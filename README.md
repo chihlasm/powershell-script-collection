@@ -52,11 +52,11 @@ Collection of useful PowerShell scripts for automation and system administration
 
 ## CitrixVDADiagnostics
 
-**Description**: A comprehensive diagnostic tool for Citrix Virtual Desktop Agent (VDA) servers, specifically designed to monitor performance issues related to FSlogix user profiles. The tool analyzes disk queue length, storage space utilization, CPU and RAM usage per user, and provides actionable recommendations for optimizing Citrix environments.
+**Description**: A comprehensive diagnostic tool for Citrix Virtual Desktop Agent (VDA) servers, specifically designed to monitor performance issues related to FSlogix user profiles. The tool analyzes disk queue length, storage space utilization, CPU and RAM usage per user, Windows update status, FSlogix version, and I/O performance, providing actionable recommendations for optimizing Citrix environments.
 
 **Parameters**:
 - `-ServerName <string>` (Optional, default: local computer): Target server for diagnostics.
-- `-Verbose` (Optional): Switch to show detailed session information.
+- `-Verbose` (Optional): Switch to show detailed session information and critical update counts.
 
 **Usage Examples**:
 - Basic local diagnostics: `.\CitrixVDADiagnostics\CitrixVDADiagnostics.ps1`
@@ -66,9 +66,11 @@ Collection of useful PowerShell scripts for automation and system administration
 
 **Features**:
 - **Citrix Session Monitoring**: Detects active user sessions using Citrix cmdlets or fallback methods
-- **FSlogix Integration**: Automatically detects and analyzes FSlogix profile VHD storage locations
+- **FSlogix Integration**: Automatically detects FSlogix version and analyzes profile VHD storage locations
+- **Windows Update Monitoring**: Checks for pending Windows updates and critical security patches
 - **Disk Performance Analysis**: Measures disk queue length for storage drives hosting user profiles
 - **Storage Capacity Monitoring**: Tracks disk space usage with configurable thresholds
+- **I/O Performance Diagnostics**: Measures read/write performance and latency for both local and network storage
 - **Resource Usage Tracking**: Monitors CPU and RAM usage with per-user calculations
 - **Automated Recommendations**: Provides actionable insights for performance optimization
 - **Color-coded Alerts**: Visual indicators for OK/WARNING/CRITICAL status levels
@@ -78,6 +80,9 @@ Collection of useful PowerShell scripts for automation and system administration
 - Storage Usage: OK (< 80%), WARNING (80-90%), CRITICAL (> 90%)
 - CPU per User: WARNING (> 80%), CRITICAL (> 100%)
 - Memory per User: WARNING (> 1GB), CRITICAL (> 2GB)
+- I/O Performance: Read/Write < 50 MB/s (Red), 50-100 MB/s (Yellow), > 100 MB/s (Green)
+- I/O Latency: > 20ms (Red), 10-20ms (Yellow), < 10ms (Green)
+- Windows Updates: > 10 pending (Red), 5-10 pending (Yellow), < 5 pending (Green)
 
 **Notes**:
 - Designed specifically for Citrix VDA servers with FSlogix
@@ -85,4 +90,6 @@ Collection of useful PowerShell scripts for automation and system administration
 - Requires administrative privileges for performance counter access
 - Compatible with Windows Server 2016+ and PowerShell 5.1+
 - Can be run locally or against remote servers
+- I/O testing for UNC paths creates temporary test files (1MB) that are automatically cleaned up
 - Output can be redirected to log files for automated monitoring
+- Windows Update checking requires Windows Update service access
