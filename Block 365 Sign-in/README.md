@@ -44,6 +44,89 @@ When Azure AD Connect synchronizes these changes to Azure AD, users with the "Bl
    .\CloudSignInMgr.ps1
    ```
 
+### Creating a Desktop Shortcut (Recommended)
+
+For easier access and to ensure the script always runs with administrator privileges, create a desktop shortcut:
+
+#### Method 1: Manual Shortcut Creation
+
+1. **Right-click** on your desktop and select **New > Shortcut**
+2. **Location**: Enter the following command:
+   ```
+   powershell.exe -ExecutionPolicy Bypass -File "C:\Path\To\Block 365 Sign-in\CloudSignInMgr.ps1"
+   ```
+   Replace `C:\Path\To\Block 365 Sign-in` with the actual path to your script folder.
+
+3. **Name**: Enter "Cloud Sign-In Manager" and click **Finish**
+
+4. **Set to Run as Administrator**:
+   - Right-click the new shortcut
+   - Select **Properties**
+   - Click the **Shortcut** tab
+   - Click **Advanced**
+   - Check **Run as administrator**
+   - Click **OK** twice to save
+
+5. **Optional Customization**:
+   - Change the icon: In Properties > Shortcut tab > Change Icon
+   - Browse to a suitable icon file or use a system icon
+
+#### Method 2: PowerShell Script to Create Shortcut
+
+Save this as `CreateShortcut.ps1` and run it once to create the shortcut:
+
+```powershell
+# CreateShortcut.ps1
+$WshShell = New-Object -comObject WScript.Shell
+$Shortcut = $WshShell.CreateShortcut("$([Environment]::GetFolderPath('Desktop'))\Cloud Sign-In Manager.lnk")
+$Shortcut.TargetPath = "powershell.exe"
+$Shortcut.Arguments = '-ExecutionPolicy Bypass -File "C:\Path\To\Block 365 Sign-in\CloudSignInMgr.ps1"'
+$Shortcut.WorkingDirectory = "C:\Path\To\Block 365 Sign-in"
+$Shortcut.IconLocation = "powershell.exe,0"  # Use PowerShell icon
+$Shortcut.Description = "Manage Microsoft 365 cloud sign-in access for AD users"
+$Shortcut.Save()
+
+# Note: This creates the shortcut but doesn't automatically set "Run as administrator"
+# You still need to manually right-click the shortcut > Properties > Advanced > Run as administrator
+```
+
+#### Method 3: Using Windows Task Scheduler
+
+For even more control, create a scheduled task that runs the script:
+
+1. Open **Task Scheduler** (search for it in Start menu)
+2. Click **Create Task**
+3. **General Tab**:
+   - Name: "Cloud Sign-In Manager"
+   - Check "Run with highest privileges"
+   - Configure for: "Windows 10" (or your OS version)
+
+4. **Actions Tab**:
+   - Click **New**
+   - Action: "Start a program"
+   - Program/script: `powershell.exe`
+   - Add arguments: `-ExecutionPolicy Bypass -File "C:\Path\To\Block 365 Sign-in\CloudSignInMgr.ps1"`
+   - Start in: `C:\Path\To\Block 365 Sign-in`
+
+5. **Conditions Tab**:
+   - Uncheck all options to ensure it runs regardless of power state
+
+6. **Settings Tab**:
+   - Check "Allow task to be run on demand"
+   - Check "Run task as soon as possible after a scheduled start is missed"
+
+7. **Create a Desktop Shortcut to the Task**:
+   - Right-click the task in Task Scheduler
+   - Select "Export" and save as XML
+   - Create a desktop shortcut with target: `schtasks /run /tn "Cloud Sign-In Manager"`
+
+### Important Notes for Shortcuts
+
+- **Execution Policy**: The `-ExecutionPolicy Bypass` parameter ensures the script runs even if execution policy is restricted
+- **Path Requirements**: Use absolute paths in shortcuts to avoid issues
+- **Administrator Rights**: Always run as administrator since the script modifies Active Directory attributes
+- **Working Directory**: Set the working directory to the script folder to ensure relative paths work correctly
+
 ### GUI Interface
 
 The script opens a Windows Forms GUI with the following components:
