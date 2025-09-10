@@ -93,3 +93,38 @@ Collection of useful PowerShell scripts for automation and system administration
 - I/O testing for UNC paths creates temporary test files (1MB) that are automatically cleaned up
 - Output can be redirected to log files for automated monitoring
 - Windows Update checking requires Windows Update service access
+
+### CloudSignInMgr.ps1 (Block 365 Sign-in)
+
+**Description**: A PowerShell GUI application for managing Microsoft 365 cloud sign-in access for Active Directory users. This tool allows administrators to selectively block or allow cloud sign-in for users while maintaining their local Active Directory authentication. It works in conjunction with Azure AD Connect synchronization rules by setting the `msDS-cloudExtensionAttribute10` attribute to "BlockCloudSignIn" to disable cloud access.
+
+**Parameters**:
+- None (interactive GUI application)
+
+**Usage Examples**:
+- Run the script: `.\Block 365 Sign-in\CloudSignInMgr.ps1`
+- Search and select users from the grid
+- Use "Block Cloud Sign-In" to disable Microsoft 365 access
+- Use "Unblock Cloud Sign-In" to restore Microsoft 365 access
+- Optionally trigger Azure AD Connect synchronization to apply changes immediately
+
+**Features**:
+- **User Search and Selection**: Search users by name or username with real-time filtering
+- **Bulk Operations**: Select multiple users for batch blocking/unblocking operations
+- **Visual Status Display**: Shows current cloud sign-in status (Allowed/Blocked) for each user
+- **Confirmation Prompts**: Safety confirmations before making changes
+- **Sync Integration**: Optional Azure AD Connect synchronization trigger after changes
+- **Error Handling**: Comprehensive error reporting for failed operations
+
+**Prerequisites**:
+- Active Directory PowerShell module
+- Domain Administrator or equivalent permissions
+- Azure AD Connect installed (for synchronization)
+- Windows Forms assemblies (included in script)
+
+**Notes**:
+- Changes take effect after Azure AD Connect synchronization cycle
+- Local Active Directory sign-in remains unaffected
+- Requires appropriate AD permissions to modify user attributes
+- Compatible with Windows Server 2016+ and PowerShell 5.1+
+- Synchronization rule configuration required (see script folder README for details)
