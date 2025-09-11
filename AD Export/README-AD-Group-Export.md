@@ -30,9 +30,9 @@ A comprehensive PowerShell script to export user members from multiple Active Di
    - For best results, run as Domain Administrator or with delegated permissions
 
 3. **PowerShell Execution Policy**: Ensure PowerShell execution policy allows script execution
-   ```powershell
-   Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-   ```
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
 
 ## Installation
 
