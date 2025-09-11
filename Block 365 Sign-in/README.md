@@ -25,9 +25,11 @@ When Azure AD Connect synchronizes these changes to Azure AD, users with the "Bl
 
 1. Download the `CloudSignInMgr.ps1` script to your domain controller or management workstation
 2. Ensure the Active Directory PowerShell module is available:
+
    ```powershell
    Import-Module ActiveDirectory
    ```
+
 3. Configure Azure AD Connect synchronization rules (see Configuration section below)
 
 ## Usage
