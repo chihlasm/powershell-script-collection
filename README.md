@@ -179,7 +179,7 @@ powershell.exe -ExecutionPolicy Bypass -File .\SMB_Diagnostic.ps1
 
 **The script performs the following steps:**
 
-Step 1: Test TCP connectivity to SMB port 445
+Step 1: Test TCP connectivity to SMB port 445 
 Step 2: Check existing SMB sessions on the client and server
 Step 3: Detect SMB protocol version (SMB1/2/3)
 Step 4: Test folder access and permissions
