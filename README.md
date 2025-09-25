@@ -128,3 +128,96 @@ Collection of useful PowerShell scripts for automation and system administration
 - Requires appropriate AD permissions to modify user attributes
 - Compatible with Windows Server 2016+ and PowerShell 5.1+
 - Synchronization rule configuration required (see script folder README for details)
+
+
+# SMB Diagnostic & Drive Mapping Script
+
+**Description:**  
+This PowerShell script diagnoses SMB connectivity, detects protocol versions, tests access, lists files, and maps network drives between Windows clients (Windows 7–11) and Windows Servers (2008–2022).
+
+## Features
+
+- ✅ Test TCP connectivity to SMB port 445
+- ✅ Check active SMB sessions
+- ✅ Detect SMB protocol version (SMB1/2/3)
+- ✅ Test folder access and permissions
+- ✅ List files and folders in the target share
+- ✅ Map network drives safely
+- ✅ Color-coded output:
+  - **Green** = Pass
+  - **Yellow** = Warning
+  - **Red** = Fail/Error
+
+## Requirements
+
+- PowerShell 3.0+
+- Windows clients: Windows 7 – 11
+- Windows servers: Server 2008 – 2022
+- Network access to the SMB share (TCP 445)
+- Permissions to access the target share
+
+> SMB dialect detection requires Windows 8 / Server 2012+. Legacy servers fallback to `net use`.
+
+## Installation & Usage
+
+1. Clone the repository:
+
+   ```bash
+   git clone https://github.com/chihlasm/powershell-script-collection.git
+   cd powershell-script-collection
+**Configure the script (SMB_Diagnostic.ps1) by editing the variables:**
+
+$ServerIP   = "xxx.xxx.xxx.xxx"   # Replace with your SMB server IP
+$ShareName  = "folder"            # Replace with your share name
+$DriveLetter = "Z"                # Desired local drive letter
+
+
+**Run the script in PowerShell:**
+
+powershell.exe -ExecutionPolicy Bypass -File .\SMB_Diagnostic.ps1
+
+
+**The script performs the following steps:**
+
+Step 1: Test TCP connectivity to SMB port 445 
+Step 2: Check existing SMB sessions on the client and server
+Step 3: Detect SMB protocol version (SMB1/2/3)
+Step 4: Test folder access and permissions
+Step 5: List files and folders in the share
+Step 6: Map network drive to the chosen letter
+
+**Example Output**
+=== Step 1: Test TCP connectivity on port 445 ===
+[PASS] TCP connection to SMB port 445 successful.
+
+=== Step 2: Check existing SMB sessions ===
+[INFO] Active SMB sessions found:
+ServerName    ShareName UserName  Dialect
+----------    --------- --------  -------
+192.168.1.10  Share1    DOMAIN\User  3.1.1
+
+=== Step 3: Detect SMB protocol version ===
+[PASS] SMB2/3 in use — modern protocol, Explorer should work.
+
+=== Step 4: Test folder access ===
+[PASS] Access to \\192.168.1.10\Share1 successful.
+
+=== Step 5: List files/folders ===
+[PASS] Files/folders in \\192.168.1.10\Share1:
+Name           Length LastWriteTime
+----           ------ -------------
+File1.txt      1024   9/23/2025 8:45 AM
+Folder1        0      9/22/2025 3:12 PM
+
+=== Step 6: Map network drive Z: ===
+[PASS] Mapped \\192.168.1.10\Share1 to drive Z:
+
+=== Diagnostic Complete ===
+
+Notes
+
+SMB1 detected → Consider enabling SMB2/3 on the server to prevent Explorer hangs.
+
+Admin rights not required for diagnostics; may be required for persistent drives.
+
+Fully safe for internal networks; changes are limited to the mapped share.
