@@ -256,3 +256,35 @@ Fully safe for internal networks; changes are limited to the mapped share.
 - Taking ownership uses `icacls` and may fail without proper permissions.
 - Replicating permissions adds the top-level folder's access rules to sub-folders without removing existing permissions (ownership is taken at the beginning).
 - Test on a small folder first to understand the behavior.
+
+## HideFromGal
+
+**Description**: A collection of PowerShell scripts for managing user visibility in the Exchange Online Global Address List (GAL) using Entra Connect synchronization rules. Provides both one-time setup and ongoing management capabilities for hiding users from GAL.
+
+**Scripts**:
+- **HideFromGal-RuleBuilder.ps1**: Creates a custom Entra Connect synchronization rule that maps the `msDS-cloudExtensionAttribute1` AD attribute to `msExchHideFromAddressLists` in Exchange Online.
+- **HideFromGAL.ps1**: GUI-based tool for managing GAL visibility by setting/clearing the `msDS-cloudExtensionAttribute1` attribute on AD user accounts.
+
+**Prerequisites**:
+- Entra Connect server with Azure AD Connect installed and ADSync module available
+- Domain-joined administrative workstation with Active Directory module
+- Domain Admin or equivalent permissions for AD modifications
+- Administrative access to Entra Connect server for rule creation
+
+**Usage**:
+1. **Setup (One-time)**: Run `HideFromGal-RuleBuilder.ps1` on the Entra Connect server to create the synchronization rule.
+2. **Management (Ongoing)**: Run `HideFromGAL.ps1` on a domain workstation to hide/unhide users from GAL.
+
+**Features**:
+- Automatic domain detection and connector lookup
+- GUI with search, bulk selection, and confirmation prompts
+- Manual synchronization triggering
+- Comprehensive logging to `C:\Temp\`
+- Error handling and user-friendly messages
+
+**Notes**:
+- Run rule builder only once per Entra Connect server/domain
+- GUI tool supports search, select all/deselect all, and bulk operations
+- Changes take effect after Entra Connect synchronization cycle
+- Uses cloud extension attribute that doesn't conflict with on-premises AD
+- Test in non-production environment first
