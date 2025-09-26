@@ -164,7 +164,28 @@ The script opens a Windows Forms GUI with the following components:
 
 To enable cloud sign-in blocking, you must configure Azure AD Connect synchronization rules to process the `msDS-cloudExtensionAttribute10` attribute.
 
-### Method 1: Using Synchronization Rules Editor
+### Method 1: Using the Automated Rule Builder Script (Recommended)
+
+For easier setup, use the `Block365SignIn-RuleBuilder.ps1` script:
+
+1. Copy `Block365SignIn-RuleBuilder.ps1` to your Azure AD Connect server
+2. Open PowerShell as Administrator on the Azure AD Connect server
+3. Navigate to the script location and run:
+   ```powershell
+   .\Block365SignIn-RuleBuilder.ps1
+   ```
+4. The script will:
+   - Automatically detect the local AD domain
+   - Find the corresponding AD connector
+   - Create a new synchronization rule with a unique identifier
+   - Configure the attribute mapping: `msDS-cloudExtensionAttribute10` → `cloudFiltered`
+   - Enable the rule
+
+5. Verify the rule was created successfully by checking the output
+
+**Note**: Run this script only once per Azure AD Connect server/domain combination.
+
+### Method 2: Using Synchronization Rules Editor
 
 1. Open **Azure AD Connect** on your sync server
 2. Click **Synchronization Rules Editor**

@@ -96,38 +96,34 @@ Collection of useful PowerShell scripts for automation and system administration
 
 ### CloudSignInMgr.ps1 (Block 365 Sign-in)
 
-**Description**: A PowerShell GUI application for managing Microsoft 365 cloud sign-in access for Active Directory users. This tool allows administrators to selectively block or allow cloud sign-in for users while maintaining their local Active Directory authentication. It works in conjunction with Azure AD Connect synchronization rules by setting the `msDS-cloudExtensionAttribute10` attribute to "BlockCloudSignIn" to disable cloud access.
+**Description**: A collection of PowerShell scripts for managing Microsoft 365 cloud sign-in access for Active Directory users. Provides both one-time setup and ongoing management capabilities for blocking/unblocking cloud access.
 
-**Parameters**:
-- None (interactive GUI application)
-
-**Usage Examples**:
-- Run the script: `.\Block 365 Sign-in\CloudSignInMgr.ps1`
-- Search and select users from the grid
-- Use "Block Cloud Sign-In" to disable Microsoft 365 access
-- Use "Unblock Cloud Sign-In" to restore Microsoft 365 access
-- Optionally trigger Azure AD Connect synchronization to apply changes immediately
-
-**Features**:
-- **User Search and Selection**: Search users by name or username with real-time filtering
-- **Bulk Operations**: Select multiple users for batch blocking/unblocking operations
-- **Visual Status Display**: Shows current cloud sign-in status (Allowed/Blocked) for each user
-- **Confirmation Prompts**: Safety confirmations before making changes
-- **Sync Integration**: Optional Azure AD Connect synchronization trigger after changes
-- **Error Handling**: Comprehensive error reporting for failed operations
+**Scripts**:
+- **CloudSignInMgr.ps1**: GUI-based tool for managing cloud sign-in blocking by setting/clearing the `msDS-cloudExtensionAttribute10` attribute on AD user accounts.
+- **Block365SignIn-RuleBuilder.ps1**: Creates a custom Entra Connect synchronization rule that maps the `msDS-cloudExtensionAttribute10` AD attribute to `cloudFiltered` in Azure AD.
 
 **Prerequisites**:
-- Active Directory PowerShell module
-- Domain Administrator or equivalent permissions
-- Azure AD Connect installed (for synchronization)
-- Windows Forms assemblies (included in script)
+- Entra Connect server with Azure AD Connect installed and ADSync module available
+- Domain-joined administrative workstation with Active Directory module
+- Domain Admin or equivalent permissions for AD modifications
+- Administrative access to Entra Connect server for rule creation
+
+**Usage**:
+1. **Setup (One-time)**: Run `Block365SignIn-RuleBuilder.ps1` on the Entra Connect server to create the synchronization rule.
+2. **Management (Ongoing)**: Run `CloudSignInMgr.ps1` on a domain workstation to block/unblock users from cloud sign-in.
+
+**Features**:
+- Automatic domain detection and connector lookup for rule builder
+- GUI with search, bulk selection, and confirmation prompts for user management
+- Manual synchronization triggering
+- Error handling and user-friendly messages
 
 **Notes**:
-- Changes take effect after Azure AD Connect synchronization cycle
-- Local Active Directory sign-in remains unaffected
-- Requires appropriate AD permissions to modify user attributes
-- Compatible with Windows Server 2016+ and PowerShell 5.1+
-- Synchronization rule configuration required (see script folder README for details)
+- Run rule builder only once per Entra Connect server/domain
+- GUI tool supports search, select all/deselect all, and bulk operations
+- Changes take effect after Entra Connect synchronization cycle
+- Uses cloud extension attribute that doesn't conflict with on-premises AD
+- Test in non-production environment first
 
 ## LocalAdminManager
 
