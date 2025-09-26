@@ -238,3 +238,21 @@ SMB1 detected → Consider enabling SMB2/3 on the server to prevent Explorer han
 Admin rights not required for diagnostics; may be required for persistent drives.
 
 Fully safe for internal networks; changes are limited to the mapped share.
+
+## FolderPermissionManager
+
+**Description**: A PowerShell script for managing permissions on folders and their sub-folders. It allows taking ownership of sub-folders, reviewing current permissions, and replicating permissions from the top-level folder to all sub-folders.
+
+**Parameters**:
+- `-Path <string>` (Optional): The path to the top-level folder. If not provided, the script will prompt for it.
+
+**Usage Examples**:
+- Run with path: `.\FolderPermissionManager\FolderPermissionManager.ps1 -Path "C:\SharedFolder"`
+- Run without path (prompts): `.\FolderPermissionManager\FolderPermissionManager.ps1`
+
+**Notes**:
+- Requires administrative privileges to modify ownership and permissions.
+- Run the script from an elevated PowerShell session.
+- Taking ownership uses `icacls` and may fail without proper permissions.
+- Replicating permissions adds the top-level folder's access rules to sub-folders without removing existing permissions (ownership is taken at the beginning).
+- Test on a small folder first to understand the behavior.
