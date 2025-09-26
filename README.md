@@ -129,6 +129,23 @@ Collection of useful PowerShell scripts for automation and system administration
 - Compatible with Windows Server 2016+ and PowerShell 5.1+
 - Synchronization rule configuration required (see script folder README for details)
 
+## LocalAdminManager
+
+**Description**: A PowerShell script for managing the local Administrators group on Windows computers by adding or removing domain users and groups.
+
+**Parameters**:
+- `-Action <string>` (Required): Action to perform ('Add' or 'Remove').
+- `-Member <string>` (Required): Domain user or group in 'DOMAIN\Username' format.
+- `-ComputerName <string>` (Optional): Target computer name (defaults to localhost).
+
+**Usage Examples**:
+- Add user locally: `.\LocalAdminManager\LocalAdminManager.ps1 -Action Add -Member "CONTOSO\JohnDoe"`
+- Remove group remotely: `.\LocalAdminManager\LocalAdminManager.ps1 -Action Remove -Member "CONTOSO\DomainAdmins" -ComputerName "RemotePC01"`
+
+**Notes**:
+- Requires administrator privileges.
+- Supports local and remote computer management.
+- Domain users/groups must exist in Active Directory.
 
 # SMB Diagnostic & Drive Mapping Script
 
