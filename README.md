@@ -125,6 +125,24 @@ Collection of useful PowerShell scripts for automation and system administration
 - Uses cloud extension attribute that doesn't conflict with on-premises AD
 - Test in non-production environment first
 
+## Install-TeamsOnCitrixVDA
+
+**Description**: Downloads and installs Microsoft Teams on a Citrix VDA running Windows Server 2019. Removes old Teams and new Teams if present, ensures prerequisites are met, and performs clean installation.
+
+**Parameters**:
+- `-TeamsDownloadUrl <string>` (Optional, default: official Microsoft URL): URL to download Teams MSIX.
+- `-WebView2Url <string>` (Optional, default: official Microsoft URL): URL to download WebView2 runtime.
+
+**Usage Examples**:
+- Basic installation: `.\Install-TeamsOnCitrixVDA\Install-TeamsOnCitrixVDA.ps1`
+- Custom URLs: `.\Install-TeamsOnCitrixVDA\Install-TeamsOnCitrixVDA.ps1 -TeamsDownloadUrl "https://custom.url/teams.msix"`
+
+**Notes**:
+- Requires administrator privileges.
+- Designed for Windows Server 2019 Citrix VDA environments.
+- Automatically removes existing Teams installations before installing the new version.
+- Ensures WebView2 and .NET Framework prerequisites are met.
+
 ## LocalAdminManager
 
 **Description**: A PowerShell script for managing the local Administrators group on Windows computers by adding or removing domain users and groups.
