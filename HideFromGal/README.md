@@ -39,7 +39,7 @@ This collection of PowerShell scripts provides a solution for hiding Active Dire
 2. Open PowerShell as Administrator on the Entra Connect server.
 3. Navigate to the script location and run:
    ```powershell
-   .\HideFromGal-RuleBuilder.ps1
+   PowerShell -ExecutionPolicy Bypass -File .\HideFromGal-RuleBuilder.ps1
    ```
 4. The script will:
    - Automatically detect the local AD domain
@@ -56,7 +56,7 @@ This collection of PowerShell scripts provides a solution for hiding Active Dire
 2. Open PowerShell as Administrator.
 3. Navigate to the script location and run:
    ```powershell
-   .\HideFromGAL.ps1
+   PowerShell -ExecutionPolicy Bypass -File .\HideFromGAL.ps1
    ```
 
 4. The GUI will open with the following features:
