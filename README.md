@@ -50,6 +50,38 @@ Collection of useful PowerShell scripts for automation and system administration
 - Cancel button allows stopping the operation mid-process
 - Requires appropriate permissions for source and destination paths
 
+### CopyFileToServer.ps1
+
+**Description**: A PowerShell script that copies a single file to multiple destination servers. It creates the destination directory if it doesn't exist and handles errors gracefully for each server.
+
+**Parameters**:
+- `-SourceFile <string>` (Required): Path to the source file to copy (e.g., "C:\Scripts\script.ps1").
+- `-DestServers <string[]>` (Required): Array of destination server names (e.g., @("Server01", "Server02")).
+- `-DestPath <string>` (Required): Destination path on each server (e.g., "share\folder" or "C$\Scripts").
+
+**Usage Examples**:
+- Copy to multiple servers: `.\CopyFileToServer.ps1 -SourceFile "C:\Temp\file.txt" -DestServers @("Server01", "Server02") -DestPath "Shared\Files"`
+
+**Notes**:
+- Creates destination folders automatically if they don't exist
+- Handles UNC paths for remote server destinations
+- Continues to next server if one fails
+
+### CursorFix.ps1
+
+**Description**: A PowerShell script that fixes cursor visibility issues in Windows applications by enabling Overlay Test Mode for the Desktop Window Manager (DWM).
+
+**Parameters**:
+- None (no parameters required)
+
+**Usage Examples**:
+- Run as administrator: `.\CursorFix.ps1`
+
+**Notes**:
+- Requires administrator privileges to modify HKLM registry
+- Changes take effect after logging off/on (or restarting the system)
+- This is a common fix for cursor issues in Citrix, RDS, or other virtualized environments
+
 ## CitrixVDADiagnostics
 
 **Description**: A comprehensive diagnostic tool for Citrix Virtual Desktop Agent (VDA) servers, specifically designed to monitor performance issues related to FSlogix user profiles. The tool analyzes disk queue length, storage space utilization, CPU and RAM usage per user, Windows update status, FSlogix version, and I/O performance, providing actionable recommendations for optimizing Citrix environments.
@@ -124,6 +156,28 @@ Collection of useful PowerShell scripts for automation and system administration
 - Changes take effect after Entra Connect synchronization cycle
 - Uses cloud extension attribute that doesn't conflict with on-premises AD
 - Test in non-production environment first
+
+## PasswordPolicyAuditor
+
+**Description**: Retrieves and exports password policies from Active Directory Domain and Azure AD Tenant with detailed descriptions. Supports multiple export formats (CSV, HTML, TXT) and includes comprehensive policy explanations.
+
+**Parameters**:
+- `-OutputPath <string>` (Optional, default: current directory): Path where the output file will be saved.
+- `-OutputFormat <string>` (Optional, default: CSV): Format for the output file (CSV, HTML, or TXT).
+- `-IncludeAD <bool>` (Optional, default: $true): Include Active Directory domain password policy.
+- `-IncludeAzureAD <bool>` (Optional, default: $true): Include Azure AD tenant password policy.
+- `-AzureADCredential <PSCredential>` (Optional): PSCredential object for Azure AD authentication.
+
+**Usage Examples**:
+- Basic audit: `.\PasswordPolicyAuditor\Get-PasswordPolicies.ps1`
+- HTML report: `.\PasswordPolicyAuditor\Get-PasswordPolicies.ps1 -OutputFormat HTML`
+- AD only: `.\PasswordPolicyAuditor\Get-PasswordPolicies.ps1 -IncludeAzureAD $false`
+
+**Notes**:
+- Requires ActiveDirectory module for on-premises policies (install RSAT tools).
+- Requires AzureAD or MSOnline module for cloud policies.
+- Supports both interactive and credential-based Azure AD authentication.
+- Exports include policy descriptions and current values.
 
 ## Install-TeamsOnCitrixVDA
 
