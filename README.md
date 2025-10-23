@@ -11,6 +11,7 @@ Collection of useful PowerShell scripts for automation and system administration
 - [DeleteOldFolders](#deleteoldfoldersps1)
 - [FileCopyMoveGUI](#filecopymoveguips1)
 - [FolderPermissionManager](#folderpermissionmanager)
+- [FSLogix-Profile-Backup](#fslogix-profile-backup)
 - [HideFromGal](#hidefromgal)
 - [Install-TeamsOnCitrixVDA](#install-teamsoncitrixvda)
 - [LocalAdminManager](#localadminmanager)
@@ -379,6 +380,57 @@ For full documentation, see [Get-CitrixSessions/README.md](Get-CitrixSessions/RE
 - Taking ownership uses `icacls` and may fail without proper permissions.
 - Replicating permissions adds the top-level folder's access rules to sub-folders without removing existing permissions (ownership is taken at the beginning).
 - Test on a small folder first to understand the behavior.
+
+## FSLogix-Profile-Backup
+
+**Description**: A comprehensive collection of PowerShell scripts for backing up and restoring FSLogix user profile settings in virtual desktop environments. When FSLogix profiles need to be rebuilt or migrated, important user customizations are often lost. This toolkit backs up and restores Windows Explorer Quick Access shortcuts, Chrome/Edge bookmarks, display and scaling settings, taskbar configurations, and browser password export instructions.
+
+**Scripts Included**:
+- `Backup-FSLogixProfile.ps1` - Main orchestration script that runs all individual backups
+- `Restore-FSLogixProfile.ps1` - Main restoration script that orchestrates all restores
+- Individual backup/restore scripts for each component (Quick Access shortcuts, browser bookmarks, display settings, taskbar settings, browser passwords)
+
+**Parameters** (Backup-FSLogixProfile.ps1):
+- `-BackupPath <string>` (Optional, default: ".\FSLogixBackups"): Root directory for backups
+- `-CreateZip <bool>` (Optional, default: true): Create ZIP archive of backup
+- `-FSLogixProfile <string>` (Optional): Path to FSLogix VHD/VHDX file for offline backup
+- `-MountProfile <switch>` (Optional): Enable mounting of FSLogix profile (requires -FSLogixProfile)
+
+**Parameters** (Restore-FSLogixProfile.ps1):
+- `-BackupPath <string>` (Optional): Path to backup directory to restore from
+- `-SkipRegistry <switch>` (Optional): Skip registry-based restorations
+- `-SkipBrowser <switch>` (Optional): Skip browser-related restorations
+
+**Usage Examples**:
+- Full profile backup: `.\FSLogix-Profile-Backup\Backup-FSLogixProfile.ps1`
+- Offline FSLogix backup: `.\FSLogix-Profile-Backup\Backup-FSLogixProfile.ps1 -MountProfile -FSLogixProfile "C:\FSLogixProfiles\User123.vhd"`
+- Full profile restore: `.\FSLogix-Profile-Backup\Restore-FSLogixProfile.ps1`
+- Selective restore: `.\FSLogix-Profile-Backup\Restore-FSLogixProfile.ps1 -SkipBrowser`
+
+**Features**:
+- **Multi-Profile Support**: Automatically detects and backs up all Chrome/Edge profiles (Default, Profile 1, Profile 2, etc.)
+- **Offline Backup Capability**: Mount FSLogix VHD/VHDX files for offline profile backups
+- **Progress Tracking**: Real-time progress indicators for long backup operations
+- **Modular Design**: Individual scripts for each component (bookmarks, registry settings, etc.)
+- **Error Resilience**: Continues with other backups even if one component fails
+- **Backup Manifest**: Creates detailed manifest with backup contents and metadata
+- **Security-Enhanced**: Modern PowerShell patterns with secure parameter handling
+
+**Prerequisites**:
+- Windows 10/11 or Windows Server 2016+
+- PowerShell 5.1 or later
+- Administrator privileges recommended
+- Google Chrome and/or Microsoft Edge installed (for browser backups)
+- FSLogix agent installed (for offline backup capability)
+
+**Notes**:
+- Browser passwords require manual export due to security restrictions
+- Registry settings may not restore correctly across different hardware/OS versions
+- Test restoration procedures on non-production systems first
+- Scripts assume default browser profile locations
+- Supports both online (current user) and offline (VHD/VHDX file) backup modes
+
+For full documentation, see [FSLogix-Profile-Backup/README.md](FSLogix-Profile-Backup/README.md)
 
 ## HideFromGal
 
