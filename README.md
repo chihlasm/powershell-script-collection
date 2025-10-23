@@ -16,6 +16,7 @@ Collection of useful PowerShell scripts for automation and system administration
 - [LocalAdminManager](#localadminmanager)
 - [PasswordPolicyAuditor](#passwordpolicyauditor)
 - [SMBTest](#smb-diagnostic--drive-mapping-script)
+- [Get-CitrixSessions](#get-citrixsessions)
 
 ## AD Export
 
@@ -341,6 +342,25 @@ SMB1 detected → Consider enabling SMB2/3 on the server to prevent Explorer han
 Admin rights not required for diagnostics; may be required for persistent drives.
 
 Fully safe for internal networks; changes are limited to the mapped share.
+
+## Get-CitrixSessions
+
+**Description**: A PowerShell script that queries Citrix VDA sessions using the Citrix Broker Admin SDK for comprehensive session monitoring and CSV export. Displays detailed session information including user details, connection properties, idle time, and client information.
+
+**Parameters**:
+- `-VdaMachineName <string>` (Optional): Target VDA machine name (e.g., "DOMAIN\VDAServer01").
+- `-OutputPath <string>` (Optional): Path for CSV export file.
+
+**Usage Examples**:
+- Query all active sessions: `.\Get-CitrixSessions\Get-CitrixSessions.ps1`
+- Query specific VDA: `.\Get-CitrixSessions\Get-CitrixSessions.ps1 -VdaMachineName "DOMAIN\VDAServer01"`
+- Export to CSV: `.\Get-CitrixSessions\Get-CitrixSessions.ps1 -OutputPath "C:\Reports\Sessions.csv"`
+
+**Prerequisites**:
+- Citrix Virtual Apps & Desktops PowerShell SDK (on Delivery Controller or with Studio installed)
+- Administrative permissions for Citrix session management
+
+For full documentation, see [Get-CitrixSessions/README.md](Get-CitrixSessions/README.md)
 
 ## FolderPermissionManager
 
