@@ -1,6 +1,41 @@
 # powershell-script-collection
 Collection of useful PowerShell scripts for automation and system administration tasks.
 
+## Table of Contents
+
+- [AD Export](#ad-export)
+- [Block 365 Sign-in](#cloudsigninmgrps1-block-365-sign-in)
+- [CitrixVDADiagnostics](#citrixvdadiagnostics)
+- [CopyFileToServer](#copyfiletoserverps1)
+- [CursorFix](#cursorfixps1)
+- [DeleteOldFolders](#deleteoldfoldersps1)
+- [FileCopyMoveGUI](#filecopymoveguips1)
+- [FolderPermissionManager](#folderpermissionmanager)
+- [HideFromGal](#hidefromgal)
+- [Install-TeamsOnCitrixVDA](#install-teamsoncitrixvda)
+- [LocalAdminManager](#localadminmanager)
+- [PasswordPolicyAuditor](#passwordpolicyauditor)
+- [SMBTest](#smb-diagnostic--drive-mapping-script)
+
+## AD Export
+
+**Description**: A comprehensive PowerShell script to export user members from multiple Active Directory groups with flexible output options. Supports individual or combined CSV exports, nested group inclusion, rich user data, and comprehensive logging.
+
+**Files Included**:
+- `Export-MultipleADGroupMembers.ps1` - Main export script
+- `Export-ADGroupMembers-Example.ps1` - Usage examples
+- `README-AD-Group-Export.md` - Detailed documentation
+
+**Prerequisites**:
+- Active Directory PowerShell module (via RSAT)
+- Domain permissions to read group membership
+
+**Usage Examples**:
+- Basic export: `.\AD Export\Export-MultipleADGroupMembers.ps1 -GroupNames "Domain Admins", "Enterprise Admins"`
+- Combined output: `.\AD Export\Export-MultipleADGroupMembers.ps1 -GroupNames "Group1", "Group2" -CombinedOutput`
+
+For full documentation, see [AD Export/README-AD-Group-Export.md](AD%20Export/README-AD-Group-Export.md)
+
 ## Scripts
 
 ### DeleteOldFolders.ps1
