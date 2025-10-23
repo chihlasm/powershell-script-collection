@@ -1,0 +1,135 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+    <title>Citrix VDA Consolidated Diagnostics Report</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }
+        .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+        .section { background: white; padding: 20px; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .status-ok { color: #28a745; font-weight: bold; }
+        .status-warning { color: #ffc107; font-weight: bold; }
+        .status-critical { color: #dc3545; font-weight: bold; }
+        .metric { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #eee; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background-color: #f8f9fa; font-weight: bold; }
+        .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 20px; }
+        .summary-item { background: white; padding: 15px; border-radius: 6px; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .summary-value { font-size: 24px; font-weight: bold; color: #333; }
+        .summary-label { color: #666; font-size: 14px; }
+        .recommendation { background: #fff3cd; border-left: 4px solid #ffc107; padding: 10px; margin: 10px 0; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Citrix VDA Consolidated Diagnostics Report</h1>
+        <p><strong>Server:</strong> LAPTOP-F5J0L9NT</p>
+        <p><strong>Report Generated:</strong> 10/16/2025 20:28:54</p>
+    </div>
+
+    <div class="summary">
+        <div class="summary-item">
+            <div class="summary-value">0</div>
+            <div class="summary-label">Active Sessions</div>
+        </div>
+        <div class="summary-item">
+            <div class="summary-value">17.58%</div>
+            <div class="summary-label">CPU Usage</div>
+        </div>
+        <div class="summary-item">
+            <div class="summary-value">78.81%</div>
+            <div class="summary-label">Memory Usage</div>
+        </div>
+        <div class="summary-item">
+            <div class="summary-value">1</div>
+            <div class="summary-label">Pending Updates</div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>System Information</h2>
+        <div class="metric">
+            <span>Citrix Virtual Apps & Desktops:</span>
+            <span class="status-ok">
+                Citrix Workspace Inside - v25.3.10.25
+            </span>
+        </div>
+        <div class="metric">
+            <span>FSlogix Version:</span>
+            <span class="status-warning">Not Detected</span>
+        </div>
+        <div class="metric">
+            <span>Profile Locations:</span>
+            <span>0 configured</span>
+        </div>    </div>
+
+    <div class="section">
+        <h2>FSLogix Services</h2>
+        <table>
+            <tr><th>Service</th><th>Status</th><th>Start Type</th><th>State</th></tr><tr><td>FSLogix Virtualization Service</td><td class='status-critical'>Not Found</td><td>N/A</td><td>False</td></tr><tr><td>FSLogix Cloud Caching Service</td><td class='status-critical'>Not Found</td><td>N/A</td><td>False</td></tr>        </table>
+    </div>
+
+    <div class="section">
+        <h2>Profile Health</h2>
+        <table>
+            <tr><th>Location</th><th>VHD Count</th><th>Total Size (GB)</th><th>Healthy</th><th>Corrupt</th><th>Status</th></tr><tr><td>N/A</td><td>0</td><td>0</td><td>0</td><td>0</td><td class='status-ok'>No FSLogix locations configured</td></tr>        </table>
+    </div>
+
+    <div class="section">
+        <h2>Event Log Analysis</h2>
+        <table>
+            <tr><th>Source</th><th>Total Events</th><th>Errors</th><th>Warnings</th><th>Status</th></tr><tr><td>FSLogix Apps</td><td>0</td><td>0</td><td>0</td><td class='status-ok'>OK</td></tr><tr><td>Citrix</td><td>0</td><td>0</td><td>0</td><td class='status-ok'>OK</td></tr><tr><td>Service Events</td><td>2</td><td>0</td><td>0</td><td class='status-ok'>OK</td></tr>        </table>
+    </div>
+
+    <div class="section">
+        <h2>Network Connectivity</h2>
+        <table>
+            <tr><th>Server</th><th>Share</th><th>Ping</th><th>Share Access</th><th>Status</th></tr>        </table>
+    </div>
+
+    <div class="section">
+        <h2>System Resources</h2>
+        <div class="metric">
+            <span>CPU Usage:</span>
+            <span class="status-ok">17.58%</span>
+        </div>
+        <div class="metric">
+            <span>Memory Usage:</span>
+            <span class="status-ok">12433.02MB / 15775.14MB (78.81%)</span>
+        </div>
+        <div class="metric">
+            <span>Available Memory:</span>
+            <span>3342.13MB</span>
+        </div>    </div>
+
+    <div class="section">
+        <h2>Storage Analysis</h2>        <div class="metric">
+            <span>C::</span>
+            <span class="status-ok">739.35GB used / 933GB total (79.24%)</span>
+        </div>        <div class="metric">
+            <span>Queue Length:</span>
+            <span class="status-ok">0</span>
+        </div>    </div>
+
+    <div class="section">
+        <h2>I/O Performance</h2>    </div>
+
+    <div class="section">
+        <h2>Windows Updates</h2>
+        <div class="metric">
+            <span>Pending Updates:</span>
+            <span class="status-warning">1</span>
+        </div>        <h3>Update Details</h3>
+        <table>
+            <tr><th>Update Type</th><th>Title</th><th>KB Number</th></tr><tr><td class='status-critical'>Security</td><td>Security Intelligence Update for Microsoft Defender Antivirus - KB2267602 (Version 1.439.233.0) - Current Channel (Broad)</td><td>2267602</td></tr>        </table>    </div>
+
+    <div class="section">
+        <h2>Recommendations</h2>        <div class="recommendation">
+            1 Windows updates pending. Schedule maintenance window for updates.
+        </div>    </div>
+
+    <div style="text-align: center; margin-top: 20px; color: #666; font-size: 12px;">
+        <p>Report generated by Citrix VDA Consolidated Diagnostics Tool</p>
+    </div>
+</body>
+</html>

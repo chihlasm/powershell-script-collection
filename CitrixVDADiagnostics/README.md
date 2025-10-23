@@ -15,6 +15,64 @@ A comprehensive PowerShell script to diagnose performance issues on Citrix Virtu
 - **Report Generation**: Exports results in HTML, CSV, JSON, or TXT formats
 - **Color-coded Alerts**: Visual indicators for OK/WARNING/CRITICAL status levels
 
+## Additional Citrix FSLogix Tools
+
+This collection now includes additional specialized tools for comprehensive Citrix FSLogix environment management:
+
+### **Remove-OrphanedFSLogixTempProfiles.ps1**
+- **Purpose**: Safely identifies and removes orphaned temporary user profiles
+- **Key Features**:
+  - Detects FSLogix temporary profiles that remain after user logoff failures
+  - Compares active sessions against registry profile entries
+  - Removes unused profile registry keys and C:\Users folders
+  - WhatIf mode for safe testing
+  - Includes FSLogix event log analysis
+  - Configurable logging and confirmation prompts
+
+### **Monitor-CitrixFSLogixStorage.ps1**
+- **Purpose**: Monitors storage space across Citrix VDAs and FSLogix storage servers
+- **Key Features**:
+  - Automatically discovers FSLogix storage locations from registry
+  - Monitors local VDA storage and remote file server storage
+  - Configurable warning/critical thresholds (default: 80%/90%)
+  - Remote server monitoring via PowerShell remoting
+  - Credential support for authenticated remote access
+  - Comprehensive HTML/CSV/TXT reporting
+  - Health status analysis with recommendations
+
+### **CitrixVDA-Consolidated.ps1** ⭐ NEW
+- **Purpose**: Unified comprehensive Citrix VDA diagnostics combining all features from both CitrixVDADiagnostics.ps1 and CitrixFSLogix-AdvancedDiagnostics.ps1
+- **Key Features**:
+  - Complete integration of all diagnostic functionality
+  - **Citrix Virtual Apps and Desktops version detection**
+  - **Actual FSLogix profile location discovery and validation**
+  - Citrix session monitoring with FSLogix integration
+  - Advanced FSLogix service health and VHD corruption detection
+  - Event log analysis for FSLogix/Citrix issues
+  - Network connectivity testing and registry validation
+  - Enhanced CPU/RAM usage analysis (system-wide + per-process)
+  - Storage performance monitoring with disk queue analysis
+  - I/O performance diagnostics for local and network storage
+  - Windows Update monitoring with critical patch alerts
+  - Automated recommendations with detailed guidance
+  - Full scan option for comprehensive troubleshooting
+  - Unified report generation in HTML, CSV, JSON, and TXT formats
+  - Color-coded alerts and professional HTML reports
+  - **Software information section with detailed version and path reporting**
+
+### **CitrixFSLogix-AdvancedDiagnostics.ps1**
+- **Purpose**: Deep-dive troubleshooting for complex FSLogix issues
+- **Key Features**:
+  - FSLogix service health monitoring
+  - VHDX/VHD file corruption detection and accessibility testing
+  - Event log analysis for FSLogix/Citrix errors and warnings
+  - Network connectivity testing to profile shares
+  - Registry configuration validation
+  - Performance counter availability checking
+  - Full scan option for comprehensive analysis
+  - HTML reports with recommendations
+
+
 ## Requirements
 
 - Windows Server 2016+ with PowerShell 5.1 or higher
@@ -59,6 +117,117 @@ A comprehensive PowerShell script to diagnose performance issues on Citrix Virtu
 ```powershell
 # Remote server with verbose output and HTML report
 .\CitrixVDADiagnostics.ps1 -ServerName "CitrixProd01" -Verbose -ExportReport -ReportFormat HTML
+```
+
+## Temporary Profile Cleanup Usage
+
+### Basic Profile Cleanup
+```powershell
+.\Remove-OrphanedFSLogixTempProfiles.ps1
+```
+
+### Safe Mode (Preview Changes)
+```powershell
+.\Remove-OrphanedFSLogixTempProfiles.ps1 -WhatIf
+```
+
+### Force Cleanup (No Confirmation)
+```powershell
+.\Remove-OrphanedFSLogixTempProfiles.ps1 -Force
+```
+
+### Verbose Output with Logging
+```powershell
+.\Remove-OrphanedFSLogixTempProfiles.ps1 -Verbose -LogPath "C:\Logs\ProfileCleanup.log"
+```
+
+## Storage Monitoring Usage
+
+### Basic Storage Monitoring
+```powershell
+.\Monitor-CitrixFSLogixStorage.ps1 -IncludeLocalVDA
+```
+
+### Monitor Specific Servers with Reports
+```powershell
+.\Monitor-CitrixFSLogixStorage.ps1 -TargetServers "Server01","FileServer01" -ExportReport -ReportFormat HTML
+```
+
+### Remote Monitoring with Credentials
+```powershell
+# Create credential file first
+$cred = Get-Credential
+$cred | Export-Clixml -Path "C:\Secure\FSLogixCred.xml"
+
+# Then use it
+.\Monitor-CitrixFSLogixStorage.ps1 -TargetServers "RemoteServer" -CredentialFile "C:\Secure\FSLogixCred.xml" -ExportReport
+```
+
+### Custom Thresholds
+```powershell
+.\Monitor-CitrixFSLogixStorage.ps1 -IncludeLocalVDA -WarningThresholdPercent 70 -CriticalThresholdPercent 85
+```
+
+## Advanced Diagnostics Usage
+
+### Basic Diagnostics
+```powershell
+.\CitrixFSLogix-AdvancedDiagnostics.ps1
+```
+
+### Full Comprehensive Scan
+```powershell
+.\CitrixFSLogix-AdvancedDiagnostics.ps1 -FullScan
+```
+
+### Remote Server Analysis
+```powershell
+.\CitrixFSLogix-AdvancedDiagnostics.ps1 -ServerName "CitrixVDA02"
+```
+
+### Export Diagnostics Report
+```powershell
+.\CitrixFSLogix-AdvancedDiagnostics.ps1 -ExportReport -ReportFormat HTML -ReportPath "C:\Reports\FSLogixHealth.html"
+```
+
+## Consolidated Diagnostics Usage ⭐
+
+The **CitrixVDA-Consolidated.ps1** script combines all functionality from both original scripts into one unified diagnostic tool.
+
+### Basic Consolidated Diagnosis
+```powershell
+.\CitrixVDA-Consolidated.ps1
+```
+
+### Full Comprehensive Scan
+```powershell
+.\CitrixVDA-Consolidated.ps1 -FullScan
+```
+
+### Remote Server with Verbose Output
+```powershell
+.\CitrixVDA-Consolidated.ps1 -ServerName "CitrixVDA01" -Verbose
+```
+
+### Generate Unified Report (All Formats Supported)
+```powershell
+# HTML Report (default, most comprehensive)
+.\CitrixVDA-Consolidated.ps1 -ExportReport
+
+# CSV Report for data analysis
+.\CitrixVDA-Consolidated.ps1 -ExportReport -ReportFormat CSV
+
+# JSON Report for API integration
+.\CitrixVDA-Consolidated.ps1 -ExportReport -ReportFormat JSON
+
+# Text Report for logging
+.\CitrixVDA-Consolidated.ps1 -ExportReport -ReportFormat TXT
+```
+
+### Complete Diagnostic Suite
+```powershell
+# Full scan on remote server with HTML report
+.\CitrixVDA-Consolidated.ps1 -ServerName "CitrixProd01" -FullScan -Verbose -ExportReport -ReportFormat HTML -ReportPath "C:\Reports\CompleteHealth.html"
 ```
 
 ## Parameters
