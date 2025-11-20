@@ -5,9 +5,14 @@
     Copies Chrome bookmarks file to the current user's Chrome profile
 .PARAMETER BackupPath
     Path to the backup bookmarks file
+.EXAMPLE
+    .\Restore-ChromeBookmarks.ps1 -BackupPath "C:\Backup\ChromeBookmarks.bak"
 #>
 
+[CmdletBinding()]
 param (
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
     [string]$BackupPath
 )
 
@@ -15,8 +20,7 @@ Write-Host "Restoring Chrome bookmarks..."
 
 try {
     if (-not (Test-Path $BackupPath)) {
-        Write-Error "Backup file not found: $BackupPath"
-        return
+        throw "Backup file not found: $BackupPath"
     }
 
     # Target Chrome bookmarks location
@@ -26,9 +30,8 @@ try {
     $chromeDir = Split-Path -Path $chromeBookmarksPath -Parent
     if (-not (Test-Path $chromeDir)) {
         New-Item -ItemType Directory -Path $chromeDir -Force | Out-Null
+        Write-Host "Created Chrome profile directory: $chromeDir"
     }
-
-    Write-Host "Copying bookmarks to: $chromeBookmarksPath"
 
     # Check if Chrome is running
     $chromeProcesses = Get-Process -Name "chrome" -ErrorAction SilentlyContinue
@@ -37,20 +40,29 @@ try {
         Write-Host "Continuing with restoration - changes will take effect after Chrome restart."
     }
 
+    Write-Host "Copying bookmarks to: $chromeBookmarksPath"
+
+    # Create backup of existing bookmarks if they exist
+    if (Test-Path $chromeBookmarksPath) {
+        $backupExisting = "$chromeBookmarksPath.pre-restore"
+        Copy-Item -Path $chromeBookmarksPath -Destination $backupExisting -Force
+        Write-Host "Existing bookmarks backed up to: $backupExisting"
+    }
+
     # Copy the backup file
     Copy-Item -Path $BackupPath -Destination $chromeBookmarksPath -Force
 
     if (Test-Path $chromeBookmarksPath) {
-        Write-Host "Chrome bookmarks restored successfully."
-        Write-Host "Please restart Chrome to see the changes."
-
         $backupInfo = Get-Item $BackupPath
         $fileSize = [math]::Round($backupInfo.Length / 1KB, 2)
+        Write-Host "Chrome bookmarks restored successfully." -ForegroundColor Green
         Write-Host "Restored bookmarks file size: ${fileSize}KB"
+        Write-Host "Please restart Chrome to see the changes."
     } else {
-        Write-Error "Failed to restore Chrome bookmarks."
+        throw "Failed to restore Chrome bookmarks - file not created"
     }
 }
 catch {
     Write-Error "Error restoring Chrome bookmarks: $($_.Exception.Message)"
+    throw
 }

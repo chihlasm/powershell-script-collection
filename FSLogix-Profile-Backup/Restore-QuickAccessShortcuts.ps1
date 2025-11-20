@@ -5,9 +5,14 @@
     Imports registry keys containing Quick Access shortcuts from backup
 .PARAMETER BackupPath
     Path to the backup registry file
+.EXAMPLE
+    .\Restore-QuickAccessShortcuts.ps1 -BackupPath "C:\Backup\QuickAccessBackup.reg"
 #>
 
+[CmdletBinding()]
 param (
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
     [string]$BackupPath
 )
 
@@ -15,23 +20,22 @@ Write-Host "Restoring Quick Access shortcuts..."
 
 try {
     if (-not (Test-Path $BackupPath)) {
-        Write-Error "Backup file not found: $BackupPath"
-        return
+        throw "Backup file not found: $BackupPath"
     }
 
     Write-Host "Importing registry file: $BackupPath"
 
-    # Import the registry file
-    $regCommand = "reg import `"$BackupPath`""
-    $result = cmd /c $regCommand 2>&1
+    # Use Start-Process for better control
+    $process = Start-Process -FilePath "reg.exe" -ArgumentList "import", "`"$BackupPath`"" -NoNewWindow -Wait -PassThru
 
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "Quick Access shortcuts restored successfully."
+    if ($process.ExitCode -eq 0) {
+        Write-Host "Quick Access shortcuts restored successfully." -ForegroundColor Green
         Write-Host "Note: Changes may require Explorer restart or logoff/logon to take effect."
     } else {
-        Write-Error "Failed to import registry file. Error: $result"
+        throw "Registry import failed with exit code: $($process.ExitCode)"
     }
 }
 catch {
     Write-Error "Error restoring Quick Access shortcuts: $($_.Exception.Message)"
+    throw
 }
