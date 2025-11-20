@@ -44,6 +44,15 @@ try {
         return
     }
 
+    # Check if Chrome is running (for current user backup)
+    if (-not $ProfilePath) {
+        $chromeProcesses = Get-Process -Name "chrome" -ErrorAction SilentlyContinue
+        if ($chromeProcesses) {
+            Write-Warning "Chrome is currently running. Bookmarks file may be locked."
+            Write-Warning "For best results, close Chrome before backing up."
+        }
+    }
+
     # Resolve output path
     $OutputPath = $PSCmdlet.GetUnresolvedProviderPathFromPSPath($OutputPath)
     $backupDir = Split-Path -Path $OutputPath -Parent
