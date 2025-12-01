@@ -86,8 +86,7 @@ function Get-ADUsers {
     $dataGridView.Rows.Clear()
     try {
         $sanitizedFilter = Format-SearchFilter -Filter $searchFilter
-        $filter = "(Name -like '$sanitizedFilter' -or SamAccountName -like '$sanitizedFilter')"
-        $users = Get-ADUser -Filter $filter -Properties SamAccountName, Name, Enabled, msDS-cloudExtensionAttribute1 -ErrorAction Stop |
+        $users = Get-ADUser -Filter "Name -like '$sanitizedFilter' -or SamAccountName -like '$sanitizedFilter'" -Properties SamAccountName, Name, Enabled, msDS-cloudExtensionAttribute1 -ErrorAction Stop |
                  Sort-Object Name
         foreach ($user in $users) {
             $cloudStatus = if ($user.'msDS-cloudExtensionAttribute1' -eq "HideFromGAL") { "Hidden" } else { "Visible" }
