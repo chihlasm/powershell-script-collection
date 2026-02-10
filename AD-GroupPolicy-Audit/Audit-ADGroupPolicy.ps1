@@ -278,24 +278,10 @@ function Get-GPORegistrySettings {
                     }
                 }
 
-                # GP Preferences Registry Items (Extension.RegistrySettings.Registry)
-                if ($ext.Extension.RegistrySettings.Registry) {
-                    foreach ($reg in $ext.Extension.RegistrySettings.Registry) {
-                        $props = $reg.Properties
-                        if (-not $props) { continue }
-
-                        $registrySettings.Add([PSCustomObject]@{
-                            GPOName       = $GPO.DisplayName
-                            Configuration = $scope
-                            Source        = 'GPPreference'
-                            Name          = if ($props.name) { "$($props.key)\$($props.name)" } else { $props.key }
-                            State         = $props.action
-                            KeyPath       = $props.key
-                            ValueName     = $props.name
-                            Value         = $props.value
-                            Type          = $props.type
-                        })
-                    }
+                # GP Preferences Registry Items - recurse into RegistrySettings
+                # including Collection folders at any depth
+                if ($ext.Extension.RegistrySettings) {
+                    Get-RegistryPreferenceItems -Node $ext.Extension.RegistrySettings -GPOName $GPO.DisplayName -Scope $scope -Results $registrySettings
                 }
             }
         }
@@ -305,6 +291,42 @@ function Get-GPORegistrySettings {
     }
 
     return $registrySettings
+}
+
+function Get-RegistryPreferenceItems {
+    param(
+        [System.Xml.XmlElement]$Node,
+        [string]$GPOName,
+        [string]$Scope,
+        [System.Collections.Generic.List[object]]$Results
+    )
+
+    # Process Registry items at this level
+    if ($Node.Registry) {
+        foreach ($reg in $Node.Registry) {
+            $props = $reg.Properties
+            if (-not $props) { continue }
+
+            $Results.Add([PSCustomObject]@{
+                GPOName       = $GPOName
+                Configuration = $Scope
+                Source        = 'GPPreference'
+                Name          = if ($props.name) { "$($props.key)\$($props.name)" } else { $props.key }
+                State         = $props.action
+                KeyPath       = $props.key
+                ValueName     = $props.name
+                Value         = $props.value
+                Type          = $props.type
+            })
+        }
+    }
+
+    # Recurse into Collection folders (sub-folders in GP Preferences)
+    if ($Node.Collection) {
+        foreach ($collection in $Node.Collection) {
+            Get-RegistryPreferenceItems -Node $collection -GPOName $GPOName -Scope $Scope -Results $Results
+        }
+    }
 }
 
 function Escape-Html {
