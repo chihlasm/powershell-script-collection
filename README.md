@@ -17,6 +17,7 @@ Collection of useful PowerShell scripts for automation and system administration
 - [LocalAdminManager](#localadminmanager)
 - [PasswordPolicyAuditor](#passwordpolicyauditor)
 - [SMBTest](#smb-diagnostic--drive-mapping-script)
+- [AD-GroupPolicy-Audit](#ad-groupolicy-audit)
 - [Get-CitrixSessions](#get-citrixsessions)
 
 ## AD Export
@@ -431,6 +432,43 @@ For full documentation, see [Get-CitrixSessions/README.md](Get-CitrixSessions/RE
 - Supports both online (current user) and offline (VHD/VHDX file) backup modes
 
 For full documentation, see [FSLogix-Profile-Backup/README.md](FSLogix-Profile-Backup/README.md)
+
+## AD-GroupPolicy-Audit
+
+**Description**: A comprehensive Active Directory Group Policy audit tool that analyzes all GPOs in a domain for duplicates, conflicts, optimization opportunities, security issues, and FSLogix configuration problems. Generates detailed HTML and CSV reports.
+
+**Files Included**:
+- `Audit-ADGroupPolicy.ps1` - Consolidated GPO audit script
+
+**Parameters**:
+- `-OutputPath <string>` (Optional, default: script directory): Directory where reports will be saved.
+- `-IncludeFSLogix <bool>` (Optional, default: $true): Include FSLogix-specific policy audit.
+- `-ExportFormat <string>` (Optional, default: Both): Export format for reports (HTML, CSV, or Both).
+- `-ExportXML <bool>` (Optional, default: $true): Export individual and combined GPO XML files.
+- `-Domain <string>` (Optional): Specific domain to audit.
+- `-Credential <PSCredential>` (Optional): Credential for connecting to domain.
+- `-SkipBrowserOpen` (Optional): Do not open the HTML report in the default browser.
+
+**Usage Examples**:
+- Full audit: `.\AD-GroupPolicy-Audit\Audit-ADGroupPolicy.ps1`
+- HTML only: `.\AD-GroupPolicy-Audit\Audit-ADGroupPolicy.ps1 -OutputPath "C:\Reports" -ExportFormat HTML`
+- Specific domain: `.\AD-GroupPolicy-Audit\Audit-ADGroupPolicy.ps1 -Domain "contoso.com" -IncludeFSLogix $false`
+
+**Features**:
+- **GPO Report Caching**: Fetches XML reports once per GPO and reuses across all analysis passes for performance
+- **Duplicate Detection**: SHA256 hash comparison for exact duplicates plus similar name detection
+- **Conflict Analysis**: Identifies registry settings configured differently across multiple GPOs
+- **Optimization Checks**: Finds empty, unlinked, stale, and disabled GPOs
+- **Security Analysis**: Reviews GPO permissions for overly permissive access
+- **Security Filtering Audit**: Detects GPOs that will not apply to anyone
+- **FSLogix Audit**: Analyzes FSLogix-specific settings, conflicts, and best practices
+- **HTML-Escaped Output**: All dynamic values in HTML reports are escaped to prevent markup issues
+- **Progress Indicators**: Write-Progress bars for all long-running operations
+
+**Prerequisites**:
+- GroupPolicy module (via RSAT)
+- ActiveDirectory module (via RSAT)
+- Domain permissions to read GPO settings and permissions
 
 ## HideFromGal
 
