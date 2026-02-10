@@ -334,6 +334,94 @@ function Escape-Html {
     if ([string]::IsNullOrEmpty($Value)) { return '' }
     return [System.Security.SecurityElement]::Escape($Value)
 }
+
+function Get-DriveMapPreferenceItems {
+    param(
+        [System.Xml.XmlElement]$Node,
+        [string]$GPOName,
+        [object]$GPOId,
+        [string]$Scope,
+        [System.Collections.Generic.List[object]]$Results
+    )
+
+    if ($Node.Drive) {
+        foreach ($drive in $Node.Drive) {
+            $props = $drive.Properties
+            if (-not $props) { continue }
+
+            $Results.Add([PSCustomObject]@{
+                GPOName       = $GPOName
+                GPOId         = $GPOId
+                Configuration = $Scope
+                Action        = $props.action
+                DriveLetter   = $props.thisDrive
+                UNCPath       = $props.path
+                Label         = $props.label
+                Reconnect     = $props.persistent
+            })
+        }
+    }
+
+    if ($Node.Collection) {
+        foreach ($collection in $Node.Collection) {
+            Get-DriveMapPreferenceItems -Node $collection -GPOName $GPOName -GPOId $GPOId -Scope $Scope -Results $Results
+        }
+    }
+}
+
+function Get-PrinterPreferenceItems {
+    param(
+        [System.Xml.XmlElement]$Node,
+        [string]$GPOName,
+        [object]$GPOId,
+        [string]$Scope,
+        [System.Collections.Generic.List[object]]$Results
+    )
+
+    if ($Node.SharedPrinter) {
+        foreach ($printer in $Node.SharedPrinter) {
+            $props = $printer.Properties
+            if (-not $props) { continue }
+
+            $Results.Add([PSCustomObject]@{
+                GPOName       = $GPOName
+                GPOId         = $GPOId
+                Configuration = $Scope
+                PrinterType   = 'Shared'
+                Action        = $props.action
+                Path          = $props.path
+                Default       = $props.default
+                Location      = $props.location
+                Comment       = $props.comment
+            })
+        }
+    }
+
+    if ($Node.PortPrinter) {
+        foreach ($printer in $Node.PortPrinter) {
+            $props = $printer.Properties
+            if (-not $props) { continue }
+
+            $Results.Add([PSCustomObject]@{
+                GPOName       = $GPOName
+                GPOId         = $GPOId
+                Configuration = $Scope
+                PrinterType   = 'TCP/IP Port'
+                Action        = $props.action
+                Path          = $props.ipAddress
+                Default       = $props.default
+                Location      = $props.location
+                Comment       = $props.comment
+            })
+        }
+    }
+
+    if ($Node.Collection) {
+        foreach ($collection in $Node.Collection) {
+            Get-PrinterPreferenceItems -Node $collection -GPOName $GPOName -GPOId $GPOId -Scope $Scope -Results $Results
+        }
+    }
+}
 #endregion
 
 #region Analysis Functions
@@ -964,24 +1052,9 @@ function Find-DuplicateDriveMaps {
             if (-not $extensions) { continue }
 
             foreach ($ext in $extensions) {
-                # GP Preferences Drive Maps
-                $drives = $ext.Extension.DriveMapSettings.Drive
-                if (-not $drives) { continue }
-
-                foreach ($drive in $drives) {
-                    $props = $drive.Properties
-                    if (-not $props) { continue }
-
-                    $allDriveMaps.Add([PSCustomObject]@{
-                        GPOName       = $gpo.DisplayName
-                        GPOId         = $gpo.Id
-                        Configuration = $scope
-                        Action        = $props.action
-                        DriveLetter   = $props.thisDrive
-                        UNCPath       = $props.path
-                        Label         = $props.label
-                        Reconnect     = $props.persistent
-                    })
+                # GP Preferences Drive Maps - recurse into Collections
+                if ($ext.Extension.DriveMapSettings) {
+                    Get-DriveMapPreferenceItems -Node $ext.Extension.DriveMapSettings -GPOName $gpo.DisplayName -GPOId $gpo.Id -Scope $scope -Results $allDriveMaps
                 }
             }
         }
@@ -1069,46 +1142,9 @@ function Find-DuplicatePrinters {
             if (-not $extensions) { continue }
 
             foreach ($ext in $extensions) {
-                # Shared Printers (GP Preferences)
-                $sharedPrinters = $ext.Extension.PrinterSettings.SharedPrinter
-                if ($sharedPrinters) {
-                    foreach ($printer in $sharedPrinters) {
-                        $props = $printer.Properties
-                        if (-not $props) { continue }
-
-                        $allPrinters.Add([PSCustomObject]@{
-                            GPOName       = $gpo.DisplayName
-                            GPOId         = $gpo.Id
-                            Configuration = $scope
-                            PrinterType   = 'Shared'
-                            Action        = $props.action
-                            Path          = $props.path
-                            Default       = $props.default
-                            Location      = $props.location
-                            Comment       = $props.comment
-                        })
-                    }
-                }
-
-                # TCP/IP Port Printers (GP Preferences)
-                $portPrinters = $ext.Extension.PrinterSettings.PortPrinter
-                if ($portPrinters) {
-                    foreach ($printer in $portPrinters) {
-                        $props = $printer.Properties
-                        if (-not $props) { continue }
-
-                        $allPrinters.Add([PSCustomObject]@{
-                            GPOName       = $gpo.DisplayName
-                            GPOId         = $gpo.Id
-                            Configuration = $scope
-                            PrinterType   = 'TCP/IP Port'
-                            Action        = $props.action
-                            Path          = $props.ipAddress
-                            Default       = $props.default
-                            Location      = $props.location
-                            Comment       = $props.comment
-                        })
-                    }
+                # GP Preferences Printers - recurse into Collections
+                if ($ext.Extension.PrinterSettings) {
+                    Get-PrinterPreferenceItems -Node $ext.Extension.PrinterSettings -GPOName $gpo.DisplayName -GPOId $gpo.Id -Scope $scope -Results $allPrinters
                 }
 
                 # Deployed Printers (pushed via Print Management, shows as policy)
@@ -1329,11 +1365,15 @@ function Export-HTMLReport {
         .badge-warning { background: #f39c12; color: white; }
         .badge-info { background: #3498db; color: white; }
         .badge-success { background: #27ae60; color: white; }
+        .back-to-top { text-align: right; margin-top: 10px; font-size: 13px; }
+        .back-to-top a { color: #3498db; text-decoration: none; }
+        .back-to-top a:hover { text-decoration: underline; }
+        td .multi-value { display: block; padding: 1px 0; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Active Directory Group Policy Audit Report</h1>
+        <h1 id="top">Active Directory Group Policy Audit Report</h1>
 
         <div class="summary-box">
             <h3>Audit Summary</h3>
@@ -1403,6 +1443,7 @@ function Export-HTMLReport {
                     })
                 </table>"
             })
+            <div class="back-to-top"><a href="#top">Back to top</a></div>
         </div>
 
         <div class="section" id="overlaps">
@@ -1416,8 +1457,8 @@ function Export-HTMLReport {
                         "<tr class='$rowClass'>
                             <td>$(Escape-Html $_.RegistryPath)</td>
                             <td>$(Escape-Html $_.ValueName)</td>
-                            <td>$(Escape-Html $_.AffectedGPOs)</td>
-                            <td>$(Escape-Html $_.UniqueValues)</td>
+                            <td>$(($_.AffectedGPOs -split ', ' | ForEach-Object { "<span class='multi-value'>$(Escape-Html $_)</span>" }) -join '')</td>
+                            <td>$(($_.UniqueValues -split ' \| ' | ForEach-Object { "<span class='multi-value'>$(Escape-Html $_)</span>" }) -join '')</td>
                             <td class='$severityClass'>$(Escape-Html $_.Severity)</td>
                             <td>$(Escape-Html $_.Recommendation)</td>
                         </tr>"
@@ -1426,6 +1467,7 @@ function Export-HTMLReport {
             } else {
                 "<p class='badge badge-success'>No policy overlaps found</p>"
             })
+            <div class="back-to-top"><a href="#top">Back to top</a></div>
         </div>
 
         <div class="section" id="optimizations">
@@ -1440,7 +1482,7 @@ function Export-HTMLReport {
                             <td>$(Escape-Html $_.Status)</td>
                             <td>$($_.LinkCount)</td>
                             <td>$($_.Modified.ToString('yyyy-MM-dd'))</td>
-                            <td>$(Escape-Html $_.Issues)</td>
+                            <td>$(($_.Issues -split '; ' | ForEach-Object { "<span class='multi-value'>$(Escape-Html $_)</span>" }) -join '')</td>
                             <td class='$severityClass'>$(Escape-Html $_.Severity)</td>
                         </tr>"
                     })
@@ -1448,6 +1490,7 @@ function Export-HTMLReport {
             } else {
                 "<p class='badge badge-success'>No optimization opportunities found</p>"
             })
+            <div class="back-to-top"><a href="#top">Back to top</a></div>
         </div>
 
         <div class="section" id="security">
@@ -1469,6 +1512,7 @@ function Export-HTMLReport {
             } else {
                 "<p class='badge badge-success'>No security issues found</p>"
             })
+            <div class="back-to-top"><a href="#top">Back to top</a></div>
         </div>
 
         <div class="section" id="nofiltering">
@@ -1491,6 +1535,7 @@ function Export-HTMLReport {
             } else {
                 "<p class='badge badge-success'>All GPOs have proper security filtering</p>"
             })
+            <div class="back-to-top"><a href="#top">Back to top</a></div>
         </div>
 
         <div class="section" id="links">
@@ -1508,6 +1553,7 @@ function Export-HTMLReport {
                     </tr>"
                 })
             </table>
+            <div class="back-to-top"><a href="#top">Back to top</a></div>
         </div>
 
         <div class="section" id="drivemaps">
@@ -1520,8 +1566,8 @@ function Export-HTMLReport {
                     $($AuditResults.DriveMaps.ConflictingLetters | ForEach-Object {
                         "<tr class='conflict'>
                             <td>$(Escape-Html $_.DriveLetter)</td>
-                            <td>$(Escape-Html $_.ConflictPaths)</td>
-                            <td>$(Escape-Html $_.AffectedGPOs)</td>
+                            <td>$(($_.ConflictPaths -split ' vs ' | ForEach-Object { "<span class='multi-value'>$(Escape-Html $_)</span>" }) -join '')</td>
+                            <td>$(($_.AffectedGPOs -split ', ' | ForEach-Object { "<span class='multi-value'>$(Escape-Html $_)</span>" }) -join '')</td>
                             <td class='severity-high'>$(Escape-Html $_.Severity)</td>
                             <td>$(Escape-Html $_.Recommendation)</td>
                         </tr>"
@@ -1539,7 +1585,7 @@ function Export-HTMLReport {
                         "<tr>
                             <td>$(Escape-Html $_.UNCPath)</td>
                             <td>$(Escape-Html $_.DriveLetters)</td>
-                            <td>$(Escape-Html $_.AffectedGPOs)</td>
+                            <td>$(($_.AffectedGPOs -split ', ' | ForEach-Object { "<span class='multi-value'>$(Escape-Html $_)</span>" }) -join '')</td>
                             <td>$($_.IsSameLetter)</td>
                             <td class='$severityClass'>$(Escape-Html $_.Severity)</td>
                             <td>$(Escape-Html $_.Recommendation)</td>
@@ -1572,6 +1618,7 @@ function Export-HTMLReport {
                     })
                 </table>"
             })
+            <div class="back-to-top"><a href="#top">Back to top</a></div>
         </div>
 
         <div class="section" id="printers">
@@ -1584,8 +1631,8 @@ function Export-HTMLReport {
                     $($AuditResults.Printers.DefaultConflicts | ForEach-Object {
                         "<tr class='conflict'>
                             <td>$(Escape-Html $_.Configuration)</td>
-                            <td>$(Escape-Html $_.ConflictPaths)</td>
-                            <td>$(Escape-Html $_.AffectedGPOs)</td>
+                            <td>$(($_.ConflictPaths -split ' vs ' | ForEach-Object { "<span class='multi-value'>$(Escape-Html $_)</span>" }) -join '')</td>
+                            <td>$(($_.AffectedGPOs -split ', ' | ForEach-Object { "<span class='multi-value'>$(Escape-Html $_)</span>" }) -join '')</td>
                             <td class='severity-warning'>$(Escape-Html $_.Severity)</td>
                             <td>$(Escape-Html $_.Recommendation)</td>
                         </tr>"
@@ -1602,7 +1649,7 @@ function Export-HTMLReport {
                         "<tr>
                             <td>$(Escape-Html $_.PrinterPath)</td>
                             <td>$(Escape-Html $_.PrinterType)</td>
-                            <td>$(Escape-Html $_.AffectedGPOs)</td>
+                            <td>$(($_.AffectedGPOs -split ', ' | ForEach-Object { "<span class='multi-value'>$(Escape-Html $_)</span>" }) -join '')</td>
                             <td class='severity-info'>$(Escape-Html $_.Severity)</td>
                             <td>$(Escape-Html $_.Recommendation)</td>
                         </tr>"
@@ -1634,6 +1681,7 @@ function Export-HTMLReport {
                     })
                 </table>"
             })
+            <div class="back-to-top"><a href="#top">Back to top</a></div>
         </div>
 
         $(if ($IncludeFSLogix -and $AuditResults.FSLogix) {
@@ -1656,8 +1704,8 @@ function Export-HTMLReport {
                             "<tr class='conflict'>
                                 <td>$(Escape-Html $_.Setting)</td>
                                 <td>$(Escape-Html $_.RegistryPath)</td>
-                                <td>$(Escape-Html $_.AffectedGPOs)</td>
-                                <td>$(Escape-Html $_.ConflictingValues)</td>
+                                <td>$(($_.AffectedGPOs -split ', ' | ForEach-Object { "<span class='multi-value'>$(Escape-Html $_)</span>" }) -join '')</td>
+                                <td>$(($_.ConflictingValues -split ' vs ' | ForEach-Object { "<span class='multi-value'>$(Escape-Html $_)</span>" }) -join '')</td>
                                 <td>$(Escape-Html $_.Impact)</td>
                             </tr>"
                         })
@@ -1691,6 +1739,7 @@ function Export-HTMLReport {
                         </tr>"
                     })
                 </table>
+                <div class='back-to-top'><a href='#top'>Back to top</a></div>
             </div>"
         })
 
@@ -1718,6 +1767,7 @@ function Export-HTMLReport {
                         })
                     </table>"
                 })
+                <div class='back-to-top'><a href='#top'>Back to top</a></div>
             </div>"
         })
 
