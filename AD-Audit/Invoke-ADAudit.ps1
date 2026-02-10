@@ -11,11 +11,13 @@
     - User account analysis (stale, locked, password issues)
     - Group analysis (empty, large, nested, privileged)
     - Computer account analysis (stale, OS distribution, unsupported OS)
-    - Password policy review (default and fine-grained)
-    - Privileged access review (AdminSDHolder, delegation, Kerberoastable)
-    - Security findings (reversible encryption, DES, LAPS, DNS)
+    - Password policy review (default and fine-grained, NIST 800-63B)
+    - Privileged access review (AdminSDHolder, delegation, Kerberoastable, AS-REP Roastable, RBCD)
+    - Security findings (reversible encryption, DES, Legacy/Windows LAPS, DNS)
+    - Infrastructure health (tombstone, Recycle Bin, schema, Sysvol replication, trust health)
+    - OU structure analysis (empty OUs, no GPO links, nesting depth)
 
-    Exports results as HTML report and/or CSV files.
+    Exports results as HTML report and/or CSV files. Returns results hashtable for pipeline use.
 
 .PARAMETER OutputPath
     Directory where reports will be saved. Defaults to script directory.
@@ -35,6 +37,14 @@
 .PARAMETER SkipBrowserOpen
     Do not open the HTML report in the default browser after generation.
 
+.PARAMETER IncludeSection
+    Array of section names to include. Default: All. Valid values:
+    DomainOverview, DomainControllers, Users, Groups, Computers,
+    PasswordPolicy, PrivilegedAccess, Security, Infrastructure, OUStructure
+
+.PARAMETER LogCallback
+    Optional scriptblock called with each log message. Used by GUI wrapper.
+
 .EXAMPLE
     .\Invoke-ADAudit.ps1
     Runs full audit with default settings.
@@ -47,9 +57,17 @@
     .\Invoke-ADAudit.ps1 -Domain "contoso.com" -ExportFormat HTML -SkipBrowserOpen
     Audits specific domain, HTML only, no browser open.
 
+.EXAMPLE
+    .\Invoke-ADAudit.ps1 -IncludeSection Users, Security, PrivilegedAccess
+    Runs only user, security, and privileged access audits.
+
+.EXAMPLE
+    $results = .\Invoke-ADAudit.ps1 -SkipBrowserOpen
+    Captures audit results hashtable for further processing.
+
 .NOTES
     Author: PowerShell Script Collection
-    Version: 1.0
+    Version: 2.0
     Requires: ActiveDirectory module (RSAT)
 #>
 
@@ -72,14 +90,28 @@ param(
     [int]$DaysInactive = 90,
 
     [Parameter()]
-    [switch]$SkipBrowserOpen
+    [switch]$SkipBrowserOpen,
+
+    [Parameter()]
+    [ValidateSet('All','DomainOverview','DomainControllers','Users','Groups','Computers',
+        'PasswordPolicy','PrivilegedAccess','Security','Infrastructure','OUStructure')]
+    [string[]]$IncludeSection = @('All'),
+
+    [Parameter()]
+    [scriptblock]$LogCallback
 )
 
 #region Script Configuration
 $ErrorActionPreference = 'Continue'
 $WarningPreference = 'Continue'
 
-$ScriptVersion = "1.0"
+$ScriptVersion = "2.0"
+
+# Section selection helper
+$AllSections = @('DomainOverview','DomainControllers','Users','Groups','Computers',
+    'PasswordPolicy','PrivilegedAccess','Security','Infrastructure','OUStructure')
+if ($IncludeSection -contains 'All') { $IncludeSection = $AllSections }
+function Test-SectionIncluded { param([string]$Name) $IncludeSection -contains $Name }
 $AuditDate = Get-Date
 $ReportName = "AD-Audit-$($AuditDate.ToString('yyyy-MM-dd-HHmmss'))"
 $StaleDate = $AuditDate.AddDays(-$DaysInactive)
@@ -113,6 +145,9 @@ function Write-AuditLog {
     }
 
     Write-Host "[$timestamp] $prefix $Message" -ForegroundColor $colors[$Level]
+    if ($LogCallback) {
+        try { $LogCallback.Invoke("[$timestamp] $prefix $Message") } catch {}
+    }
 }
 
 function Escape-Html {
@@ -508,6 +543,7 @@ function Get-PrivilegedAccessAudit {
         AdminSDHolder    = @()
         Delegation       = @()
         KerberoastableAdmins = @()
+        ASREPRoastable   = @()
     }
 
     try {
@@ -592,6 +628,39 @@ function Get-PrivilegedAccessAudit {
         Write-AuditLog "Could not check Kerberoastable admins: $_" -Level Warning
     }
 
+    try {
+        # AS-REP Roastable accounts (DoesNotRequirePreAuth)
+        $asrepRoastable = @(Get-ADUser -Filter { DoesNotRequirePreAuth -eq $true } `
+            -Properties DoesNotRequirePreAuth, Enabled, LastLogonDate @ADParams -ErrorAction Stop |
+            Select-Object Name, SamAccountName, Enabled, LastLogonDate)
+        $results.ASREPRoastable = $asrepRoastable
+
+        if ($asrepRoastable.Count -gt 0) {
+            Write-AuditLog "Found $($asrepRoastable.Count) AS-REP Roastable accounts!" -Level Warning
+        }
+    } catch {
+        Write-AuditLog "Could not check AS-REP Roastable accounts: $_" -Level Warning
+    }
+
+    try {
+        # Resource-Based Constrained Delegation (RBCD)
+        $rbcdObjects = Get-ADObject -Filter { msDS-AllowedToActOnBehalfOfOtherIdentity -like '*' } `
+            -Properties 'msDS-AllowedToActOnBehalfOfOtherIdentity', Name, ObjectClass @ADParams -ErrorAction SilentlyContinue
+        foreach ($obj in $rbcdObjects) {
+            $sd = $obj.'msDS-AllowedToActOnBehalfOfOtherIdentity'
+            $allowedPrincipals = @()
+            if ($sd -is [System.DirectoryServices.ActiveDirectorySecurity]) {
+                $allowedPrincipals = @($sd.Access | ForEach-Object { $_.IdentityReference.Value })
+            }
+            $results.Delegation.Add([PSCustomObject]@{
+                Name = $obj.Name; Type = 'RBCD'; ObjectClass = $obj.ObjectClass
+                Details = "Allowed principals: $(($allowedPrincipals -join '; '))"
+            })
+        }
+    } catch {
+        Write-AuditLog "Could not check RBCD: $_" -Level Warning
+    }
+
     Write-AuditLog "Privileged access audit complete" -Level Success
     return $results
 }
@@ -638,30 +707,47 @@ function Get-SecurityAudit {
     }
 
     try {
-        # LAPS deployment status
+        # LAPS deployment status - check both Legacy LAPS and Windows LAPS
         $allComputers = @(Get-ADComputer -Filter { Enabled -eq $true } @ADParams -ErrorAction SilentlyContinue)
-        $lapsComputers = @()
-        # Check for Legacy LAPS (ms-Mcs-AdmPwd) and Windows LAPS (msLAPS-Password)
+        $legacyLapsCount = 0
+        $windowsLapsCount = 0
+
+        # Legacy LAPS (ms-Mcs-AdmPwd)
         try {
-            $lapsComputers = @(Get-ADComputer -Filter { Enabled -eq $true } `
+            $legacyLapsCount = @(Get-ADComputer -Filter { Enabled -eq $true } `
                 -Properties 'ms-Mcs-AdmPwd' @ADParams -ErrorAction Stop |
-                Where-Object { $_.'ms-Mcs-AdmPwd' })
+                Where-Object { $_.'ms-Mcs-AdmPwd' }).Count
         } catch {
             # Attribute may not exist if LAPS schema not extended
         }
 
-        $lapsDeployed = $lapsComputers.Count
-        $lapsTotal = $allComputers.Count
-        $lapsPercent = if ($lapsTotal -gt 0) { [math]::Round(($lapsDeployed / $lapsTotal) * 100, 1) } else { 0 }
+        # Windows LAPS (msLAPS-PasswordExpirationTime as proxy - readable without admin rights)
+        try {
+            $windowsLapsCount = @(Get-ADComputer -Filter { Enabled -eq $true } `
+                -Properties 'msLAPS-PasswordExpirationTime' @ADParams -ErrorAction Stop |
+                Where-Object { $_.'msLAPS-PasswordExpirationTime' }).Count
+        } catch {
+            # Attribute may not exist if Windows LAPS schema not extended
+        }
 
+        $lapsTotal = $allComputers.Count
+        $lapsEither = [math]::Max($legacyLapsCount, $windowsLapsCount)
+        $lapsPercent = if ($lapsTotal -gt 0) { [math]::Round(($lapsEither / $lapsTotal) * 100, 1) } else { 0 }
         $lapsSeverity = if ($lapsPercent -ge 90) { 'Low' } elseif ($lapsPercent -ge 50) { 'Warning' } else { 'High' }
 
         $findings.Add([PSCustomObject]@{
-            Category = 'LAPS Deployment'
+            Category = 'LAPS Deployment (Legacy)'
             Severity = $lapsSeverity
             Object   = "Domain-wide"
-            Details  = "$lapsDeployed of $lapsTotal enabled computers have LAPS ($lapsPercent%)"
-            Recommendation = if ($lapsPercent -lt 90) { 'Deploy LAPS to all workstations and servers' } else { 'Good LAPS coverage' }
+            Details  = "$legacyLapsCount of $lapsTotal enabled computers have Legacy LAPS (ms-Mcs-AdmPwd)"
+            Recommendation = if ($legacyLapsCount -eq 0) { 'Legacy LAPS not deployed or schema not extended' } else { 'Consider migrating to Windows LAPS' }
+        })
+        $findings.Add([PSCustomObject]@{
+            Category = 'LAPS Deployment (Windows)'
+            Severity = $lapsSeverity
+            Object   = "Domain-wide"
+            Details  = "$windowsLapsCount of $lapsTotal enabled computers have Windows LAPS"
+            Recommendation = if ($windowsLapsCount -eq 0) { 'Deploy Windows LAPS for modern password management' } else { "Windows LAPS coverage: $([math]::Round(($windowsLapsCount/$lapsTotal)*100,1))%" }
         })
     } catch {
         Write-AuditLog "Could not check LAPS status: $_" -Level Warning
@@ -701,6 +787,158 @@ function Get-SecurityAudit {
     return @{ Findings = $findings }
 }
 
+function Get-ADInfrastructureAudit {
+    Write-AuditLog "Auditing AD infrastructure health..." -Level Info
+
+    $results = @{
+        TombstoneLifetime = 'Unknown'
+        RecycleBinEnabled = $false
+        SchemaVersion     = 'Unknown'
+        SchemaOS          = 'Unknown'
+        SysvolReplication = 'Unknown'
+        TrustHealth       = @()
+    }
+
+    try {
+        # Tombstone lifetime
+        $configNC = (Get-ADRootDSE @ADParams).configurationNamingContext
+        $dsService = Get-ADObject "CN=Directory Service,CN=Windows NT,CN=Services,$configNC" `
+            -Properties tombstoneLifetime @ADParams -ErrorAction Stop
+        $results.TombstoneLifetime = if ($dsService.tombstoneLifetime) { "$($dsService.tombstoneLifetime) days" } else { '60 days (default)' }
+    } catch {
+        Write-AuditLog "Could not check tombstone lifetime: $_" -Level Warning
+    }
+
+    try {
+        # AD Recycle Bin
+        $recycleBin = Get-ADOptionalFeature -Filter { Name -like 'Recycle Bin Feature' } @ADParams -ErrorAction Stop
+        $results.RecycleBinEnabled = ($recycleBin.EnabledScopes.Count -gt 0)
+    } catch {
+        Write-AuditLog "Could not check AD Recycle Bin: $_" -Level Warning
+    }
+
+    try {
+        # Schema version
+        $schemaNC = (Get-ADRootDSE @ADParams).schemaNamingContext
+        $schema = Get-ADObject $schemaNC -Properties objectVersion @ADParams -ErrorAction Stop
+        $results.SchemaVersion = $schema.objectVersion
+        $schemaMap = @{
+            47 = 'Windows Server 2008 R2'
+            56 = 'Windows Server 2012'
+            69 = 'Windows Server 2012 R2'
+            87 = 'Windows Server 2016'
+            88 = 'Windows Server 2019/2022'
+            90 = 'Windows Server 2025'
+        }
+        $results.SchemaOS = if ($schemaMap.ContainsKey([int]$schema.objectVersion)) {
+            $schemaMap[[int]$schema.objectVersion]
+        } else { "Unknown (version $($schema.objectVersion))" }
+    } catch {
+        Write-AuditLog "Could not check schema version: $_" -Level Warning
+    }
+
+    try {
+        # Sysvol replication method (FRS vs DFSR)
+        $configNC = (Get-ADRootDSE @ADParams).configurationNamingContext
+        $domainDN = (Get-ADDomain @ADParams).DistinguishedName
+        $dfsrCheck = Get-ADObject "CN=Domain System Volume,CN=DFSR-GlobalSettings,CN=System,$domainDN" `
+            @ADParams -ErrorAction SilentlyContinue
+        $results.SysvolReplication = if ($dfsrCheck) { 'DFSR' } else { 'FRS (legacy - migrate to DFSR)' }
+    } catch {
+        $results.SysvolReplication = 'Unable to determine'
+    }
+
+    try {
+        # Trust health validation
+        $trustHealth = [System.Collections.Generic.List[object]]::new()
+        $trusts = Get-ADTrust -Filter * @ADParams -ErrorAction SilentlyContinue
+        foreach ($trust in $trusts) {
+            $trustHealth.Add([PSCustomObject]@{
+                Name             = $trust.Name
+                Direction        = $trust.Direction
+                TrustType        = $trust.TrustType
+                IntraForest      = $trust.IntraForest
+                SelectiveAuth    = $trust.SelectiveAuthentication
+                SIDFiltering     = -not $trust.SIDFilteringQuarantined
+                TGTDelegation    = $trust.TGTDelegation
+            })
+        }
+        $results.TrustHealth = $trustHealth
+    } catch {
+        Write-AuditLog "Could not validate trust health: $_" -Level Warning
+    }
+
+    Write-AuditLog "Infrastructure audit complete" -Level Success
+    return $results
+}
+
+function Get-OUStructureAudit {
+    Write-AuditLog "Auditing OU structure..." -Level Info
+
+    try {
+        $ous = Get-ADOrganizationalUnit -Filter * -Properties Description, gPLink @ADParams -ErrorAction Stop
+        $totalOUs = @($ous).Count
+        Write-AuditLog "Processing $totalOUs OUs..." -Level Info
+
+        $ouResults = [System.Collections.Generic.List[object]]::new()
+        $emptyOUs = [System.Collections.Generic.List[object]]::new()
+        $noGPOLink = [System.Collections.Generic.List[object]]::new()
+        $maxDepth = 0
+
+        foreach ($ou in $ous) {
+            # Calculate depth from DN
+            $depth = ($ou.DistinguishedName -split '(?<!\\),OU=' ).Count - 1
+            if ($depth -gt $maxDepth) { $maxDepth = $depth }
+
+            # Check for child objects
+            $childCount = @(Get-ADObject -SearchBase $ou.DistinguishedName -SearchScope OneLevel `
+                -Filter * @ADParams -ErrorAction SilentlyContinue).Count
+
+            $hasGPO = -not [string]::IsNullOrWhiteSpace($ou.gPLink)
+
+            $ouResults.Add([PSCustomObject]@{
+                Name            = $ou.Name
+                DistinguishedName = $ou.DistinguishedName
+                Depth           = $depth
+                ChildObjects    = $childCount
+                HasGPOLinks     = $hasGPO
+                Description     = $ou.Description
+            })
+
+            if ($childCount -eq 0) {
+                $emptyOUs.Add([PSCustomObject]@{
+                    Name = $ou.Name
+                    DistinguishedName = $ou.DistinguishedName
+                    Depth = $depth
+                    Description = $ou.Description
+                })
+            }
+
+            if (-not $hasGPO) {
+                $noGPOLink.Add([PSCustomObject]@{
+                    Name = $ou.Name
+                    DistinguishedName = $ou.DistinguishedName
+                    Depth = $depth
+                    ChildObjects = $childCount
+                })
+            }
+        }
+
+        Write-AuditLog "OU audit complete: $totalOUs OUs, $($emptyOUs.Count) empty, max depth $maxDepth" -Level Success
+        return @{
+            TotalOUs    = $totalOUs
+            MaxDepth    = $maxDepth
+            OUs         = $ouResults
+            EmptyOUs    = $emptyOUs
+            NoGPOLink   = $noGPOLink
+        }
+    }
+    catch {
+        Write-AuditLog "Failed OU structure audit: $_" -Level Error
+        return @{ TotalOUs = 0; MaxDepth = 0; OUs = @(); EmptyOUs = @(); NoGPOLink = @() }
+    }
+}
+
 #endregion
 
 #region Report Generation
@@ -731,7 +969,12 @@ function Export-CSVReports {
         'Privileged-AdminSDHolder' = $AuditResults.Privileged.AdminSDHolder
         'Privileged-Delegation' = $AuditResults.Privileged.Delegation
         'Privileged-Kerberoastable' = $AuditResults.Privileged.KerberoastableAdmins
+        'Privileged-ASREPRoastable' = $AuditResults.Privileged.ASREPRoastable
         'Security-Findings'    = $AuditResults.Security.Findings
+        'Infrastructure-TrustHealth' = $AuditResults.Infrastructure.TrustHealth
+        'OU-Structure'         = $AuditResults.OUStructure.OUs
+        'OU-Empty'             = $AuditResults.OUStructure.EmptyOUs
+        'OU-NoGPOLink'         = $AuditResults.OUStructure.NoGPOLink
     }
 
     $exported = 0
@@ -865,6 +1108,8 @@ function Export-HTMLReport {
                 <li><a href="#passwordpolicy">Password Policy</a></li>
                 <li><a href="#privileged">Privileged Access</a></li>
                 <li><a href="#security">Security Findings</a></li>
+                <li><a href="#infrastructure">Infrastructure Health</a></li>
+                <li><a href="#oustructure">OU Structure</a></li>
             </ul>
         </div>
 "@
@@ -1311,6 +1556,18 @@ function Export-HTMLReport {
 "@
     }
 
+    if (@($priv.ASREPRoastable).Count -gt 0) {
+        $html += @"
+            <h3>AS-REP Roastable Accounts <span class="badge badge-danger">$(@($priv.ASREPRoastable).Count)</span></h3>
+            <table>
+                <tr><th>Name</th><th>SamAccountName</th><th>Enabled</th><th>Last Logon</th></tr>
+                $($priv.ASREPRoastable | ForEach-Object {
+                    "<tr><td>$(Escape-Html $_.Name)</td><td>$(Escape-Html $_.SamAccountName)</td><td>$($_.Enabled)</td><td>$($_.LastLogonDate)</td></tr>"
+                })
+            </table>
+"@
+    }
+
     $html += @"
             <div class="back-to-top"><a href="#top">Back to top</a></div>
         </div>
@@ -1332,6 +1589,95 @@ function Export-HTMLReport {
             } else {
                 "<p class='badge badge-success'>No security findings</p>"
             })
+            <div class="back-to-top"><a href="#top">Back to top</a></div>
+        </div>
+"@
+
+    #--- Infrastructure Health Section ---
+    $infra = $AuditResults.Infrastructure
+    $html += @"
+
+        <div class="section" id="infrastructure">
+            <h2>Infrastructure Health</h2>
+            <div class="info-grid">
+                <div class="info-label">Tombstone Lifetime:</div><div>$(Escape-Html $infra.TombstoneLifetime)</div>
+                <div class="info-label">AD Recycle Bin:</div><div>$(if($infra.RecycleBinEnabled){"<span class='severity-low'>Enabled</span>"}else{"<span class='severity-high'>Disabled</span>"})</div>
+                <div class="info-label">Schema Version:</div><div>$($infra.SchemaVersion) ($(Escape-Html $infra.SchemaOS))</div>
+                <div class="info-label">Sysvol Replication:</div><div>$(if($infra.SysvolReplication -eq 'DFSR'){"<span class='severity-low'>DFSR</span>"}else{"<span class='severity-warning'>$(Escape-Html $infra.SysvolReplication)</span>"})</div>
+            </div>
+"@
+
+    if (@($infra.TrustHealth).Count -gt 0) {
+        $html += @"
+            <h3>Trust Health <span class="badge badge-info">$(@($infra.TrustHealth).Count)</span></h3>
+            <table>
+                <tr><th>Name</th><th>Direction</th><th>Type</th><th>IntraForest</th><th>Selective Auth</th><th>SID Filtering</th><th>TGT Delegation</th></tr>
+                $($infra.TrustHealth | ForEach-Object {
+                    $sidClass = if ($_.SIDFiltering) { 'severity-warning' } else { 'severity-low' }
+                    "<tr><td>$(Escape-Html $_.Name)</td><td>$($_.Direction)</td><td>$($_.TrustType)</td><td>$($_.IntraForest)</td><td>$($_.SelectiveAuth)</td><td class='$sidClass'>$($_.SIDFiltering)</td><td>$($_.TGTDelegation)</td></tr>"
+                })
+            </table>
+"@
+    }
+
+    $html += @"
+            <div class="back-to-top"><a href="#top">Back to top</a></div>
+        </div>
+"@
+
+    #--- OU Structure Section ---
+    $ouData = $AuditResults.OUStructure
+    $html += @"
+
+        <div class="section" id="oustructure">
+            <h2>OU Structure</h2>
+            <div class="metric">
+                <div class="metric-value">$($ouData.TotalOUs)</div>
+                <div class="metric-label">Total OUs</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value">$($ouData.MaxDepth)</div>
+                <div class="metric-label">Max Depth</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value">$(@($ouData.EmptyOUs).Count)</div>
+                <div class="metric-label">Empty OUs</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value">$(@($ouData.NoGPOLink).Count)</div>
+                <div class="metric-label">No GPO Links</div>
+            </div>
+"@
+
+    if (@($ouData.EmptyOUs).Count -gt 0) {
+        $html += @"
+            <h3 class="collapsible" onclick="toggleSection('empty-ous')">Empty OUs <span class="badge badge-info">$(@($ouData.EmptyOUs).Count)</span></h3>
+            <div id="empty-ous" class="collapsible-content">
+            <table>
+                <tr><th>Name</th><th>Distinguished Name</th><th>Depth</th><th>Description</th></tr>
+                $($ouData.EmptyOUs | Sort-Object DistinguishedName | ForEach-Object {
+                    "<tr><td>$(Escape-Html $_.Name)</td><td>$(Escape-Html $_.DistinguishedName)</td><td>$($_.Depth)</td><td>$(Escape-Html $_.Description)</td></tr>"
+                })
+            </table>
+            </div>
+"@
+    }
+
+    if (@($ouData.NoGPOLink).Count -gt 0) {
+        $html += @"
+            <h3 class="collapsible collapsed" onclick="toggleSection('no-gpo-ous')">OUs Without GPO Links <span class="badge badge-info">$(@($ouData.NoGPOLink).Count)</span></h3>
+            <div id="no-gpo-ous" class="collapsible-content collapsed">
+            <table>
+                <tr><th>Name</th><th>Distinguished Name</th><th>Depth</th><th>Child Objects</th></tr>
+                $($ouData.NoGPOLink | Sort-Object DistinguishedName | ForEach-Object {
+                    "<tr><td>$(Escape-Html $_.Name)</td><td>$(Escape-Html $_.DistinguishedName)</td><td>$($_.Depth)</td><td>$($_.ChildObjects)</td></tr>"
+                })
+            </table>
+            </div>
+"@
+    }
+
+    $html += @"
             <div class="back-to-top"><a href="#top">Back to top</a></div>
         </div>
 "@
@@ -1368,16 +1714,19 @@ if (-not (Test-Path $OutputPath)) {
 Write-AuditLog "Starting Active Directory Audit (v$ScriptVersion)" -Level Info
 Write-AuditLog "Output: $OutputPath | Format: $ExportFormat | Stale threshold: $DaysInactive days" -Level Info
 
-# Run all audit sections
+# Run selected audit sections
+$emptyHash = @{}
 $auditResults = @{
-    Overview          = Get-DomainOverview
-    DomainControllers = Get-DomainControllerAudit
-    Users             = Get-UserAccountAudit
-    Groups            = Get-GroupAudit
-    Computers         = Get-ComputerAccountAudit
-    PasswordPolicy    = Get-PasswordPolicyAudit
-    Privileged        = Get-PrivilegedAccessAudit
-    Security          = Get-SecurityAudit
+    Overview          = if (Test-SectionIncluded 'DomainOverview')    { Get-DomainOverview }          else { @{ DomainName = ''; ForestName = ''; DomainControllers = 0; FSMORoles = @(); Trusts = @(); Sites = @(); Subnets = @() } }
+    DomainControllers = if (Test-SectionIncluded 'DomainControllers') { Get-DomainControllerAudit }   else { @{ DomainControllers = @(); ReplicationFailures = @() } }
+    Users             = if (Test-SectionIncluded 'Users')             { Get-UserAccountAudit }         else { @{ TotalUsers = 0; EnabledCount = 0; DisabledCount = 0; StaleUsers = @(); PasswordNeverExpires = @(); PasswordNotRequired = @(); NeverLoggedOn = @(); LockedOut = @(); SIDHistory = @() } }
+    Groups            = if (Test-SectionIncluded 'Groups')            { Get-GroupAudit }               else { @{ TotalGroups = 0; EmptyGroups = @(); LargeGroups = @(); PrivilegedMembers = @(); NestedWarnings = @() } }
+    Computers         = if (Test-SectionIncluded 'Computers')         { Get-ComputerAccountAudit }     else { @{ TotalComputers = 0; EnabledCount = 0; DisabledCount = 0; StaleComputers = @(); OSDistribution = @(); UnsupportedComputers = @() } }
+    PasswordPolicy    = if (Test-SectionIncluded 'PasswordPolicy')    { Get-PasswordPolicyAudit }      else { @{ DefaultPolicy = $null; NISTFindings = @(); FineGrained = @() } }
+    Privileged        = if (Test-SectionIncluded 'PrivilegedAccess')   { Get-PrivilegedAccessAudit }    else { @{ AdminSDHolder = @(); Delegation = @(); KerberoastableAdmins = @(); ASREPRoastable = @() } }
+    Security          = if (Test-SectionIncluded 'Security')          { Get-SecurityAudit }            else { @{ Findings = @() } }
+    Infrastructure    = if (Test-SectionIncluded 'Infrastructure')    { Get-ADInfrastructureAudit }    else { @{ TombstoneLifetime = 'Skipped'; RecycleBinEnabled = $false; SchemaVersion = 'Skipped'; SchemaOS = 'Skipped'; SysvolReplication = 'Skipped'; TrustHealth = @() } }
+    OUStructure       = if (Test-SectionIncluded 'OUStructure')       { Get-OUStructureAudit }         else { @{ TotalOUs = 0; MaxDepth = 0; OUs = @(); EmptyOUs = @(); NoGPOLink = @() } }
 }
 
 # Export reports
@@ -1396,5 +1745,8 @@ if ($ExportFormat -in @('HTML', 'Both')) {
 
 Write-AuditLog "Active Directory Audit complete!" -Level Success
 Write-AuditLog "Reports saved to: $OutputPath" -Level Info
+
+# Return results for pipeline use
+return $auditResults
 
 #endregion
