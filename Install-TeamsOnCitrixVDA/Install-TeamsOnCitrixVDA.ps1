@@ -16,6 +16,12 @@
 
 .PARAMETER TeamsDownloadUrl
     URL to download Teams MSIX. If not specified, uses the official Microsoft URL.
+    Ignored if TeamsMsixPath is specified.
+
+.PARAMETER TeamsMsixPath
+    Path to a local or network share MSIX file. If specified, the script will use this
+    file instead of downloading from the internet. Supports UNC paths (e.g., \\server\share\teams.msix)
+    and local paths (e.g., C:\Installers\teams.msix).
 
 .PARAMETER WebView2Url
     URL to download WebView2 runtime. If not specified, uses the official Microsoft URL.
@@ -25,10 +31,17 @@
 
 .EXAMPLE
     .\Install-TeamsOnCitrixVDA.ps1 -TeamsDownloadUrl "https://custom.url/teams.msix"
+
+.EXAMPLE
+    .\Install-TeamsOnCitrixVDA.ps1 -TeamsMsixPath "\\fileserver\software\Teams_x64.msix"
+
+.EXAMPLE
+    .\Install-TeamsOnCitrixVDA.ps1 -TeamsMsixPath "C:\Installers\Teams_x64.msix"
 #>
 
 param (
     [string]$TeamsDownloadUrl = "https://go.microsoft.com/fwlink/?linkid=2196106",
+    [string]$TeamsMsixPath,
     [string]$WebView2Url = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
 )
 
@@ -229,15 +242,33 @@ try {
         Install-WebView2
     }
 
-    # Download and install Teams
-    $teamsMsixPath = "$env:TEMP\Teams_x64.msix"
-    Get-TeamsInstaller -Url $TeamsDownloadUrl -OutputPath $teamsMsixPath
+    # Determine MSIX source and install Teams
+    if ($TeamsMsixPath) {
+        # Use provided local or network path
+        Write-Log "Using provided MSIX path: $TeamsMsixPath"
 
-    Install-Teams -MsixPath $teamsMsixPath
+        if (-not (Test-Path $TeamsMsixPath)) {
+            throw "Teams MSIX file not found at: $TeamsMsixPath"
+        }
 
-    # Clean up
-    if (Test-Path $teamsMsixPath) {
-        Remove-Item -Path $teamsMsixPath -Force
+        # Verify it's an MSIX file
+        if ($TeamsMsixPath -notmatch '\.msix$') {
+            Write-Log "Warning: File does not have .msix extension. Proceeding anyway..."
+        }
+
+        Install-Teams -MsixPath $TeamsMsixPath
+    }
+    else {
+        # Download from URL
+        $teamsMsixPath = "$env:TEMP\Teams_x64.msix"
+        Get-TeamsInstaller -Url $TeamsDownloadUrl -OutputPath $teamsMsixPath
+
+        Install-Teams -MsixPath $teamsMsixPath
+
+        # Clean up downloaded file
+        if (Test-Path $teamsMsixPath) {
+            Remove-Item -Path $teamsMsixPath -Force
+        }
     }
 
     Write-Log "Teams installation script completed successfully"
