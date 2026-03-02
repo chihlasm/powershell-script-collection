@@ -85,9 +85,15 @@ function Get-ADUsers {
     param($searchFilter = "*")
     $dataGridView.Rows.Clear()
     try {
-        $sanitizedFilter = Format-SearchFilter -Filter $searchFilter
-        $users = Get-ADUser -Filter "Name -like '$sanitizedFilter' -or SamAccountName -like '$sanitizedFilter'" -Properties SamAccountName, Name, Enabled, msDS-cloudExtensionAttribute1 -ErrorAction Stop |
-                 Sort-Object Name
+        if ([string]::IsNullOrWhiteSpace($searchFilter) -or $searchFilter -eq "*") {
+            # Load all users without filter
+            $users = Get-ADUser -Filter * -Properties SamAccountName, Name, Enabled, msDS-cloudExtensionAttribute1 -ErrorAction Stop |
+                     Sort-Object Name
+        } else {
+            $sanitizedFilter = Format-SearchFilter -Filter $searchFilter
+            $users = Get-ADUser -Filter "Name -like '$sanitizedFilter' -or SamAccountName -like '$sanitizedFilter'" -Properties SamAccountName, Name, Enabled, msDS-cloudExtensionAttribute1 -ErrorAction Stop |
+                     Sort-Object Name
+        }
         foreach ($user in $users) {
             $cloudStatus = if ($user.'msDS-cloudExtensionAttribute1' -eq "HideFromGAL") { "Hidden" } else { "Visible" }
             $dataGridView.Rows.Add($false, $user.SamAccountName, $user.Name, $user.Enabled, $cloudStatus) | Out-Null
@@ -138,8 +144,12 @@ $searchBox = New-Object System.Windows.Forms.TextBox
 $searchBox.Location = New-Object System.Drawing.Point(90, 20)
 $searchBox.Size = New-Object System.Drawing.Size(180, 20)
 $searchBox.Add_TextChanged({
-    $sanitizedFilter = Format-SearchFilter -Filter $searchBox.Text
-    Get-ADUsers -searchFilter "*$sanitizedFilter*"
+    if ([string]::IsNullOrWhiteSpace($searchBox.Text)) {
+        Get-ADUsers
+    } else {
+        $sanitizedFilter = Format-SearchFilter -Filter $searchBox.Text
+        Get-ADUsers -searchFilter "*$sanitizedFilter*"
+    }
 })
 
 # Create clear search button (X)
@@ -238,7 +248,11 @@ $applyButton.Add_Click({
                 "Information"
             )
         }
-        Get-ADUsers -searchFilter "*$(Format-SearchFilter -Filter $searchBox.Text)*"
+        if ([string]::IsNullOrWhiteSpace($searchBox.Text)) {
+            Get-ADUsers
+        } else {
+            Get-ADUsers -searchFilter "*$(Format-SearchFilter -Filter $searchBox.Text)*"
+        }
         Request-EntraSync
     }
 })
@@ -288,7 +302,11 @@ $clearButton.Add_Click({
                 "Information"
             )
         }
-        Get-ADUsers -searchFilter "*$(Format-SearchFilter -Filter $searchBox.Text)*"
+        if ([string]::IsNullOrWhiteSpace($searchBox.Text)) {
+            Get-ADUsers
+        } else {
+            Get-ADUsers -searchFilter "*$(Format-SearchFilter -Filter $searchBox.Text)*"
+        }
         Request-EntraSync
     }
 })
