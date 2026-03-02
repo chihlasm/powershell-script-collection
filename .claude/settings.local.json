@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfix: recurse into GP Preferences registry Collection folders\n\nThe registry preference parser only read top-level Registry items.\nRegistry items organized into Collection folders \\(sub-folders in\nGP Preferences\\) were silently skipped. Add Get-RegistryPreferenceItems\nhelper that recursively walks Collection elements at any nesting depth.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfix: recurse into Collection folders for drive maps/printers, improve HTML report\n\n- Add Get-DriveMapPreferenceItems recursive helper for nested Collection\n  folders in GP Preferences drive map settings\n- Add Get-PrinterPreferenceItems recursive helper for nested Collection\n  folders in GP Preferences printer settings \\(SharedPrinter + PortPrinter\\)\n- Replace inline parsing in Find-DuplicateDriveMaps and\n  Find-DuplicatePrinters with recursive helpers\n- Fix HTML multi-value fields \\(AffectedGPOs, ConflictPaths, UniqueValues,\n  Issues\\) to render each value on its own line instead of comma-mashed\n- Add \"Back to top\" navigation links after every report section\n- Add CSS for .multi-value and .back-to-top styling\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfix: replace anchor links with JavaScript scrollIntoView for Teams compatibility\n\nFragment anchor links \\(#id\\) don''t work when HTML reports are opened\nthrough Teams or SharePoint viewer. Replaced all TOC and back-to-top\nlinks with onclick handlers using scrollIntoView\\({behavior:''smooth''}\\).\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git push:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfix: revert to plain anchor links, remove JavaScript\n\nThe script tag triggered Edge security restrictions on domain\ncontrollers with IE Enhanced Security Configuration, breaking\nall navigation. Reverted to pure HTML #anchor links which work\nreliably on DCs. Teams users should download the file to use links.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git reset:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfix: add back-to-top anchor links to HTML report sections\n\nAdd #anchor navigation links after each report section so users\ncan quickly return to the top of long reports. Uses pure HTML\nanchors for maximum compatibility with domain controllers and\nrestricted browser environments.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(npx skills add:*)",
+      "Bash(npx skills:*)",
+      "Bash(powershell -NoProfile -Command \"& { $null = [System.Management.Automation.PSParser]::Tokenize\\(\\(Get-Content ''C:\\\\Users\\\\micha\\\\OneDrive - VC3, Inc\\\\_Scripts\\\\powershell-script-collection\\\\AD-Audit\\\\Invoke-ADAudit.ps1'' -Raw\\), [ref]$null\\); Write-Host ''Syntax OK'' }\")",
+      "Bash(powershell -NoProfile -File -:*)",
+      "Bash(powershell -NoProfile -Command:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfeat: add comprehensive Active Directory audit script\n\nCovers domain overview, DC health/replication, user/group/computer\nanalysis, password policy \\(with NIST 800-63B checks\\), privileged\naccess review, and security findings. Outputs HTML + CSV reports.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(powershell -NoProfile -File:*)",
+      "Bash(git commit:*)"
+    ]
+  }
+}
