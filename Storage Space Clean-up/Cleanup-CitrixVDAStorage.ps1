@@ -1,19 +1,25 @@
+#Requires -Version 5.1
+#Requires -RunAsAdministrator
+
 <#
 .SYNOPSIS
     Comprehensive storage cleanup script for Citrix VDA servers with FSLogix.
 
 .DESCRIPTION
     This script safely reclaims storage space on Citrix VDA servers by cleaning:
-    - FSLogix ghost/orphaned profiles
+    - FSLogix ghost/orphaned profiles (local folders with no matching AD/local user)
     - Windows temp files and caches
     - User temp directories
     - Windows Update cleanup
     - IIS logs (if present)
     - Citrix-specific caches
-    - Old Windows profiles
+    - Old Windows installations
     - Browser caches
     - Font cache
     - Recycle bins
+
+    Active user sessions are always protected - no profile with a current logon
+    session will be removed.
 
 .PARAMETER WhatIf
     Shows what would be deleted without actually deleting.
@@ -48,8 +54,6 @@ param(
     [int]$DaysOld = 7,
     [switch]$SkipFSLogixCleanup
 )
-
-#Requires -RunAsAdministrator
 
 # Initialize variables
 $script:TotalSpaceReclaimed = 0
@@ -99,6 +103,7 @@ function Get-FolderSize {
 }
 
 function Remove-ItemSafely {
+    [CmdletBinding(SupportsShouldProcess)]
     param(
         [string]$Path,
         [switch]$Recurse
@@ -130,20 +135,34 @@ function Remove-ItemSafely {
 }
 
 function Get-ActiveUserSessions {
-    # Get currently logged in users to avoid cleaning their profiles
+    # Get currently logged-in users via CIM to avoid cleaning their profiles
+    # Returns an array of lowercase usernames (without domain prefix)
     try {
-        $Sessions = query user 2>$null | Select-Object -Skip 1
         $ActiveUsers = @()
 
-        foreach ($Session in $Sessions) {
-            if ($Session -match '^\s*(\S+)') {
-                $ActiveUsers += $Matches[1]
+        # CIM logon sessions — reliable across Windows versions and locales
+        $LoggedOn = Get-CimInstance -ClassName Win32_LogonSession -Filter "LogonType=2 OR LogonType=10 OR LogonType=11" -ErrorAction SilentlyContinue
+        foreach ($Session in $LoggedOn) {
+            $UserInfo = Get-CimAssociatedInstance -InputObject $Session -ResultClassName Win32_UserAccount -ErrorAction SilentlyContinue
+            if ($UserInfo) {
+                $ActiveUsers += $UserInfo.Name.ToLower()
             }
         }
 
-        return $ActiveUsers
+        # Fallback: also check explorer.exe owners for interactive sessions
+        $ExplorerProcesses = Get-CimInstance -ClassName Win32_Process -Filter "Name='explorer.exe'" -ErrorAction SilentlyContinue
+        foreach ($Proc in $ExplorerProcesses) {
+            $Owner = Invoke-CimMethod -InputObject $Proc -MethodName GetOwner -ErrorAction SilentlyContinue
+            if ($Owner -and $Owner.User) {
+                $ActiveUsers += $Owner.User.ToLower()
+            }
+        }
+
+        return @($ActiveUsers | Select-Object -Unique)
     }
     catch {
+        Write-Log "Failed to enumerate active sessions: $($_.Exception.Message)" -Level WARNING
+        # Return empty array — caller should treat unknown state conservatively
         return @()
     }
 }
@@ -155,23 +174,31 @@ function Get-FSLogixGhostProfiles {
     $ActiveUsers = Get-ActiveUserSessions
     $ProfilesPath = "C:\Users"
 
+    # System and service account patterns to always skip
+    $ProtectedPatterns = '^(Public|Default|Default User|All Users|Administrator|SYSTEM|NetworkService|LocalService|svc_.*|ctx_.*)$'
+
     # Get all user profile folders
     $UserFolders = Get-ChildItem -Path $ProfilesPath -Directory -ErrorAction SilentlyContinue |
-                   Where-Object { $_.Name -notmatch '^(Public|Default|Default User|All Users)$' }
+                   Where-Object { $_.Name -notmatch $ProtectedPatterns }
+
+    # Safety check: if we couldn't enumerate active sessions, refuse to proceed
+    if ($ActiveUsers -eq $null) {
+        Write-Log "Could not determine active sessions - skipping ghost profile cleanup for safety" -Level WARNING
+        return $GhostProfiles
+    }
 
     foreach ($Folder in $UserFolders) {
         $ProfilePath = $Folder.FullName
         $Username = $Folder.Name
 
-        # Skip active users
-        if ($ActiveUsers -contains $Username) {
+        # Skip active users (case-insensitive comparison)
+        if ($ActiveUsers -contains $Username.ToLower()) {
             Write-Log "Skipping active user: $Username" -Level INFO
             continue
         }
 
         # Check for FSLogix indicators
         $IsFSLogixProfile = $false
-        $IsGhost = $false
 
         # FSLogix local profile markers
         $FSLogixMarkers = @(
@@ -186,66 +213,65 @@ function Get-FSLogixGhostProfiles {
             }
         }
 
-        # Check if profile is orphaned (no corresponding user in AD or local)
-        if ($IsFSLogixProfile) {
-            try {
-                $UserExists = $false
-
-                # Check local users
-                $LocalUser = Get-LocalUser -Name $Username -ErrorAction SilentlyContinue
-                if ($LocalUser) {
-                    $UserExists = $true
-                }
-
-                # Check AD users (if domain joined)
-                if (-not $UserExists) {
-                    try {
-                        $ADUser = ([adsisearcher]"(samaccountname=$Username)").FindOne()
-                        if ($ADUser) {
-                            $UserExists = $true
-                        }
-                    }
-                    catch {
-                        # Not domain joined or AD not available
-                    }
-                }
-
-                # Check registry for profile
-                $ProfileList = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList" -ErrorAction SilentlyContinue
-                $RegisteredProfile = $false
-
-                foreach ($Profile in $ProfileList) {
-                    $ProfileImagePath = (Get-ItemProperty $Profile.PSPath -ErrorAction SilentlyContinue).ProfileImagePath
-                    if ($ProfileImagePath -eq $ProfilePath) {
-                        $RegisteredProfile = $true
-                        break
-                    }
-                }
-
-                # Profile is ghost if it's an FSLogix profile and either user doesn't exist or not registered
-                if (-not $RegisteredProfile -or -not $UserExists) {
-                    $IsGhost = $true
-                }
-
-                # Also check for profiles that haven't been accessed in a long time
-                $LastAccess = (Get-Item $ProfilePath -ErrorAction SilentlyContinue).LastAccessTime
-                if ($LastAccess -lt (Get-Date).AddDays(-30)) {
-                    $IsGhost = $true
-                }
-            }
-            catch {
-                Write-Log "Error checking profile $Username`: $($_.Exception.Message)" -Level WARNING
-            }
+        if (-not $IsFSLogixProfile) {
+            continue
         }
 
-        if ($IsGhost) {
-            $Size = Get-FolderSize -Path $ProfilePath
-            $GhostProfiles += [PSCustomObject]@{
-                Path = $ProfilePath
-                Username = $Username
-                SizeMB = $Size
-                LastAccess = (Get-Item $ProfilePath -ErrorAction SilentlyContinue).LastAccessTime
+        # Determine if the profile is truly orphaned
+        # A ghost profile must fail ALL of these checks: AD user, local user, and registry entry
+        try {
+            $UserExists = $false
+
+            # Check local users
+            $LocalUser = Get-LocalUser -Name $Username -ErrorAction SilentlyContinue
+            if ($LocalUser) {
+                $UserExists = $true
             }
+
+            # Check AD users (if domain joined)
+            if (-not $UserExists) {
+                try {
+                    $ADUser = ([adsisearcher]"(samaccountname=$Username)").FindOne()
+                    if ($ADUser) {
+                        $UserExists = $true
+                    }
+                }
+                catch {
+                    # Not domain joined or AD not available — log but don't assume ghost
+                    Write-Log "AD lookup unavailable for $Username - treating as valid user for safety" -Level WARNING
+                    $UserExists = $true
+                }
+            }
+
+            # If the user still exists in AD or locally, this is NOT a ghost
+            if ($UserExists) {
+                continue
+            }
+
+            # User doesn't exist anywhere — also confirm no registry profile entry
+            $RegisteredProfile = $false
+            $ProfileList = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList" -ErrorAction SilentlyContinue
+            foreach ($Profile in $ProfileList) {
+                $ProfileImagePath = (Get-ItemProperty $Profile.PSPath -ErrorAction SilentlyContinue).ProfileImagePath
+                if ($ProfileImagePath -eq $ProfilePath) {
+                    $RegisteredProfile = $true
+                    break
+                }
+            }
+
+            # Only mark as ghost if user doesn't exist AND profile is not registered
+            if (-not $RegisteredProfile) {
+                $Size = Get-FolderSize -Path $ProfilePath
+                $GhostProfiles += [PSCustomObject]@{
+                    Path       = $ProfilePath
+                    Username   = $Username
+                    SizeMB     = $Size
+                    LastAccess = (Get-Item $ProfilePath -ErrorAction SilentlyContinue).LastAccessTime
+                }
+            }
+        }
+        catch {
+            Write-Log "Error checking profile $Username`: $($_.Exception.Message)" -Level WARNING
         }
     }
 
@@ -308,7 +334,7 @@ function Clear-UserTempDirectories {
 
     foreach ($Profile in $UserProfiles) {
         # Skip active user sessions
-        if ($ActiveUsers -contains $Profile.Name) {
+        if ($ActiveUsers -contains $Profile.Name.ToLower()) {
             Write-Log "Skipping active user temp: $($Profile.Name)" -Level INFO
             continue
         }
@@ -342,7 +368,7 @@ function Clear-BrowserCaches {
                     Where-Object { $_.Name -notmatch '^(Public|Default|Default User|All Users)$' }
 
     foreach ($Profile in $UserProfiles) {
-        if ($ActiveUsers -contains $Profile.Name) {
+        if ($ActiveUsers -contains $Profile.Name.ToLower()) {
             continue
         }
 
@@ -573,7 +599,7 @@ function Clear-MemoryDumps {
 function Get-DiskSpaceReport {
     Write-Log "=== Disk Space Report ===" -Level INFO
 
-    $Drives = Get-WmiObject Win32_LogicalDisk -Filter "DriveType=3" | Select-Object DeviceID,
+    $Drives = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=3" | Select-Object DeviceID,
         @{Name="SizeGB";Expression={[math]::Round($_.Size/1GB,2)}},
         @{Name="FreeSpaceGB";Expression={[math]::Round($_.FreeSpace/1GB,2)}},
         @{Name="PercentFree";Expression={[math]::Round(($_.FreeSpace/$_.Size)*100,2)}}
