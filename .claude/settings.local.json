@@ -17,7 +17,9 @@
       "Bash(powershell -NoProfile -Command:*)",
       "Bash(git commit -m \"$\\(cat <<''EOF''\nfeat: add comprehensive Active Directory audit script\n\nCovers domain overview, DC health/replication, user/group/computer\nanalysis, password policy \\(with NIST 800-63B checks\\), privileged\naccess review, and security findings. Outputs HTML + CSV reports.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
       "Bash(powershell -NoProfile -File:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(ls:*)",
+      "Bash(grep:*)"
     ]
   }
 }
