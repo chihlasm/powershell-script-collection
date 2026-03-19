@@ -83,7 +83,10 @@ param(
     [PSCredential]$Credential,
 
     [Parameter()]
-    [switch]$SkipBrowserOpen
+    [switch]$SkipBrowserOpen,
+
+    [Parameter()]
+    [switch]$IncludeUnlinked
 )
 
 #region Script Configuration
@@ -307,6 +310,8 @@ function Get-RegistryPreferenceItems {
             $props = $reg.Properties
             if (-not $props) { continue }
 
+            $ilt = Get-ItemLevelTargeting -PreferenceElement $reg
+
             $Results.Add([PSCustomObject]@{
                 GPOName       = $GPOName
                 Configuration = $Scope
@@ -317,6 +322,8 @@ function Get-RegistryPreferenceItems {
                 ValueName     = $props.name
                 Value         = $props.value
                 Type          = $props.type
+                ILTSummary    = $ilt.Summary
+                ILTFilters    = $ilt.Filters
             })
         }
     }
@@ -335,6 +342,99 @@ function Escape-Html {
     return [System.Security.SecurityElement]::Escape($Value)
 }
 
+function Get-ItemLevelTargeting {
+    param([System.Xml.XmlElement]$PreferenceElement)
+
+    $filters = [System.Collections.Generic.List[string]]::new()
+    $filterObjects = [System.Collections.Generic.List[object]]::new()
+
+    $filtersNode = $PreferenceElement.Filters
+    if (-not $filtersNode) {
+        return @{
+            Summary = 'No targeting (applies to all)'
+            Filters = $filterObjects
+        }
+    }
+
+    foreach ($child in $filtersNode.ChildNodes) {
+        if ($child.NodeType -ne 'Element') { continue }
+
+        $filterType = $child.LocalName
+        $bool = if ($child.not -eq '1') { 'IS NOT' } else { 'IS' }
+
+        $detail = switch -Wildcard ($filterType) {
+            'FilterGroup' {
+                $name = $child.name
+                if (-not $name) { $name = $child.userContext }
+                "Group $bool '$name'"
+            }
+            'FilterUser' { "User $bool '$($child.name)'" }
+            'FilterComputer' { "Computer $bool '$($child.name)'" }
+            'FilterOrgUnit' {
+                $name = $child.name
+                if (-not $name) { $name = $child.directMember }
+                "OU $bool '$name'"
+            }
+            'FilterSite' { "Site $bool '$($child.name)'" }
+            'FilterNetworkAddress' {
+                $addr = $child.ipAddress
+                if (-not $addr) { $addr = $child.name }
+                "IP Range $bool '$addr'"
+            }
+            'FilterOperatingSystem' { "OS $bool '$($child.name)'" }
+            'FilterRunOnce' { "Run Once (apply only on first processing)" }
+            'FilterCollection' {
+                $nested = Get-FilterCollectionSummary -CollectionNode $child
+                "Collection: ($nested)"
+            }
+            default {
+                $name = $child.name
+                if ($name) { "$filterType $bool '$name'" } else { "$filterType (details in XML)" }
+            }
+        }
+
+        $filters.Add($detail)
+        $filterObjects.Add([PSCustomObject]@{
+            Type   = $filterType
+            Bool   = $child.bool
+            Not    = $child.not -eq '1'
+            Detail = $detail
+        })
+    }
+
+    $summary = if ($filters.Count -gt 0) { $filters -join '; ' } else { 'No targeting (applies to all)' }
+    return @{ Summary = $summary; Filters = $filterObjects }
+}
+
+function Get-FilterCollectionSummary {
+    param([System.Xml.XmlElement]$CollectionNode)
+
+    $parts = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($child in $CollectionNode.ChildNodes) {
+        if ($child.NodeType -ne 'Element') { continue }
+        $bool = if ($child.not -eq '1') { 'NOT' } else { '' }
+        $name = $child.name
+
+        switch -Wildcard ($child.LocalName) {
+            'FilterGroup'          { $parts.Add("Group $bool '$name'") }
+            'FilterUser'           { $parts.Add("User $bool '$name'") }
+            'FilterComputer'       { $parts.Add("Computer $bool '$name'") }
+            'FilterOrgUnit'        { $parts.Add("OU $bool '$name'") }
+            'FilterSite'           { $parts.Add("Site $bool '$name'") }
+            'FilterNetworkAddress' { $parts.Add("IP $bool '$($child.ipAddress)'") }
+            'FilterCollection' {
+                $nested = Get-FilterCollectionSummary -CollectionNode $child
+                $parts.Add("($nested)")
+            }
+            default { $parts.Add("$($child.LocalName) $bool '$name'") }
+        }
+    }
+
+    $connector = if ($CollectionNode.bool -eq 'OR') { ' OR ' } else { ' AND ' }
+    return $parts -join $connector
+}
+
 function Get-DriveMapPreferenceItems {
     param(
         [System.Xml.XmlElement]$Node,
@@ -349,15 +449,27 @@ function Get-DriveMapPreferenceItems {
             $props = $drive.Properties
             if (-not $props) { continue }
 
+            $ilt = Get-ItemLevelTargeting -PreferenceElement $drive
+
+            # Resolve drive letter — thisDrive can be NOCHANGE
+            $driveLetter = $props.thisDrive
+            if ($driveLetter -eq 'NOCHANGE' -or [string]::IsNullOrWhiteSpace($driveLetter)) {
+                if ($props.letter) { $driveLetter = $props.letter }
+                elseif ($props.useLetter) { $driveLetter = $props.useLetter }
+                elseif ($drive.letter) { $driveLetter = $drive.letter }
+            }
+
             $Results.Add([PSCustomObject]@{
                 GPOName       = $GPOName
                 GPOId         = $GPOId
                 Configuration = $Scope
                 Action        = $props.action
-                DriveLetter   = $props.thisDrive
+                DriveLetter   = $driveLetter
                 UNCPath       = $props.path
                 Label         = $props.label
                 Reconnect     = $props.persistent
+                ILTSummary    = $ilt.Summary
+                ILTFilters    = $ilt.Filters
             })
         }
     }
@@ -383,6 +495,8 @@ function Get-PrinterPreferenceItems {
             $props = $printer.Properties
             if (-not $props) { continue }
 
+            $ilt = Get-ItemLevelTargeting -PreferenceElement $printer
+
             $Results.Add([PSCustomObject]@{
                 GPOName       = $GPOName
                 GPOId         = $GPOId
@@ -393,6 +507,8 @@ function Get-PrinterPreferenceItems {
                 Default       = $props.default
                 Location      = $props.location
                 Comment       = $props.comment
+                ILTSummary    = $ilt.Summary
+                ILTFilters    = $ilt.Filters
             })
         }
     }
@@ -401,6 +517,8 @@ function Get-PrinterPreferenceItems {
         foreach ($printer in $Node.PortPrinter) {
             $props = $printer.Properties
             if (-not $props) { continue }
+
+            $ilt = Get-ItemLevelTargeting -PreferenceElement $printer
 
             $Results.Add([PSCustomObject]@{
                 GPOName       = $GPOName
@@ -412,6 +530,8 @@ function Get-PrinterPreferenceItems {
                 Default       = $props.default
                 Location      = $props.location
                 Comment       = $props.comment
+                ILTSummary    = $ilt.Summary
+                ILTFilters    = $ilt.Filters
             })
         }
     }
@@ -1089,8 +1209,14 @@ function Find-DuplicateDriveMaps {
             })
         }
 
-        # Same drive letter mapped to different paths
-        $byLetter = $allDriveMaps | Where-Object { $_.DriveLetter } |
+        # Same drive letter mapped to different paths (with ILT overlap check)
+        $realLetterMaps = $allDriveMaps | Where-Object {
+            $_.DriveLetter -and
+            $_.DriveLetter -ne 'NOCHANGE' -and
+            $_.DriveLetter.Trim() -ne ''
+        }
+
+        $byLetter = $realLetterMaps |
             Group-Object -Property DriveLetter |
             Where-Object {
                 ($_.Group | Select-Object -ExpandProperty UNCPath -Unique).Count -gt 1
@@ -1098,16 +1224,66 @@ function Find-DuplicateDriveMaps {
 
         foreach ($group in $byLetter) {
             $maps = $group.Group
-            $paths = ($maps | Select-Object -ExpandProperty UNCPath -Unique) -join ' vs '
-            $gpos = ($maps | Select-Object -ExpandProperty GPOName -Unique) -join ', '
+            $letter = $maps[0].DriveLetter
+
+            # Per-mapping detail
+            $mappingDetails = [System.Collections.Generic.List[object]]::new()
+            foreach ($map in $maps) {
+                $mappingDetails.Add([PSCustomObject]@{
+                    GPOName    = $map.GPOName
+                    UNCPath    = $map.UNCPath
+                    ILTSummary = $map.ILTSummary
+                    Action     = $map.Action
+                    Label      = $map.Label
+                })
+            }
+
+            # Check ILT overlap
+            $hasRealConflict = $false
+            $uniquePathMaps = @($maps | Sort-Object UNCPath | Group-Object UNCPath | ForEach-Object { $_.Group[0] })
+            for ($i = 0; $i -lt $uniquePathMaps.Count; $i++) {
+                for ($j = $i + 1; $j -lt $uniquePathMaps.Count; $j++) {
+                    $m1 = $uniquePathMaps[$i]
+                    $m2 = $uniquePathMaps[$j]
+
+                    $m1HasILT = $m1.ILTFilters -and $m1.ILTFilters.Count -gt 0
+                    $m2HasILT = $m2.ILTFilters -and $m2.ILTFilters.Count -gt 0
+
+                    if (-not $m1HasILT -or -not $m2HasILT) {
+                        $hasRealConflict = $true; break
+                    }
+
+                    $g1 = @($m1.ILTFilters | Where-Object { $_.Type -eq 'FilterGroup' -and -not $_.Not } |
+                        ForEach-Object { if ($_.Detail -match "'(.+)'") { $Matches[1] } }) | Where-Object { $_ }
+                    $g2 = @($m2.ILTFilters | Where-Object { $_.Type -eq 'FilterGroup' -and -not $_.Not } |
+                        ForEach-Object { if ($_.Detail -match "'(.+)'") { $Matches[1] } }) | Where-Object { $_ }
+
+                    if ($g1.Count -gt 0 -and $g2.Count -gt 0) {
+                        $overlap = $g1 | Where-Object { $_ -in $g2 }
+                        if ($overlap.Count -gt 0) { $hasRealConflict = $true; break }
+                    } else {
+                        $hasRealConflict = $true; break
+                    }
+                }
+                if ($hasRealConflict) { break }
+            }
+
+            $severity = if ($hasRealConflict) { 'High' } else { 'Info' }
+            $recommendation = if ($hasRealConflict) {
+                "REAL CONFLICT: Drive $letter mapped to different shares with overlapping or no targeting"
+            } else {
+                "ILT RESOLVED: Drive $letter mapped differently but item-level targeting does not overlap"
+            }
 
             $conflictsByLetter.Add([PSCustomObject]@{
-                DriveLetter    = $maps[0].DriveLetter
-                ConflictPaths  = $paths
-                AffectedGPOs   = $gpos
-                GPOCount       = ($maps | Select-Object -ExpandProperty GPOName -Unique).Count
-                Severity       = 'High'
-                Recommendation = "Drive letter $($maps[0].DriveLetter): mapped to different shares - users may get unexpected mappings based on GPO precedence"
+                DriveLetter     = $letter
+                MappingDetails  = $mappingDetails
+                HasRealConflict = $hasRealConflict
+                ConflictPaths   = ($maps | Select-Object -ExpandProperty UNCPath -Unique) -join ' vs '
+                AffectedGPOs    = ($maps | Select-Object -ExpandProperty GPOName -Unique) -join ', '
+                GPOCount        = ($maps | Select-Object -ExpandProperty GPOName -Unique).Count
+                Severity        = $severity
+                Recommendation  = $recommendation
             })
         }
     }
@@ -1336,88 +1512,174 @@ function Export-HTMLReport {
 <head>
     <title>AD Group Policy Audit Report</title>
     <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; background: #f5f5f5; }
+        :root {
+            --bg: #1a1d23; --bg-card: #23272e; --bg-hover: #2a2f38; --bg-detail: #1e2228;
+            --text: #e0e0e0; --text-muted: #8b95a5; --text-heading: #f0f0f0;
+            --border: #333a45; --accent: #5dade2; --accent-hover: #3498db;
+            --table-header: #2980b9; --table-row-hover: #2a2f38;
+            --shadow: rgba(0,0,0,0.3); --conflict-bg: #3a2020;
+            --rec-bg: #3a3520; --rec-border: #f39c12;
+            --ilt-bg: #1e3a4f; --ilt-border: #4a7a9b; --ilt-text: #b8d8f0;
+            --search-bg: #2a2f38; --search-border: #444;
+            --gpo-expanded: #1e3248; --gpo-hover: #252b35;
+            --toggle-bg: #333a45;
+        }
+        body.light {
+            --bg: #f5f5f5; --bg-card: #fff; --bg-hover: #f8f9fa; --bg-detail: #f9f9f9;
+            --text: #2c3e50; --text-muted: #7f8c8d; --text-heading: #2c3e50;
+            --border: #ddd; --accent: #3498db; --accent-hover: #2980b9;
+            --table-header: #3498db; --table-row-hover: #f8f9fa;
+            --shadow: rgba(0,0,0,0.1); --conflict-bg: #fdf2f2;
+            --rec-bg: #fef9e7; --rec-border: #f39c12;
+            --ilt-bg: #eaf2f8; --ilt-border: #bdc3c7; --ilt-text: #2c3e50;
+            --search-bg: #fff; --search-border: #ddd;
+            --gpo-expanded: #d5e8f7; --gpo-hover: #eaf2f8;
+            --toggle-bg: #ddd;
+        }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; background: var(--bg); color: var(--text); transition: background 0.3s, color 0.3s; }
+        .layout { display: flex; min-height: 100vh; }
+        .sidebar { position: fixed; top: 0; left: 0; width: 260px; height: 100vh; background: var(--bg-card); border-right: 1px solid var(--border); overflow-y: auto; padding: 16px 0; z-index: 100; transition: background 0.3s, transform 0.3s; }
+        .sidebar-header { padding: 12px 20px; font-size: 14px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); margin-bottom: 8px; }
+        .sidebar a { display: flex; align-items: center; gap: 10px; padding: 10px 20px; color: var(--text-muted); text-decoration: none; font-size: 13px; transition: all 0.15s; border-left: 3px solid transparent; }
+        .sidebar a:hover { color: var(--text); background: var(--bg-hover); }
+        .sidebar a.active { color: var(--accent); background: var(--bg-hover); border-left-color: var(--accent); font-weight: 600; }
+        .sidebar .nav-badge { font-size: 11px; padding: 2px 6px; border-radius: 10px; background: var(--bg-hover); color: var(--text-muted); margin-left: auto; }
+        .sidebar a.active .nav-badge { background: var(--accent); color: white; }
+        .main-content { margin-left: 260px; padding: 24px 32px; flex: 1; min-width: 0; }
         .container { max-width: 1400px; margin: 0 auto; }
-        h1 { color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }
-        h2 { color: #34495e; margin-top: 30px; border-left: 4px solid #3498db; padding-left: 10px; }
-        h3 { color: #7f8c8d; }
-        .summary-box { background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        /* Mobile sidebar toggle */
+        .sidebar-toggle { display: none; position: fixed; bottom: 20px; left: 20px; z-index: 200; background: var(--accent); color: white; border: none; border-radius: 50%; width: 48px; height: 48px; font-size: 20px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.3); }
+        @media (max-width: 900px) {
+            .sidebar { transform: translateX(-100%); }
+            .sidebar.open { transform: translateX(0); }
+            .sidebar-toggle { display: block; }
+            .main-content { margin-left: 0; padding: 20px; }
+        }
+        h1 { color: var(--text-heading); border-bottom: 3px solid var(--accent); padding-bottom: 10px; }
+        h2 { color: var(--text-heading); margin-top: 20px; }
+        h3 { color: var(--text-muted); }
+        p { color: var(--text); }
+        .summary-box { background: var(--bg-card); padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px var(--shadow); margin-bottom: 20px; }
         .metric { display: inline-block; margin: 10px 20px; text-align: center; }
-        .metric-value { font-size: 36px; font-weight: bold; color: #3498db; }
-        .metric-label { font-size: 14px; color: #7f8c8d; }
-        table { border-collapse: collapse; width: 100%; margin: 15px 0; background: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
-        th { background: #3498db; color: white; font-weight: 600; }
-        tr:hover { background: #f8f9fa; }
+        .metric-value { font-size: 36px; font-weight: bold; color: var(--accent); }
+        .metric-label { font-size: 14px; color: var(--text-muted); }
+        table { border-collapse: collapse; width: 100%; margin: 15px 0; background: var(--bg-card); box-shadow: 0 2px 4px var(--shadow); }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid var(--border); color: var(--text); }
+        th { background: var(--table-header); color: white; font-weight: 600; }
+        tr:hover { background: var(--table-row-hover); }
         .severity-high { color: #e74c3c; font-weight: bold; }
         .severity-warning { color: #f39c12; font-weight: bold; }
-        .severity-info { color: #3498db; }
+        .severity-info { color: var(--accent); }
         .severity-low { color: #27ae60; }
-        .conflict { background: #fdf2f2; }
-        .recommendation { background: #fef9e7; padding: 10px; border-left: 4px solid #f39c12; margin: 10px 0; }
-        .section { background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }
-        .footer { text-align: center; color: #7f8c8d; margin-top: 30px; padding: 20px; }
-        .toc { background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
-        .toc a { color: #3498db; text-decoration: none; }
-        .toc a:hover { text-decoration: underline; }
+        .conflict { background: var(--conflict-bg); }
+        .recommendation { background: var(--rec-bg); padding: 10px; border-left: 4px solid var(--rec-border); margin: 10px 0; color: var(--text); }
+        .section { background: var(--bg-card); padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px var(--shadow); margin-bottom: 20px; display: none; }
+        .section.active { display: block; }
+        .footer { text-align: center; color: var(--text-muted); margin-top: 30px; padding: 20px; }
         .badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
         .badge-danger { background: #e74c3c; color: white; }
         .badge-warning { background: #f39c12; color: white; }
-        .badge-info { background: #3498db; color: white; }
+        .badge-info { background: var(--accent); color: white; }
         .badge-success { background: #27ae60; color: white; }
-        .back-to-top { text-align: right; margin-top: 10px; font-size: 13px; }
-        .back-to-top a { color: #3498db; text-decoration: none; }
-        .back-to-top a:hover { text-decoration: underline; }
         td .multi-value { display: block; padding: 1px 0; }
+        .ilt-tag { display: inline-block; background: var(--ilt-bg); color: var(--ilt-text); padding: 2px 8px; border-radius: 10px; font-size: 11px; margin: 2px; border: 1px solid var(--ilt-border); }
+        /* Interactive settings browser */
+        .settings-controls { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }
+        .settings-search { padding: 10px 16px; border: 1px solid var(--search-border); border-radius: 6px; font-size: 14px; width: 350px; background: var(--search-bg); color: var(--text); }
+        .settings-search:focus { outline: none; border-color: var(--accent); }
+        .gpo-row { cursor: pointer; transition: background 0.15s; }
+        .gpo-row:hover { background: var(--gpo-hover) !important; }
+        .gpo-row.expanded { background: var(--gpo-expanded); }
+        .gpo-expand { display: inline-block; width: 18px; transition: transform 0.2s; }
+        .gpo-row.expanded .gpo-expand { transform: rotate(90deg); }
+        .gpo-detail { display: none; }
+        .gpo-detail.show { display: table-row; }
+        .gpo-detail td { padding: 0; }
+        .gpo-detail-panel { padding: 12px 24px; background: var(--bg-detail); }
+        .gpo-detail-search { padding: 8px 12px; border: 1px solid var(--search-border); border-radius: 4px; width: 250px; margin-bottom: 10px; font-size: 13px; background: var(--search-bg); color: var(--text); }
+        .gpo-detail-search:focus { outline: none; border-color: var(--accent); }
+        .inner-table { width: 100%; border-collapse: collapse; margin: 0; box-shadow: none; font-size: 13px; }
+        .inner-table th { background: #217dbb; font-size: 12px; padding: 8px; cursor: pointer; }
+        .inner-table th:hover { background: var(--accent-hover); }
+        .inner-table td { padding: 8px; border-bottom: 1px solid var(--border); }
+        .cat-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+        .cat-admin { background: #3d2050; color: #c39bd3; }
+        .cat-reg { background: #1e4d2b; color: #82e0aa; }
+        .cat-drive { background: #1b3a4b; color: #85c1e9; }
+        .cat-printer { background: #4a3520; color: #f0c27a; }
+        body.light .cat-admin { background: #ebdef0; color: #6c3483; }
+        body.light .cat-reg { background: #d5f5e3; color: #1e8449; }
+        body.light .cat-drive { background: #d6eaf8; color: #21618c; }
+        body.light .cat-printer { background: #fdebd0; color: #b9770e; }
+        /* Buttons */
+        .btn { padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; transition: background 0.2s; }
+        .btn-outline { background: transparent; border: 1px solid var(--accent); color: var(--accent); }
+        .btn-outline:hover { background: var(--accent); color: white; }
+        .btn-outline-danger { background: transparent; border: 1px solid #e74c3c; color: #e74c3c; }
+        .btn-outline-danger:hover { background: #e74c3c; color: white; }
+        .section h2 { border-left: 4px solid var(--accent); padding-left: 10px; }
     </style>
 </head>
 <body>
+    <div class="layout">
+    <nav class="sidebar" id="sidebar">
+        <div class="sidebar-header">GPO Audit Report</div>
+        <a href="#summary" class="nav-link active" data-section="summary">&#9670; Summary</a>
+        <a href="#duplicates" class="nav-link" data-section="duplicates">&#9670; Duplicates <span class="nav-badge">$($AuditResults.Duplicates.ExactDuplicates.Count)</span></a>
+        <a href="#overlaps" class="nav-link" data-section="overlaps">&#9670; Overlaps &amp; Conflicts <span class="nav-badge">$(($AuditResults.Overlaps | Where-Object { $_.IsConflict }).Count)</span></a>
+        <a href="#optimizations" class="nav-link" data-section="optimizations">&#9670; Optimizations <span class="nav-badge">$($AuditResults.Optimizations.Count)</span></a>
+        <a href="#security" class="nav-link" data-section="security">&#9670; Security <span class="nav-badge">$($AuditResults.SecurityFindings.Count)</span></a>
+        <a href="#nofiltering" class="nav-link" data-section="nofiltering">&#9670; No Filtering <span class="nav-badge">$($AuditResults.NoSecurityFiltering.Count)</span></a>
+        <a href="#links" class="nav-link" data-section="links">&#9670; Link Analysis</a>
+        <a href="#drivemaps" class="nav-link" data-section="drivemaps">&#9670; Drive Maps</a>
+        <a href="#printers" class="nav-link" data-section="printers">&#9670; Printers</a>
+        $(if ($IncludeFSLogix) { '<a href="#fslogix" class="nav-link" data-section="fslogix">&#9670; FSLogix</a>' })
+        $(if ($ExportXML) { '<a href="#xmlexport" class="nav-link" data-section="xmlexport">&#9670; XML Export</a>' })
+        <a href="#gpobrowser" class="nav-link" data-section="gpobrowser">&#9670; Settings Browser <span class="nav-badge">$($AuditResults.AllSettings.Count)</span></a>
+        <div style="padding: 16px 20px; margin-top: 12px; border-top: 1px solid var(--border);">
+            <button class="btn btn-outline" onclick="toggleTheme()" style="width:100%; margin-bottom:8px;">
+                <span id="themeIcon">&#9788;</span> <span id="themeLabel">Light</span> Mode
+            </button>
+        </div>
+    </nav>
+    <button class="sidebar-toggle" id="sidebarToggle" onclick="document.getElementById('sidebar').classList.toggle('open')">&#9776;</button>
+    <div class="main-content">
     <div class="container">
         <h1 id="top">Active Directory Group Policy Audit Report</h1>
 
-        <div class="summary-box">
-            <h3>Audit Summary</h3>
-            <div class="metric">
-                <div class="metric-value">$($AuditResults.TotalGPOs)</div>
-                <div class="metric-label">Total GPOs</div>
-            </div>
-            <div class="metric">
-                <div class="metric-value">$($AuditResults.Duplicates.ExactDuplicates.Count)</div>
-                <div class="metric-label">Duplicates</div>
-            </div>
-            <div class="metric">
-                <div class="metric-value">$(($AuditResults.Overlaps | Where-Object { $_.IsConflict }).Count)</div>
-                <div class="metric-label">Conflicts</div>
-            </div>
-            <div class="metric">
-                <div class="metric-value">$($AuditResults.Optimizations.Count)</div>
-                <div class="metric-label">Optimization Opportunities</div>
-            </div>
-            <div class="metric">
-                <div class="metric-value">$($AuditResults.SecurityFindings.Count)</div>
-                <div class="metric-label">Security Findings</div>
-            </div>
-            <div class="metric">
-                <div class="metric-value">$($AuditResults.NoSecurityFiltering.Count)</div>
-                <div class="metric-label">No Security Filtering</div>
+        <div class="section active" id="summary">
+            <h2>Audit Summary</h2>
+            <div class="summary-box">
+                <div class="metric">
+                    <div class="metric-value">$($AuditResults.AuditedGPOCount)</div>
+                    <div class="metric-label">GPOs Audited$(if ($AuditResults.SkippedUnlinked -gt 0) { " ($($AuditResults.SkippedUnlinked) unlinked skipped)" })</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value">$($AuditResults.AllSettings.Count)</div>
+                    <div class="metric-label">Total Settings</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value">$($AuditResults.Duplicates.ExactDuplicates.Count)</div>
+                    <div class="metric-label">Duplicates</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value">$(($AuditResults.Overlaps | Where-Object { $_.IsConflict }).Count)</div>
+                    <div class="metric-label">Conflicts</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value">$($AuditResults.Optimizations.Count)</div>
+                    <div class="metric-label">Optimization Opportunities</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value">$($AuditResults.SecurityFindings.Count)</div>
+                    <div class="metric-label">Security Findings</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value">$($AuditResults.NoSecurityFiltering.Count)</div>
+                    <div class="metric-label">No Security Filtering</div>
+                </div>
             </div>
             <p><strong>Domain:</strong> $(Escape-Html $AuditResults.Domain) | <strong>Date:</strong> $(Escape-Html $AuditResults.AuditDate)</p>
-        </div>
-
-        <div class="toc">
-            <h3>Table of Contents</h3>
-            <ul>
-                <li><a href="#duplicates">Duplicate GPOs</a></li>
-                <li><a href="#overlaps">Policy Overlaps &amp; Conflicts</a></li>
-                <li><a href="#optimizations">Optimization Opportunities</a></li>
-                <li><a href="#security">Security Analysis</a></li>
-                <li><a href="#nofiltering">GPOs with No Security Filtering</a></li>
-                <li><a href="#links">GPO Link Analysis</a></li>
-                <li><a href="#drivemaps">Drive Map Analysis</a></li>
-                <li><a href="#printers">Printer Analysis</a></li>
-                $(if ($IncludeFSLogix) { '<li><a href="#fslogix">FSLogix Configuration</a></li>' })
-                $(if ($ExportXML) { '<li><a href="#xmlexport">XML Export Summary</a></li>' })
-            </ul>
         </div>
 
         <div class="section" id="duplicates">
@@ -1443,7 +1705,6 @@ function Export-HTMLReport {
                     })
                 </table>"
             })
-            <div class="back-to-top"><a href="#top">Back to top</a></div>
         </div>
 
         <div class="section" id="overlaps">
@@ -1467,7 +1728,6 @@ function Export-HTMLReport {
             } else {
                 "<p class='badge badge-success'>No policy overlaps found</p>"
             })
-            <div class="back-to-top"><a href="#top">Back to top</a></div>
         </div>
 
         <div class="section" id="optimizations">
@@ -1490,7 +1750,6 @@ function Export-HTMLReport {
             } else {
                 "<p class='badge badge-success'>No optimization opportunities found</p>"
             })
-            <div class="back-to-top"><a href="#top">Back to top</a></div>
         </div>
 
         <div class="section" id="security">
@@ -1512,7 +1771,6 @@ function Export-HTMLReport {
             } else {
                 "<p class='badge badge-success'>No security issues found</p>"
             })
-            <div class="back-to-top"><a href="#top">Back to top</a></div>
         </div>
 
         <div class="section" id="nofiltering">
@@ -1535,7 +1793,6 @@ function Export-HTMLReport {
             } else {
                 "<p class='badge badge-success'>All GPOs have proper security filtering</p>"
             })
-            <div class="back-to-top"><a href="#top">Back to top</a></div>
         </div>
 
         <div class="section" id="links">
@@ -1553,26 +1810,41 @@ function Export-HTMLReport {
                     </tr>"
                 })
             </table>
-            <div class="back-to-top"><a href="#top">Back to top</a></div>
         </div>
 
         <div class="section" id="drivemaps">
             <h2>Drive Map Analysis</h2>
             $(if ($AuditResults.DriveMaps.ConflictingLetters.Count -gt 0) {
-                "<h3>Drive Letter Conflicts <span class='badge badge-danger'>$($AuditResults.DriveMaps.ConflictingLetters.Count)</span></h3>
-                <p>Same drive letter mapped to different UNC paths across GPOs.</p>
-                <table>
-                    <tr><th>Drive Letter</th><th>Conflicting Paths</th><th>Affected GPOs</th><th>Severity</th><th>Recommendation</th></tr>
-                    $($AuditResults.DriveMaps.ConflictingLetters | ForEach-Object {
-                        "<tr class='conflict'>
-                            <td>$(Escape-Html $_.DriveLetter)</td>
-                            <td>$(($_.ConflictPaths -split ' vs ' | ForEach-Object { "<span class='multi-value'>$(Escape-Html $_)</span>" }) -join '')</td>
-                            <td>$(($_.AffectedGPOs -split ', ' | ForEach-Object { "<span class='multi-value'>$(Escape-Html $_)</span>" }) -join '')</td>
-                            <td class='severity-high'>$(Escape-Html $_.Severity)</td>
-                            <td>$(Escape-Html $_.Recommendation)</td>
-                        </tr>"
-                    })
-                </table>"
+                $realCount = ($AuditResults.DriveMaps.ConflictingLetters | Where-Object { $_.HasRealConflict }).Count
+                $iltCount = ($AuditResults.DriveMaps.ConflictingLetters | Where-Object { -not $_.HasRealConflict }).Count
+                "<h3>Drive Letter Conflicts <span class='badge badge-danger'>$realCount real</span> $(if ($iltCount -gt 0) { "<span class='badge badge-success'>$iltCount ILT resolved</span>" })</h3>
+                <p>Same drive letter mapped to different UNC paths across GPOs.</p>"
+                $AuditResults.DriveMaps.ConflictingLetters | Sort-Object { -not $_.HasRealConflict } | ForEach-Object {
+                    $c = $_
+                    $borderColor = if ($c.HasRealConflict) { '#e74c3c' } else { '#27ae60' }
+                    $statusBadge = if ($c.HasRealConflict) { "<span class='badge badge-danger'>Real Conflict</span>" } else { "<span class='badge badge-success'>ILT Resolved</span>" }
+                    "<div style='border-left:4px solid $borderColor; padding:12px; margin:10px 0; background:#fff; border-radius:4px;'>
+                        <strong>Drive $(Escape-Html $c.DriveLetter):</strong> $statusBadge
+                        <table style='margin-top:8px'>
+                            <tr><th>GPO</th><th>UNC Path</th><th>Action</th><th>Label</th><th>Item-Level Targeting</th></tr>
+                            $($c.MappingDetails | ForEach-Object {
+                                $iltDisplay = if ($_.ILTSummary -eq 'No targeting (applies to all)') {
+                                    "<span class='ilt-tag'>All users</span>"
+                                } else {
+                                    ($_.ILTSummary -split '; ' | ForEach-Object { "<span class='ilt-tag'>$(Escape-Html $_)</span>" }) -join ' '
+                                }
+                                "<tr>
+                                    <td>$(Escape-Html $_.GPOName)</td>
+                                    <td>$(Escape-Html $_.UNCPath)</td>
+                                    <td>$(Escape-Html $_.Action)</td>
+                                    <td>$(Escape-Html $_.Label)</td>
+                                    <td>$iltDisplay</td>
+                                </tr>"
+                            })
+                        </table>
+                        <p style='color:#7f8c8d; font-size:13px; margin-top:8px;'>$(Escape-Html $c.Recommendation)</p>
+                    </div>"
+                }
             })
 
             $(if ($AuditResults.DriveMaps.DuplicatePaths.Count -gt 0) {
@@ -1605,20 +1877,25 @@ function Export-HTMLReport {
             $(if ($AuditResults.DriveMaps.AllDriveMaps.Count -gt 0) {
                 "<h3>All Drive Mappings ($($AuditResults.DriveMaps.AllDriveMaps.Count))</h3>
                 <table>
-                    <tr><th>GPO</th><th>Scope</th><th>Action</th><th>Drive</th><th>UNC Path</th><th>Label</th></tr>
-                    $($AuditResults.DriveMaps.AllDriveMaps | Sort-Object UNCPath | ForEach-Object {
+                    <tr><th>GPO</th><th>Scope</th><th>Action</th><th>Drive</th><th>UNC Path</th><th>Label</th><th>Item-Level Targeting</th></tr>
+                    $($AuditResults.DriveMaps.AllDriveMaps | Sort-Object DriveLetter, UNCPath | ForEach-Object {
+                        $iltDisplay = if ($_.ILTSummary -eq 'No targeting (applies to all)') {
+                            "<span class='ilt-tag'>All users</span>"
+                        } else {
+                            ($_.ILTSummary -split '; ' | ForEach-Object { "<span class='ilt-tag'>$(Escape-Html $_)</span>" }) -join ' '
+                        }
                         "<tr>
                             <td>$(Escape-Html $_.GPOName)</td>
                             <td>$(Escape-Html $_.Configuration)</td>
                             <td>$(Escape-Html $_.Action)</td>
-                            <td>$(Escape-Html $_.DriveLetter)</td>
+                            <td><strong>$(Escape-Html $_.DriveLetter)</strong></td>
                             <td>$(Escape-Html $_.UNCPath)</td>
                             <td>$(Escape-Html $_.Label)</td>
+                            <td>$iltDisplay</td>
                         </tr>"
                     })
                 </table>"
             })
-            <div class="back-to-top"><a href="#top">Back to top</a></div>
         </div>
 
         <div class="section" id="printers">
@@ -1668,8 +1945,13 @@ function Export-HTMLReport {
             $(if ($AuditResults.Printers.AllPrinters.Count -gt 0) {
                 "<h3>All Printer Mappings ($($AuditResults.Printers.AllPrinters.Count))</h3>
                 <table>
-                    <tr><th>GPO</th><th>Scope</th><th>Type</th><th>Action</th><th>Path</th><th>Default</th></tr>
+                    <tr><th>GPO</th><th>Scope</th><th>Type</th><th>Action</th><th>Path</th><th>Default</th><th>Item-Level Targeting</th></tr>
                     $($AuditResults.Printers.AllPrinters | Sort-Object Path | ForEach-Object {
+                        $iltDisplay = if ($_.ILTSummary -eq 'No targeting (applies to all)') {
+                            "<span class='ilt-tag'>All users</span>"
+                        } else {
+                            ($_.ILTSummary -split '; ' | ForEach-Object { "<span class='ilt-tag'>$(Escape-Html $_)</span>" }) -join ' '
+                        }
                         "<tr>
                             <td>$(Escape-Html $_.GPOName)</td>
                             <td>$(Escape-Html $_.Configuration)</td>
@@ -1677,11 +1959,11 @@ function Export-HTMLReport {
                             <td>$(Escape-Html $_.Action)</td>
                             <td>$(Escape-Html $_.Path)</td>
                             <td>$(Escape-Html $_.Default)</td>
+                            <td>$iltDisplay</td>
                         </tr>"
                     })
                 </table>"
             })
-            <div class="back-to-top"><a href="#top">Back to top</a></div>
         </div>
 
         $(if ($IncludeFSLogix -and $AuditResults.FSLogix) {
@@ -1739,7 +2021,6 @@ function Export-HTMLReport {
                         </tr>"
                     })
                 </table>
-                <div class='back-to-top'><a href='#top'>Back to top</a></div>
             </div>"
         })
 
@@ -1767,13 +2048,312 @@ function Export-HTMLReport {
                         })
                     </table>"
                 })
-                <div class='back-to-top'><a href='#top'>Back to top</a></div>
             </div>"
         })
+
+        <div class="section" id="gpobrowser">
+            <h2>GPO Settings Browser <span class="badge badge-info">$($AuditResults.AllSettings.Count) settings</span></h2>
+            <p>Click any GPO to expand and see all its settings. Use the search box to filter across GPO names, settings, paths, and values.</p>
+
+            <div class="settings-controls">
+                <input type="text" id="gpoGlobalSearch" class="settings-search" placeholder="Search all GPO settings..." oninput="filterGPOs()">
+                <button class="btn btn-outline" onclick="expandAllGPOs(true)">Expand All</button>
+                <button class="btn btn-outline-danger" onclick="expandAllGPOs(false)">Collapse All</button>
+            </div>
+
+            <table id="gpoBrowserTable">
+                <thead>
+                    <tr>
+                        <th onclick="sortGPOTable(0)" style="cursor:pointer">GPO Name &#x25B2;&#x25BC;</th>
+                        <th onclick="sortGPOTable(1)" style="cursor:pointer; width:80px;">Settings &#x25B2;&#x25BC;</th>
+                        <th onclick="sortGPOTable(2)" style="cursor:pointer; width:120px;">Categories</th>
+                    </tr>
+                </thead>
+                <tbody id="gpoBrowserBody"></tbody>
+            </table>
+        </div>
+
+        <script>
+        var allSettingsData = $(
+            $settingsJson = $AuditResults.AllSettings | ForEach-Object {
+                [PSCustomObject]@{
+                    g = [System.Security.SecurityElement]::Escape($_.GPOName)
+                    s = [System.Security.SecurityElement]::Escape($_.Scope)
+                    c = [System.Security.SecurityElement]::Escape($_.Category)
+                    n = [System.Security.SecurityElement]::Escape($_.Setting)
+                    st = [System.Security.SecurityElement]::Escape($_.State)
+                    k = [System.Security.SecurityElement]::Escape($_.KeyPath)
+                    v = [System.Security.SecurityElement]::Escape($_.Value)
+                    i = [System.Security.SecurityElement]::Escape($_.ILT)
+                }
+            }
+            $settingsJson | ConvertTo-Json -Depth 3 -Compress
+        );
+
+        function groupByGPO(data) {
+            var groups = {};
+            for (var i = 0; i < data.length; i++) {
+                var d = data[i];
+                if (!groups[d.g]) groups[d.g] = [];
+                groups[d.g].push(d);
+            }
+            var result = [];
+            for (var name in groups) {
+                var items = groups[name];
+                var cats = {};
+                for (var j = 0; j < items.length; j++) cats[items[j].c] = true;
+                result.push({ name: name, settings: items, categories: Object.keys(cats) });
+            }
+            result.sort(function(a, b) { return a.name.localeCompare(b.name); });
+            return result;
+        }
+
+        var gpoGroups = groupByGPO(allSettingsData || []);
+        var gpoSortCol = 0, gpoSortAsc = true;
+
+        function catClass(cat) {
+            if (cat.indexOf('Admin') >= 0) return 'cat-admin';
+            if (cat.indexOf('Registry') >= 0) return 'cat-reg';
+            if (cat.indexOf('Drive') >= 0) return 'cat-drive';
+            if (cat.indexOf('Printer') >= 0) return 'cat-printer';
+            return 'cat-reg';
+        }
+
+        function renderGPOBrowser(groups) {
+            var body = document.getElementById('gpoBrowserBody');
+            body.innerHTML = '';
+            for (var i = 0; i < groups.length; i++) {
+                var g = groups[i];
+                var catBadges = g.categories.map(function(c) {
+                    return '<span class="cat-badge ' + catClass(c) + '">' + c + '</span> ';
+                }).join('');
+
+                var row = document.createElement('tr');
+                row.className = 'gpo-row';
+                row.setAttribute('data-idx', i);
+                row.innerHTML = '<td><span class="gpo-expand">&#9654;</span> ' + g.name + '</td>' +
+                    '<td><strong>' + g.settings.length + '</strong></td>' +
+                    '<td>' + catBadges + '</td>';
+                row.onclick = (function(idx) { return function() { toggleGPODetail(idx); }; })(i);
+                body.appendChild(row);
+
+                var detailRow = document.createElement('tr');
+                detailRow.className = 'gpo-detail';
+                detailRow.id = 'gpo-detail-' + i;
+                var td = document.createElement('td');
+                td.colSpan = 3;
+                var panel = document.createElement('div');
+                panel.className = 'gpo-detail-panel';
+                panel.innerHTML = '<input type="text" class="gpo-detail-search" placeholder="Search settings..." oninput="filterGPOSettings(' + i + ', this.value)">' +
+                    '<table class="inner-table"><thead><tr>' +
+                    '<th onclick="sortGPOSettings(' + i + ', 0)">Scope</th>' +
+                    '<th onclick="sortGPOSettings(' + i + ', 1)">Category</th>' +
+                    '<th onclick="sortGPOSettings(' + i + ', 2)">Setting</th>' +
+                    '<th onclick="sortGPOSettings(' + i + ', 3)">State</th>' +
+                    '<th onclick="sortGPOSettings(' + i + ', 4)">Key/Path</th>' +
+                    '<th onclick="sortGPOSettings(' + i + ', 5)">Value</th>' +
+                    '<th onclick="sortGPOSettings(' + i + ', 6)">ILT</th>' +
+                    '</tr></thead><tbody id="gpo-settings-' + i + '"></tbody></table>';
+                td.appendChild(panel);
+                detailRow.appendChild(td);
+                body.appendChild(detailRow);
+
+                renderGPOSettings(i, g.settings);
+            }
+        }
+
+        function renderGPOSettings(idx, settings) {
+            var tbody = document.getElementById('gpo-settings-' + idx);
+            if (!tbody) return;
+            tbody.innerHTML = '';
+            for (var j = 0; j < settings.length; j++) {
+                var s = settings[j];
+                var iltHtml = '';
+                if (s.i && s.i !== '' && s.i !== 'No targeting (applies to all)') {
+                    var parts = s.i.split('; ');
+                    for (var p = 0; p < parts.length; p++) iltHtml += '<span class="ilt-tag">' + parts[p] + '</span> ';
+                } else if (s.i === 'No targeting (applies to all)') {
+                    iltHtml = '<span class="ilt-tag">All users</span>';
+                }
+                var tr = document.createElement('tr');
+                tr.innerHTML = '<td>' + s.s + '</td>' +
+                    '<td><span class="cat-badge ' + catClass(s.c) + '">' + s.c + '</span></td>' +
+                    '<td>' + (s.n || '') + '</td>' +
+                    '<td>' + (s.st || '') + '</td>' +
+                    '<td style="font-size:12px; word-break:break-all;">' + (s.k || '') + '</td>' +
+                    '<td>' + (s.v || '') + '</td>' +
+                    '<td>' + iltHtml + '</td>';
+                tbody.appendChild(tr);
+            }
+        }
+
+        function toggleGPODetail(idx) {
+            var row = document.querySelector('[data-idx="' + idx + '"]');
+            var detail = document.getElementById('gpo-detail-' + idx);
+            if (!row || !detail) return;
+            var isOpen = detail.classList.contains('show');
+            if (isOpen) {
+                detail.classList.remove('show');
+                row.classList.remove('expanded');
+            } else {
+                detail.classList.add('show');
+                row.classList.add('expanded');
+            }
+        }
+
+        function filterGPOs() {
+            var term = document.getElementById('gpoGlobalSearch').value.toLowerCase();
+            if (!term) {
+                renderGPOBrowser(gpoGroups);
+                return;
+            }
+            var filtered = gpoGroups.filter(function(g) {
+                if (g.name.toLowerCase().indexOf(term) >= 0) return true;
+                return g.settings.some(function(s) {
+                    return (s.n && s.n.toLowerCase().indexOf(term) >= 0) ||
+                           (s.k && s.k.toLowerCase().indexOf(term) >= 0) ||
+                           (s.v && s.v.toLowerCase().indexOf(term) >= 0) ||
+                           (s.c && s.c.toLowerCase().indexOf(term) >= 0) ||
+                           (s.i && s.i.toLowerCase().indexOf(term) >= 0);
+                });
+            });
+            renderGPOBrowser(filtered);
+            for (var i = 0; i < filtered.length; i++) {
+                var detail = document.getElementById('gpo-detail-' + i);
+                var row = document.querySelector('[data-idx="' + i + '"]');
+                if (detail && row) {
+                    detail.classList.add('show');
+                    row.classList.add('expanded');
+                }
+            }
+        }
+
+        function filterGPOSettings(idx, term) {
+            var group = gpoGroups[idx];
+            if (!group) return;
+            term = term.toLowerCase();
+            var filtered = term ? group.settings.filter(function(s) {
+                return (s.n && s.n.toLowerCase().indexOf(term) >= 0) ||
+                       (s.k && s.k.toLowerCase().indexOf(term) >= 0) ||
+                       (s.v && s.v.toLowerCase().indexOf(term) >= 0) ||
+                       (s.c && s.c.toLowerCase().indexOf(term) >= 0);
+            }) : group.settings;
+            renderGPOSettings(idx, filtered);
+        }
+
+        var gpoSettingsSortState = {};
+        function sortGPOSettings(idx, col) {
+            var key = idx + '-' + col;
+            var asc = gpoSettingsSortState[key] !== false;
+            gpoSettingsSortState[key] = !asc;
+            var fields = ['s', 'c', 'n', 'st', 'k', 'v', 'i'];
+            var field = fields[col];
+            var group = gpoGroups[idx];
+            if (!group) return;
+            var sorted = group.settings.slice().sort(function(a, b) {
+                var va = (a[field] || '').toLowerCase(), vb = (b[field] || '').toLowerCase();
+                return asc ? va.localeCompare(vb) : vb.localeCompare(va);
+            });
+            renderGPOSettings(idx, sorted);
+        }
+
+        function sortGPOTable(col) {
+            gpoSortAsc = (gpoSortCol === col) ? !gpoSortAsc : true;
+            gpoSortCol = col;
+            gpoGroups.sort(function(a, b) {
+                if (col === 0) return gpoSortAsc ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name);
+                if (col === 1) return gpoSortAsc ? a.settings.length - b.settings.length : b.settings.length - a.settings.length;
+                if (col === 2) {
+                    var ca = a.categories.join(','), cb = b.categories.join(',');
+                    return gpoSortAsc ? ca.localeCompare(cb) : cb.localeCompare(ca);
+                }
+                return 0;
+            });
+            renderGPOBrowser(gpoGroups);
+        }
+
+        function expandAllGPOs(expand) {
+            var details = document.querySelectorAll('.gpo-detail');
+            var rows = document.querySelectorAll('.gpo-row');
+            for (var i = 0; i < details.length; i++) {
+                if (expand) {
+                    details[i].classList.add('show');
+                    if (rows[i]) rows[i].classList.add('expanded');
+                } else {
+                    details[i].classList.remove('show');
+                    if (rows[i]) rows[i].classList.remove('expanded');
+                }
+            }
+        }
+
+        renderGPOBrowser(gpoGroups);
+
+        // Theme toggle
+        function toggleTheme() {
+            document.body.classList.toggle('light');
+            var isLight = document.body.classList.contains('light');
+            document.getElementById('themeIcon').innerHTML = isLight ? '&#9790;' : '&#9788;';
+            document.getElementById('themeLabel').textContent = isLight ? 'Dark' : 'Light';
+            localStorage.setItem('gpo-audit-theme', isLight ? 'light' : 'dark');
+        }
+        (function() {
+            var saved = localStorage.getItem('gpo-audit-theme');
+            if (saved === 'light') {
+                document.body.classList.add('light');
+                var icon = document.getElementById('themeIcon');
+                var label = document.getElementById('themeLabel');
+                if (icon) icon.innerHTML = '&#9790;';
+                if (label) label.textContent = 'Dark';
+            }
+        })();
+
+        // Sidebar navigation — show one section at a time
+        (function() {
+            var links = document.querySelectorAll('.nav-link');
+            var sections = document.querySelectorAll('.section');
+
+            function showSection(sectionId) {
+                for (var i = 0; i < sections.length; i++) {
+                    sections[i].classList.remove('active');
+                }
+                var target = document.getElementById(sectionId);
+                if (target) target.classList.add('active');
+
+                for (var j = 0; j < links.length; j++) {
+                    links[j].classList.remove('active');
+                    if (links[j].getAttribute('data-section') === sectionId) {
+                        links[j].classList.add('active');
+                    }
+                }
+                // Close mobile sidebar after navigation
+                document.getElementById('sidebar').classList.remove('open');
+                window.scrollTo(0, 0);
+                // Save active section
+                localStorage.setItem('gpo-audit-section', sectionId);
+            }
+
+            for (var i = 0; i < links.length; i++) {
+                links[i].addEventListener('click', (function(link) {
+                    return function(e) {
+                        e.preventDefault();
+                        showSection(link.getAttribute('data-section'));
+                    };
+                })(links[i]));
+            }
+
+            // Restore last viewed section
+            var saved = localStorage.getItem('gpo-audit-section');
+            if (saved && document.getElementById(saved)) {
+                showSection(saved);
+            }
+        })();
+        </script>
 
         <div class="footer">
             <p>Generated by AD Group Policy Audit Tool v$ScriptVersion on $(Escape-Html $AuditResults.AuditDate)</p>
         </div>
+    </div>
+    </div>
     </div>
 </body>
 </html>
@@ -1877,6 +2457,8 @@ function Start-GPOAudit {
         Domain              = $domainInfo.DNSRoot
         AuditDate           = $AuditDate.ToString('yyyy-MM-dd HH:mm:ss')
         TotalGPOs           = 0
+        AuditedGPOCount     = 0
+        SkippedUnlinked     = 0
         Duplicates          = @{}
         Overlaps            = @()
         Optimizations       = @()
@@ -1887,6 +2469,7 @@ function Start-GPOAudit {
         Printers            = @{}
         FSLogix             = @{}
         XMLExport           = @{}
+        AllSettings         = [System.Collections.Generic.List[object]]::new()
     }
 
     # Get all GPOs
@@ -1900,19 +2483,128 @@ function Start-GPOAudit {
     # Cache all GPO reports once
     $gpoCache = Get-CachedGPOReports -GPOs $allGPOs
 
-    # Run audit functions
-    $auditResults.Duplicates = Find-DuplicateGPOs -GPOs $allGPOs -GPOCache $gpoCache
-    $auditResults.Overlaps = Find-GPOOverlaps -GPOs $allGPOs -GPOCache $gpoCache
-    $auditResults.Optimizations = Get-GPOOptimizations -GPOs $allGPOs -GPOCache $gpoCache
-    $auditResults.LinkAnalysis = Get-GPOLinkAnalysis -GPOs $allGPOs -GPOCache $gpoCache
-    $auditResults.SecurityFindings = Get-SecurityAnalysis -GPOs $allGPOs
-    $auditResults.NoSecurityFiltering = Get-GPOsWithNoSecurityFiltering -GPOs $allGPOs
-    $auditResults.DriveMaps = Find-DuplicateDriveMaps -GPOs $allGPOs -GPOCache $gpoCache
-    $auditResults.Printers = Find-DuplicatePrinters -GPOs $allGPOs -GPOCache $gpoCache
+    # Filter to linked GPOs only (unless -IncludeUnlinked)
+    if (-not $IncludeUnlinked) {
+        $linkedGPOs = @($allGPOs | Where-Object {
+            $guid = $_.Id.ToString()
+            if ($gpoCache.ContainsKey($guid)) {
+                $rpt = $gpoCache[$guid].XmlDoc
+                $rpt.GPO.LinksTo -and @($rpt.GPO.LinksTo).Count -gt 0
+            } else { $false }
+        })
+        $skipped = $allGPOs.Count - $linkedGPOs.Count
+        if ($skipped -gt 0) {
+            Write-AuditLog "Filtered out $skipped unlinked GPOs (use -IncludeUnlinked to include them)" -Level Info
+        }
+        $auditResults.SkippedUnlinked = $skipped
+    } else {
+        $linkedGPOs = $allGPOs
+    }
+    $auditResults.AuditedGPOCount = $linkedGPOs.Count
+
+    # Run audit functions — use linked GPOs for all except optimizations
+    $auditResults.Duplicates = Find-DuplicateGPOs -GPOs $linkedGPOs -GPOCache $gpoCache
+    $auditResults.Overlaps = Find-GPOOverlaps -GPOs $linkedGPOs -GPOCache $gpoCache
+    $auditResults.Optimizations = Get-GPOOptimizations -GPOs $allGPOs -GPOCache $gpoCache  # needs all GPOs
+    $auditResults.LinkAnalysis = Get-GPOLinkAnalysis -GPOs $linkedGPOs -GPOCache $gpoCache
+    $auditResults.SecurityFindings = Get-SecurityAnalysis -GPOs $linkedGPOs
+    $auditResults.NoSecurityFiltering = Get-GPOsWithNoSecurityFiltering -GPOs $linkedGPOs
+    $auditResults.DriveMaps = Find-DuplicateDriveMaps -GPOs $linkedGPOs -GPOCache $gpoCache
+    $auditResults.Printers = Find-DuplicatePrinters -GPOs $linkedGPOs -GPOCache $gpoCache
+
+    # Collect ALL settings for searchable browser
+    Write-AuditLog "Collecting all GPO settings for browsable report..." -Level Info
+    foreach ($gpo in $linkedGPOs) {
+        $guid = $gpo.Id.ToString()
+        if (-not $gpoCache.ContainsKey($guid)) { continue }
+        $report = $gpoCache[$guid].XmlDoc
+
+        foreach ($scope in @('Computer', 'User')) {
+            $extensions = $report.GPO.$scope.ExtensionData
+            if (-not $extensions) { continue }
+
+            foreach ($ext in $extensions) {
+                # Admin Templates
+                if ($ext.Extension.Policy) {
+                    foreach ($pol in $ext.Extension.Policy) {
+                        if ($pol -and $pol.Name) {
+                            $auditResults.AllSettings.Add([PSCustomObject]@{
+                                GPOName   = $gpo.DisplayName
+                                GPOId     = $gpo.Id.ToString()
+                                Scope     = $scope
+                                Category  = 'Admin Template'
+                                Setting   = $pol.Name
+                                State     = $pol.State
+                                KeyPath   = $pol.RegistryKey
+                                Value     = $pol.Value
+                                ILT       = ''
+                            })
+                        }
+                    }
+                }
+                # GP Preferences Registry
+                if ($ext.Extension.RegistrySettings) {
+                    $regItems = [System.Collections.Generic.List[object]]::new()
+                    Get-RegistryPreferenceItems -Node $ext.Extension.RegistrySettings -GPOName $gpo.DisplayName -Scope $scope -Results $regItems
+                    foreach ($ri in $regItems) {
+                        $auditResults.AllSettings.Add([PSCustomObject]@{
+                            GPOName   = $gpo.DisplayName
+                            GPOId     = $gpo.Id.ToString()
+                            Scope     = $scope
+                            Category  = 'Registry Preference'
+                            Setting   = if ($ri.ValueName) { $ri.ValueName } else { $ri.KeyPath }
+                            State     = $ri.State
+                            KeyPath   = $ri.KeyPath
+                            Value     = $ri.Value
+                            ILT       = $ri.ILTSummary
+                        })
+                    }
+                }
+                # Drive Maps
+                if ($ext.Extension.DriveMapSettings) {
+                    $dmItems = [System.Collections.Generic.List[object]]::new()
+                    Get-DriveMapPreferenceItems -Node $ext.Extension.DriveMapSettings -GPOName $gpo.DisplayName -GPOId $gpo.Id -Scope $scope -Results $dmItems
+                    foreach ($dm in $dmItems) {
+                        $letter = if ($dm.DriveLetter -and $dm.DriveLetter -ne 'NOCHANGE') { "$($dm.DriveLetter):" } else { 'Auto' }
+                        $auditResults.AllSettings.Add([PSCustomObject]@{
+                            GPOName   = $gpo.DisplayName
+                            GPOId     = $gpo.Id.ToString()
+                            Scope     = $scope
+                            Category  = 'Drive Map'
+                            Setting   = "Drive $letter -> $($dm.UNCPath)"
+                            State     = $dm.Action
+                            KeyPath   = $dm.UNCPath
+                            Value     = $dm.Label
+                            ILT       = $dm.ILTSummary
+                        })
+                    }
+                }
+                # Printers
+                if ($ext.Extension.PrinterSettings) {
+                    $prItems = [System.Collections.Generic.List[object]]::new()
+                    Get-PrinterPreferenceItems -Node $ext.Extension.PrinterSettings -GPOName $gpo.DisplayName -GPOId $gpo.Id -Scope $scope -Results $prItems
+                    foreach ($pr in $prItems) {
+                        $auditResults.AllSettings.Add([PSCustomObject]@{
+                            GPOName   = $gpo.DisplayName
+                            GPOId     = $gpo.Id.ToString()
+                            Scope     = $scope
+                            Category  = "Printer ($($pr.PrinterType))"
+                            Setting   = $pr.Path
+                            State     = $pr.Action
+                            KeyPath   = $pr.Path
+                            Value     = if ($pr.Default -eq 'true' -or $pr.Default -eq '1') { 'Default' } else { '' }
+                            ILT       = $pr.ILTSummary
+                        })
+                    }
+                }
+            }
+        }
+    }
+    Write-AuditLog "Collected $($auditResults.AllSettings.Count) total settings across $($linkedGPOs.Count) GPOs" -Level Success
 
     # FSLogix audit
     if ($IncludeFSLogix) {
-        $auditResults.FSLogix = Get-FSLogixAudit -GPOs $allGPOs -GPOCache $gpoCache
+        $auditResults.FSLogix = Get-FSLogixAudit -GPOs $linkedGPOs -GPOCache $gpoCache
     }
 
     # XML Export
@@ -1942,7 +2634,8 @@ function Start-GPOAudit {
     Write-Host "========================================" -ForegroundColor Green
     Write-Host ""
     Write-Host "Summary:" -ForegroundColor Cyan
-    Write-Host "  Total GPOs: $($auditResults.TotalGPOs)"
+    Write-Host "  GPOs Audited: $($auditResults.AuditedGPOCount) of $($auditResults.TotalGPOs) total$(if ($auditResults.SkippedUnlinked -gt 0) { " ($($auditResults.SkippedUnlinked) unlinked skipped)" })"
+    Write-Host "  Total Settings: $($auditResults.AllSettings.Count)"
     Write-Host "  Exact Duplicates: $($auditResults.Duplicates.ExactDuplicates.Count)"
     Write-Host "  Similar Named GPOs: $($auditResults.Duplicates.SimilarNames.Count)"
     Write-Host "  Policy Conflicts: $(($auditResults.Overlaps | Where-Object { $_.IsConflict }).Count)"
@@ -1954,7 +2647,9 @@ function Start-GPOAudit {
     Write-Host "Drive Maps:" -ForegroundColor Cyan
     Write-Host "  Total Mappings: $($auditResults.DriveMaps.AllDriveMaps.Count)"
     Write-Host "  Duplicate Paths: $($auditResults.DriveMaps.DuplicatePaths.Count)"
-    Write-Host "  Drive Letter Conflicts: $($auditResults.DriveMaps.ConflictingLetters.Count)"
+    $realConflicts = ($auditResults.DriveMaps.ConflictingLetters | Where-Object { $_.HasRealConflict }).Count
+    $iltResolved = ($auditResults.DriveMaps.ConflictingLetters | Where-Object { -not $_.HasRealConflict }).Count
+    Write-Host "  Drive Letter Conflicts: $realConflicts real, $iltResolved ILT-resolved"
     Write-Host ""
     Write-Host "Printers:" -ForegroundColor Cyan
     Write-Host "  Total Mappings: $($auditResults.Printers.AllPrinters.Count)"
