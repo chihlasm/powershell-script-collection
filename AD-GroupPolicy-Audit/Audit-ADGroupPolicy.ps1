@@ -1563,8 +1563,8 @@ function Export-HTMLReport {
         .metric { display: inline-block; margin: 10px 20px; text-align: center; }
         .metric-value { font-size: 36px; font-weight: bold; color: var(--accent); }
         .metric-label { font-size: 14px; color: var(--text-muted); }
-        table { border-collapse: collapse; width: 100%; margin: 15px 0; background: var(--bg-card); box-shadow: 0 2px 4px var(--shadow); }
-        th, td { padding: 12px; text-align: left; border-bottom: 1px solid var(--border); color: var(--text); }
+        table { border-collapse: collapse; width: 100%; margin: 15px 0; background: var(--bg-card); box-shadow: 0 2px 4px var(--shadow); table-layout: fixed; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid var(--border); color: var(--text); word-wrap: break-word; overflow-wrap: break-word; word-break: break-word; }
         th { background: var(--table-header); color: white; font-weight: 600; }
         tr:hover { background: var(--table-row-hover); }
         .severity-high { color: #e74c3c; font-weight: bold; }
@@ -1573,7 +1573,7 @@ function Export-HTMLReport {
         .severity-low { color: #27ae60; }
         .conflict { background: var(--conflict-bg); }
         .recommendation { background: var(--rec-bg); padding: 10px; border-left: 4px solid var(--rec-border); margin: 10px 0; color: var(--text); }
-        .section { background: var(--bg-card); padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px var(--shadow); margin-bottom: 20px; display: none; }
+        .section { background: var(--bg-card); padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px var(--shadow); margin-bottom: 20px; display: none; overflow-x: auto; }
         .section.active { display: block; }
         .footer { text-align: center; color: var(--text-muted); margin-top: 30px; padding: 20px; }
         .badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
@@ -1598,10 +1598,10 @@ function Export-HTMLReport {
         .gpo-detail-panel { padding: 12px 24px; background: var(--bg-detail); }
         .gpo-detail-search { padding: 8px 12px; border: 1px solid var(--search-border); border-radius: 4px; width: 250px; margin-bottom: 10px; font-size: 13px; background: var(--search-bg); color: var(--text); }
         .gpo-detail-search:focus { outline: none; border-color: var(--accent); }
-        .inner-table { width: 100%; border-collapse: collapse; margin: 0; box-shadow: none; font-size: 13px; }
+        .inner-table { width: 100%; border-collapse: collapse; margin: 0; box-shadow: none; font-size: 13px; table-layout: auto; }
         .inner-table th { background: #217dbb; font-size: 12px; padding: 8px; cursor: pointer; }
         .inner-table th:hover { background: var(--accent-hover); }
-        .inner-table td { padding: 8px; border-bottom: 1px solid var(--border); }
+        .inner-table td { padding: 8px; border-bottom: 1px solid var(--border); word-wrap: break-word; overflow-wrap: break-word; }
         .cat-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
         .cat-admin { background: #3d2050; color: #c39bd3; }
         .cat-reg { background: #1e4d2b; color: #82e0aa; }
