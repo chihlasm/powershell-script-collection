@@ -1,50 +1,50 @@
 # Folder Permission Manager
 
-This PowerShell script helps manage permissions on folders and their sub-folders. It provides functionality to take ownership of sub-folders, review current permissions, and replicate permissions from the top-level folder to all sub-folders.
+Tools for managing NTFS folder permissions, ownership, and ACLs. Includes a command-line script and a browser-based GUI.
 
-## Features
+## Scripts
 
-- **Take Ownership**: Recursively takes ownership of all sub-folders within the specified top-level folder.
-- **Review Permissions**: Displays the current permissions (owner and access rules) on the top-level folder and lists the owners of sub-folders.
-- **Replicate Permissions**: Optionally replicates the permissions from the top-level folder to all sub-folders.
+### FolderPermissionManager-GUI.ps1 (Web GUI)
 
-## Requirements
+A browser-based interface for managing folder permissions across local drives and network shares. Runs a local web server and opens an interactive dashboard.
 
-- Windows PowerShell (version 5.1 or later recommended).
-- Administrative privileges (run as Administrator) to modify ownership and permissions.
-- The script must be run from an elevated PowerShell session.
+**Features:**
+- Browse all local drives and network shares in a folder tree
+- View ownership, inheritance status, and full ACL entries for any folder
+- Take ownership (single folder or recursive)
+- Add and remove permission entries (identity, rights, allow/deny)
+- Replicate parent permissions to selected child folders
+- Export permissions report as CSV
+- Dark/light theme toggle
 
-## Usage
+**Usage:**
 
-1. Open PowerShell as Administrator.
-2. Navigate to the script directory.
-3. Run the script with the path to the top-level folder:
+```powershell
+# Launch with defaults (opens browser automatically)
+.\FolderPermissionManager-GUI.ps1
 
-   ```powershell
-   .\FolderPermissionManager.ps1 -Path "C:\Path\To\TopLevelFolder"
-   ```
+# Custom port, don't auto-open browser
+.\FolderPermissionManager-GUI.ps1 -Port 9090 -NoBrowserOpen
+```
 
-   Or, if no path is provided, the script will prompt for it.
+Press Ctrl+C in the PowerShell window to stop the server.
 
-4. The script will:
-   - Take ownership of sub-folders.
-   - Display permissions on the top-level folder.
-   - List sub-folders and their owners.
-   - Ask for confirmation to replicate permissions.
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `-Port` | `8271` | TCP port for the local web server (1024-65535) |
+| `-NoBrowserOpen` | — | Don't automatically open the browser on launch |
 
-5. If you confirm, it will set the top-level folder's permissions on all sub-folders.
+### FolderPermissionManager.ps1 (CLI)
 
-## Notes
-
-- Taking ownership and setting permissions may fail if you do not have sufficient privileges.
-- The script uses `icacls` for taking ownership and PowerShell's `Get-Acl`/`Set-Acl` for permissions.
-- Replicating permissions adds the top-level folder's access rules to sub-folders without removing existing permissions (ownership is taken at the beginning).
-- Test on a small folder first to understand the behavior.
-
-## Example
+Command-line script that takes ownership of subfolders, reviews permissions, and optionally replicates parent ACLs to all children.
 
 ```powershell
 .\FolderPermissionManager.ps1 -Path "C:\SharedFolder"
 ```
 
-This will process `C:\SharedFolder` and its sub-folders.
+If no path is provided, the script will prompt for it.
+
+## Requirements
+
+- PowerShell 5.1+
+- Run as Administrator (required for ownership and permission operations)
