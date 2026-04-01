@@ -47,7 +47,7 @@ Audits all GPOs in an Active Directory domain and generates reports covering dup
 | **Security Filtering** | GPOs with no Apply permission (won't apply to anyone) |
 | **Drive Maps** | Same share mapped in multiple GPOs, same drive letter pointing to different shares |
 | **Printers** | Same printer deployed by multiple GPOs, conflicting default printer settings |
-| **FSLogix** | Profile/ODFC/Cloud Cache settings from both Admin Templates and GP Preferences registry items, conflicts, mixed-source warnings |
+| **FSLogix** | Profile Container, ODFC, Cloud Cache, and App Masking settings from both ADMX Admin Templates and GP Preferences registry items; conflicting values across GPOs; best-practice recommendations (VolumeType, redirections.xml, VHDLocations/CCDLocations overlap, missing critical settings); mixed-source warnings |
 | **Links** | Full link inventory with enforcement and ordering details |
 
 ## Output Files
@@ -74,6 +74,28 @@ OutputPath/
 ```
 
 CSV files are only created when findings exist for that category.
+
+## FSLogix Audit Details
+
+The FSLogix audit detects settings delivered via two different mechanisms:
+
+- **ADMX Admin Templates** (`Computer Configuration > Administrative Templates > FSLogix`) write to `HKLM\SOFTWARE\Policies\FSLogix\*`. The script parses the ADMX category path from the GPO XML report and maps it to the underlying registry location.
+- **GP Preferences Registry Items** (`Computer Configuration > Preferences > Windows Settings > Registry`) write directly to `HKLM\SOFTWARE\FSLogix\*`. These are detected by matching the registry key path.
+
+When both methods are used in the same environment, the script flags it as a consistency warning because `Policies\` paths take precedence and GP Preferences registry items are not removed when their GPO is unlinked.
+
+Best-practice checks include:
+
+| Setting | Recommendation |
+|---------|---------------|
+| `Enabled` | Must be set to 1 for Profile Containers to activate |
+| `VolumeType` | Use VHDX over VHD (larger size limit, better corruption resilience) |
+| `DeleteLocalProfileWhenVHDShouldApply` | Set to 1 to prevent stale local profile conflicts |
+| `FlipFlopProfileDirectoryName` | Set to 1 for human-readable folder names (username_SID) |
+| `PreventLoginWithTempProfile` | Set to 1 to prevent silent data loss from temp profiles |
+| `PreventLoginWithFailure` | 0 for most environments (fallback to local), 1 for strict VDI |
+| `RedirXMLSourceFolder` | Configure redirections.xml to exclude temp/cache folders |
+| `VHDLocations` + `CCDLocations` | Never set both; CCDLocations silently overrides VHDLocations |
 
 ## Performance Notes
 
