@@ -42,6 +42,9 @@ if (Test-Path $ChocoExePath) {
     Write-Host "   Chocolatey $currentVersion is already installed." -ForegroundColor Yellow
     Write-Host '   Upgrading to latest version...' -ForegroundColor Yellow
     & $ChocoExePath upgrade chocolatey -y --no-progress | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Chocolatey upgrade returned exit code $LASTEXITCODE. Review the output above."
+    }
     $newVersion = & $ChocoExePath --version 2>$null
     Write-Host "   Chocolatey is now at version $newVersion." -ForegroundColor Green
 }
@@ -92,7 +95,7 @@ if ($existingSources -match "^$VC3SourceName\|") {
 & $ChocoExePath source add `
     -n=$VC3SourceName `
     -s $VC3SourceUrl `
-    -priority=$VC3SourcePriority
+    -priority=$VC3SourcePriority | Out-Null
 
 Write-Host "   '$VC3SourceName' source added (priority $VC3SourcePriority)." -ForegroundColor Green
 

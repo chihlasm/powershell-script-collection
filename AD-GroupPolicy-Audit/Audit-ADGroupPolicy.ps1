@@ -98,19 +98,36 @@ $AuditDate = Get-Date
 $ReportName = "GPO-Audit-$($AuditDate.ToString('yyyy-MM-dd-HHmmss'))"
 
 # FSLogix Registry Paths (all known locations where FSLogix settings may appear)
+# GP Preferences write to SOFTWARE\FSLogix\*; ADMX Admin Templates write to SOFTWARE\Policies\FSLogix\*
 $FSLogixPaths = @{
-    'Profiles'        = 'SOFTWARE\FSLogix\Profiles'
-    'ODFC'            = 'SOFTWARE\Policies\FSLogix\ODFC'
-    'Apps'            = 'SOFTWARE\FSLogix\Apps'
-    'Logging'         = 'SOFTWARE\FSLogix\Logging'
-    'CloudCacheAgent' = 'SYSTEM\CurrentControlSet\Services\frxccd\Parameters'
-    'CloudCacheProxy' = 'SYSTEM\CurrentControlSet\Services\frxccds\Parameters'
+    'Profiles'            = 'SOFTWARE\FSLogix\Profiles'
+    'ProfilesPolicies'    = 'SOFTWARE\Policies\FSLogix\Profiles'
+    'ODFC'                = 'SOFTWARE\FSLogix\ODFC'
+    'ODFCPolicies'        = 'SOFTWARE\Policies\FSLogix\ODFC'
+    'Apps'                = 'SOFTWARE\FSLogix\Apps'
+    'AppsPolicies'        = 'SOFTWARE\Policies\FSLogix\Apps'
+    'Logging'             = 'SOFTWARE\FSLogix\Logging'
+    'CloudCacheAgent'     = 'SYSTEM\CurrentControlSet\Services\frxccd\Parameters'
+    'CloudCacheProxy'     = 'SYSTEM\CurrentControlSet\Services\frxccds\Parameters'
 }
 
-# Regex pattern for matching FSLogix registry paths in GPO XML
-# Matches Admin Templates (SOFTWARE\FSLogix, SOFTWARE\Policies\FSLogix) and
-# GP Preferences registry items targeting the same keys, plus Cloud Cache services
-$FSLogixPathPattern = 'FSLogix|frxccd\\\\Parameters|frxccds\\\\Parameters'
+# Regex pattern for matching FSLogix registry paths in GPO XML (GP Preferences)
+# Matches SOFTWARE\FSLogix, SOFTWARE\Policies\FSLogix, and Cloud Cache service keys
+$FSLogixPathPattern = 'FSLogix|frxccd\\Parameters|frxccds\\Parameters'
+
+# Regex pattern for matching FSLogix ADMX categories in Admin Template Policy elements
+# Get-GPOReport XML stores ADMX policies with a Category element (e.g. "FSLogix/Profile Containers")
+# but does NOT include the RegistryKey - the registry mapping is in the ADMX file only
+$FSLogixCategoryPattern = '^FSLogix'
+
+# Map ADMX category paths to the registry paths they actually configure
+$FSLogixCategoryToRegistry = @{
+    'Profile Containers'           = 'SOFTWARE\Policies\FSLogix\Profiles'
+    'ODFC Containers'              = 'SOFTWARE\Policies\FSLogix\ODFC'
+    'Cloud Cache'                  = 'SOFTWARE\Policies\FSLogix\Profiles'
+    'Logging'                      = 'SOFTWARE\Policies\FSLogix\Logging'
+    'App Masking'                  = 'SOFTWARE\Policies\FSLogix\Apps'
+}
 
 # Critical FSLogix settings - flagged in reports for extra visibility
 $FSLogixCriticalSettings = @(
@@ -137,6 +154,10 @@ $FSLogixCriticalSettings = @(
     'IncludeOfficeActivation',
     'IncludeOneDrive',
     'IncludeOutlook',
+    'IncludeOutlookPersonalization',
+    'IncludeOneNote',
+    'IncludeOneNote_UWP',
+    'IncludeSharepoint',
     'IncludeTeams',
     'CacheDirectory',
     'WriteCacheDirectory',
@@ -265,7 +286,10 @@ function Get-GPORegistrySettings {
                 # Administrative Templates (Extension.Policy) - registry-based policies
                 if ($ext.Extension.Policy) {
                     foreach ($reg in $ext.Extension.Policy) {
-                        if ($reg -and $reg.RegistryKey) {
+                        if (-not $reg) { continue }
+
+                        if ($reg.RegistryKey) {
+                            # Policy element includes explicit RegistryKey (some ADMX templates)
                             $registrySettings.Add([PSCustomObject]@{
                                 GPOName       = $GPO.DisplayName
                                 Configuration = $scope
@@ -277,6 +301,62 @@ function Get-GPORegistrySettings {
                                 Value         = $reg.Value
                                 Type          = $reg.Type
                             })
+                        }
+                        elseif ($reg.Category -and ($reg.Category -match $FSLogixCategoryPattern)) {
+                            # ADMX policies (e.g. FSLogix) that use Category instead of RegistryKey.
+                            # Get-GPOReport XML for ADMX policies stores the display name and category
+                            # but the underlying registry path is only in the ADMX file. We derive
+                            # the registry path from the category and extract values from sub-elements.
+                            $categoryParts = $reg.Category -split '/'
+                            $subCategory = if ($categoryParts.Count -gt 1) { $categoryParts[1..($categoryParts.Count - 1)] -join '/' } else { $categoryParts[0] }
+                            $derivedKeyPath = $FSLogixCategoryToRegistry[$subCategory]
+                            if (-not $derivedKeyPath) { $derivedKeyPath = 'SOFTWARE\Policies\FSLogix' }
+
+                            # Extract configured values from ADMX sub-elements (EditText, Numeric, DropDownList, CheckBox, etc.)
+                            $subElements = @('EditText', 'Numeric', 'DropDownList', 'CheckBox', 'ListBox', 'MultiText', 'Text')
+                            $foundSubValues = $false
+
+                            foreach ($elemType in $subElements) {
+                                $elems = $reg.$elemType
+                                if (-not $elems) { continue }
+
+                                foreach ($elem in $elems) {
+                                    $foundSubValues = $true
+                                    $valName = $elem.Name
+                                    $val = $elem.Value
+                                    if ($val -is [System.Xml.XmlElement]) {
+                                        # Handle nested value elements like <Decimal value="1"/>
+                                        $val = $val.value
+                                    }
+
+                                    $registrySettings.Add([PSCustomObject]@{
+                                        GPOName       = $GPO.DisplayName
+                                        Configuration = $scope
+                                        Source        = 'AdminTemplate'
+                                        Name          = "$($reg.Name) - $valName"
+                                        State         = if ($elem.State) { $elem.State } else { $reg.State }
+                                        KeyPath       = $derivedKeyPath
+                                        ValueName     = $valName
+                                        Value         = $val
+                                        Type          = $elemType
+                                    })
+                                }
+                            }
+
+                            # If policy is a simple enable/disable with no sub-elements, record it too
+                            if (-not $foundSubValues) {
+                                $registrySettings.Add([PSCustomObject]@{
+                                    GPOName       = $GPO.DisplayName
+                                    Configuration = $scope
+                                    Source        = 'AdminTemplate'
+                                    Name          = $reg.Name
+                                    State         = $reg.State
+                                    KeyPath       = $derivedKeyPath
+                                    ValueName     = $reg.Name
+                                    Value         = if ($reg.State -eq 'Enabled') { '1' } else { '0' }
+                                    Type          = 'ADMX-Policy'
+                                })
+                            }
                         }
                     }
                 }
@@ -999,8 +1079,8 @@ function Get-FSLogixAudit {
                     IsCritical   = $setting.ValueName -in $FSLogixCriticalSettings
                     Source       = $setting.Source
                     Category     = switch -Regex ($setting.KeyPath) {
+                        'FSLogix\\ODFC'       { 'Office Container' }
                         'FSLogix\\Profiles'   { 'Profile Container' }
-                        'FSLogix\\ODFC|Policies\\FSLogix\\ODFC' { 'Office Container' }
                         'FSLogix\\Apps'       { 'App Masking' }
                         'FSLogix\\Logging'    { 'Logging' }
                         'frxccd|frxccds'      { 'Cloud Cache' }
@@ -1064,8 +1144,8 @@ function Get-FSLogixAudit {
         $recommendations.Add([PSCustomObject]@{
             Category       = 'Configuration'
             Finding        = 'FSLogix Enabled setting not explicitly configured'
-            Severity       = 'Info'
-            Recommendation = 'Consider explicitly enabling FSLogix via GPO'
+            Severity       = 'High'
+            Recommendation = 'Set Enabled=1 under HKLM\SOFTWARE\FSLogix\Profiles (or via ADMX). Without this, Profile Containers will not activate.'
         })
     }
 
@@ -1074,8 +1154,36 @@ function Get-FSLogixAudit {
         $recommendations.Add([PSCustomObject]@{
             Category       = 'Best Practice'
             Finding        = 'DeleteLocalProfileWhenVHDShouldApply not configured'
+            Severity       = 'Warning'
+            Recommendation = 'Set to 1. Without this, a stale cached local profile can take precedence over the container profile, causing users to see an old or empty desktop.'
+        })
+    }
+
+    $flipFlop = $allFSLogixSettings | Where-Object { $_.ValueName -eq 'FlipFlopProfileDirectoryName' }
+    if ($flipFlop.Count -eq 0) {
+        $recommendations.Add([PSCustomObject]@{
+            Category       = 'Best Practice'
+            Finding        = 'FlipFlopProfileDirectoryName not configured'
             Severity       = 'Info'
-            Recommendation = 'Consider enabling to prevent local profile conflicts'
+            Recommendation = 'Set to 1 to use username_SID folder naming instead of SID_username. Makes the profile share browsable for admin troubleshooting.'
+        })
+    }
+
+    $volumeType = $allFSLogixSettings | Where-Object { $_.ValueName -eq 'VolumeType' }
+    if ($volumeType.Count -eq 0) {
+        $recommendations.Add([PSCustomObject]@{
+            Category       = 'Best Practice'
+            Finding        = 'VolumeType not configured (defaults to VHD)'
+            Severity       = 'Warning'
+            Recommendation = 'Set VolumeType to VHDX. VHDX supports larger sizes (up to 64 TB), is more resilient to corruption, and supports dynamic expansion more efficiently than VHD.'
+        })
+    }
+    elseif ($volumeType -and ($volumeType | Where-Object { $_.Value -and $_.Value -notmatch 'VHDX' })) {
+        $recommendations.Add([PSCustomObject]@{
+            Category       = 'Best Practice'
+            Finding        = 'VolumeType is set to VHD instead of VHDX'
+            Severity       = 'Warning'
+            Recommendation = 'Switch to VHDX. VHD has a 2 TB limit, is more susceptible to corruption, and does not expand dynamically as efficiently.'
         })
     }
 
@@ -1083,9 +1191,9 @@ function Get-FSLogixAudit {
     if ($sizeLimit.Count -eq 0) {
         $recommendations.Add([PSCustomObject]@{
             Category       = 'Best Practice'
-            Finding        = 'Profile size limit not configured'
+            Finding        = 'Profile size limit (SizeInMBs) not configured'
             Severity       = 'Info'
-            Recommendation = 'Consider setting SizeInMBs to prevent unbounded profile growth'
+            Recommendation = 'Default is 30000 MB (30 GB). Set SizeInMBs explicitly based on expected profile sizes to prevent unbounded growth.'
         })
     }
 
@@ -1095,7 +1203,7 @@ function Get-FSLogixAudit {
             Category       = 'Performance'
             Finding        = 'IsDynamic not configured'
             Severity       = 'Info'
-            Recommendation = 'Consider enabling dynamic VHD to optimize storage'
+            Recommendation = 'Set to 1 to use dynamically expanding disks. Only allocates storage as needed up to the SizeInMBs limit.'
         })
     }
 
@@ -1104,8 +1212,8 @@ function Get-FSLogixAudit {
         $recommendations.Add([PSCustomObject]@{
             Category       = 'Reliability'
             Finding        = 'PreventLoginWithFailure not configured'
-            Severity       = 'Info'
-            Recommendation = 'Consider setting to 1 to block login when profile fails to attach (prevents data loss to local profile)'
+            Severity       = 'Warning'
+            Recommendation = 'Microsoft recommends 0 for most environments (fall back to local profile if container fails). Set to 1 only in strict VDI environments to block login entirely when the container cannot attach.'
         })
     }
 
@@ -1114,8 +1222,29 @@ function Get-FSLogixAudit {
         $recommendations.Add([PSCustomObject]@{
             Category       = 'Reliability'
             Finding        = 'PreventLoginWithTempProfile not configured'
+            Severity       = 'Warning'
+            Recommendation = 'Set to 1 to prevent silent data loss. Without this, users may get a temporary profile and lose all work when they log off.'
+        })
+    }
+
+    $redirXml = $allFSLogixSettings | Where-Object { $_.ValueName -eq 'RedirXMLSourceFolder' }
+    if ($redirXml.Count -eq 0) {
+        $recommendations.Add([PSCustomObject]@{
+            Category       = 'Performance'
+            Finding        = 'RedirXMLSourceFolder not configured (no redirections.xml)'
             Severity       = 'Info'
-            Recommendation = 'Consider setting to 1 to block login when a temp profile would be created'
+            Recommendation = 'Configure a redirections.xml to exclude temp/cache folders (AppData\Local\Temp, browser caches, INetCache, CrashDumps). Without exclusions, containers can grow rapidly from cached data.'
+        })
+    }
+
+    # Check for both VHDLocations and CCDLocations (CCDLocations silently overrides VHDLocations)
+    $ccdLocations = $allFSLogixSettings | Where-Object { $_.ValueName -eq 'CCDLocations' }
+    if (($vhdLocations.Count -gt 0) -and ($ccdLocations.Count -gt 0)) {
+        $recommendations.Add([PSCustomObject]@{
+            Category       = 'Configuration'
+            Finding        = 'Both VHDLocations and CCDLocations are configured'
+            Severity       = 'High'
+            Recommendation = 'CCDLocations silently overrides VHDLocations when both are set. VHDLocations is completely ignored. Remove VHDLocations if using Cloud Cache, or remove CCDLocations if using direct VHD storage.'
         })
     }
 
@@ -1131,7 +1260,7 @@ function Get-FSLogixAudit {
             Category       = 'Consistency'
             Finding        = "FSLogix settings delivered via both Admin Templates and GP Preferences registry items"
             Severity       = 'Warning'
-            Recommendation = "Admin Template GPOs: $adminGPOs. GP Preference GPOs: $prefGPOs. Standardize on one method to avoid confusion - note that GP Preferences registry items are NOT removed when the GPO is unlinked."
+            Recommendation = "Admin Template GPOs: $adminGPOs. GP Preference GPOs: $prefGPOs. Standardize on one method. ADMX Admin Templates write to SOFTWARE\Policies\FSLogix\* and take precedence over GP Preferences at SOFTWARE\FSLogix\*. GP Preference registry items are NOT removed when the GPO is unlinked."
         })
     }
 
