@@ -128,7 +128,7 @@ function Remove-OldTeams {
             }
         }
         catch {
-            Write-Log "Error uninstalling old Teams: $_"
+            Write-Log "Error uninstalling old Teams: $($_.Exception.Message)"
             throw
         }
     }
@@ -165,7 +165,7 @@ function Remove-OldTeamsAllUsers {
                 }
             }
             catch {
-                Write-Log "[WARN] Failed to remove old Teams for profile $($profile.Name): $_"
+                Write-Log "[WARN] Failed to remove old Teams for profile $($profile.Name): $($_.Exception.Message)"
                 continue
             }
         }
@@ -227,7 +227,7 @@ function Remove-NewTeams {
         }
     }
     catch {
-        Write-Log "Error uninstalling new Teams: $_"
+        Write-Log "Error uninstalling new Teams: $($_.Exception.Message)"
         throw
     }
 }
@@ -276,7 +276,7 @@ function Install-WebView2 {
         }
     }
     catch {
-        Write-Log "Error installing WebView2: $_"
+        Write-Log "Error installing WebView2: $($_.Exception.Message)"
         throw
     }
     finally {
@@ -312,7 +312,7 @@ function Get-TeamsInstaller {
         Write-Log "Teams installer downloaded to $OutputPath"
     }
     catch {
-        Write-Log "Error downloading Teams installer: $_"
+        Write-Log "Error downloading Teams installer: $($_.Exception.Message)"
         throw
     }
 }
@@ -327,7 +327,7 @@ function Install-TeamsCitrixVDA {
         Write-Log "Teams installation completed successfully (Citrix VDA - auto-provisions via VDA detection)"
     }
     catch {
-        Write-Log "Error installing Teams: $_"
+        Write-Log "Error installing Teams: $($_.Exception.Message)"
         throw
     }
 }
@@ -342,7 +342,7 @@ function Install-TeamsRDS {
         Write-Log "Teams provisioned successfully for all users (RDS)"
     }
     catch {
-        Write-Log "Error provisioning Teams: $_"
+        Write-Log "Error provisioning Teams: $($_.Exception.Message)"
         throw
     }
 }
@@ -432,6 +432,6 @@ try {
     Write-Log "Teams installation script completed successfully for $DeploymentType"
 }
 catch {
-    Write-Log "[FAIL] Script failed with error: $_"
+    Write-Log "[FAIL] Script failed with error: $($_.Exception.Message)"
     exit 1
 }
