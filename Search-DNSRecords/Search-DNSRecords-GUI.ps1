@@ -301,7 +301,7 @@ function Invoke-StaleDetection {
     $adComputers = @{}
     if ($checkAdOrphan -and $script:adModuleAvailable) {
         try {
-            Get-ADComputer -Filter * -Properties Name -ErrorAction Stop | ForEach-Object {
+            Get-ADComputer -Filter * -Properties Name -Server $dc -ErrorAction Stop | ForEach-Object {
                 $adComputers[$_.Name.ToLower()] = $true
             }
         }
@@ -338,7 +338,7 @@ function Invoke-StaleDetection {
                 if ($checkAdOrphan -and $converted.Type -eq 'A' -and $converted.Name -ne '@') {
                     $hostname = $converted.Name.ToLower()
                     if (-not $adComputers.ContainsKey($hostname)) {
-                        $reasons.Add('No matching AD computer')
+                        $reasons.Add('AD orphan (no matching computer)')
                     }
                 }
 
@@ -359,7 +359,7 @@ function Invoke-StaleDetection {
         total    = $results.Count
         aged     = @($results | Where-Object { $_.StaleReasons -match 'Aged' }).Count
         static   = @($results | Where-Object { $_.StaleReasons -match 'Static' }).Count
-        adOrphan = @($results | Where-Object { $_.StaleReasons -match 'No matching AD' }).Count
+        adOrphan = @($results | Where-Object { $_.StaleReasons -match 'AD orphan' }).Count
     }
     Send-Json $Response @{ results = @($results); errors = @($errors); summary = $summary }
 }
@@ -606,7 +606,7 @@ function Invoke-Route {
     }
 }
 
-# --- HTML Content (placeholder — replaced in Task 8) ---
+# --- Embedded HTML/CSS/JS Frontend ---
 
 $script:htmlContent = @"
 <!DOCTYPE html>
@@ -1103,7 +1103,7 @@ body {
             <div class="param-group">
                 <label for="recordType">Type</label>
                 <select id="recordType">
-                    <option value="All">All</option>
+                    <option value="">All</option>
                     <option value="A">A</option>
                     <option value="AAAA">AAAA</option>
                     <option value="CNAME">CNAME</option>
@@ -1544,7 +1544,7 @@ function formatCompareStatus(status) {
 
 function formatStaleReasons(reasons) {
     if (!reasons) return '';
-    var parts = reasons.split(',');
+    var parts = reasons.split('; ');
     var html = '';
     for (var i = 0; i < parts.length; i++) {
         var r = parts[i].replace(/^\s+|\s+$/g, '');
