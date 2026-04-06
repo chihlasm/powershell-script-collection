@@ -526,7 +526,8 @@ function Invoke-ExportHtml {
         $cells = ($columns | ForEach-Object {
             $val = $row.$_
             if ($null -eq $val) { $val = '' }
-            "<td>$([System.Web.HttpUtility]::HtmlEncode($val.ToString()))</td>"
+            $escaped = $val.ToString().Replace('&','&amp;').Replace('<','&lt;').Replace('>','&gt;').Replace('"','&quot;')
+            "<td>$escaped</td>"
         }) -join ''
         "<tr>$cells</tr>"
     }
@@ -609,8 +610,1027 @@ function Invoke-Route {
 
 $script:htmlContent = @"
 <!DOCTYPE html>
-<html><head><title>DNS Audit</title></head>
-<body><h1>DNS Record Audit Tool</h1><p>Frontend loading in next task...</p></body>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DNS Record Audit Tool</title>
+<style>
+:root {
+    --bg: #1a1d23;
+    --bg-card: #23272e;
+    --bg-hover: #2a2f38;
+    --bg-input: #1e2229;
+    --text: #e0e0e0;
+    --text-muted: #8b95a5;
+    --accent: #5dade2;
+    --accent-hover: #4a9bd4;
+    --border: #333a45;
+    --success: #2ecc71;
+    --warning: #f39c12;
+    --danger: #e74c3c;
+    --shadow: rgba(0,0,0,0.3);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+/* Header */
+.header {
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+.header h1 {
+    font-size: 16px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--accent);
+}
+.status-indicator {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 4px;
+}
+.status-dot.ok { background: var(--success); }
+.status-dot.err { background: var(--danger); }
+
+/* Config bar */
+.config-bar {
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 24px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+.config-bar label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.config-bar input[type="text"] {
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 7px 12px;
+    border-radius: 4px;
+    font-size: 13px;
+    font-family: inherit;
+    width: 200px;
+}
+.config-bar input[type="text"]:focus { outline: none; border-color: var(--accent); }
+.config-bar .separator { width: 1px; height: 28px; background: var(--border); margin: 0 4px; }
+
+/* Buttons */
+.btn {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 7px 16px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    font-family: inherit;
+    transition: all 0.15s;
+    white-space: nowrap;
+}
+.btn:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--accent); color: var(--accent); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.btn.primary:hover:not(:disabled) { background: var(--accent-hover); }
+.btn.primary:disabled { opacity: 0.5; }
+.btn.run-btn {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+    padding: 10px 32px;
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+.btn.run-btn:hover:not(:disabled) { background: var(--accent-hover); }
+
+/* Mode tabs */
+.mode-tabs {
+    display: flex;
+    gap: 0;
+}
+.mode-tab {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    padding: 7px 20px;
+    cursor: pointer;
+    font-size: 13px;
+    font-family: inherit;
+    font-weight: 500;
+    transition: all 0.15s;
+}
+.mode-tab:first-child { border-radius: 4px 0 0 4px; }
+.mode-tab:last-child { border-radius: 0 4px 4px 0; }
+.mode-tab:not(:first-child) { border-left: none; }
+.mode-tab:hover { color: var(--text); background: var(--bg-hover); }
+.mode-tab.active { color: #fff; background: var(--accent); border-color: var(--accent); }
+
+/* Main layout */
+.main-layout {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+}
+
+/* Zone sidebar */
+.zone-sidebar {
+    width: 280px;
+    min-width: 280px;
+    background: var(--bg-card);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+.zone-sidebar-header {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+}
+.zone-sidebar-header h2 {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+}
+.zone-quick-btns {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+.zone-quick-btns .btn { padding: 4px 10px; font-size: 11px; }
+.zone-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 0;
+}
+.zone-item {
+    display: flex;
+    align-items: center;
+    padding: 5px 16px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background 0.1s;
+    gap: 8px;
+}
+.zone-item:hover { background: var(--bg-hover); }
+.zone-item input[type="checkbox"] { accent-color: var(--accent); cursor: pointer; }
+.zone-item .zone-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.zone-badge {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    background: rgba(93,173,226,0.1);
+    color: var(--accent);
+}
+.zone-badge.reverse { background: rgba(243,156,18,0.1); color: var(--warning); }
+.zone-empty {
+    padding: 20px 16px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 13px;
+}
+
+/* Content area */
+.content-area {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+/* Parameters panel */
+.params-panel {
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+.param-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.param-group label {
+    font-size: 12px;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+.param-group input[type="text"],
+.param-group input[type="number"] {
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 13px;
+    font-family: inherit;
+    width: 140px;
+}
+.param-group input:focus { outline: none; border-color: var(--accent); }
+.param-group select {
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 13px;
+    font-family: inherit;
+}
+.param-group select:focus { outline: none; border-color: var(--accent); }
+.param-group input[type="checkbox"] { accent-color: var(--accent); cursor: pointer; }
+.params-panel .hidden { display: none; }
+.tooltip-wrap { position: relative; }
+.tooltip-wrap .tooltip-text {
+    display: none;
+    position: absolute;
+    bottom: 120%;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    white-space: nowrap;
+    z-index: 100;
+}
+.tooltip-wrap:hover .tooltip-text { display: block; }
+
+/* Run bar */
+.run-bar {
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    background: var(--bg);
+}
+.spinner {
+    display: none;
+    width: 18px;
+    height: 18px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Summary bar */
+.summary-bar {
+    padding: 8px 24px;
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+    display: none;
+    align-items: center;
+    gap: 16px;
+    font-size: 13px;
+    flex-wrap: wrap;
+}
+.summary-bar .count-item {
+    color: var(--text-muted);
+}
+.summary-bar .count-item strong { color: var(--text); }
+
+/* Error alerts */
+.error-alerts {
+    display: none;
+    padding: 8px 24px;
+}
+.error-alert {
+    background: rgba(243,156,18,0.1);
+    border: 1px solid rgba(243,156,18,0.3);
+    border-radius: 4px;
+    padding: 6px 12px;
+    margin-bottom: 4px;
+    font-size: 12px;
+    color: var(--warning);
+}
+
+/* Filter and export bar */
+.results-toolbar {
+    padding: 8px 24px;
+    display: none;
+    align-items: center;
+    gap: 12px;
+    background: var(--bg);
+}
+.results-toolbar input[type="text"] {
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 13px;
+    font-family: inherit;
+    width: 250px;
+}
+.results-toolbar input[type="text"]:focus { outline: none; border-color: var(--accent); }
+.row-count {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-left: auto;
+}
+.export-btns { display: flex; gap: 6px; margin-left: 12px; }
+
+/* Results table */
+.results-wrap {
+    flex: 1;
+    overflow: auto;
+    padding: 0;
+}
+.results-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+.results-table th {
+    text-align: left;
+    padding: 10px 12px;
+    background: var(--bg-card);
+    border-bottom: 2px solid var(--border);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    position: sticky;
+    top: 0;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+    z-index: 2;
+}
+.results-table th:hover { color: var(--accent); }
+.results-table th .sort-arrow { margin-left: 4px; font-size: 10px; }
+.results-table td {
+    padding: 7px 12px;
+    border-bottom: 1px solid var(--border);
+    word-break: break-word;
+    max-width: 320px;
+}
+.results-table tr:hover td { background: var(--bg-hover); }
+
+/* Status badges for compare mode */
+.compare-match { color: var(--success); }
+.compare-mismatch { color: var(--warning); }
+.compare-missing { color: var(--danger); }
+
+/* Stale reason badges */
+.stale-reason {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 600;
+    margin-right: 4px;
+    margin-bottom: 2px;
+}
+.stale-aged { background: rgba(243,156,18,0.15); color: var(--warning); }
+.stale-static { background: rgba(93,173,226,0.15); color: var(--accent); }
+.stale-orphan { background: rgba(231,76,60,0.15); color: var(--danger); }
+
+/* Empty state */
+.empty-state {
+    padding: 60px 24px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 14px;
+}
+.empty-state .icon { font-size: 48px; margin-bottom: 12px; opacity: 0.3; }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+    <h1>DNS Record Audit Tool</h1>
+    <div class="status-indicator" id="statusArea">
+        <span>Checking modules...</span>
+    </div>
+</div>
+
+<!-- Config bar -->
+<div class="config-bar">
+    <label for="dcInput">Domain Controller</label>
+    <input type="text" id="dcInput" placeholder="e.g. DC01.domain.local" />
+    <button class="btn primary" id="loadZonesBtn" onclick="loadZones()">Load Zones</button>
+    <div class="separator"></div>
+    <div id="dc2Group" class="param-group" style="display:none;">
+        <label for="dc2Input">Second DC</label>
+        <input type="text" id="dc2Input" placeholder="e.g. DC02.domain.local" />
+    </div>
+    <div class="separator" id="dc2Sep" style="display:none;"></div>
+    <div class="mode-tabs">
+        <button class="mode-tab active" data-mode="search" onclick="switchMode('search')">Search</button>
+        <button class="mode-tab" data-mode="stale" onclick="switchMode('stale')">Stale</button>
+        <button class="mode-tab" data-mode="compare" onclick="switchMode('compare')">Compare</button>
+    </div>
+</div>
+
+<!-- Main layout -->
+<div class="main-layout">
+    <!-- Zone sidebar -->
+    <div class="zone-sidebar">
+        <div class="zone-sidebar-header">
+            <h2>DNS Zones</h2>
+            <div class="zone-quick-btns">
+                <button class="btn" onclick="selectAllZones(true)">Select All</button>
+                <button class="btn" onclick="selectAllZones(false)">Deselect All</button>
+                <button class="btn" onclick="selectForwardOnly()">Forward Only</button>
+            </div>
+        </div>
+        <div class="zone-list" id="zoneList">
+            <div class="zone-empty">Click "Load Zones" to populate</div>
+        </div>
+    </div>
+
+    <!-- Content area -->
+    <div class="content-area">
+        <!-- Search params -->
+        <div class="params-panel" id="searchParams">
+            <div class="param-group">
+                <label for="patternInput">Pattern</label>
+                <input type="text" id="patternInput" placeholder="hostname or pattern" />
+            </div>
+            <div class="param-group">
+                <input type="checkbox" id="regexToggle" />
+                <label for="regexToggle">Regex</label>
+            </div>
+            <div class="param-group">
+                <label for="recordType">Type</label>
+                <select id="recordType">
+                    <option value="All">All</option>
+                    <option value="A">A</option>
+                    <option value="AAAA">AAAA</option>
+                    <option value="CNAME">CNAME</option>
+                    <option value="MX">MX</option>
+                    <option value="PTR">PTR</option>
+                    <option value="SRV">SRV</option>
+                    <option value="TXT">TXT</option>
+                    <option value="NS">NS</option>
+                </select>
+            </div>
+            <div class="param-group">
+                <label for="maxAgeDays">Older than (days)</label>
+                <input type="number" id="maxAgeDays" placeholder="optional" style="width:90px;" />
+            </div>
+        </div>
+
+        <!-- Stale params -->
+        <div class="params-panel hidden" id="staleParams">
+            <div class="param-group">
+                <label for="thresholdDays">Threshold (days)</label>
+                <input type="number" id="thresholdDays" value="90" style="width:90px;" />
+            </div>
+            <div class="param-group">
+                <input type="checkbox" id="checkAge" checked />
+                <label for="checkAge">Age-based</label>
+            </div>
+            <div class="param-group">
+                <input type="checkbox" id="checkStatic" checked />
+                <label for="checkStatic">Static records</label>
+            </div>
+            <div class="param-group tooltip-wrap">
+                <input type="checkbox" id="checkAdOrphan" />
+                <label for="checkAdOrphan">AD Orphans</label>
+                <span class="tooltip-text" id="adOrphanTooltip">Requires AD module on server</span>
+            </div>
+        </div>
+
+        <!-- Compare params (no extra params beyond DC2 in config bar) -->
+        <div class="params-panel hidden" id="compareParams">
+            <div class="param-group">
+                <span style="color:var(--text-muted);font-size:13px;">Configure both Domain Controllers above, select zones, then run compare.</span>
+            </div>
+        </div>
+
+        <!-- Run bar -->
+        <div class="run-bar">
+            <button class="btn run-btn" id="runBtn" onclick="runQuery()">Search</button>
+            <div class="spinner" id="spinner"></div>
+            <span id="runError" style="color:var(--danger);font-size:13px;"></span>
+        </div>
+
+        <!-- Summary bar -->
+        <div class="summary-bar" id="summaryBar"></div>
+
+        <!-- Error alerts -->
+        <div class="error-alerts" id="errorAlerts"></div>
+
+        <!-- Results toolbar -->
+        <div class="results-toolbar" id="resultsToolbar">
+            <input type="text" id="filterInput" placeholder="Filter results..." oninput="filterResults()" />
+            <span class="row-count" id="rowCount"></span>
+            <div class="export-btns">
+                <button class="btn" id="exportCsvBtn" onclick="exportCsv()" disabled>Export CSV</button>
+                <button class="btn" id="exportHtmlBtn" onclick="exportHtml()" disabled>Export HTML</button>
+            </div>
+        </div>
+
+        <!-- Results table -->
+        <div class="results-wrap" id="resultsWrap">
+            <div class="empty-state" id="emptyState">
+                <div class="icon">&#128269;</div>
+                <div>Configure parameters and click the button above to run a query.</div>
+            </div>
+            <table class="results-table" id="resultsTable" style="display:none;">
+                <thead id="tableHead"></thead>
+                <tbody id="tableBody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+var currentMode = 'search';
+var allResults = [];
+var sortCol = -1;
+var sortAsc = true;
+var adModuleAvailable = false;
+var staleThresholdDefault = 90;
+
+function initApp() {
+    fetchStatus();
+}
+
+function fetchStatus() {
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', '/api/status', true);
+    xhr.onload = function() {
+        if (xhr.status === 200) {
+            var data = JSON.parse(xhr.responseText);
+            var area = document.getElementById('statusArea');
+            var dnsDot = data.dnsModule ? 'ok' : 'err';
+            var adDot = data.adModule ? 'ok' : 'err';
+            area.innerHTML = '<span><span class="status-dot ' + dnsDot + '"></span>DNS Module</span>' +
+                '<span><span class="status-dot ' + adDot + '"></span>AD Module</span>';
+            adModuleAvailable = data.adModule;
+            if (data.staleThresholdDays) {
+                staleThresholdDefault = data.staleThresholdDays;
+                document.getElementById('thresholdDays').value = data.staleThresholdDays;
+            }
+            if (!adModuleAvailable) {
+                document.getElementById('checkAdOrphan').disabled = true;
+            }
+        }
+    };
+    xhr.onerror = function() {
+        document.getElementById('statusArea').innerHTML = '<span style="color:var(--danger)">Connection error</span>';
+    };
+    xhr.send();
+}
+
+function loadZones() {
+    var dc = document.getElementById('dcInput').value.trim();
+    if (!dc) {
+        showRunError('Enter a Domain Controller name first.');
+        return;
+    }
+    var btn = document.getElementById('loadZonesBtn');
+    btn.disabled = true;
+    btn.textContent = 'Loading...';
+    var zoneList = document.getElementById('zoneList');
+    zoneList.innerHTML = '<div class="zone-empty">Loading zones...</div>';
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', '/api/zones?dc=' + encodeURIComponent(dc), true);
+    xhr.onload = function() {
+        btn.disabled = false;
+        btn.textContent = 'Load Zones';
+        if (xhr.status === 200) {
+            var data = JSON.parse(xhr.responseText);
+            renderZoneList(data.zones || []);
+        } else {
+            var errData = {};
+            try { errData = JSON.parse(xhr.responseText); } catch(e) {}
+            zoneList.innerHTML = '<div class="zone-empty" style="color:var(--danger);">Error: ' + escapeHtml(errData.error || 'Failed to load zones') + '</div>';
+        }
+    };
+    xhr.onerror = function() {
+        btn.disabled = false;
+        btn.textContent = 'Load Zones';
+        zoneList.innerHTML = '<div class="zone-empty" style="color:var(--danger);">Connection error</div>';
+    };
+    xhr.send();
+}
+
+function renderZoneList(zones) {
+    var zoneList = document.getElementById('zoneList');
+    if (zones.length === 0) {
+        zoneList.innerHTML = '<div class="zone-empty">No zones found</div>';
+        return;
+    }
+    var html = '';
+    for (var i = 0; i < zones.length; i++) {
+        var z = zones[i];
+        var checked = z.isReverse ? '' : ' checked';
+        var badgeClass = z.isReverse ? 'zone-badge reverse' : 'zone-badge';
+        var badgeText = z.type || (z.isReverse ? 'Reverse' : 'Forward');
+        html += '<label class="zone-item">' +
+            '<input type="checkbox" class="zone-cb" value="' + escapeHtml(z.name) + '"' + checked + ' />' +
+            '<span class="zone-name">' + escapeHtml(z.name) + '</span>' +
+            '<span class="' + badgeClass + '">' + escapeHtml(badgeText) + '</span>' +
+            '</label>';
+    }
+    zoneList.innerHTML = html;
+}
+
+function selectAllZones(check) {
+    var cbs = document.querySelectorAll('.zone-cb');
+    for (var i = 0; i < cbs.length; i++) {
+        cbs[i].checked = check;
+    }
+}
+
+function selectForwardOnly() {
+    var items = document.querySelectorAll('.zone-item');
+    for (var i = 0; i < items.length; i++) {
+        var cb = items[i].querySelector('.zone-cb');
+        var badge = items[i].querySelector('.zone-badge');
+        if (badge && badge.classList.contains('reverse')) {
+            cb.checked = false;
+        } else {
+            cb.checked = true;
+        }
+    }
+}
+
+function getSelectedZones() {
+    var cbs = document.querySelectorAll('.zone-cb:checked');
+    var zones = [];
+    for (var i = 0; i < cbs.length; i++) {
+        zones.push(cbs[i].value);
+    }
+    return zones;
+}
+
+function switchMode(mode) {
+    currentMode = mode;
+    var tabs = document.querySelectorAll('.mode-tab');
+    for (var i = 0; i < tabs.length; i++) {
+        tabs[i].classList.toggle('active', tabs[i].getAttribute('data-mode') === mode);
+    }
+    document.getElementById('searchParams').className = mode === 'search' ? 'params-panel' : 'params-panel hidden';
+    document.getElementById('staleParams').className = mode === 'stale' ? 'params-panel' : 'params-panel hidden';
+    document.getElementById('compareParams').className = mode === 'compare' ? 'params-panel' : 'params-panel hidden';
+
+    var dc2Vis = mode === 'compare' ? '' : 'none';
+    document.getElementById('dc2Group').style.display = dc2Vis;
+    document.getElementById('dc2Sep').style.display = dc2Vis;
+
+    var btnText = { search: 'Search', stale: 'Scan for Stale', compare: 'Compare DCs' };
+    document.getElementById('runBtn').textContent = btnText[mode] || 'Run';
+}
+
+function showRunError(msg) {
+    document.getElementById('runError').textContent = msg;
+    setTimeout(function() { document.getElementById('runError').textContent = ''; }, 5000);
+}
+
+function runQuery() {
+    var dc = document.getElementById('dcInput').value.trim();
+    if (!dc) { showRunError('Enter a Domain Controller name.'); return; }
+    var zones = getSelectedZones();
+    if (zones.length === 0) { showRunError('Select at least one zone.'); return; }
+
+    var url, body;
+    if (currentMode === 'search') {
+        url = '/api/search';
+        body = {
+            dc: dc,
+            zones: zones,
+            pattern: document.getElementById('patternInput').value,
+            recordType: document.getElementById('recordType').value,
+            useRegex: document.getElementById('regexToggle').checked,
+            maxAgeDays: parseInt(document.getElementById('maxAgeDays').value) || 0
+        };
+    } else if (currentMode === 'stale') {
+        url = '/api/stale';
+        body = {
+            dc: dc,
+            zones: zones,
+            thresholdDays: parseInt(document.getElementById('thresholdDays').value) || staleThresholdDefault,
+            checkAge: document.getElementById('checkAge').checked,
+            checkStatic: document.getElementById('checkStatic').checked,
+            checkAdOrphan: document.getElementById('checkAdOrphan').checked
+        };
+    } else if (currentMode === 'compare') {
+        var dc2 = document.getElementById('dc2Input').value.trim();
+        if (!dc2) { showRunError('Enter a second Domain Controller for compare.'); return; }
+        url = '/api/compare';
+        body = {
+            dc1: dc,
+            dc2: dc2,
+            zones: zones
+        };
+    }
+
+    var btn = document.getElementById('runBtn');
+    var spinner = document.getElementById('spinner');
+    btn.disabled = true;
+    spinner.style.display = 'inline-block';
+    document.getElementById('runError').textContent = '';
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', url, true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.onload = function() {
+        btn.disabled = false;
+        spinner.style.display = 'none';
+        if (xhr.status === 200) {
+            var data = JSON.parse(xhr.responseText);
+            renderResults(data);
+        } else {
+            var errData = {};
+            try { errData = JSON.parse(xhr.responseText); } catch(e) {}
+            showRunError(errData.error || 'Server returned status ' + xhr.status);
+        }
+    };
+    xhr.onerror = function() {
+        btn.disabled = false;
+        spinner.style.display = 'none';
+        showRunError('Connection error. Is the server running?');
+    };
+    xhr.send(JSON.stringify(body));
+}
+
+function renderResults(data) {
+    allResults = data.results || [];
+    sortCol = -1;
+    sortAsc = true;
+
+    /* Summary */
+    var summaryBar = document.getElementById('summaryBar');
+    var summaryHtml = '<span class="count-item"><strong>' + (data.total || allResults.length) + '</strong> total records</span>';
+    if (currentMode === 'stale' && data.summary) {
+        summaryHtml += '<span class="count-item">Aged: <strong>' + (data.summary.aged || 0) + '</strong></span>';
+        summaryHtml += '<span class="count-item">Static: <strong>' + (data.summary.static || 0) + '</strong></span>';
+        summaryHtml += '<span class="count-item">AD Orphan: <strong>' + (data.summary.adOrphan || 0) + '</strong></span>';
+    }
+    if (currentMode === 'compare' && data.summary) {
+        summaryHtml += '<span class="count-item">Only ' + escapeHtml(data.dc1 || 'DC1') + ': <strong>' + (data.summary.onlyDc1 || 0) + '</strong></span>';
+        summaryHtml += '<span class="count-item">Only ' + escapeHtml(data.dc2 || 'DC2') + ': <strong>' + (data.summary.onlyDc2 || 0) + '</strong></span>';
+        summaryHtml += '<span class="count-item">Mismatch: <strong>' + (data.summary.mismatch || 0) + '</strong></span>';
+    }
+    summaryBar.innerHTML = summaryHtml;
+    summaryBar.style.display = 'flex';
+
+    /* Errors */
+    var errorAlerts = document.getElementById('errorAlerts');
+    var errors = data.errors || [];
+    if (errors.length > 0) {
+        var eHtml = '';
+        for (var i = 0; i < errors.length; i++) {
+            var e = errors[i];
+            var eText = (typeof e === 'string') ? e : ((e.zone || '') + ': ' + (e.error || e.message || JSON.stringify(e)));
+            eHtml += '<div class="error-alert">' + escapeHtml(eText) + '</div>';
+        }
+        errorAlerts.innerHTML = eHtml;
+        errorAlerts.style.display = 'block';
+    } else {
+        errorAlerts.style.display = 'none';
+    }
+
+    /* Toolbar */
+    document.getElementById('resultsToolbar').style.display = 'flex';
+    document.getElementById('filterInput').value = '';
+    document.getElementById('exportCsvBtn').disabled = allResults.length === 0;
+    document.getElementById('exportHtmlBtn').disabled = allResults.length === 0;
+
+    /* Table */
+    document.getElementById('emptyState').style.display = allResults.length === 0 ? 'block' : 'none';
+    document.getElementById('resultsTable').style.display = allResults.length > 0 ? 'table' : 'none';
+
+    if (allResults.length > 0) {
+        buildTable(allResults);
+    }
+}
+
+function getColumns() {
+    if (currentMode === 'search') {
+        return [
+            { key: 'Zone', label: 'Zone' },
+            { key: 'Name', label: 'Name' },
+            { key: 'Type', label: 'Type' },
+            { key: 'Data', label: 'Data' },
+            { key: 'TTL', label: 'TTL' },
+            { key: 'Timestamp', label: 'Timestamp' },
+            { key: 'AgeDays', label: 'Age (days)' },
+            { key: 'DC', label: 'DC' }
+        ];
+    }
+    if (currentMode === 'stale') {
+        return [
+            { key: 'Zone', label: 'Zone' },
+            { key: 'Name', label: 'Name' },
+            { key: 'Type', label: 'Type' },
+            { key: 'Data', label: 'Data' },
+            { key: 'Timestamp', label: 'Timestamp' },
+            { key: 'AgeDays', label: 'Age (days)' },
+            { key: 'StaleReasons', label: 'Stale Reasons' }
+        ];
+    }
+    if (currentMode === 'compare') {
+        return [
+            { key: 'Zone', label: 'Zone' },
+            { key: 'Name', label: 'Name' },
+            { key: 'Type', label: 'Type' },
+            { key: 'Data', label: 'Data' },
+            { key: 'TTL', label: 'TTL' },
+            { key: 'DC', label: 'DC' },
+            { key: 'CompareStatus', label: 'Status' }
+        ];
+    }
+    return [];
+}
+
+function buildTable(records) {
+    var cols = getColumns();
+    var thead = document.getElementById('tableHead');
+    var hRow = '<tr>';
+    for (var c = 0; c < cols.length; c++) {
+        var arrow = '';
+        if (c === sortCol) { arrow = sortAsc ? ' &#9650;' : ' &#9660;'; }
+        hRow += '<th data-col="' + c + '" onclick="sortBy(' + c + ')">' + escapeHtml(cols[c].label) + '<span class="sort-arrow">' + arrow + '</span></th>';
+    }
+    hRow += '</tr>';
+    thead.innerHTML = hRow;
+
+    renderRows(records, cols);
+}
+
+function renderRows(records, cols) {
+    if (!cols) cols = getColumns();
+    var tbody = document.getElementById('tableBody');
+    var html = '';
+    for (var r = 0; r < records.length; r++) {
+        var rec = records[r];
+        html += '<tr>';
+        for (var c = 0; c < cols.length; c++) {
+            var val = rec[cols[c].key];
+            if (val === undefined || val === null) val = '';
+            var cellHtml = escapeHtml(String(val));
+
+            if (cols[c].key === 'CompareStatus') {
+                cellHtml = formatCompareStatus(String(val));
+            } else if (cols[c].key === 'StaleReasons') {
+                cellHtml = formatStaleReasons(String(val));
+            }
+
+            html += '<td>' + cellHtml + '</td>';
+        }
+        html += '</tr>';
+    }
+    tbody.innerHTML = html;
+    updateRowCount(records.length, allResults.length);
+}
+
+function formatCompareStatus(status) {
+    if (status.indexOf('Only on') === 0) {
+        return '<span class="compare-missing">' + escapeHtml(status) + '</span>';
+    }
+    if (status.indexOf('differs') !== -1 || status.indexOf('mismatch') !== -1 || status.indexOf('Mismatch') !== -1) {
+        return '<span class="compare-mismatch">' + escapeHtml(status) + '</span>';
+    }
+    if (status.indexOf('Match') !== -1 || status.indexOf('match') !== -1) {
+        return '<span class="compare-match">' + escapeHtml(status) + '</span>';
+    }
+    return escapeHtml(status);
+}
+
+function formatStaleReasons(reasons) {
+    if (!reasons) return '';
+    var parts = reasons.split(',');
+    var html = '';
+    for (var i = 0; i < parts.length; i++) {
+        var r = parts[i].replace(/^\s+|\s+$/g, '');
+        if (!r) continue;
+        var cls = 'stale-reason';
+        var lower = r.toLowerCase();
+        if (lower.indexOf('age') !== -1 || lower.indexOf('old') !== -1) cls += ' stale-aged';
+        else if (lower.indexOf('static') !== -1) cls += ' stale-static';
+        else if (lower.indexOf('orphan') !== -1) cls += ' stale-orphan';
+        else cls += ' stale-aged';
+        html += '<span class="' + cls + '">' + escapeHtml(r) + '</span>';
+    }
+    return html;
+}
+
+function sortBy(colIdx) {
+    if (sortCol === colIdx) {
+        sortAsc = !sortAsc;
+    } else {
+        sortCol = colIdx;
+        sortAsc = true;
+    }
+    var cols = getColumns();
+    var key = cols[colIdx].key;
+    allResults.sort(function(a, b) {
+        var va = a[key], vb = b[key];
+        if (va === undefined || va === null) va = '';
+        if (vb === undefined || vb === null) vb = '';
+        if (typeof va === 'number' && typeof vb === 'number') {
+            return sortAsc ? va - vb : vb - va;
+        }
+        va = String(va).toLowerCase();
+        vb = String(vb).toLowerCase();
+        if (va < vb) return sortAsc ? -1 : 1;
+        if (va > vb) return sortAsc ? 1 : -1;
+        return 0;
+    });
+    buildTable(getFilteredResults());
+}
+
+function filterResults() {
+    var filtered = getFilteredResults();
+    renderRows(filtered);
+}
+
+function getFilteredResults() {
+    var filter = document.getElementById('filterInput').value.toLowerCase();
+    if (!filter) return allResults;
+    var cols = getColumns();
+    var filtered = [];
+    for (var r = 0; r < allResults.length; r++) {
+        var rec = allResults[r];
+        var match = false;
+        for (var c = 0; c < cols.length; c++) {
+            var val = rec[cols[c].key];
+            if (val !== undefined && val !== null && String(val).toLowerCase().indexOf(filter) !== -1) {
+                match = true;
+                break;
+            }
+        }
+        if (match) filtered.push(rec);
+    }
+    return filtered;
+}
+
+function updateRowCount(showing, total) {
+    document.getElementById('rowCount').textContent = 'Showing ' + showing + ' of ' + total + ' records';
+}
+
+function exportCsv() {
+    window.location = '/api/export/csv';
+}
+
+function exportHtml() {
+    window.location = '/api/export/html';
+}
+
+function escapeHtml(str) {
+    var div = document.createElement('div');
+    div.appendChild(document.createTextNode(str));
+    return div.innerHTML;
+}
+
+initApp();
+</script>
+</body>
 </html>
 "@
 
