@@ -783,32 +783,32 @@ function Invoke-RobocopyFiles {
     $cmdLine = "robocopy $($roboArgs -join ' ')"
 
     try {
-        $output   = robocopy $sourceDir $destDir $files /COPY:DATSO /SECFIX /ZB /NP /R:3 /W:5 2>&1
+        $output   = cmd /c $cmdLine 2>&1
         $exitCode = $LASTEXITCODE
         $success  = $exitCode -lt 8
 
-        $message = switch ($exitCode) {
-            0  { 'No files copied — source and destination are identical' }
-            1  { 'Files copied successfully' }
-            2  { 'Extra files detected in destination' }
-            3  { 'Files copied + extra files detected' }
-            4  { 'Mismatched files detected' }
-            5  { 'Files copied + mismatched files' }
-            6  { 'Extra and mismatched files detected' }
-            7  { 'Files copied + extra + mismatched' }
-            8  { 'Some files could not be copied (errors occurred)' }
-            16 { 'Fatal error — no files were copied' }
-            default { "Exit code $exitCode" }
-        }
-
-        if (-not $success) { $Response.StatusCode = 500 }
-        Send-Json $Response @{
-            success  = $success
+        $summary = @{
+            status   = if ($success) { 'success' } else { 'error' }
             exitCode = $exitCode
-            message  = $message
+            exitMeaning = switch ($exitCode) {
+                0  { 'No files copied — source and destination are identical' }
+                1  { 'Files copied successfully' }
+                2  { 'Extra files detected in destination' }
+                3  { 'Files copied + extra files detected' }
+                4  { 'Mismatched files detected' }
+                5  { 'Files copied + mismatched files' }
+                6  { 'Extra and mismatched files detected' }
+                7  { 'Files copied + extra + mismatched' }
+                8  { 'Some files could not be copied (errors occurred)' }
+                16 { 'Fatal error — no files were copied' }
+                default { "Exit code $exitCode" }
+            }
             command  = $cmdLine
             output   = ($output | Out-String).Trim()
         }
+
+        if (-not $success) { $Response.StatusCode = 500 }
+        Send-Json $Response $summary
     }
     catch {
         $Response.StatusCode = 500
