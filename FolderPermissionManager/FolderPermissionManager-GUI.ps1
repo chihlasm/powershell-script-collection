@@ -632,7 +632,7 @@ function Invoke-AddFileAce {
             $results.Add([PSCustomObject]@{ path = $filePath; status = 'success'; message = "Added $type $rights for $identity" })
         }
         catch {
-            $results.Add([PSCustomObject]@{ path = $filePath; status = 'error'; message = $_.Exception.Message })
+            $results.Add([PSCustomObject]@{ path = $rawPath; status = 'error'; message = $_.Exception.Message })
         }
     }
     Send-Json $Response @{ status = 'complete'; results = @($results) }
@@ -676,7 +676,7 @@ function Invoke-RemoveFileAce {
             $results.Add([PSCustomObject]@{ path = $filePath; status = 'success'; message = "Removed $type $rights for $identity" })
         }
         catch {
-            $results.Add([PSCustomObject]@{ path = $filePath; status = 'error'; message = $_.Exception.Message })
+            $results.Add([PSCustomObject]@{ path = $rawPath; status = 'error'; message = $_.Exception.Message })
         }
     }
     Send-Json $Response @{ status = 'complete'; results = @($results) }
