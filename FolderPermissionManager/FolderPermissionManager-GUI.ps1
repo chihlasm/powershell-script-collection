@@ -1428,8 +1428,6 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
 </div>
 
 <script>
-(function() {
-'use strict';
 
 // --- State ---
 var currentFolder  = null;   // currently selected folder path
@@ -1986,7 +1984,6 @@ function showRoboOutput(r) {
 // --- Init ---
 initTheme();
 loadDrives();
-})();
 </script>
 </body>
 </html>
