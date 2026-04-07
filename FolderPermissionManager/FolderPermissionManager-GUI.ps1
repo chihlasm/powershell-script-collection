@@ -1068,7 +1068,8 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
 
 /* Tab bar */
 .tabbar { display: flex; background: var(--bg-card); border-bottom: 1px solid var(--border); flex-shrink: 0; }
-.tab { padding: 8px 16px; font-size: 13px; cursor: pointer; border-bottom: 2px solid transparent; color: var(--text-muted); }
+.tab { padding: 8px 16px; font-size: 13px; cursor: pointer; border-bottom: 2px solid transparent; color: var(--text-muted); transition: color 0.15s, border-color 0.15s; user-select: none; }
+.tab:hover { color: var(--text); }
 .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 
 /* Main layout */
@@ -1112,10 +1113,9 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
 .badge-allow { background: rgba(46,204,113,0.15); color: var(--success); }
 .badge-deny  { background: rgba(231,76,60,0.15); color: var(--danger); }
 .badge-inherited { background: rgba(139,149,165,0.15); color: var(--text-muted); }
-.folder-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 
 /* Buttons */
-.btn { padding: 5px 12px; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 500; transition: background 0.15s; }
+.btn { padding: 5px 12px; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 500; transition: background 0.15s, color 0.15s, border-color 0.15s; }
 .btn-primary { background: var(--accent); color: #fff; }
 .btn-primary:hover { background: var(--accent-hover); }
 .btn-danger  { background: var(--danger); color: #fff; }
@@ -1125,7 +1125,7 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* Status bar */
-.status-bar { padding: 6px 16px; font-size: 12px; background: var(--bg-card); border-top: 1px solid var(--border); flex-shrink: 0; min-height: 30px; }
+.status-bar { padding: 6px 16px; font-size: 12px; background: var(--bg-card); border-top: 1px solid var(--border); flex-shrink: 0; min-height: 34px; line-height: 1.5; display: flex; align-items: center; }
 .status-bar.success { color: var(--success); }
 .status-bar.error   { color: var(--danger); }
 .status-bar.info    { color: var(--accent); }
@@ -1138,7 +1138,8 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
 .modal h3 { font-size: 14px; font-weight: 600; margin-bottom: 14px; }
 .form-row { margin-bottom: 10px; }
 .form-row label { display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
-.form-row input, .form-row select { width: 100%; padding: 6px 8px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 13px; }
+.form-row input, .form-row select { width: 100%; padding: 6px 8px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 13px; transition: border-color 0.15s; }
+.form-row input:focus, .form-row select:focus { outline: none; border-color: var(--accent); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 
 /* Placeholder state */
@@ -1169,14 +1170,42 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
 .acl-diff-warning { width: 100%; padding: 4px 8px; background: rgba(243,156,18,0.15); border: 1px solid var(--warning); border-radius: 4px; color: var(--warning); font-size: 11px; margin-top: 4px; }
 
 /* Robocopy pane */
-#pane-robocopy { padding: 16px; overflow-y: auto; }
-.mode-toggle { display: flex; gap: 0; margin-bottom: 16px; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; width: fit-content; }
-.mode-toggle button { padding: 6px 16px; border: none; cursor: pointer; font-size: 12px; background: var(--bg-input); color: var(--text-muted); }
-.mode-toggle button.active { background: var(--accent); color: #fff; }
-.robo-form { display: flex; flex-direction: column; gap: 10px; max-width: 600px; }
-.robo-form label { font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 3px; }
+#pane-robocopy { padding: 20px 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 0; }
+
+/* Mode selector cards */
+.robo-mode-cards { display: flex; gap: 8px; margin-bottom: 20px; }
+.robo-mode-card { flex: 1; max-width: 220px; padding: 10px 14px; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; background: var(--bg-input); transition: border-color 0.15s, background 0.15s; }
+.robo-mode-card:hover { border-color: var(--accent); background: var(--bg-hover); }
+.robo-mode-card.active { border-color: var(--accent); background: rgba(93,173,226,0.08); }
+.robo-mode-card .card-title { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 2px; }
+.robo-mode-card.active .card-title { color: var(--accent); }
+.robo-mode-card .card-desc { font-size: 11px; color: var(--text-muted); line-height: 1.4; }
+
+/* Form sections */
+.robo-form { display: flex; flex-direction: column; gap: 12px; max-width: 580px; }
+.robo-form label { font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 4px; }
 .robo-form input, .robo-form select { padding: 6px 8px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 13px; width: 100%; }
-.robo-output { margin-top: 14px; font-family: monospace; font-size: 11px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 4px; padding: 10px; white-space: pre-wrap; max-height: 300px; overflow-y: auto; color: var(--text-muted); }
+.robo-form input:focus, .robo-form select:focus { outline: none; border-color: var(--accent); }
+
+/* Advanced options disclosure */
+.robo-advanced { margin-top: 4px; }
+.robo-advanced summary { font-size: 12px; color: var(--text-muted); cursor: pointer; user-select: none; padding: 6px 0; display: flex; align-items: center; gap: 6px; list-style: none; }
+.robo-advanced summary::-webkit-details-marker { display: none; }
+.robo-advanced summary::before { content: '▶'; font-size: 9px; transition: transform 0.15s; display: inline-block; }
+.robo-advanced[open] summary::before { transform: rotate(90deg); }
+.robo-advanced summary:hover { color: var(--text); }
+.robo-advanced-body { display: flex; flex-direction: column; gap: 10px; padding-top: 10px; border-top: 1px solid var(--border); margin-top: 6px; }
+
+/* Output area */
+.robo-output-wrap { margin-top: 20px; max-width: 580px; }
+.robo-output-header { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; background: var(--bg-hover); border: 1px solid var(--border); border-bottom: none; border-radius: 4px 4px 0 0; font-size: 11px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.robo-output-header .robo-exit-badge { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 3px; }
+.robo-output-header .robo-exit-badge.ok { background: rgba(46,204,113,0.15); color: var(--success); }
+.robo-output-header .robo-exit-badge.warn { background: rgba(243,156,18,0.15); color: var(--warning); }
+.robo-output { font-family: 'Consolas', monospace; font-size: 11px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 0 0 4px 4px; padding: 10px; white-space: pre-wrap; height: 200px; overflow-y: auto; color: var(--text-muted); }
+.robo-output.placeholder { display: flex; align-items: center; justify-content: center; color: var(--text-muted); font-family: 'Segoe UI', sans-serif; font-size: 12px; font-style: italic; }
+
+/* File list */
 .robo-file-list { border: 1px solid var(--border); border-radius: 4px; max-height: 180px; overflow-y: auto; background: var(--bg-input); }
 .robo-file-item { display: flex; align-items: center; gap: 6px; padding: 4px 8px; font-size: 12px; border-bottom: 1px solid var(--border); }
 .robo-file-item:last-child { border-bottom: none; }
@@ -1195,6 +1224,24 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
 .path-header { padding: 8px 16px; background: var(--bg-card); border-bottom: 1px solid var(--border); font-size: 12px; color: var(--text-muted); flex-shrink: 0; display: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .path-header .path-drive { color: var(--accent); font-weight: 600; }
 .path-header .path-rest { color: var(--text); }
+
+/* Overflow action menu */
+.folder-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; align-items: center; }
+.action-overflow { position: relative; display: inline-block; }
+.action-overflow-btn { padding: 5px 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-hover); color: var(--text-muted); cursor: pointer; font-size: 13px; line-height: 1; transition: background 0.15s, color 0.15s; }
+.action-overflow-btn:hover { background: var(--border); color: var(--text); }
+.action-overflow-menu { position: absolute; top: calc(100% + 4px); left: 0; background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; min-width: 210px; z-index: 50; box-shadow: 0 4px 16px var(--shadow); padding: 4px 0; opacity: 0; pointer-events: none; transform: translateY(-4px); transition: opacity 0.12s ease-out, transform 0.12s ease-out; }
+.action-overflow-menu.open { opacity: 1; pointer-events: auto; transform: translateY(0); }
+.overflow-item { display: flex; align-items: center; gap: 8px; padding: 7px 12px; font-size: 12px; cursor: pointer; color: var(--text); white-space: nowrap; }
+.overflow-item:hover { background: var(--bg-hover); }
+.overflow-item svg { flex-shrink: 0; color: var(--text-muted); }
+.overflow-item.danger { color: var(--danger); }
+.overflow-item.danger svg { color: var(--danger); }
+.overflow-divider { height: 1px; background: var(--border); margin: 4px 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+}
 </style>
 </head>
 <body>
@@ -1221,7 +1268,8 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
 <div class="main">
   <!-- Left panel: folder tree -->
   <div class="panel-left">
-    <div class="panel-left-header">Folders</div>
+    <div class="panel-left-header" id="panelLeftHeader">Folders</div>
+    <div id="panelLeftHint" style="padding:4px 12px 6px;font-size:11px;color:var(--accent);display:none;border-bottom:1px solid var(--border);">Click a folder to set as source</div>
     <div class="tree-container" id="treeContainer"></div>
   </div>
 
@@ -1253,10 +1301,28 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
         <div class="folder-actions">
           <button class="btn btn-primary btn-icon" onclick="showAddAceModal('folder')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Add Permission</button>
           <button class="btn btn-secondary btn-icon" onclick="showRemoveAceModal('folder')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"/></svg>Remove Permission</button>
-          <button class="btn btn-secondary btn-icon" onclick="takeOwnership(false)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>Take Ownership</button>
-          <button class="btn btn-secondary btn-icon" onclick="takeOwnership(true)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>Take Ownership (All Files Too)</button>
-          <button class="btn btn-secondary btn-icon" onclick="showReplicateModal()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Copy Permissions To...</button>
-          <button class="btn btn-secondary btn-icon" id="btnExport" onclick="exportReport()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Export CSV</button>
+          <div class="action-overflow" id="folderOverflow">
+            <button class="action-overflow-btn" onclick="toggleOverflow('folderOverflow')" title="More actions">•••</button>
+            <div class="action-overflow-menu" id="folderOverflowMenu">
+              <div class="overflow-item" onclick="closeOverflow('folderOverflow'); takeOwnership(false)">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                Take Ownership
+              </div>
+              <div class="overflow-item danger" onclick="closeOverflow('folderOverflow'); takeOwnership(true)">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                Take Ownership — All Files Too
+              </div>
+              <div class="overflow-divider"></div>
+              <div class="overflow-item" onclick="closeOverflow('folderOverflow'); showReplicateModal()">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                Copy Permissions To...
+              </div>
+              <div class="overflow-item" id="overflowExport" onclick="closeOverflow('folderOverflow'); exportReport()">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Export CSV
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1276,7 +1342,7 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
           <button class="btn btn-primary btn-icon" onclick="showAddAceModal('files')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Add Permission</button>
           <button class="btn btn-secondary btn-icon" onclick="showRemoveAceModal('files')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"/></svg>Remove Permission</button>
           <button class="btn btn-secondary btn-icon" onclick="takeFileOwnership()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>Take Ownership</button>
-          <button class="btn btn-secondary btn-icon" onclick="showCopyFilesModal()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Copy to...</button>
+          <button class="btn btn-secondary btn-icon" onclick="showCopyFilesModal()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Copy Files To...</button>
           <div class="acl-diff-warning" id="aclDiffWarning" style="display:none;">
             Selected files have different permissions — this operation applies uniformly to all
           </div>
@@ -1287,50 +1353,77 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
 
     <!-- Robocopy tab pane -->
     <div class="tab-pane" id="pane-robocopy">
-      <div class="mode-toggle">
-        <button class="active" id="roboModeFolderBtn" onclick="setRoboMode('folder')">Folder copy</button>
-        <button id="roboModeFileBtn" onclick="setRoboMode('file')">File copy</button>
+
+      <!-- Mode selector -->
+      <div class="robo-mode-cards">
+        <div class="robo-mode-card active" id="roboModeFolderCard" onclick="setRoboMode('folder')" title="Sync a folder">
+          <div class="card-title">Sync a folder</div>
+          <div class="card-desc">Copy or mirror an entire directory tree to another location</div>
+        </div>
+        <div class="robo-mode-card" id="roboModeFileCard" onclick="setRoboMode('file')" title="Copy specific files">
+          <div class="card-title">Copy specific files</div>
+          <div class="card-desc">Pick individual files from a folder and copy them to a destination</div>
+        </div>
       </div>
 
-      <!-- Folder copy mode -->
+      <!-- Folder sync mode -->
       <div id="roboFolderForm" class="robo-form">
-        <div><label>Source folder</label><input type="text" id="roboSrc" placeholder="\\server\share\source"></div>
-        <div><label>Destination folder</label><input type="text" id="roboDst" placeholder="\\server\share\dest"></div>
+        <div><label>Source folder</label><input type="text" id="roboSrc" placeholder="\\server\share\source or C:\local\path"></div>
+        <div><label>Destination folder</label><input type="text" id="roboDst" placeholder="\\server\share\dest or C:\local\dest"></div>
         <div>
-          <label>Mode</label>
-          <select id="roboMode">
-            <option value="copy">Copy (/E — all subdirs including empty)</option>
-            <option value="mirror">Mirror (/MIR — deletes files not in source)</option>
+          <label>Copy mode</label>
+          <select id="roboMode" onchange="updateMirrorWarning()">
+            <option value="copy">Copy — add and update files, keep files that only exist in destination</option>
+            <option value="mirror">Mirror — make destination an exact copy (deletes extra files in destination)</option>
           </select>
         </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">
-          <div><label>Threads (/MT)</label><input type="number" id="roboThreads" value="8" min="1" max="128"></div>
-          <div><label>Retries (/R)</label><input type="number" id="roboRetries" value="3" min="0"></div>
-          <div><label>Wait (/W sec)</label><input type="number" id="roboWait" value="5" min="0"></div>
+        <div id="mirrorWarning" style="display:none; padding:8px 10px; background:rgba(243,156,18,0.12); border:1px solid var(--warning); border-radius:4px; font-size:12px; color:var(--warning);">
+          <strong>Warning:</strong> Mirror mode will permanently delete any files in the destination that don't exist in the source. This cannot be undone.
         </div>
-        <div><label>Extra flags (optional)</label><input type="text" id="roboExtra" placeholder="/XF *.tmp /XD .git"></div>
-        <div><label>Log file path (optional)</label><input type="text" id="roboLog" placeholder="Leave empty to skip"></div>
-        <div style="display:flex;gap:8px;">
+
+        <!-- Advanced options -->
+        <details class="robo-advanced">
+          <summary>Advanced options</summary>
+          <div class="robo-advanced-body">
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
+              <div><label>Parallel threads</label><input type="number" id="roboThreads" value="8" min="1" max="128" title="Number of parallel copy threads (/MT)"></div>
+              <div><label>Retry attempts</label><input type="number" id="roboRetries" value="3" min="0" title="Times to retry a failed file copy (/R)"></div>
+              <div><label>Retry wait (sec)</label><input type="number" id="roboWait" value="5" min="0" title="Seconds to wait between retries (/W)"></div>
+            </div>
+            <div><label>Extra flags <span style="font-weight:400;font-style:italic;">(e.g. /XF *.tmp /XD .git)</span></label><input type="text" id="roboExtra" placeholder="Optional additional robocopy flags"></div>
+            <div><label>Log file path <span style="font-weight:400;font-style:italic;">(leave empty to skip)</span></label><input type="text" id="roboLog" placeholder="C:\Logs\robocopy.log"></div>
+          </div>
+        </details>
+
+        <div style="display:flex;gap:8px;margin-top:4px;">
           <button class="btn btn-secondary btn-icon" id="btnRoboPreview" onclick="roboPreview()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>Preview</button>
-          <button class="btn btn-primary btn-icon" id="btnRobocopy" onclick="runRobocopy()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>Run Robocopy</button>
+          <button class="btn btn-primary btn-icon" id="btnRobocopy" onclick="runRobocopy()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>Run Copy</button>
         </div>
       </div>
 
-      <!-- File copy mode -->
+      <!-- File picker mode -->
       <div id="roboFileForm" class="robo-form" style="display:none;">
         <div style="display:flex;gap:8px;align-items:flex-end;">
-          <div style="flex:1;"><label>Source folder</label><input type="text" id="roboFileSrc" placeholder="\\server\share\source" oninput="loadRoboFileList()"></div>
+          <div style="flex:1;"><label>Source folder</label><input type="text" id="roboFileSrc" placeholder="\\server\share\source or C:\local\path"></div>
           <button class="btn btn-secondary" style="margin-bottom:0;" onclick="loadRoboFileList()">Load files</button>
         </div>
-        <div><label>Select files to copy</label><div class="robo-file-list" id="roboFileList"><span style="padding:8px;color:var(--text-muted);font-size:12px;display:block;">Enter a source folder above</span></div></div>
-        <div><label>Destination folder</label><input type="text" id="roboFileDst" placeholder="\\server\share\dest"></div>
-        <div><label>Extra flags (optional)</label><input type="text" id="roboFileExtra" placeholder="/XO"></div>
-        <div>
+        <div><label>Select files to copy</label><div class="robo-file-list" id="roboFileList"><span style="padding:8px;color:var(--text-muted);font-size:12px;display:block;">Enter a source folder above, then click Load files</span></div></div>
+        <div><label>Destination folder</label><input type="text" id="roboFileDst" placeholder="\\server\share\dest or C:\local\dest"></div>
+        <div><label>Extra flags <span style="font-weight:400;font-style:italic;">(optional)</span></label><input type="text" id="roboFileExtra" placeholder="/XO"></div>
+        <div style="margin-top:4px;">
           <button class="btn btn-primary btn-icon" id="btnRobocopyFiles" onclick="runRobocopyFiles()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>Copy Selected Files</button>
         </div>
       </div>
 
-      <div class="robo-output" id="roboOutput" style="display:none;"></div>
+      <!-- Output area — always visible -->
+      <div class="robo-output-wrap">
+        <div class="robo-output-header">
+          <span>Output</span>
+          <span id="roboExitBadge"></span>
+        </div>
+        <div class="robo-output placeholder" id="roboOutput">Run a copy to see output here</div>
+      </div>
+
     </div><!-- /pane-robocopy -->
 
     <div class="status-bar" id="statusBar">Ready</div>
@@ -1427,6 +1520,34 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
   </div>
 </div>
 
+<!-- Mirror confirmation modal -->
+<div class="modal-overlay" id="mirrorConfirmModal">
+  <div class="modal" style="max-width:480px;">
+    <h3 style="color:var(--warning);">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:6px;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      Confirm Mirror Operation
+    </h3>
+    <p style="font-size:12px;margin-bottom:10px;">Mirror will make the destination an <strong>exact copy</strong> of the source. Files in the destination that don't exist in the source <strong>will be permanently deleted</strong>.</p>
+    <div style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;padding:8px 10px;font-size:12px;margin-bottom:12px;">
+      <div style="color:var(--text-muted);margin-bottom:4px;">Source</div>
+      <div id="mirrorConfirmSrc" style="color:var(--text);word-break:break-all;"></div>
+      <div style="color:var(--text-muted);margin:6px 0 4px;">Destination (files may be deleted)</div>
+      <div id="mirrorConfirmDst" style="color:var(--danger);word-break:break-all;"></div>
+    </div>
+    <div class="form-row">
+      <label style="color:var(--text);">Type <strong>MIRROR</strong> to confirm</label>
+      <input type="text" id="mirrorConfirmInput" placeholder="MIRROR" autocomplete="off" spellcheck="false"
+        oninput="document.getElementById('btnMirrorConfirm').disabled = this.value !== 'MIRROR'; document.getElementById('mirrorConfirmError').style.display='none';"
+        onkeydown="if(event.key==='Enter' && this.value==='MIRROR') document.getElementById('btnMirrorConfirm').click();">
+    </div>
+    <div id="mirrorConfirmError" style="display:none;font-size:12px;color:var(--danger);margin-bottom:8px;">Type MIRROR exactly to confirm</div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('mirrorConfirmModal')">Cancel</button>
+      <button class="btn btn-danger" id="btnMirrorConfirm" disabled>Run Mirror</button>
+    </div>
+  </div>
+</div>
+
 <script>
 
 // --- State ---
@@ -1455,6 +1576,24 @@ function api(url, opts) {
 
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
 function openModal(id)  { document.getElementById(id).classList.add('open'); }
+
+function toggleOverflow(wrapperId) {
+    var menu = document.getElementById(wrapperId + 'Menu');
+    var isOpen = menu.classList.contains('open');
+    // Close all open overflow menus first
+    document.querySelectorAll('.action-overflow-menu.open').forEach(function(m) { m.classList.remove('open'); });
+    if (!isOpen) menu.classList.add('open');
+}
+function closeOverflow(wrapperId) {
+    var menu = document.getElementById(wrapperId + 'Menu');
+    if (menu) menu.classList.remove('open');
+}
+// Close overflow menus on outside click
+document.addEventListener('click', function(e) {
+    if (!e.target.closest('.action-overflow')) {
+        document.querySelectorAll('.action-overflow-menu.open').forEach(function(m) { m.classList.remove('open'); });
+    }
+});
 
 function updateThemeButton(isLight) {
     var lbl = document.getElementById('btnThemeLabel');
@@ -1485,6 +1624,8 @@ function initTheme() {
 function switchTab(name) {
     document.querySelectorAll('.tab').forEach(function(t) { t.classList.toggle('active', t.dataset.tab === name); });
     document.querySelectorAll('.tab-pane').forEach(function(p) { p.classList.toggle('active', p.id === 'pane-' + name); });
+    var hint = document.getElementById('panelLeftHint');
+    if (hint) hint.style.display = name === 'robocopy' ? 'block' : 'none';
 }
 
 function shutdown() {
@@ -1561,6 +1702,25 @@ function selectFolder(path) {
     document.querySelectorAll('.tree-node').forEach(function(n) {
         n.classList.toggle('selected', n.dataset.path === path);
     });
+
+    // Detect active tab — tree drives different behavior per tab
+    var activeTab = (document.querySelector('.tab.active') || {}).dataset && document.querySelector('.tab.active').dataset.tab;
+
+    if (activeTab === 'robocopy') {
+        // On Robocopy tab: populate whichever source field is visible
+        var folderFormVisible = document.getElementById('roboFolderForm').style.display !== 'none';
+        if (folderFormVisible) {
+            document.getElementById('roboSrc').value = path;
+            setStatus('Source set to: ' + path, 'info');
+        } else {
+            document.getElementById('roboFileSrc').value = path;
+            loadRoboFileList();
+            setStatus('Source set to: ' + path + ' — loading files...', 'info');
+        }
+        return; // don't load ACL
+    }
+
+    // Permissions tab behavior
     currentFolder = path;
     checkedFiles.clear();
     fileAclCache = {};
@@ -1888,12 +2048,24 @@ function submitCopyFiles() {
 }
 
 // --- Robocopy tab ---
+function updateMirrorWarning() {
+    var mode = document.getElementById('roboMode').value;
+    document.getElementById('mirrorWarning').style.display = mode === 'mirror' ? 'block' : 'none';
+}
+
 function setRoboMode(mode) {
     document.getElementById('roboFolderForm').style.display = mode === 'folder' ? 'flex' : 'none';
     document.getElementById('roboFileForm').style.display  = mode === 'file'   ? 'flex' : 'none';
-    document.getElementById('roboModeFolderBtn').classList.toggle('active', mode === 'folder');
-    document.getElementById('roboModeFileBtn').classList.toggle('active', mode === 'file');
-    document.getElementById('roboOutput').style.display = 'none';
+    document.getElementById('roboModeFolderCard').classList.toggle('active', mode === 'folder');
+    document.getElementById('roboModeFileCard').classList.toggle('active', mode === 'file');
+    // Hide mirror warning when switching modes
+    if (mode !== 'folder') document.getElementById('mirrorWarning').style.display = 'none';
+    // Reset output to placeholder state
+    var out = document.getElementById('roboOutput');
+    out.className = 'robo-output placeholder';
+    out.textContent = 'Run a copy to see output here';
+    document.getElementById('roboExitBadge').textContent = '';
+    document.getElementById('roboExitBadge').className = 'robo-exit-badge';
 }
 
 function loadRoboFileList() {
@@ -1925,18 +2097,51 @@ function runRobocopy() {
     var wait    = parseInt(document.getElementById('roboWait').value) || 5;
     var extra   = document.getElementById('roboExtra').value.trim();
     var log     = document.getElementById('roboLog').value.trim();
-    if (!src || !dst) { setStatus('Source and destination are required', 'error'); return; }
-    document.getElementById('btnRobocopy').disabled = true;
-    document.getElementById('btnRoboPreview').disabled = true;
-    setStatus('Running robocopy...', 'info');
+    if (!src) { setStatus('Source folder is required', 'error'); return; }
+    if (!dst) { setStatus('Destination folder is required', 'error'); return; }
+    if (src.replace(/[\\\/]+$/, '').toLowerCase() === dst.replace(/[\\\/]+$/, '').toLowerCase()) {
+        setStatus('Source and destination cannot be the same folder', 'error'); return;
+    }
+    if (mode === 'mirror') {
+        showMirrorConfirm(src, dst, threads, retries, wait, extra, log);
+        return;
+    }
+    executeRobocopy(src, dst, mode, threads, retries, wait, extra, log);
+}
+
+function showMirrorConfirm(src, dst, threads, retries, wait, extra, log) {
+    document.getElementById('mirrorConfirmSrc').textContent = src;
+    document.getElementById('mirrorConfirmDst').textContent = dst;
+    document.getElementById('mirrorConfirmInput').value = '';
+    document.getElementById('mirrorConfirmError').style.display = 'none';
+    document.getElementById('btnMirrorConfirm').disabled = true;
+    // Store params for the confirmed callback
+    document.getElementById('btnMirrorConfirm').onclick = function() {
+        if (document.getElementById('mirrorConfirmInput').value !== 'MIRROR') {
+            document.getElementById('mirrorConfirmError').style.display = 'block';
+            return;
+        }
+        closeModal('mirrorConfirmModal');
+        executeRobocopy(src, dst, 'mirror', threads, retries, wait, extra, log);
+    };
+    document.getElementById('mirrorConfirmModal').classList.add('open');
+    setTimeout(function() { document.getElementById('mirrorConfirmInput').focus(); }, 50);
+}
+
+function executeRobocopy(src, dst, mode, threads, retries, wait, extra, log) {
+    var btn = document.getElementById('btnRobocopy');
+    var prevBtn = document.getElementById('btnRoboPreview');
+    btn.disabled = true;
+    prevBtn.disabled = true;
+    setStatus('Running copy...', 'info');
     api('/api/robocopy', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ source: src, destination: dst, mode: mode, threads: threads, retries: retries, waitTime: wait, extraFlags: extra || null, logFile: log || null }) })
         .then(function(r) {
             showRoboOutput(r);
             var ok = r.exitCode === 0 || r.exitCode === 1;
-            setStatus((ok ? 'Robocopy complete: ' : 'Robocopy finished with warnings/errors: ') + (r.exitMeaning || r.status || ''), ok ? 'success' : 'warning');
+            setStatus((ok ? 'Copy complete: ' : 'Copy finished with warnings/errors: ') + (r.exitMeaning || r.status || ''), ok ? 'success' : 'warning');
         })
-        .catch(function(e) { setStatus('Robocopy failed: ' + e.message, 'error'); })
-        .finally(function() { document.getElementById('btnRobocopy').disabled = false; document.getElementById('btnRoboPreview').disabled = false; });
+        .catch(function(e) { setStatus('Copy failed: ' + e.message, 'error'); })
+        .finally(function() { btn.disabled = false; prevBtn.disabled = false; });
 }
 
 function roboPreview() {
@@ -1948,8 +2153,11 @@ function roboPreview() {
     api('/api/robocopy-preview?source=' + encodeURIComponent(src) + '&destination=' + encodeURIComponent(dst))
         .then(function(r) {
             var out = document.getElementById('roboOutput');
-            out.style.display = 'block';
+            out.className = 'robo-output';
             out.textContent = 'Preview: ' + r.dirs + ' dirs, ' + r.files + ' files, ' + r.sizeDisplay + '\n\n' + (r.rawSummary || '');
+            var badge = document.getElementById('roboExitBadge');
+            badge.textContent = 'Preview';
+            badge.className = 'robo-exit-badge ok';
             setStatus('Preview complete', 'success');
         })
         .catch(function(e) { setStatus('Preview failed: ' + e.message, 'error'); })
@@ -1960,7 +2168,11 @@ function runRobocopyFiles() {
     var src   = document.getElementById('roboFileSrc').value.trim();
     var dst   = document.getElementById('roboFileDst').value.trim();
     var extra = document.getElementById('roboFileExtra').value.trim();
-    if (!src || !dst) { setStatus('Source and destination are required', 'error'); return; }
+    if (!src) { setStatus('Source folder is required', 'error'); return; }
+    if (!dst) { setStatus('Destination folder is required', 'error'); return; }
+    if (src.replace(/[\\\/]+$/, '').toLowerCase() === dst.replace(/[\\\/]+$/, '').toLowerCase()) {
+        setStatus('Source and destination cannot be the same folder', 'error'); return;
+    }
     var checked = Array.from(document.querySelectorAll('#roboFileList input[type=checkbox]:checked')).map(function(cb) { return cb.value; });
     if (!checked.length) { setStatus('Select at least one file to copy', 'error'); return; }
     document.getElementById('btnRobocopyFiles').disabled = true;
@@ -1977,8 +2189,12 @@ function runRobocopyFiles() {
 
 function showRoboOutput(r) {
     var out = document.getElementById('roboOutput');
-    out.style.display = 'block';
+    out.className = 'robo-output'; // remove placeholder class
     out.textContent = 'Command: ' + r.command + '\nExit code: ' + r.exitCode + ' — ' + (r.exitMeaning || r.status || '') + '\n\n' + (r.output || '');
+    var ok = r.exitCode === 0 || r.exitCode === 1;
+    var badge = document.getElementById('roboExitBadge');
+    badge.textContent = 'Exit ' + r.exitCode + ' — ' + (r.exitMeaning || (ok ? 'Success' : 'Error'));
+    badge.className = 'robo-exit-badge ' + (ok ? 'ok' : 'warn');
 }
 
 // --- Init ---
