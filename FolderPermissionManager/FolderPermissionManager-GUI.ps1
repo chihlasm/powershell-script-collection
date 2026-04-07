@@ -551,6 +551,49 @@ function Invoke-ExportReport {
     $Response.OutputStream.Close()
 }
 
+function Get-FileAcl {
+    param(
+        [System.Net.HttpListenerRequest]$Request,
+        [System.Net.HttpListenerResponse]$Response
+    )
+
+    $filePath = Resolve-MappedDrive $Request.QueryString['path']
+    if (-not $filePath -or -not (Test-Path $filePath -PathType Leaf)) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Invalid or missing path parameter" }
+        return
+    }
+
+    try {
+        $acl = Get-Acl -Path $filePath -ErrorAction Stop
+        $entries = @($acl.Access | ForEach-Object {
+            [PSCustomObject]@{
+                identity         = $_.IdentityReference.ToString()
+                rights           = $_.FileSystemRights.ToString()
+                type             = $_.AccessControlType.ToString()
+                isInherited      = $_.IsInherited
+                inheritanceFlags = $_.InheritanceFlags.ToString()
+                propagationFlags = $_.PropagationFlags.ToString()
+            }
+        })
+        $result = [PSCustomObject]@{
+            path                    = $filePath
+            owner                   = $acl.Owner
+            areAccessRulesProtected = $acl.AreAccessRulesProtected
+            entries                 = $entries
+        }
+        Send-Json $Response $result
+    }
+    catch [System.UnauthorizedAccessException] {
+        $Response.StatusCode = 403
+        Send-Json $Response @{ error = "Access denied to '$filePath'. Try taking ownership first." }
+    }
+    catch {
+        $Response.StatusCode = 500
+        Send-Json $Response @{ error = "Failed to read ACL: $($_.Exception.Message)" }
+    }
+}
+
 function Invoke-Robocopy {
     param(
         [System.Net.HttpListenerRequest]$Request,
