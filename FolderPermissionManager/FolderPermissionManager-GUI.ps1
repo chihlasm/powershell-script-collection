@@ -682,6 +682,48 @@ function Invoke-RemoveFileAce {
     Send-Json $Response @{ status = 'complete'; results = @($results) }
 }
 
+function Invoke-TakeFileOwnership {
+    param(
+        [System.Net.HttpListenerRequest]$Request,
+        [System.Net.HttpListenerResponse]$Response
+    )
+
+    $body  = Read-RequestBody $Request
+    $paths = @($body.paths)
+
+    if (-not $paths -or $paths.Count -eq 0) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Missing required field: paths" }
+        return
+    }
+
+    # Resolve the current identity once — $env:USERNAME is unreliable under SYSTEM/service accounts
+    $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $ownerAccount    = [System.Security.Principal.NTAccount]::new($currentIdentity)
+
+    $results = [System.Collections.Generic.List[object]]::new()
+    foreach ($rawPath in $paths) {
+        $filePath = Resolve-MappedDrive $rawPath
+        if (-not $filePath -or -not (Test-Path $filePath -PathType Leaf)) {
+            $results.Add([PSCustomObject]@{ path = $rawPath; status = 'error'; message = 'Path not found or not a file' })
+            continue
+        }
+        try {
+            # takeown forces OS-level ownership grant (uses SE_TAKE_OWNERSHIP privilege)
+            $null = takeown /F $filePath /A /D Y 2>&1
+            # Then set owner via .NET ACL API — same pattern as folder ownership in Invoke-TakeOwnership
+            $acl = Get-Acl -Path $filePath -ErrorAction Stop
+            $acl.SetOwner($ownerAccount)
+            Set-Acl -Path $filePath -AclObject $acl -ErrorAction Stop
+            $results.Add([PSCustomObject]@{ path = $filePath; status = 'success'; message = "Ownership taken by $currentIdentity" })
+        }
+        catch {
+            $results.Add([PSCustomObject]@{ path = $rawPath; status = 'error'; message = $_.Exception.Message })
+        }
+    }
+    Send-Json $Response @{ status = 'complete'; results = @($results) }
+}
+
 function Invoke-Robocopy {
     param(
         [System.Net.HttpListenerRequest]$Request,
