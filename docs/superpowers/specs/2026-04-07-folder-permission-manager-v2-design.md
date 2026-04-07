@@ -36,7 +36,7 @@ Operations available when one or more files are checked:
 | **View ACL** | Click a single file row (▶) to expand its ACL inline — identity, rights, type, inherited flag |
 | **Add ACE** | Same dialog as folder add — identity text input, rights dropdown, allow/deny toggle. Applied to all checked files. |
 | **Remove ACE** | Identity picker drawn from the combined list of unique identities across all checked files' ACLs. Applied to all checked files. |
-| **Take Ownership** | Runs `takeown /F <file>` + `icacls <file> /setowner %USERNAME%` per file. Results shown per-file (success/error). |
+| **Take Ownership** | Runs `takeown /F <file>` per file, then sets owner via .NET `SetOwner()` using the resolved current identity. Results shown per-file (success/error). |
 | **Copy to...** | Opens modal with destination folder input (browseable via folder tree). Fires `POST /api/robocopy-files`. Shows robocopy output summary. |
 
 **ACL diff advisory:** Before firing any batch operation, the frontend compares ACE lists across selected files. If they differ, the yellow banner is shown. The operation still proceeds — it is advisory only, not a blocker.
@@ -60,6 +60,7 @@ Returns ACL for a single file.
 Adds an ACE to one or more files.
 
 - Body: `{ paths: string[], identity: string, rights: string, type: "Allow"|"Deny" }`
+- Each path in `paths[]` validated with `Test-Path -PathType Leaf` before operating — invalid paths skipped with per-entry error, not a full abort
 - Same `FileSystemAccessRule` logic as `Invoke-AddAce` but iterates `paths[]`
 - Returns: `{ status, results: [{ path, status, message }] }`
 
@@ -68,6 +69,7 @@ Adds an ACE to one or more files.
 Removes an ACE from one or more files.
 
 - Body: `{ paths: string[], identity: string, rights: string, type: "Allow"|"Deny" }`
+- Each path in `paths[]` validated with `Test-Path -PathType Leaf` before operating — invalid paths skipped with per-entry error, not a full abort
 - Same `RemoveAccessRuleAll` logic as `Invoke-RemoveAce` but iterates `paths[]`
 - Returns: `{ status, results: [{ path, status, message }] }`
 
@@ -76,7 +78,10 @@ Removes an ACE from one or more files.
 Takes ownership of one or more files.
 
 - Body: `{ paths: string[] }`
-- Per file: `takeown /F <file>` then `icacls <file> /setowner %USERNAME% /C /Q`
+- Resolve the current identity once at the start of the function using `[System.Security.Principal.WindowsIdentity]::GetCurrent().Name` — do not use `$env:USERNAME` (unreliable under SYSTEM/service accounts) or `%USERNAME%` (CMD variable, not valid in PowerShell)
+- Per file: `takeown /F <file>` (forces OS-level ownership grant), then `Get-Acl` / `SetOwner()` / `Set-Acl` using the resolved identity — same pattern as `Invoke-TakeOwnership` for folders
+- Log the resolved identity in the per-file result message so it's visible in the UI
+- All paths validated with `Test-Path -PathType Leaf` before operating
 - Returns: `{ status, results: [{ path, status, message }] }`
 
 ### `POST /api/robocopy-files`
@@ -84,11 +89,16 @@ Takes ownership of one or more files.
 Copies specific files to a destination folder, preserving ACLs.
 
 - Body: `{ sourceDir: string, destDir: string, files: string[], extraFlags?: string }`
-- Command: `robocopy "<sourceDir>" "<destDir>" "file1" "file2" /COPY:DATSOU /SECFIX /ZB /NP /R:3 /W:5`
+- Reject with 400 if `files` is null, missing, or empty — an empty array must never fall through to a full directory copy
+- All paths in `files` validated with `Test-Path -PathType Leaf` before invoking robocopy
+- Command: `robocopy "<sourceDir>" "<destDir>" "file1" "file2" /COPY:DATSO /SECFIX /ZB /NP /R:3 /W:5`
 - `/SECFIX` is required for files — without it, robocopy skips ACL copying on unchanged files
+- Use `/COPY:DATSO` (drop the `U` auditing flag) — `U` requires `SeSecurityPrivilege` (Backup Operator or higher); silently skipping or partially failing in standard MSP environments is worse than not requesting it. Document this decision in a comment.
 - Returns same summary shape as existing `Invoke-Robocopy`: `{ success, exitCode, message, command, output }`
 
-**Note:** `/SECFIX` must always be paired with a `/COPY:` flag that includes `S` (security). `/COPY:DATSOU` satisfies this. Omitting `/COPY:S` causes robocopy to error: `"ERROR: /SECFIX specified, without specifying WHICH security info to copy."`
+**Note:** `/SECFIX` must always be paired with a `/COPY:` flag that includes `S` (security). `/COPY:DATSO` satisfies this. Omitting `/COPY:S` causes robocopy to error: `"ERROR: /SECFIX specified, without specifying WHICH security info to copy."`
+
+**Note on robocopy version variance:** `/SECFIX` behavior is consistent across Windows 10 (build 1607+) and Windows 11. If targeting pre-1607 systems, `/SECFIX` is unavailable — not expected in this MSP environment but worth noting.
 
 ---
 
@@ -131,6 +141,6 @@ Follows existing conventions — no new patterns introduced:
 | Scenario | Command shape |
 | --- | --- |
 | Folder copy (existing) | `robocopy "<src>" "<dst>" /E /COPY:DATSOU /DCOPY:DAT /ZB /NP /R:3 /W:5` |
-| File copy (new) | `robocopy "<srcDir>" "<dstDir>" "f1" "f2" /COPY:DATSOU /SECFIX /ZB /NP /R:3 /W:5` |
+| File copy (new) | `robocopy "<srcDir>" "<dstDir>" "f1" "f2" /COPY:DATSO /SECFIX /ZB /NP /R:3 /W:5` |
 
 Both are supported on Windows 10 and Windows 11.
