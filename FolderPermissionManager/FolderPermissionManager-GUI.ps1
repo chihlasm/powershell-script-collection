@@ -594,6 +594,94 @@ function Get-FileAcl {
     }
 }
 
+function Invoke-AddFileAce {
+    param(
+        [System.Net.HttpListenerRequest]$Request,
+        [System.Net.HttpListenerResponse]$Response
+    )
+
+    $body     = Read-RequestBody $Request
+    $paths    = @($body.paths)
+    $identity = $body.identity
+    $rights   = $body.rights
+    $type     = $body.type
+
+    if (-not $paths -or $paths.Count -eq 0 -or -not $identity -or -not $rights) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Missing required fields: paths, identity, rights" }
+        return
+    }
+
+    $results = [System.Collections.Generic.List[object]]::new()
+    foreach ($rawPath in $paths) {
+        $filePath = Resolve-MappedDrive $rawPath
+        if (-not $filePath -or -not (Test-Path $filePath -PathType Leaf)) {
+            $results.Add([PSCustomObject]@{ path = $rawPath; status = 'error'; message = 'Path not found or not a file' })
+            continue
+        }
+        try {
+            $acl        = Get-Acl -Path $filePath -ErrorAction Stop
+            $accessType = if ($type -eq 'Deny') { [System.Security.AccessControl.AccessControlType]::Deny } else { [System.Security.AccessControl.AccessControlType]::Allow }
+            $fileRights = [System.Security.AccessControl.FileSystemRights]$rights
+            $inheritance = [System.Security.AccessControl.InheritanceFlags]::None
+            $propagation = [System.Security.AccessControl.PropagationFlags]::None
+            $account    = [System.Security.Principal.NTAccount]::new($identity)
+            $rule       = [System.Security.AccessControl.FileSystemAccessRule]::new($account, $fileRights, $inheritance, $propagation, $accessType)
+            $acl.AddAccessRule($rule)
+            Set-Acl -Path $filePath -AclObject $acl -ErrorAction Stop
+            $results.Add([PSCustomObject]@{ path = $filePath; status = 'success'; message = "Added $type $rights for $identity" })
+        }
+        catch {
+            $results.Add([PSCustomObject]@{ path = $filePath; status = 'error'; message = $_.Exception.Message })
+        }
+    }
+    Send-Json $Response @{ status = 'complete'; results = @($results) }
+}
+
+function Invoke-RemoveFileAce {
+    param(
+        [System.Net.HttpListenerRequest]$Request,
+        [System.Net.HttpListenerResponse]$Response
+    )
+
+    $body     = Read-RequestBody $Request
+    $paths    = @($body.paths)
+    $identity = $body.identity
+    $rights   = $body.rights
+    $type     = $body.type
+
+    if (-not $paths -or $paths.Count -eq 0 -or -not $identity -or -not $rights) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Missing required fields: paths, identity, rights" }
+        return
+    }
+
+    $results = [System.Collections.Generic.List[object]]::new()
+    foreach ($rawPath in $paths) {
+        $filePath = Resolve-MappedDrive $rawPath
+        if (-not $filePath -or -not (Test-Path $filePath -PathType Leaf)) {
+            $results.Add([PSCustomObject]@{ path = $rawPath; status = 'error'; message = 'Path not found or not a file' })
+            continue
+        }
+        try {
+            $acl        = Get-Acl -Path $filePath -ErrorAction Stop
+            $accessType = if ($type -eq 'Deny') { [System.Security.AccessControl.AccessControlType]::Deny } else { [System.Security.AccessControl.AccessControlType]::Allow }
+            $fileRights = [System.Security.AccessControl.FileSystemRights]$rights
+            $inheritance = [System.Security.AccessControl.InheritanceFlags]::None
+            $propagation = [System.Security.AccessControl.PropagationFlags]::None
+            $account    = [System.Security.Principal.NTAccount]::new($identity)
+            $rule       = [System.Security.AccessControl.FileSystemAccessRule]::new($account, $fileRights, $inheritance, $propagation, $accessType)
+            $acl.RemoveAccessRuleAll($rule)
+            Set-Acl -Path $filePath -AclObject $acl -ErrorAction Stop
+            $results.Add([PSCustomObject]@{ path = $filePath; status = 'success'; message = "Removed $type $rights for $identity" })
+        }
+        catch {
+            $results.Add([PSCustomObject]@{ path = $filePath; status = 'error'; message = $_.Exception.Message })
+        }
+    }
+    Send-Json $Response @{ status = 'complete'; results = @($results) }
+}
+
 function Invoke-Robocopy {
     param(
         [System.Net.HttpListenerRequest]$Request,
