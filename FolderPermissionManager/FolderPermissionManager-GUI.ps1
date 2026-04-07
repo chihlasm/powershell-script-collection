@@ -1059,1737 +1059,873 @@ body.light {
     --shadow: rgba(0,0,0,0.1);
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body {
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    background: var(--bg);
-    color: var(--text);
-    overflow: hidden;
-}
-.layout {
-    display: flex;
-    min-height: 100vh;
-}
+body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
 
-/* Sidebar */
-.sidebar {
-    width: 280px;
-    min-width: 280px;
-    background: var(--bg-card);
-    border-right: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    height: 100vh;
-    position: fixed;
-    left: 0;
-    top: 0;
-    z-index: 10;
-}
-.sidebar-header {
-    padding: 20px 16px 12px;
-    border-bottom: 1px solid var(--border);
-}
-.sidebar-header h1 {
-    font-size: 14px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 1.5px;
-    color: var(--accent);
-}
-.sidebar-section {
-    padding: 12px 16px 8px;
-}
-.sidebar-section-title {
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    color: var(--text-muted);
-    margin-bottom: 8px;
-}
-.drive-list {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-}
-.drive-btn {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 6px 12px;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 12px;
-    font-family: inherit;
-    transition: all 0.15s;
-}
-.drive-btn:hover { background: var(--bg-hover); border-color: var(--accent); }
-.drive-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+/* Top nav */
+.topbar { display: flex; align-items: center; justify-content: space-between; padding: 8px 16px; background: var(--bg-card); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.topbar h1 { font-size: 14px; font-weight: 600; color: var(--accent); }
+.topbar-actions { display: flex; gap: 8px; align-items: center; }
 
-/* Tree */
-.tree-container {
-    flex: 1;
-    overflow-y: auto;
-    padding: 4px 0;
-}
-.tree-node {
-    user-select: none;
-}
-.tree-node-row {
-    display: flex;
-    align-items: center;
-    padding: 4px 8px;
-    cursor: pointer;
-    font-size: 13px;
-    white-space: nowrap;
-    transition: background 0.1s;
-}
-.tree-node-row:hover { background: var(--bg-hover); }
-.tree-node-row.active { background: var(--accent); color: #fff; }
-.tree-arrow {
-    width: 18px;
-    text-align: center;
-    font-size: 10px;
-    color: var(--text-muted);
-    flex-shrink: 0;
-    cursor: pointer;
-}
-.tree-arrow.empty { visibility: hidden; }
-.tree-icon { margin-right: 6px; font-size: 14px; flex-shrink: 0; }
-.tree-label { overflow: hidden; text-overflow: ellipsis; }
-.tree-children { display: none; }
-.tree-children.expanded { display: block; }
+/* Tab bar */
+.tabbar { display: flex; background: var(--bg-card); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.tab { padding: 8px 16px; font-size: 13px; cursor: pointer; border-bottom: 2px solid transparent; color: var(--text-muted); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 
-/* Sidebar footer */
-.sidebar-footer {
-    padding: 12px 16px;
-    border-top: 1px solid var(--border);
-}
-.theme-toggle {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 8px 16px;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 13px;
-    font-family: inherit;
-    width: 100%;
-    transition: all 0.15s;
-}
-.theme-toggle:hover { background: var(--bg-hover); }
+/* Main layout */
+.main { display: flex; flex: 1; overflow: hidden; }
 
-/* Main Content */
-.main {
-    margin-left: 280px;
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    height: 100vh;
-}
-.path-bar {
-    display: flex;
-    align-items: center;
-    padding: 10px 16px;
-    background: var(--bg-card);
-    border-bottom: 1px solid var(--border);
-    gap: 8px;
-}
-.path-bar label {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-}
-.path-input {
-    flex: 1;
-    background: var(--bg-input);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 7px 12px;
-    border-radius: 4px;
-    font-size: 13px;
-    font-family: inherit;
-}
-.path-input:focus { outline: none; border-color: var(--accent); }
+/* Left panel — folder tree */
+.panel-left { width: 280px; min-width: 200px; border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; background: var(--bg-card); }
+.panel-left-header { padding: 10px 12px; font-size: 12px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.tree-container { flex: 1; overflow-y: auto; padding: 4px 0; }
 
-/* Action Buttons */
-.toolbar-btn {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 6px 14px;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 12px;
-    font-family: inherit;
-    transition: all 0.15s;
-    white-space: nowrap;
-}
-.toolbar-btn:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--accent); color: var(--accent); }
-.toolbar-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.toolbar-btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
-.toolbar-btn.primary:hover:not(:disabled) { background: var(--accent-hover); }
-.toolbar-btn.danger { border-color: var(--danger); color: var(--danger); }
-.toolbar-btn.danger:hover:not(:disabled) { background: var(--danger); color: #fff; }
+/* Tree nodes */
+.tree-node { padding: 5px 8px 5px 0; cursor: pointer; font-size: 13px; display: flex; align-items: center; gap: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-radius: 4px; margin: 1px 4px; }
+.tree-node:hover { background: var(--bg-hover); }
+.tree-node.selected { background: var(--accent); color: #fff; }
+.tree-node .toggle { width: 16px; text-align: center; flex-shrink: 0; font-size: 10px; color: var(--text-muted); }
+.tree-node.selected .toggle { color: rgba(255,255,255,0.7); }
+.tree-children { padding-left: 16px; }
 
-/* Tabs */
-.tab-bar {
-    display: flex;
-    background: var(--bg-card);
-    border-bottom: 1px solid var(--border);
-    padding: 0 16px;
-}
-.tab-btn {
-    background: none;
-    border: none;
-    color: var(--text-muted);
-    padding: 10px 20px;
-    cursor: pointer;
-    font-size: 13px;
-    font-family: inherit;
-    font-weight: 500;
-    border-bottom: 2px solid transparent;
-    transition: all 0.15s;
-}
-.tab-btn:hover { color: var(--text); }
-.tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+/* Right panel */
+.panel-right { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; }
 
-/* Tab panels */
-.tab-content {
-    flex: 1;
-    overflow-y: auto;
-    padding: 20px;
-}
-.tab-panel { display: none; }
-.tab-panel.active { display: block; }
+/* Tab content panes */
+.tab-pane { display: none; flex: 1; flex-direction: column; overflow: hidden; }
+.tab-pane.active { display: flex; }
 
-/* ACL Table */
-.acl-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 13px;
-}
-.acl-table th {
-    text-align: left;
-    padding: 10px 12px;
-    background: var(--bg-card);
-    border-bottom: 2px solid var(--border);
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    color: var(--text-muted);
-    position: sticky;
-    top: 0;
-}
-.acl-table td {
-    padding: 8px 12px;
-    border-bottom: 1px solid var(--border);
-    word-break: break-word;
-    max-width: 300px;
-}
-.acl-table tr:hover td { background: var(--bg-hover); }
-.badge {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 3px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-}
+/* Permissions pane — stacked: folder ACL top, files section below */
+#pane-permissions { flex-direction: column; }
+.pane-section { padding: 14px 16px; border-bottom: 1px solid var(--border); }
+.pane-section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.pane-section-title { font-size: 13px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+
+/* Folder ACL section */
+#folder-acl-section { flex-shrink: 0; }
+.owner-row { font-size: 12px; margin-bottom: 10px; color: var(--text-muted); }
+.owner-row span { color: var(--text); font-weight: 500; }
+.acl-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.acl-table th { text-align: left; padding: 4px 8px; color: var(--text-muted); font-weight: 500; border-bottom: 1px solid var(--border); }
+.acl-table td { padding: 5px 8px; border-bottom: 1px solid var(--border); }
+.acl-table tr:last-child td { border-bottom: none; }
+.badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; }
 .badge-allow { background: rgba(46,204,113,0.15); color: var(--success); }
-.badge-deny { background: rgba(231,76,60,0.15); color: var(--danger); }
-.badge-inherited { background: rgba(93,173,226,0.1); color: var(--accent); font-size: 10px; }
-.badge-explicit { background: rgba(243,156,18,0.15); color: var(--warning); font-size: 10px; }
-.remove-btn {
-    background: none;
-    border: 1px solid var(--danger);
-    color: var(--danger);
-    padding: 3px 8px;
-    border-radius: 3px;
-    cursor: pointer;
-    font-size: 11px;
-    font-family: inherit;
-}
-.remove-btn:hover { background: var(--danger); color: #fff; }
+.badge-deny  { background: rgba(231,76,60,0.15); color: var(--danger); }
+.badge-inherited { background: rgba(139,149,165,0.15); color: var(--text-muted); }
+.folder-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 
-/* Children table */
-.children-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 13px;
-}
-.children-table th {
-    text-align: left;
-    padding: 10px 12px;
-    background: var(--bg-card);
-    border-bottom: 2px solid var(--border);
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    color: var(--text-muted);
-}
-.children-table td {
-    padding: 8px 12px;
-    border-bottom: 1px solid var(--border);
-}
-.children-table tr:hover td { background: var(--bg-hover); }
-
-/* Modal */
-.modal-overlay {
-    position: fixed;
-    top: 0; left: 0; right: 0; bottom: 0;
-    background: rgba(0,0,0,0.6);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 1000;
-}
-.modal {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 24px;
-    min-width: 400px;
-    max-width: 560px;
-    max-height: 80vh;
-    overflow-y: auto;
-    box-shadow: 0 8px 32px var(--shadow);
-}
-.modal h2 {
-    font-size: 16px;
-    margin-bottom: 16px;
-    color: var(--accent);
-}
-.modal p { font-size: 13px; margin-bottom: 12px; color: var(--text-muted); }
-.modal-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-    margin-top: 20px;
-}
-.modal-actions button {
-    padding: 8px 20px;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 13px;
-    font-family: inherit;
-    border: 1px solid var(--border);
-}
-.btn-cancel { background: var(--bg); color: var(--text); }
-.btn-cancel:hover { background: var(--bg-hover); }
-.btn-confirm { background: var(--accent); color: #fff; border-color: var(--accent); }
-.btn-confirm:hover { background: var(--accent-hover); }
-.btn-danger-confirm { background: var(--danger); color: #fff; border-color: var(--danger); }
-.btn-danger-confirm:hover { background: var(--danger-hover); }
-
-/* Form elements inside modals */
-.form-group {
-    margin-bottom: 14px;
-}
-.form-group label {
-    display: block;
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    margin-bottom: 4px;
-}
-.form-group input[type='text'],
-.form-group select {
-    width: 100%;
-    background: var(--bg-input);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 8px 12px;
-    border-radius: 4px;
-    font-size: 13px;
-    font-family: inherit;
-}
-.form-group input:focus,
-.form-group select:focus { outline: none; border-color: var(--accent); }
-.radio-group {
-    display: flex;
-    gap: 16px;
-    align-items: center;
-    padding-top: 4px;
-}
-.radio-group label {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    text-transform: none;
-    font-weight: normal;
-    cursor: pointer;
-}
-.checkbox-group {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-top: 8px;
-}
-.checkbox-group label {
-    text-transform: none;
-    font-weight: normal;
-    cursor: pointer;
-}
-.target-list {
-    max-height: 150px;
-    overflow-y: auto;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 8px;
-    font-size: 12px;
-    margin-top: 8px;
-}
-.target-list div {
-    padding: 2px 0;
-    color: var(--text-muted);
-}
+/* Buttons */
+.btn { padding: 5px 12px; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 500; transition: background 0.15s; }
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-primary:hover { background: var(--accent-hover); }
+.btn-danger  { background: var(--danger); color: #fff; }
+.btn-danger:hover  { background: var(--danger-hover); }
+.btn-secondary { background: var(--bg-hover); color: var(--text); border: 1px solid var(--border); }
+.btn-secondary:hover { background: var(--border); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* Status bar */
-.status-bar {
-    background: var(--bg-card);
-    border-top: 1px solid var(--border);
-    padding: 6px 16px;
-    font-size: 12px;
-    color: var(--text-muted);
-    min-height: 32px;
-    display: flex;
-    align-items: center;
-}
-.status-bar.info { color: var(--accent); }
+.status-bar { padding: 6px 16px; font-size: 12px; background: var(--bg-card); border-top: 1px solid var(--border); flex-shrink: 0; min-height: 30px; }
 .status-bar.success { color: var(--success); }
-.status-bar.error { color: var(--danger); }
-.status-bar.working { color: var(--warning); }
+.status-bar.error   { color: var(--danger); }
+.status-bar.info    { color: var(--accent); }
+.status-bar.warning { color: var(--warning); }
 
-/* Empty state */
-.empty-state {
-    text-align: center;
-    padding: 60px 20px;
-    color: var(--text-muted);
-}
-.empty-state .icon { font-size: 48px; margin-bottom: 16px; opacity: 0.4; }
-.empty-state p { font-size: 14px; }
+/* Modal overlay */
+.modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100; align-items: center; justify-content: center; }
+.modal-overlay.open { display: flex; }
+.modal { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 20px; min-width: 360px; max-width: 520px; width: 90%; }
+.modal h3 { font-size: 14px; font-weight: 600; margin-bottom: 14px; }
+.form-row { margin-bottom: 10px; }
+.form-row label { display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+.form-row input, .form-row select { width: 100%; padding: 6px 8px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 13px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 
-/* Breadcrumbs */
-.breadcrumbs {
-    display: flex;
-    align-items: center;
-    flex: 1;
-    flex-wrap: wrap;
-    gap: 2px;
-    font-size: 13px;
-    min-height: 32px;
-}
-.breadcrumbs a {
-    color: var(--accent);
-    text-decoration: none;
-    padding: 4px 6px;
-    border-radius: 3px;
-    cursor: pointer;
-    white-space: nowrap;
-}
-.breadcrumbs a:hover { background: var(--bg-hover); text-decoration: underline; }
-.breadcrumbs .sep { color: var(--text-muted); font-size: 11px; padding: 0 2px; user-select: none; }
-.breadcrumbs .current { color: var(--text); font-weight: 600; padding: 4px 6px; }
-.path-edit-btn {
-    background: none;
-    border: 1px solid var(--border);
-    color: var(--text-muted);
-    padding: 4px 8px;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 12px;
-    font-family: inherit;
-    flex-shrink: 0;
-}
-.path-edit-btn:hover { background: var(--bg-hover); color: var(--text); border-color: var(--accent); }
-.path-refresh-btn {
-    background: none;
-    border: 1px solid var(--border);
-    color: var(--text-muted);
-    padding: 4px 8px;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 12px;
-    font-family: inherit;
-    flex-shrink: 0;
-}
-.path-refresh-btn:hover { background: var(--bg-hover); color: var(--accent); border-color: var(--accent); }
+/* Placeholder state */
+.placeholder-msg { display: flex; align-items: center; justify-content: center; flex: 1; color: var(--text-muted); font-size: 13px; }
 
-/* Permissions tab header */
-.perm-header {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    flex-wrap: wrap;
-    margin-bottom: 12px;
-}
-.perm-header .owner-section {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex: 1;
-    min-width: 200px;
-}
-.perm-header .owner-section .owner-label {
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    color: var(--text-muted);
-}
-.perm-header .owner-section .owner-value {
-    font-size: 14px;
-    color: var(--text);
-    font-weight: 500;
-}
-.perm-quick-stats {
-    display: flex;
-    gap: 12px;
-    align-items: center;
-    flex-wrap: wrap;
-    margin-bottom: 12px;
-}
-.perm-stat {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 6px 14px;
-    font-size: 13px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-.perm-stat .num { font-weight: 700; font-size: 16px; }
-.perm-stat.allow .num { color: var(--success); }
-.perm-stat.deny .num { color: var(--danger); }
-.perm-stat.inherited .num { color: var(--text-muted); }
-.perm-actions {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    margin-bottom: 14px;
-}
-.section-divider {
-    border: none;
-    border-top: 1px solid var(--border);
-    margin: 20px 0;
-}
-.section-heading {
-    font-size: 12px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    color: var(--text-muted);
-    margin-bottom: 10px;
-}
+/* Files section */
+#files-section { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+.files-list-header { display: grid; grid-template-columns: 24px 1fr 80px 140px 24px; align-items: center; gap: 6px; padding: 6px 16px; background: var(--bg-card); border-bottom: 1px solid var(--border); font-size: 11px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; flex-shrink: 0; }
+.files-list { flex: 1; overflow-y: auto; }
+.file-row { display: grid; grid-template-columns: 24px 1fr 80px 140px 24px; align-items: center; gap: 6px; padding: 5px 16px; font-size: 12px; border-bottom: 1px solid var(--border); cursor: default; }
+.file-row:hover { background: var(--bg-hover); }
+.file-row.checked { background: rgba(93,173,226,0.08); }
+.file-row input[type=checkbox] { cursor: pointer; }
+.file-row .file-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.file-row .file-size { color: var(--text-muted); text-align: right; }
+.file-row .file-date { color: var(--text-muted); }
+.expand-btn { background: none; border: none; cursor: pointer; color: var(--text-muted); padding: 0 2px; font-size: 11px; }
+.expand-btn:hover { color: var(--accent); }
 
-/* Context Menu */
-.context-menu {
-    position: fixed;
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 4px 0;
-    min-width: 220px;
-    box-shadow: 0 8px 24px var(--shadow);
-    z-index: 2000;
-    display: none;
-}
-.context-menu .ctx-item {
-    display: block;
-    width: 100%;
-    text-align: left;
-    background: none;
-    border: none;
-    color: var(--text);
-    padding: 8px 16px;
-    font-size: 13px;
-    font-family: inherit;
-    cursor: pointer;
-    white-space: nowrap;
-}
-.context-menu .ctx-item:hover { background: var(--bg-hover); color: var(--accent); }
-.context-menu .ctx-sep {
-    border-top: 1px solid var(--border);
-    margin: 4px 0;
-}
+/* Inline file ACL */
+.file-acl-row { background: var(--bg-input); padding: 8px 16px 8px 44px; border-bottom: 1px solid var(--border); font-size: 11px; }
+.file-acl-row .acl-entry { display: flex; gap: 8px; align-items: center; padding: 2px 0; }
 
-/* Scrollbar */
-::-webkit-scrollbar { width: 8px; }
-::-webkit-scrollbar-track { background: var(--bg); }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+/* Sticky action bar */
+.action-bar { display: none; padding: 8px 16px; background: var(--bg-card); border-top: 2px solid var(--accent); flex-shrink: 0; }
+.action-bar.visible { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.action-bar .selection-count { font-size: 12px; font-weight: 600; color: var(--accent); margin-right: 4px; }
+.acl-diff-warning { width: 100%; padding: 4px 8px; background: rgba(243,156,18,0.15); border: 1px solid var(--warning); border-radius: 4px; color: var(--warning); font-size: 11px; margin-top: 4px; }
+
+/* Robocopy pane */
+#pane-robocopy { padding: 16px; overflow-y: auto; }
+.mode-toggle { display: flex; gap: 0; margin-bottom: 16px; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; width: fit-content; }
+.mode-toggle button { padding: 6px 16px; border: none; cursor: pointer; font-size: 12px; background: var(--bg-input); color: var(--text-muted); }
+.mode-toggle button.active { background: var(--accent); color: #fff; }
+.robo-form { display: flex; flex-direction: column; gap: 10px; max-width: 600px; }
+.robo-form label { font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 3px; }
+.robo-form input, .robo-form select { padding: 6px 8px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 13px; width: 100%; }
+.robo-output { margin-top: 14px; font-family: monospace; font-size: 11px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 4px; padding: 10px; white-space: pre-wrap; max-height: 300px; overflow-y: auto; color: var(--text-muted); }
+.robo-file-list { border: 1px solid var(--border); border-radius: 4px; max-height: 180px; overflow-y: auto; background: var(--bg-input); }
+.robo-file-item { display: flex; align-items: center; gap: 6px; padding: 4px 8px; font-size: 12px; border-bottom: 1px solid var(--border); }
+.robo-file-item:last-child { border-bottom: none; }
+.robo-file-item input[type=checkbox] { cursor: pointer; }
 </style>
 </head>
 <body>
-<div class="layout">
-    <!-- Sidebar -->
-    <aside class="sidebar">
-        <div class="sidebar-header">
-            <h1>Folder Permissions</h1>
-        </div>
-        <div class="sidebar-section">
-            <div class="sidebar-section-title">Drives</div>
-            <div class="drive-list" id="driveList"></div>
-        </div>
-        <div class="sidebar-section" style="flex:0 0 auto;">
-            <div class="sidebar-section-title">Folder Tree</div>
-        </div>
-        <div class="tree-container" id="treeContainer"></div>
-        <div class="sidebar-footer">
-            <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()">Toggle Theme</button>
-        </div>
-    </aside>
 
-    <!-- Context Menu -->
-    <div class="context-menu" id="contextMenu">
-        <button class="ctx-item" onclick="ctxTakeOwnership(false)">Take Ownership</button>
-        <button class="ctx-item" onclick="ctxTakeOwnership(true)">Take Ownership (Recursive)</button>
-        <div class="ctx-sep"></div>
-        <button class="ctx-item" onclick="ctxReplicateHere()">Replicate Permissions Here</button>
-        <div class="ctx-sep"></div>
-        <button class="ctx-item" onclick="ctxCopyPath()">Copy Path</button>
-        <div class="ctx-sep"></div>
-        <button class="ctx-item" onclick="ctxOpenInTab('permissions')">Open in Permissions Tab</button>
-        <button class="ctx-item" onclick="ctxOpenInTab('contents')">Open in Contents Tab</button>
+<div class="topbar">
+  <h1>Folder Permission Manager</h1>
+  <div class="topbar-actions">
+    <button class="btn btn-secondary" onclick="toggleTheme()" id="btnTheme">Light</button>
+    <button class="btn btn-danger" onclick="shutdown()">Shutdown</button>
+  </div>
+</div>
+
+<div class="tabbar">
+  <div class="tab active" data-tab="permissions" onclick="switchTab('permissions')">Permissions</div>
+  <div class="tab" data-tab="robocopy" onclick="switchTab('robocopy')">Robocopy</div>
+</div>
+
+<div class="main">
+  <!-- Left panel: folder tree -->
+  <div class="panel-left">
+    <div class="panel-left-header">Folders</div>
+    <div class="tree-container" id="treeContainer"></div>
+  </div>
+
+  <!-- Right panel -->
+  <div class="panel-right">
+
+    <!-- Permissions tab pane -->
+    <div class="tab-pane active" id="pane-permissions">
+
+      <div id="no-folder-msg" class="placeholder-msg">Select a folder to view permissions</div>
+
+      <!-- Folder ACL section -->
+      <div id="folder-acl-section" class="pane-section" style="display:none;">
+        <div class="pane-section-header">
+          <span class="pane-section-title" id="folderAclTitle">Folder Permissions</span>
+          <span class="owner-row">Owner: <span id="folderOwner">—</span></span>
+        </div>
+        <table class="acl-table">
+          <thead><tr><th>Identity</th><th>Rights</th><th>Type</th><th>Inherited</th></tr></thead>
+          <tbody id="folderAclBody"></tbody>
+        </table>
+        <div class="folder-actions">
+          <button class="btn btn-primary" onclick="showAddAceModal('folder')">Add ACE</button>
+          <button class="btn btn-secondary" onclick="showRemoveAceModal('folder')">Remove ACE</button>
+          <button class="btn btn-secondary" onclick="takeOwnership(false)">Take Ownership</button>
+          <button class="btn btn-secondary" onclick="takeOwnership(true)">Take Ownership (Recursive)</button>
+          <button class="btn btn-secondary" onclick="showReplicateModal()">Replicate Permissions</button>
+          <button class="btn btn-secondary" id="btnExport" onclick="exportReport()">Export CSV</button>
+        </div>
+      </div>
+
+      <!-- Files section -->
+      <div id="files-section" style="display:none;">
+        <div class="files-list-header">
+          <input type="checkbox" id="selectAllFiles" onchange="toggleSelectAll(this.checked)" title="Select all">
+          <span>Name</span>
+          <span style="text-align:right">Size</span>
+          <span>Modified</span>
+          <span></span>
+        </div>
+        <div class="files-list" id="filesList"></div>
+        <!-- Sticky batch action bar -->
+        <div class="action-bar" id="actionBar">
+          <span class="selection-count" id="selectionCount">0 selected</span>
+          <button class="btn btn-primary" onclick="showAddAceModal('files')">Add ACE</button>
+          <button class="btn btn-secondary" onclick="showRemoveAceModal('files')">Remove ACE</button>
+          <button class="btn btn-secondary" onclick="takeFileOwnership()">Take Ownership</button>
+          <button class="btn btn-secondary" onclick="showCopyFilesModal()">Copy to...</button>
+          <div class="acl-diff-warning" id="aclDiffWarning" style="display:none;">
+            ACLs differ across selected files — this operation applies uniformly
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /pane-permissions -->
+
+    <!-- Robocopy tab pane -->
+    <div class="tab-pane" id="pane-robocopy">
+      <div class="mode-toggle">
+        <button class="active" id="roboModeFolderBtn" onclick="setRoboMode('folder')">Folder copy</button>
+        <button id="roboModeFileBtn" onclick="setRoboMode('file')">File copy</button>
+      </div>
+
+      <!-- Folder copy mode -->
+      <div id="roboFolderForm" class="robo-form">
+        <div><label>Source folder</label><input type="text" id="roboSrc" placeholder="\\server\share\source"></div>
+        <div><label>Destination folder</label><input type="text" id="roboDst" placeholder="\\server\share\dest"></div>
+        <div>
+          <label>Mode</label>
+          <select id="roboMode">
+            <option value="copy">Copy (/E — all subdirs including empty)</option>
+            <option value="mirror">Mirror (/MIR — deletes files not in source)</option>
+          </select>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">
+          <div><label>Threads (/MT)</label><input type="number" id="roboThreads" value="8" min="1" max="128"></div>
+          <div><label>Retries (/R)</label><input type="number" id="roboRetries" value="3" min="0"></div>
+          <div><label>Wait (/W sec)</label><input type="number" id="roboWait" value="5" min="0"></div>
+        </div>
+        <div><label>Extra flags (optional)</label><input type="text" id="roboExtra" placeholder="/XF *.tmp /XD .git"></div>
+        <div><label>Log file path (optional)</label><input type="text" id="roboLog" placeholder="Leave empty to skip"></div>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-secondary" id="btnRoboPreview" onclick="roboPreview()">Preview</button>
+          <button class="btn btn-primary" id="btnRobocopy" onclick="runRobocopy()">Run Robocopy</button>
+        </div>
+      </div>
+
+      <!-- File copy mode -->
+      <div id="roboFileForm" class="robo-form" style="display:none;">
+        <div style="display:flex;gap:8px;align-items:flex-end;">
+          <div style="flex:1;"><label>Source folder</label><input type="text" id="roboFileSrc" placeholder="\\server\share\source" oninput="loadRoboFileList()"></div>
+          <button class="btn btn-secondary" style="margin-bottom:0;" onclick="loadRoboFileList()">Load files</button>
+        </div>
+        <div><label>Select files to copy</label><div class="robo-file-list" id="roboFileList"><span style="padding:8px;color:var(--text-muted);font-size:12px;display:block;">Enter a source folder above</span></div></div>
+        <div><label>Destination folder</label><input type="text" id="roboFileDst" placeholder="\\server\share\dest"></div>
+        <div><label>Extra flags (optional)</label><input type="text" id="roboFileExtra" placeholder="/XO"></div>
+        <div>
+          <button class="btn btn-primary" id="btnRobocopyFiles" onclick="runRobocopyFiles()">Copy Selected Files</button>
+        </div>
+      </div>
+
+      <div class="robo-output" id="roboOutput" style="display:none;"></div>
+    </div><!-- /pane-robocopy -->
+
+    <div class="status-bar" id="statusBar">Ready</div>
+
+  </div><!-- /panel-right -->
+</div><!-- /main -->
+
+<!-- Add ACE modal -->
+<div class="modal-overlay" id="addAceModal">
+  <div class="modal">
+    <h3 id="addAceModalTitle">Add Permission Entry</h3>
+    <div class="form-row"><label>Identity (user or group)</label><input type="text" id="addAceIdentity" placeholder="DOMAIN\User or DOMAIN\Group"></div>
+    <div class="form-row">
+      <label>Rights</label>
+      <select id="addAceRights">
+        <option value="FullControl">Full Control</option>
+        <option value="Modify">Modify</option>
+        <option value="ReadAndExecute">Read & Execute</option>
+        <option value="Read">Read</option>
+        <option value="Write">Write</option>
+      </select>
     </div>
+    <div class="form-row">
+      <label>Type</label>
+      <select id="addAceType">
+        <option value="Allow">Allow</option>
+        <option value="Deny">Deny</option>
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('addAceModal')">Cancel</button>
+      <button class="btn btn-primary" onclick="submitAddAce()">Add</button>
+    </div>
+  </div>
+</div>
 
-    <!-- Main -->
-    <main class="main">
-        <div class="path-bar">
-            <label>Path</label>
-            <div class="breadcrumbs" id="breadcrumbs">
-                <span style="color:var(--text-muted);">Select a folder from the sidebar</span>
-            </div>
-            <input type="text" class="path-input" id="pathInput" placeholder="Type a path and press Enter" style="display:none;" />
-            <button class="path-edit-btn" id="pathEditBtn" onclick="togglePathEdit()" title="Edit path manually">&#9998;</button>
-            <button class="path-refresh-btn" id="pathRefreshBtn" onclick="refreshCurrent()" title="Refresh" style="display:none;">&#8635;</button>
-        </div>
-        <div class="tab-bar">
-            <button class="tab-btn active" data-tab="permissions" onclick="switchTab('permissions')">Permissions</button>
-            <button class="tab-btn" data-tab="contents" onclick="switchTab('contents')">Contents</button>
-            <button class="tab-btn" data-tab="robocopy" onclick="switchTab('robocopy')">Robocopy</button>
-        </div>
-        <div class="tab-content">
-            <div class="tab-panel active" id="panel-permissions">
-                <div class="empty-state" id="permissionsEmpty">
-                    <div class="icon">&#128274;</div>
-                    <p>Select a folder from the sidebar to view its permissions.</p>
-                </div>
-                <div id="permissionsContent" style="display:none;"></div>
-            </div>
-            <div class="tab-panel" id="panel-contents">
-                <div class="empty-state" id="contentsEmpty">
-                    <div class="icon">&#128194;</div>
-                    <p>Select a folder to view its contents.</p>
-                </div>
-                <div id="contentsContent" style="display:none;"></div>
-            </div>
-            <div class="tab-panel" id="panel-robocopy">
-                <h3 style="color:var(--text-heading); margin-top:0;">Robocopy</h3>
-                <p style="color:var(--text-muted); font-size:13px; margin-bottom:16px;">Copy or move folder contents with full fidelity - preserves permissions, timestamps, ownership, and attributes.</p>
+<!-- Remove ACE modal -->
+<div class="modal-overlay" id="removeAceModal">
+  <div class="modal">
+    <h3 id="removeAceModalTitle">Remove Permission Entry</h3>
+    <div class="form-row">
+      <label>Identity</label>
+      <select id="removeAceIdentity"></select>
+    </div>
+    <div class="form-row">
+      <label>Rights</label>
+      <select id="removeAceRights">
+        <option value="FullControl">Full Control</option>
+        <option value="Modify">Modify</option>
+        <option value="ReadAndExecute">Read & Execute</option>
+        <option value="Read">Read</option>
+        <option value="Write">Write</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <label>Type</label>
+      <select id="removeAceType">
+        <option value="Allow">Allow</option>
+        <option value="Deny">Deny</option>
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('removeAceModal')">Cancel</button>
+      <button class="btn btn-danger" onclick="submitRemoveAce()">Remove</button>
+    </div>
+  </div>
+</div>
 
-                <!-- Step 1: Source -->
-                <div style="background:var(--bg-hover); border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:12px;">
-                    <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
-                        <span style="background:var(--accent); color:#fff; border-radius:50%; width:24px; height:24px; display:inline-flex; align-items:center; justify-content:center; font-size:13px; font-weight:700;">1</span>
-                        <strong style="color:var(--text-heading);">Source - Where to copy FROM</strong>
-                    </div>
-                    <div style="display:flex; gap:8px; align-items:center;">
-                        <input type="text" id="roboSource" style="flex:1; padding:10px 14px; background:var(--bg-card); color:var(--text); border:1px solid var(--border); border-radius:6px; font-size:14px;" placeholder="Click a folder in the sidebar, or type a path..." readonly>
-                        <button class="toolbar-btn" onclick="useCurrentPathAsSource()" title="Use the folder selected in the sidebar" style="padding:10px 14px; white-space:nowrap;">Use Selected Folder</button>
-                        <button class="toolbar-btn" onclick="document.getElementById('roboSource').readOnly=false;document.getElementById('roboSource').focus();" title="Type a path manually" style="padding:10px 14px;">Edit</button>
-                    </div>
-                </div>
+<!-- Replicate modal -->
+<div class="modal-overlay" id="replicateModal">
+  <div class="modal">
+    <h3>Replicate Permissions</h3>
+    <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">Copy permissions from the selected folder to target paths (one per line).</p>
+    <div class="form-row"><label>Target paths</label><textarea id="replicateTargets" rows="5" style="width:100%;background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:6px 8px;font-size:12px;resize:vertical;" placeholder="C:\Shares\FolderA&#10;C:\Shares\FolderB"></textarea></div>
+    <div class="form-row"><label><input type="checkbox" id="replicateRecursive"> Apply recursively</label></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('replicateModal')">Cancel</button>
+      <button class="btn btn-primary" onclick="submitReplicate()">Replicate</button>
+    </div>
+  </div>
+</div>
 
-                <!-- Step 2: Destination -->
-                <div style="background:var(--bg-hover); border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:12px;">
-                    <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
-                        <span style="background:var(--accent); color:#fff; border-radius:50%; width:24px; height:24px; display:inline-flex; align-items:center; justify-content:center; font-size:13px; font-weight:700;">2</span>
-                        <strong style="color:var(--text-heading);">Destination - Where to copy TO</strong>
-                    </div>
-                    <input type="text" id="roboDest" style="width:100%; padding:10px 14px; background:var(--bg-card); color:var(--text); border:1px solid var(--border); border-radius:6px; font-size:14px; box-sizing:border-box;" placeholder="Type or paste the destination path, e.g. \\server\share\folder or D:\Backups\Data">
-                    <p style="color:var(--text-muted); font-size:11px; margin:6px 0 0 0;">The folder will be created automatically if it does not exist.</p>
-                </div>
-
-                <!-- Step 3: What to do -->
-                <div style="background:var(--bg-hover); border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:12px;">
-                    <div style="display:flex; align-items:center; gap:8px; margin-bottom:12px;">
-                        <span style="background:var(--accent); color:#fff; border-radius:50%; width:24px; height:24px; display:inline-flex; align-items:center; justify-content:center; font-size:13px; font-weight:700;">3</span>
-                        <strong style="color:var(--text-heading);">What should happen?</strong>
-                    </div>
-                    <div style="display:flex; flex-direction:column; gap:8px;">
-                        <label style="display:flex; align-items:start; gap:10px; padding:10px 14px; background:var(--bg-card); border:2px solid var(--border); border-radius:6px; cursor:pointer;" onclick="document.getElementById('roboModeCopy').checked=true; this.style.borderColor='var(--accent)';">
-                            <input type="radio" name="roboMode" id="roboModeCopy" value="copy" checked style="margin-top:2px;">
-                            <div>
-                                <strong style="color:var(--text-heading);">Copy</strong>
-                                <p style="color:var(--text-muted); font-size:12px; margin:2px 0 0 0;">Copy all files and folders to the destination. Existing files in the destination are kept.</p>
-                            </div>
-                        </label>
-                        <label style="display:flex; align-items:start; gap:10px; padding:10px 14px; background:var(--bg-card); border:2px solid var(--border); border-radius:6px; cursor:pointer;" onclick="document.getElementById('roboModeMirror').checked=true; this.style.borderColor='#e74c3c';">
-                            <input type="radio" name="roboMode" id="roboModeMirror" value="mirror" style="margin-top:2px;">
-                            <div>
-                                <strong style="color:#e74c3c;">Mirror (Exact Sync)</strong>
-                                <p style="color:var(--text-muted); font-size:12px; margin:2px 0 0 0;">Make the destination an exact copy of the source. <strong style="color:#e74c3c;">Files in the destination that are NOT in the source will be DELETED.</strong></p>
-                            </div>
-                        </label>
-                    </div>
-                </div>
-
-                <!-- Step 4: Go -->
-                <div style="display:flex; gap:12px; margin-bottom:12px; align-items:center;">
-                    <button class="toolbar-btn" id="btnRoboPreview" onclick="robocopyPreview()" style="padding:10px 20px;">Preview First (see what will be copied)</button>
-                    <button class="toolbar-btn" id="btnRobocopy" onclick="robocopyRun()" style="padding:10px 20px; background:var(--accent); color:#fff; font-weight:600;">Start Copy</button>
-                </div>
-
-                <!-- Preview result -->
-                <div id="roboPreviewBox" style="display:none; background:var(--bg-card); border:1px solid var(--accent); border-radius:8px; padding:16px; margin-bottom:12px;">
-                    <strong style="color:var(--text-heading);">Preview - What will be copied</strong>
-                    <div id="roboPreviewContent" style="margin-top:8px; font-size:13px;"></div>
-                </div>
-
-                <!-- Advanced options (collapsed) -->
-                <div style="margin-bottom:12px;">
-                    <button onclick="var el=document.getElementById('roboAdvanced'); el.style.display = el.style.display==='none'?'block':'none'; this.textContent = el.style.display==='none'?'Show Advanced Options':'Hide Advanced Options';" style="background:none; border:none; color:var(--accent); cursor:pointer; font-size:13px; padding:0;">Show Advanced Options</button>
-                    <div id="roboAdvanced" style="display:none; margin-top:10px; background:var(--bg-hover); border:1px solid var(--border); border-radius:8px; padding:16px;">
-                        <div style="display:flex; gap:24px; flex-wrap:wrap; margin-bottom:12px;">
-                            <div>
-                                <label style="display:block; font-size:12px; color:var(--text-muted); margin-bottom:4px;">Parallel Threads</label>
-                                <input type="number" id="roboThreads" value="8" min="1" max="128" style="width:70px; padding:8px 12px; background:var(--bg-card); color:var(--text); border:1px solid var(--border); border-radius:4px; font-size:13px;">
-                                <span style="color:var(--text-muted); font-size:11px;"> (default 8)</span>
-                            </div>
-                            <div>
-                                <label style="display:block; font-size:12px; color:var(--text-muted); margin-bottom:4px;">Retry Count</label>
-                                <input type="number" id="roboRetries" value="3" min="0" max="99" style="width:70px; padding:8px 12px; background:var(--bg-card); color:var(--text); border:1px solid var(--border); border-radius:4px; font-size:13px;">
-                                <span style="color:var(--text-muted); font-size:11px;"> per failed file</span>
-                            </div>
-                            <div>
-                                <label style="display:block; font-size:12px; color:var(--text-muted); margin-bottom:4px;">Wait Between Retries</label>
-                                <input type="number" id="roboWait" value="5" min="0" max="60" style="width:70px; padding:8px 12px; background:var(--bg-card); color:var(--text); border:1px solid var(--border); border-radius:4px; font-size:13px;">
-                                <span style="color:var(--text-muted); font-size:11px;"> seconds</span>
-                            </div>
-                        </div>
-                        <div style="margin-bottom:12px;">
-                            <div class="checkbox-group" style="margin-bottom:6px;">
-                                <input type="checkbox" id="roboLogEnabled" checked onchange="updateRoboLogPath()">
-                                <label for="roboLogEnabled">Save log file to destination folder</label>
-                            </div>
-                            <input type="text" id="roboLog" style="width:100%; max-width:500px; padding:8px 12px; background:var(--bg-card); color:var(--text); border:1px solid var(--border); border-radius:4px; font-size:13px; box-sizing:border-box;" placeholder="Auto-generated from destination path">
-                            <p style="color:var(--text-muted); font-size:11px; margin:4px 0 0 0;">Log file is saved inside the destination folder. Edit the path to save elsewhere.</p>
-                        </div>
-                        <div>
-                            <label style="display:block; font-size:12px; color:var(--text-muted); margin-bottom:4px;">Exclude (folders or files)</label>
-                            <input type="text" id="roboExtra" style="width:100%; max-width:500px; padding:8px 12px; background:var(--bg-card); color:var(--text); border:1px solid var(--border); border-radius:4px; font-size:13px; box-sizing:border-box;" placeholder="e.g.  /XD Temp Logs  /XF *.tmp *.log">
-                            <p style="color:var(--text-muted); font-size:11px; margin:4px 0 0 0;">/XD = exclude directories, /XF = exclude files. Separate multiple with spaces.</p>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Output -->
-                <div id="roboOutputBox" style="display:none; background:var(--bg-card); border:1px solid var(--border); border-radius:8px; padding:16px; max-height:400px; overflow-y:auto;">
-                    <strong style="color:var(--text-heading);">Output</strong>
-                    <pre id="roboOutputContent" style="margin-top:8px; font-size:12px; color:var(--text); white-space:pre-wrap; word-break:break-all;"></pre>
-                </div>
-            </div>
-        </div>
-        <div class="status-bar" id="statusBar">Ready</div>
-    </main>
+<!-- Copy files modal -->
+<div class="modal-overlay" id="copyFilesModal">
+  <div class="modal">
+    <h3>Copy Selected Files</h3>
+    <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">Files will be copied with ACL preservation (/COPY:DATSO /SECFIX).</p>
+    <div class="form-row"><label>Destination folder</label><input type="text" id="copyFilesDest" placeholder="\\server\share\dest"></div>
+    <div class="form-row"><label>Extra robocopy flags (optional)</label><input type="text" id="copyFilesExtra" placeholder="/XO"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('copyFilesModal')">Cancel</button>
+      <button class="btn btn-primary" onclick="submitCopyFiles()">Copy</button>
+    </div>
+  </div>
 </div>
 
 <script>
 (function() {
-    var currentPath = '';
-    var currentAcl = null;
-    var childrenData = [];
-    var statusTimer = null;
-    var contextMenuPath = '';
+'use strict';
 
-    // --- Theme ---
-    function initTheme() {
-        var saved = localStorage.getItem('fpm-theme');
-        if (saved === 'light') {
-            document.body.classList.add('light');
-        }
-        updateThemeButton();
-    }
-    function updateThemeButton() {
-        var btn = document.getElementById('themeToggle');
-        var isLight = document.body.classList.contains('light');
-        btn.textContent = isLight ? 'Switch to Dark Theme' : 'Switch to Light Theme';
-    }
-    window.toggleTheme = function() {
-        document.body.classList.toggle('light');
-        var isLight = document.body.classList.contains('light');
-        localStorage.setItem('fpm-theme', isLight ? 'light' : 'dark');
-        updateThemeButton();
-    };
+// --- State ---
+var currentFolder  = null;   // currently selected folder path
+var currentFiles   = [];     // array of file objects for current folder
+var checkedFiles   = new Set(); // paths of checked files
+var addAceTarget   = 'folder'; // 'folder' or 'files'
+var removeAceTarget = 'folder';
+var fileAclCache   = {};     // path -> acl object, for inline expand + diff check
 
-    // --- Status Bar ---
-    function setStatus(message, type) {
-        var bar = document.getElementById('statusBar');
-        bar.textContent = message;
-        bar.className = 'status-bar';
-        if (type) bar.classList.add(type);
-        if (statusTimer) clearTimeout(statusTimer);
-        if (type !== 'error') {
-            statusTimer = setTimeout(function() {
-                bar.textContent = 'Ready';
-                bar.className = 'status-bar';
-            }, 5000);
-        }
-    }
-    window.setStatus = setStatus;
+// --- Utilities ---
+function setStatus(msg, type) {
+    var el = document.getElementById('statusBar');
+    el.textContent = msg;
+    el.className = 'status-bar ' + (type || '');
+}
 
-    // --- API Helpers ---
-    function apiGet(url) {
-        setStatus('Working...', 'working');
-        return fetch(url).then(function(r) {
-            if (!r.ok) return r.json().then(function(d) { throw new Error(d.error || 'Request failed'); });
-            return r.json();
-        });
-    }
-    function apiPost(url, data) {
-        setStatus('Working...', 'working');
-        return fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(data)
-        }).then(function(r) {
-            if (!r.ok) return r.json().then(function(d) { throw new Error(d.error || 'Request failed'); });
-            return r.json();
-        });
-    }
-
-    // --- Modal System ---
-    function showModal(title, bodyHtml, confirmText, onConfirm, isDanger) {
-        closeModal();
-        var overlay = document.createElement('div');
-        overlay.className = 'modal-overlay';
-        overlay.id = 'modalOverlay';
-        overlay.onclick = function(e) { if (e.target === overlay) closeModal(); };
-
-        var confirmClass = isDanger ? 'btn-danger-confirm' : 'btn-confirm';
-        overlay.innerHTML = '<div class="modal">' +
-            '<h2>' + escHtml(title) + '</h2>' +
-            '<div id="modalBody">' + bodyHtml + '</div>' +
-            '<div class="modal-actions">' +
-            '<button class="btn-cancel" onclick="closeModal()">Cancel</button>' +
-            '<button class="' + confirmClass + '" id="modalConfirmBtn">' + escHtml(confirmText) + '</button>' +
-            '</div></div>';
-        document.body.appendChild(overlay);
-        document.getElementById('modalConfirmBtn').onclick = function() {
-            onConfirm();
-        };
-    }
-    window.showModal = showModal;
-    function closeModal() {
-        var el = document.getElementById('modalOverlay');
-        if (el) el.remove();
-    }
-    window.closeModal = closeModal;
-
-    function escHtml(s) {
-        var d = document.createElement('div');
-        d.textContent = s;
-        return d.innerHTML;
-    }
-
-    // --- Breadcrumbs ---
-    function renderBreadcrumbs(path) {
-        var container = document.getElementById('breadcrumbs');
-        if (!path) {
-            container.innerHTML = '<span style="color:var(--text-muted);">Select a folder from the sidebar</span>';
-            return;
-        }
-        var normalized = path.replace(/\//g, '\\');
-        var parts = normalized.split('\\').filter(function(p) { return p.length > 0; });
-        var html = '';
-        for (var i = 0; i < parts.length; i++) {
-            var segment = parts[i];
-            // Build the path up to this segment
-            var partialPath = parts.slice(0, i + 1).join('\\');
-            // For drive root like C:, add trailing backslash
-            if (i === 0 && segment.indexOf(':') >= 0) {
-                partialPath = partialPath + '\\';
-            }
-            if (i > 0) {
-                html += '<span class="sep">&#9656;</span>';
-            }
-            if (i === parts.length - 1) {
-                html += '<span class="current">' + escHtml(segment) + '</span>';
-            } else {
-                html += '<a onclick="selectFolder(\'' + escHtml(partialPath).replace(/\\/g, '\\\\').replace(/'/g, "\\'") + '\')">' + escHtml(segment) + '</a>';
-            }
-        }
-        container.innerHTML = html;
-    }
-
-    window.togglePathEdit = function() {
-        var input = document.getElementById('pathInput');
-        var breadcrumbs = document.getElementById('breadcrumbs');
-        var editBtn = document.getElementById('pathEditBtn');
-        if (input.style.display === 'none') {
-            input.style.display = 'block';
-            breadcrumbs.style.display = 'none';
-            input.value = currentPath;
-            input.focus();
-            editBtn.innerHTML = '&#10003;';
-            editBtn.title = 'Back to breadcrumbs';
-        } else {
-            input.style.display = 'none';
-            breadcrumbs.style.display = 'flex';
-            editBtn.innerHTML = '&#9998;';
-            editBtn.title = 'Edit path manually';
-        }
-    };
-
-    // --- Drives ---
-    function loadDrives() {
-        apiGet('/api/drives').then(function(drives) {
-            var container = document.getElementById('driveList');
-            container.innerHTML = '';
-            drives.forEach(function(d) {
-                var btn = document.createElement('button');
-                btn.className = 'drive-btn';
-                btn.textContent = d.name + ': ' + d.label;
-                btn.title = d.root + ' (' + d.freeGB + ' GB free)';
-                btn.onclick = function() { selectDrive(d.root, btn); };
-                container.appendChild(btn);
-            });
-            setStatus('Drives loaded', 'info');
-        }).catch(function(err) {
-            setStatus('Failed to load drives: ' + err.message, 'error');
-        });
-    }
-
-    function selectDrive(root, btnEl) {
-        var btns = document.querySelectorAll('.drive-btn');
-        btns.forEach(function(b) { b.classList.remove('active'); });
-        if (btnEl) btnEl.classList.add('active');
-        document.getElementById('treeContainer').innerHTML = '';
-        loadTreeChildren(root, document.getElementById('treeContainer'), 0);
-    }
-
-    // --- Tree ---
-    function loadTreeChildren(path, parentEl, level) {
-        apiGet('/api/children?path=' + encodeURIComponent(path)).then(function(children) {
-            children.forEach(function(child) {
-                var node = document.createElement('div');
-                node.className = 'tree-node';
-
-                var row = document.createElement('div');
-                row.className = 'tree-node-row';
-                row.style.paddingLeft = (8 + level * 16) + 'px';
-                row.setAttribute('data-path', child.path);
-
-                var arrow = document.createElement('span');
-                arrow.className = 'tree-arrow' + (child.hasChildren ? '' : ' empty');
-                arrow.textContent = child.hasChildren ? '\u25B6' : '';
-
-                var icon = document.createElement('span');
-                icon.className = 'tree-icon';
-                icon.textContent = '\uD83D\uDCC1';
-
-                var label = document.createElement('span');
-                label.className = 'tree-label';
-                label.textContent = child.name;
-
-                row.appendChild(arrow);
-                row.appendChild(icon);
-                row.appendChild(label);
-                node.appendChild(row);
-
-                var childrenContainer = document.createElement('div');
-                childrenContainer.className = 'tree-children';
-                node.appendChild(childrenContainer);
-
-                var loaded = false;
-
-                function toggleExpand(e) {
-                    if (e) e.stopPropagation();
-                    if (!child.hasChildren) return;
-                    var isExpanded = childrenContainer.classList.contains('expanded');
-                    if (isExpanded) {
-                        childrenContainer.classList.remove('expanded');
-                        arrow.textContent = '\u25B6';
-                    } else {
-                        childrenContainer.classList.add('expanded');
-                        arrow.textContent = '\u25BC';
-                        if (!loaded) {
-                            loaded = true;
-                            loadTreeChildren(child.path, childrenContainer, level + 1);
-                        }
-                    }
-                }
-
-                arrow.onclick = toggleExpand;
-                row.onclick = function() { selectFolder(child.path); };
-                row.ondblclick = toggleExpand;
-
-                // Right-click context menu
-                row.addEventListener('contextmenu', function(e) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    showContextMenu(e.clientX, e.clientY, child.path);
-                });
-
-                parentEl.appendChild(node);
-            });
-            if (children.length === 0 && level === 0) {
-                setStatus('No subfolders found', 'info');
-            }
-        }).catch(function(err) {
-            setStatus('Failed to load children: ' + err.message, 'error');
-        });
-    }
-
-    function selectFolder(path) {
-        currentPath = path;
-        document.getElementById('pathInput').value = path;
-        renderBreadcrumbs(path);
-        document.getElementById('pathRefreshBtn').style.display = 'inline-block';
-
-        // Make sure breadcrumbs are visible (not edit mode)
-        document.getElementById('pathInput').style.display = 'none';
-        document.getElementById('breadcrumbs').style.display = 'flex';
-        document.getElementById('pathEditBtn').innerHTML = '&#9998;';
-        document.getElementById('pathEditBtn').title = 'Edit path manually';
-
-        // highlight active tree row
-        var rows = document.querySelectorAll('.tree-node-row');
-        rows.forEach(function(r) { r.classList.remove('active'); });
-        rows.forEach(function(r) {
-            var lbl = r.querySelector('.tree-label');
-            var parts = path.replace(/[\\/]+/g, '/').replace(/\/$/, '').split('/');
-            var folderName = parts[parts.length - 1];
-            if (lbl && lbl.textContent === folderName) {
-                r.classList.add('active');
-            }
-        });
-
-        loadAcl(path);
-        loadChildrenTab(path);
-        loadFilesTab(path);
-    }
-    window.selectFolder = selectFolder;
-
-    // --- Path input ---
-    document.addEventListener('DOMContentLoaded', function() {
-        document.getElementById('pathInput').addEventListener('keydown', function(e) {
-            if (e.key === 'Enter') {
-                var p = this.value.trim();
-                if (p) {
-                    selectFolder(p);
-                }
-            }
+function api(url, opts) {
+    return fetch(url, opts).then(function(r) {
+        return r.json().then(function(d) {
+            if (!r.ok) throw new Error(d.error || r.statusText);
+            return d;
         });
     });
+}
 
-    // --- ACL Loading ---
-    function loadAcl(path) {
-        apiGet('/api/acl?path=' + encodeURIComponent(path)).then(function(data) {
-            currentAcl = data;
-            renderPermissionsTab(data);
-            setStatus('Loaded permissions for ' + path, 'success');
-        }).catch(function(err) {
-            setStatus('Failed to load ACL: ' + err.message, 'error');
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+function openModal(id)  { document.getElementById(id).classList.add('open'); }
+
+function toggleTheme() {
+    document.body.classList.toggle('light');
+    document.getElementById('btnTheme').textContent = document.body.classList.contains('light') ? 'Dark' : 'Light';
+    localStorage.setItem('fpm-theme', document.body.classList.contains('light') ? 'light' : 'dark');
+}
+function initTheme() {
+    if (localStorage.getItem('fpm-theme') === 'light') { document.body.classList.add('light'); document.getElementById('btnTheme').textContent = 'Dark'; }
+}
+
+function switchTab(name) {
+    document.querySelectorAll('.tab').forEach(function(t) { t.classList.toggle('active', t.dataset.tab === name); });
+    document.querySelectorAll('.tab-pane').forEach(function(p) { p.classList.toggle('active', p.id === 'pane-' + name); });
+}
+
+function shutdown() {
+    if (!confirm('Stop the Folder Permission Manager server?')) return;
+    fetch('/api/shutdown').catch(function(){});
+    document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#8b95a5;font-family:sans-serif;">Server stopped. You may close this tab.</div>';
+}
+
+// --- Folder Tree ---
+function loadDrives() {
+    setStatus('Loading drives...', 'info');
+    api('/api/drives').then(function(drives) {
+        var container = document.getElementById('treeContainer');
+        container.innerHTML = '';
+        drives.forEach(function(d) {
+            var node = makeTreeNode(d.label || d.name, d.root, 0, true);
+            container.appendChild(node);
         });
-    }
+        setStatus('Ready');
+    }).catch(function(e) { setStatus('Failed to load drives: ' + e.message, 'error'); });
+}
 
-    // --- Permissions Tab (combined Overview + ACL) ---
-    function renderPermissionsTab(data) {
-        var el = document.getElementById('permissionsContent');
-        document.getElementById('permissionsEmpty').style.display = 'none';
-        el.style.display = 'block';
+function makeTreeNode(label, path, depth, hasChildren) {
+    var wrapper = document.createElement('div');
+    var node = document.createElement('div');
+    node.className = 'tree-node';
+    node.style.paddingLeft = (8 + depth * 16) + 'px';
+    node.dataset.path = path;
 
-        var allowCount = 0, denyCount = 0, inheritedCount = 0;
-        data.entries.forEach(function(e) {
-            if (e.type === 'Allow') allowCount++;
-            else denyCount++;
-            if (e.isInherited) inheritedCount++;
-        });
+    var toggle = document.createElement('span');
+    toggle.className = 'toggle';
+    toggle.textContent = hasChildren ? '▶' : ' ';
 
-        var inheritText = data.areAccessRulesProtected ? 'Protected (explicit only)' : 'Inheriting from parent';
+    var name = document.createElement('span');
+    name.textContent = label;
 
-        // Header with owner, inheritance, stats
-        var html = '<div class="perm-header">' +
-            '<div class="owner-section">' +
-                '<span class="owner-label">Owner:</span> ' +
-                '<span class="owner-value">' + escHtml(data.owner) + '</span>' +
-                ' <button class="toolbar-btn" style="padding:3px 10px;font-size:11px;" onclick="showTakeOwnershipModal()">Take Ownership</button>' +
-            '</div>' +
-            '<span style="font-size:12px; color:var(--text-muted);">' + escHtml(inheritText) + '</span>' +
-            '<a href="/api/export?path=' + encodeURIComponent(currentPath) + '" style="font-size:12px; color:var(--accent); text-decoration:none; margin-left:auto; white-space:nowrap;" title="Export all permissions to CSV">Export CSV</a>' +
-            '</div>';
+    node.appendChild(toggle);
+    node.appendChild(name);
+    wrapper.appendChild(node);
 
-        // Quick stats
-        html += '<div class="perm-quick-stats">' +
-            '<div class="perm-stat allow"><span class="num">' + allowCount + '</span> allow</div>' +
-            '<div class="perm-stat deny"><span class="num">' + denyCount + '</span> deny</div>' +
-            '<div class="perm-stat inherited"><span class="num">' + inheritedCount + '</span> inherited</div>' +
-            '</div>';
+    var childContainer = document.createElement('div');
+    childContainer.className = 'tree-children';
+    childContainer.style.display = 'none';
+    wrapper.appendChild(childContainer);
 
-        // Add Permission button
-        html += '<div class="perm-actions">' +
-            '<button class="toolbar-btn primary" onclick="showAddPermissionModal()">Add Permission</button>' +
-            '</div>';
+    var expanded = false;
 
-        // ACL table
-        html += renderAclTableHtml(data);
-
-        el.innerHTML = html;
-    }
-
-    // --- ACL Table (returns HTML string) ---
-    function renderAclTableHtml(data) {
-        var html = '<table class="acl-table"><thead><tr>' +
-            '<th>Identity</th><th>Rights</th><th>Type</th><th>Inherited</th><th>Applies To</th><th></th>' +
-            '</tr></thead><tbody>';
-
-        data.entries.forEach(function(entry, idx) {
-            var typeBadge = entry.type === 'Allow'
-                ? '<span class="badge badge-allow">Allow</span>'
-                : '<span class="badge badge-deny">Deny</span>';
-            var inheritBadge = entry.isInherited
-                ? '<span class="badge badge-inherited">Inherited</span>'
-                : '<span class="badge badge-explicit">Explicit</span>';
-
-            var appliesTo = entry.inheritanceFlags || 'This folder only';
-
-            var removeCell = '';
-            if (!entry.isInherited) {
-                removeCell = '<button class="remove-btn" onclick="showRemoveModal(' + idx + ')">Remove</button>';
-            }
-
-            html += '<tr>' +
-                '<td>' + escHtml(entry.identity) + '</td>' +
-                '<td>' + escHtml(entry.rights) + '</td>' +
-                '<td>' + typeBadge + '</td>' +
-                '<td>' + inheritBadge + '</td>' +
-                '<td>' + escHtml(appliesTo) + '</td>' +
-                '<td>' + removeCell + '</td>' +
-                '</tr>';
-        });
-
-        html += '</tbody></table>';
-        return html;
-    }
-
-    // Keep renderAclTable for backwards compat (calls into permissionsTab)
-    function renderAclTable(data) {
-        renderPermissionsTab(data);
-    }
-
-    // Keep renderOverview for backwards compat
-    function renderOverview(data) {
-        renderPermissionsTab(data);
-    }
-
-    // --- Children Tab ---
-    function loadChildrenTab(path) {
-        apiGet('/api/children?path=' + encodeURIComponent(path)).then(function(children) {
-            childrenData = children;
-            renderContentsTab(children, null);
-            // Also load files for the contents tab
-        }).catch(function(err) {
-            setStatus('Failed to load children: ' + err.message, 'error');
-        });
-    }
-
-    // --- Files Tab ---
-    function loadFilesTab(path) {
-        apiGet('/api/files?path=' + encodeURIComponent(path)).then(function(files) {
-            renderContentsTab(null, files);
-        }).catch(function(err) {
-            setStatus('Failed to load files: ' + err.message, 'error');
-        });
-    }
-
-    // Store latest data for combined rendering
-    var latestChildren = null;
-    var latestFiles = null;
-
-    function renderContentsTab(children, files) {
-        if (children !== null) latestChildren = children;
-        if (files !== null) latestFiles = files;
-
-        var el = document.getElementById('contentsContent');
-        var emptyEl = document.getElementById('contentsEmpty');
-
-        var hasChildren = latestChildren && latestChildren.length > 0;
-        var hasFiles = latestFiles && latestFiles.length > 0;
-
-        if (!hasChildren && !hasFiles && latestChildren !== null && latestFiles !== null) {
-            emptyEl.style.display = 'block';
-            emptyEl.querySelector('p').textContent = 'This folder is empty.';
-            el.style.display = 'none';
-            return;
-        }
-
-        // Show content if we have at least some data
-        if (hasChildren || hasFiles) {
-            emptyEl.style.display = 'none';
-            el.style.display = 'block';
-        }
-
-        var html = '';
-
-        // Replicate button at top
-        html += '<div style="margin-bottom:14px;"><button class="toolbar-btn primary" onclick="replicateSelected()">Replicate Permissions to Selected</button></div>';
-
-        // Subfolders section
-        html += '<div class="section-heading">Subfolders</div>';
-        if (hasChildren) {
-            html += renderChildrenTableHtml(latestChildren);
-        } else if (latestChildren !== null) {
-            html += '<p style="color:var(--text-muted); font-size:13px; margin-bottom:8px;">No subfolders found.</p>';
-        } else {
-            html += '<p style="color:var(--text-muted); font-size:13px; margin-bottom:8px;">Loading...</p>';
-        }
-
-        // Divider
-        html += '<hr class="section-divider">';
-
-        // Files section
-        html += '<div class="section-heading">Files</div>';
-        if (hasFiles) {
-            html += renderFilesTableHtml(latestFiles);
-        } else if (latestFiles !== null) {
-            html += '<p style="color:var(--text-muted); font-size:13px;">No files in this folder.</p>';
-        } else {
-            html += '<p style="color:var(--text-muted); font-size:13px;">Loading...</p>';
-        }
-
-        el.innerHTML = html;
-    }
-
-    function renderChildrenTableHtml(children) {
-        var html = '<table class="children-table"><thead><tr>' +
-            '<th><input type="checkbox" id="selectAllChildren" onchange="toggleSelectAllChildren(this)" /></th>' +
-            '<th>Name</th><th>Owner</th>' +
-            '</tr></thead><tbody>';
-
-        children.forEach(function(child, idx) {
-            html += '<tr>' +
-                '<td><input type="checkbox" class="child-check" data-path="' + escHtml(child.path) + '" /></td>' +
-                '<td>' + escHtml(child.name) + '</td>' +
-                '<td id="child-owner-' + idx + '"><span class="badge badge-inherited" style="cursor:pointer" onclick="loadChildOwner(' + idx + ',\'' + escHtml(child.path).replace(/\\/g, '\\\\').replace(/'/g, "\\'") + '\')">Load</span></td>' +
-                '</tr>';
-        });
-
-        html += '</tbody></table>';
-        return html;
-    }
-
-    // Keep renderChildrenTable for backwards compat
-    function renderChildrenTable(children) {
-        renderContentsTab(children, null);
-    }
-
-    function renderFilesTableHtml(files) {
-        var totalSize = 0;
-        files.forEach(function(f) { totalSize += f.size || 0; });
-        var totalDisplay = totalSize > 1073741824 ? (totalSize / 1073741824).toFixed(2) + ' GB'
-            : totalSize > 1048576 ? (totalSize / 1048576).toFixed(1) + ' MB'
-            : totalSize > 1024 ? (totalSize / 1024).toFixed(1) + ' KB'
-            : totalSize + ' B';
-
-        var html = '<p style="color:var(--text-muted); font-size:13px; margin-bottom:8px;">' +
-            '<strong>' + files.length + '</strong> files, <strong>' + totalDisplay + '</strong> total</p>' +
-            '<table class="children-table"><thead><tr>' +
-            '<th style="cursor:pointer" onclick="sortFilesTable(0)">Name &#x25B2;&#x25BC;</th>' +
-            '<th style="cursor:pointer; width:100px;" onclick="sortFilesTable(1)">Size &#x25B2;&#x25BC;</th>' +
-            '<th style="cursor:pointer; width:160px;" onclick="sortFilesTable(2)">Modified &#x25B2;&#x25BC;</th>' +
-            '<th style="width:80px;">Attributes</th>' +
-            '</tr></thead><tbody>';
-
-        files.forEach(function(f) {
-            var attrBadges = '';
-            if (f.isReadOnly) attrBadges += '<span class="badge badge-deny" style="font-size:10px; padding:1px 5px;">RO</span> ';
-            if (f.attributes && f.attributes.indexOf('Hidden') >= 0) attrBadges += '<span class="badge badge-inherited" style="font-size:10px; padding:1px 5px;">H</span> ';
-            if (f.attributes && f.attributes.indexOf('System') >= 0) attrBadges += '<span class="badge badge-inherited" style="font-size:10px; padding:1px 5px;">S</span> ';
-
-            html += '<tr>' +
-                '<td style="word-break:break-all;">' + escHtml(f.name) + '</td>' +
-                '<td style="text-align:right; white-space:nowrap;">' + escHtml(f.sizeDisplay) + '</td>' +
-                '<td style="white-space:nowrap;">' + escHtml(f.lastModified) + '</td>' +
-                '<td>' + (attrBadges || '-') + '</td>' +
-                '</tr>';
-        });
-
-        html += '</tbody></table>';
-        return html;
-    }
-
-    // Keep renderFilesTable for backwards compat
-    function renderFilesTable(files) {
-        renderContentsTab(null, files);
-    }
-
-    window.toggleSelectAllChildren = function(el) {
-        var checks = document.querySelectorAll('.child-check');
-        checks.forEach(function(c) { c.checked = el.checked; });
-    };
-
-    window.loadChildOwner = function(idx, path) {
-        var cell = document.getElementById('child-owner-' + idx);
-        cell.textContent = 'Loading...';
-        apiGet('/api/acl?path=' + encodeURIComponent(path)).then(function(data) {
-            cell.textContent = data.owner;
-        }).catch(function() {
-            cell.textContent = 'Error';
-        });
-    };
-
-    var filesData = [];
-    var filesSortCol = -1;
-    var filesSortAsc = true;
-    window.sortFilesTable = function(col) {
-        filesSortAsc = (filesSortCol === col) ? !filesSortAsc : true;
-        filesSortCol = col;
-        apiGet('/api/files?path=' + encodeURIComponent(currentPath)).then(function(files) {
-            files.sort(function(a, b) {
-                var va, vb;
-                if (col === 0) { va = a.name.toLowerCase(); vb = b.name.toLowerCase(); return filesSortAsc ? va.localeCompare(vb) : vb.localeCompare(va); }
-                if (col === 1) { return filesSortAsc ? a.size - b.size : b.size - a.size; }
-                if (col === 2) { va = a.lastModified; vb = b.lastModified; return filesSortAsc ? va.localeCompare(vb) : vb.localeCompare(va); }
-                return 0;
-            });
-            latestFiles = files;
-            renderContentsTab(null, files);
-        });
-    };
-
-    // --- Tab Switching ---
-    window.switchTab = function(tabName) {
-        var btns = document.querySelectorAll('.tab-btn');
-        btns.forEach(function(b) {
-            if (b.getAttribute('data-tab') === tabName) b.classList.add('active');
-            else b.classList.remove('active');
-        });
-        var panels = document.querySelectorAll('.tab-panel');
-        panels.forEach(function(p) {
-            if (p.id === 'panel-' + tabName) p.classList.add('active');
-            else p.classList.remove('active');
-        });
-        // Auto-fill robocopy source when switching to robocopy tab
-        if (tabName === 'robocopy' && currentPath) {
-            var roboSrc = document.getElementById('roboSource');
-            if (roboSrc && !roboSrc.value.trim()) {
-                roboSrc.value = currentPath;
-            }
-        }
-    };
-
-    // --- Context Menu ---
-    function showContextMenu(x, y, path) {
-        contextMenuPath = path;
-        var menu = document.getElementById('contextMenu');
-        menu.style.display = 'block';
-        menu.style.left = x + 'px';
-        menu.style.top = y + 'px';
-        // Keep menu in viewport
-        var rect = menu.getBoundingClientRect();
-        if (rect.right > window.innerWidth) {
-            menu.style.left = (x - rect.width) + 'px';
-        }
-        if (rect.bottom > window.innerHeight) {
-            menu.style.top = (y - rect.height) + 'px';
-        }
-    }
-
-    function hideContextMenu() {
-        document.getElementById('contextMenu').style.display = 'none';
-        contextMenuPath = '';
-    }
-
-    document.addEventListener('click', function() { hideContextMenu(); });
-    document.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape') hideContextMenu();
-    });
-
-    window.ctxTakeOwnership = function(recursive) {
-        var path = contextMenuPath;
-        hideContextMenu();
-        if (!path) return;
-        var body = '<p>Take ownership of:</p>' +
-            '<p style="color:var(--text);word-break:break-all;font-weight:600;">' + escHtml(path) + '</p>' +
-            (recursive ? '<p style="color:var(--warning);">This will be applied recursively to all subfolders and files.</p>' : '');
-        showModal('Take Ownership', body, 'Take Ownership', function() {
-            var btn = document.getElementById('modalConfirmBtn');
-            btn.disabled = true;
-            btn.textContent = 'Working...';
-            apiPost('/api/take-ownership', { path: path, recursive: recursive }).then(function(data) {
-                closeModal();
-                setStatus(data.message, 'success');
-                if (path === currentPath) loadAcl(currentPath);
-            }).catch(function(err) {
-                closeModal();
-                setStatus('Take ownership failed: ' + err.message, 'error');
-            });
-        }, false);
-    };
-
-    window.ctxReplicateHere = function() {
-        var targetPath = contextMenuPath;
-        hideContextMenu();
-        if (!currentPath || !targetPath) {
-            setStatus('Select a source folder first (click it in the tree), then right-click the target', 'error');
-            return;
-        }
-        var body = '<p>Copy permissions from:</p>' +
-            '<p style="color:var(--text);font-weight:600;word-break:break-all;">' + escHtml(currentPath) + '</p>' +
-            '<p>To:</p>' +
-            '<p style="color:var(--text);font-weight:600;word-break:break-all;">' + escHtml(targetPath) + '</p>' +
-            '<div class="checkbox-group" style="margin-top:12px;">' +
-            '<input type="checkbox" id="ctxReplicateRecursive" checked />' +
-            '<label for="ctxReplicateRecursive">Recursive (apply to all subfolders and files)</label>' +
-            '</div>';
-        showModal('Replicate Permissions', body, 'Replicate', function() {
-            var recursive = document.getElementById('ctxReplicateRecursive').checked;
-            var btn = document.getElementById('modalConfirmBtn');
-            btn.disabled = true;
-            btn.textContent = 'Working...';
-            apiPost('/api/replicate', { sourcePath: currentPath, targetPaths: [targetPath], recursive: recursive }).then(function(data) {
-                closeModal();
-                var msg = 'Replication complete';
-                if (data.results && data.results.length > 0) {
-                    msg = data.results[0].message || msg;
-                }
-                setStatus(msg, 'success');
-            }).catch(function(err) {
-                closeModal();
-                setStatus('Replication failed: ' + err.message, 'error');
-            });
-        }, false);
-    };
-
-    window.ctxCopyPath = function() {
-        var path = contextMenuPath;
-        hideContextMenu();
-        if (!path) return;
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(path).then(function() {
-                setStatus('Path copied: ' + path, 'success');
-            }).catch(function() {
-                fallbackCopy(path);
-            });
-        } else {
-            fallbackCopy(path);
-        }
-    };
-
-    function fallbackCopy(text) {
-        var ta = document.createElement('textarea');
-        ta.value = text;
-        ta.style.position = 'fixed';
-        ta.style.left = '-9999px';
-        document.body.appendChild(ta);
-        ta.select();
-        try { document.execCommand('copy'); setStatus('Path copied: ' + text, 'success'); }
-        catch(e) { setStatus('Could not copy path', 'error'); }
-        document.body.removeChild(ta);
-    }
-
-    window.ctxOpenInTab = function(tabName) {
-        var path = contextMenuPath;
-        hideContextMenu();
-        if (!path) return;
+    node.addEventListener('click', function() {
         selectFolder(path);
-        switchTab(tabName);
-    };
-
-    // --- Action Modals ---
-    window.showTakeOwnershipModal = function() {
-        if (!currentPath) return;
-        var body = '<p>Take ownership of:</p>' +
-            '<p style="color:var(--text);word-break:break-all;font-weight:600;">' + escHtml(currentPath) + '</p>' +
-            '<div class="checkbox-group">' +
-            '<input type="checkbox" id="ownerRecursive" />' +
-            '<label for="ownerRecursive">Recursive (include all subfolders)</label>' +
-            '</div>';
-        showModal('Take Ownership', body, 'Take Ownership', function() {
-            var recursive = document.getElementById('ownerRecursive').checked;
-            var btn = document.getElementById('modalConfirmBtn');
-            btn.disabled = true;
-            btn.textContent = 'Working...';
-            apiPost('/api/take-ownership', { path: currentPath, recursive: recursive }).then(function(data) {
-                closeModal();
-                setStatus(data.message, 'success');
-                loadAcl(currentPath);
-            }).catch(function(err) {
-                closeModal();
-                setStatus('Take ownership failed: ' + err.message, 'error');
-            });
-        }, false);
-    };
-
-    window.showAddPermissionModal = function() {
-        if (!currentPath) return;
-        var body = '<div class="form-group">' +
-            '<label>Identity (e.g. DOMAIN\\User or Everyone)</label>' +
-            '<input type="text" id="aceIdentity" />' +
-            '</div>' +
-            '<div class="form-group">' +
-            '<label>Rights</label>' +
-            '<select id="aceRights">' +
-            '<option value="FullControl">Full Control</option>' +
-            '<option value="Modify">Modify</option>' +
-            '<option value="ReadAndExecute" selected>Read &amp; Execute</option>' +
-            '<option value="Read">Read</option>' +
-            '<option value="Write">Write</option>' +
-            '</select>' +
-            '</div>' +
-            '<div class="form-group">' +
-            '<label>Type</label>' +
-            '<div class="radio-group">' +
-            '<label><input type="radio" name="aceType" value="Allow" checked /> Allow</label>' +
-            '<label><input type="radio" name="aceType" value="Deny" /> Deny</label>' +
-            '</div>' +
-            '</div>';
-        showModal('Add Permission', body, 'Add Permission', function() {
-            var identity = document.getElementById('aceIdentity').value.trim();
-            if (!identity) { setStatus('Identity is required', 'error'); return; }
-            var rights = document.getElementById('aceRights').value;
-            var typeRadio = document.querySelector('input[name="aceType"]:checked');
-            var type = typeRadio ? typeRadio.value : 'Allow';
-            var btn = document.getElementById('modalConfirmBtn');
-            btn.disabled = true;
-            btn.textContent = 'Working...';
-            apiPost('/api/add-ace', { path: currentPath, identity: identity, rights: rights, type: type }).then(function(data) {
-                closeModal();
-                setStatus(data.message, 'success');
-                loadAcl(currentPath);
-            }).catch(function(err) {
-                closeModal();
-                setStatus('Add permission failed: ' + err.message, 'error');
-            });
-        }, false);
-    };
-
-    window.showRemoveModal = function(idx) {
-        if (!currentAcl || !currentAcl.entries[idx]) return;
-        var entry = currentAcl.entries[idx];
-        var body = '<p>Remove the following permission?</p>' +
-            '<p style="color:var(--text)"><strong>' + escHtml(entry.identity) + '</strong></p>' +
-            '<p>' + escHtml(entry.type) + ': ' + escHtml(entry.rights) + '</p>' +
-            '<p style="color:var(--text);word-break:break-all;">' + escHtml(currentPath) + '</p>';
-        showModal('Remove Permission', body, 'Remove', function() {
-            var btn = document.getElementById('modalConfirmBtn');
-            btn.disabled = true;
-            btn.textContent = 'Working...';
-            apiPost('/api/remove-ace', {
-                path: currentPath,
-                identity: entry.identity,
-                rights: entry.rights,
-                type: entry.type
-            }).then(function(data) {
-                closeModal();
-                setStatus(data.message, 'success');
-                loadAcl(currentPath);
-            }).catch(function(err) {
-                closeModal();
-                setStatus('Remove failed: ' + err.message, 'error');
-            });
-        }, true);
-    };
-
-    window.showReplicateModal = function() {
-        if (!currentPath) return;
-        var checks = document.querySelectorAll('.child-check:checked');
-        var targets = [];
-        checks.forEach(function(c) { targets.push(c.getAttribute('data-path')); });
-
-        var body = '<p>Copy permissions from:</p>' +
-            '<p style="color:var(--text);font-weight:600;word-break:break-all;">' + escHtml(currentPath) + '</p>';
-
-        if (targets.length > 0) {
-            var listHtml = '<div class="target-list">';
-            targets.forEach(function(t) { listHtml += '<div>' + escHtml(t) + '</div>'; });
-            listHtml += '</div>';
-            body += '<p>To ' + targets.length + ' selected folder(s):</p>' + listHtml;
-        } else {
-            body += '<p>To: <strong>all contents of this folder</strong></p>';
-            targets = [currentPath];
-        }
-
-        body += '<div class="checkbox-group" style="margin-top:12px;">' +
-            '<input type="checkbox" id="replicateRecursive" checked />' +
-            '<label for="replicateRecursive">Recursive (apply to all subfolders and files)</label>' +
-            '</div>' +
-            '<p style="color:var(--text-muted); font-size:12px; margin-top:8px;">When recursive, permissions are pushed to every file and subfolder underneath each target using icacls /T.</p>';
-
-        showModal('Replicate Permissions', body, 'Replicate', function() {
-            var recursive = document.getElementById('replicateRecursive').checked;
-            var btn = document.getElementById('modalConfirmBtn');
-            btn.disabled = true;
-            btn.textContent = 'Working...';
-            setStatus('Replicating permissions' + (recursive ? ' recursively' : '') + '...', 'working');
-            apiPost('/api/replicate', { sourcePath: currentPath, targetPaths: targets, recursive: recursive }).then(function(data) {
-                closeModal();
-                var successes = 0;
-                var warnings = 0;
-                var errors = 0;
-                if (data.results) {
-                    data.results.forEach(function(r) {
-                        if (r.status === 'success') successes++;
-                        else if (r.status === 'warning') warnings++;
-                        else errors++;
-                    });
-                }
-                var msg = 'Replication complete: ' + successes + ' succeeded';
-                if (warnings > 0) msg += ', ' + warnings + ' warnings';
-                if (errors > 0) msg += ', ' + errors + ' failed';
-                setStatus(msg, errors > 0 ? 'error' : (warnings > 0 ? 'info' : 'success'));
-                refreshCurrent();
-            }).catch(function(err) {
-                closeModal();
-                setStatus('Replication failed: ' + err.message, 'error');
-            });
-        }, false);
-    };
-
-    window.replicateSelected = function() {
-        window.showReplicateModal();
-    };
-
-    // --- Export ---
-    window.exportCsv = function() {
-        if (!currentPath) return;
-        window.location.href = '/api/export?path=' + encodeURIComponent(currentPath);
-        setStatus('Export started for ' + currentPath, 'info');
-    };
-
-    // --- Refresh ---
-    window.refreshCurrent = function() {
-        if (!currentPath) return;
-        latestChildren = null;
-        latestFiles = null;
-        loadAcl(currentPath);
-        loadChildrenTab(currentPath);
-        loadFilesTab(currentPath);
-    };
-
-    // --- Robocopy ---
-    window.useCurrentPathAsSource = function() {
-        document.getElementById('roboSource').value = currentPath || '';
-    };
-
-    window.updateRoboLogPath = function() {
-        var dest = document.getElementById('roboDest').value.trim();
-        var enabled = document.getElementById('roboLogEnabled').checked;
-        var logInput = document.getElementById('roboLog');
-        if (!enabled) {
-            logInput.value = '';
-            logInput.disabled = true;
-            return;
-        }
-        logInput.disabled = false;
-        if (dest) {
-            var sep = dest.indexOf('/') >= 0 ? '/' : '\\';
-            var now = new Date();
-            var ts = now.getFullYear() + '-' +
-                String(now.getMonth() + 1).padStart(2, '0') + '-' +
-                String(now.getDate()).padStart(2, '0') + '_' +
-                String(now.getHours()).padStart(2, '0') +
-                String(now.getMinutes()).padStart(2, '0') +
-                String(now.getSeconds()).padStart(2, '0');
-            logInput.value = dest.replace(/[\\\/]+`$/, '') + sep + 'robocopy-log_' + ts + '.txt';
-        }
-    };
-
-    // Auto-update log path when destination changes
-    document.getElementById('roboDest').addEventListener('input', function() {
-        if (document.getElementById('roboLogEnabled').checked) {
-            updateRoboLogPath();
+        if (hasChildren) {
+            expanded = !expanded;
+            toggle.textContent = expanded ? '▼' : '▶';
+            childContainer.style.display = expanded ? 'block' : 'none';
+            if (expanded && childContainer.children.length === 0) {
+                loadChildren(path, depth + 1, childContainer);
+            }
         }
     });
 
-    window.robocopyPreview = function() {
-        var source = document.getElementById('roboSource').value.trim();
-        var dest = document.getElementById('roboDest').value.trim();
-        if (!source) { setStatus('Enter a source path', 'error'); return; }
+    return wrapper;
+}
 
-        setStatus('Running preview...', 'working');
-        var url = '/api/robocopy-preview?source=' + encodeURIComponent(source);
-        if (dest) url += '&destination=' + encodeURIComponent(dest);
-
-        apiGet(url).then(function(data) {
-            var box = document.getElementById('roboPreviewBox');
-            var content = document.getElementById('roboPreviewContent');
-            box.style.display = 'block';
-            content.innerHTML =
-                '<div style="display:flex; gap:24px; margin-bottom:8px;">' +
-                '<span><strong>' + data.dirs + '</strong> directories</span>' +
-                '<span><strong>' + data.files + '</strong> files</span>' +
-                '<span><strong>' + data.sizeDisplay + '</strong> total</span>' +
-                '</div>';
-            setStatus('Preview complete', 'success');
-        }).catch(function(err) {
-            setStatus('Preview failed: ' + err.message, 'error');
+function loadChildren(path, depth, container) {
+    api('/api/children?path=' + encodeURIComponent(path)).then(function(children) {
+        container.innerHTML = '';
+        children.forEach(function(c) {
+            container.appendChild(makeTreeNode(c.name, c.path, depth, c.hasChildren));
         });
-    };
+    }).catch(function(e) { setStatus('Error loading children: ' + e.message, 'error'); });
+}
 
-    window.robocopyRun = function() {
-        var source = document.getElementById('roboSource').value.trim();
-        var dest = document.getElementById('roboDest').value.trim();
-        if (!source || !dest) { setStatus('Enter both source and destination paths', 'error'); return; }
+function selectFolder(path) {
+    // Update selection highlight
+    document.querySelectorAll('.tree-node').forEach(function(n) {
+        n.classList.toggle('selected', n.dataset.path === path);
+    });
+    currentFolder = path;
+    checkedFiles.clear();
+    fileAclCache = {};
+    loadFolderAcl(path);
+    loadFiles(path);
+}
 
-        var modeRadio = document.querySelector('input[name="roboMode"]:checked');
-        var mode = modeRadio ? modeRadio.value : 'copy';
-        var modeLabel = mode === 'mirror' ? 'MIRROR (will delete extras in destination)' : 'COPY';
+// --- Folder ACL ---
+function loadFolderAcl(path) {
+    document.getElementById('no-folder-msg').style.display = 'none';
+    document.getElementById('folder-acl-section').style.display = 'block';
+    document.getElementById('files-section').style.display = 'flex';
+    document.getElementById('folderAclTitle').textContent = path.split('\\').pop() || path;
 
-        showModal('Run Robocopy', '<p><strong>Mode:</strong> ' + modeLabel + '</p>' +
-            '<p><strong>From:</strong> ' + source + '</p>' +
-            '<p><strong>To:</strong> ' + dest + '</p>' +
-            (mode === 'mirror' ? '<p style="color:#e74c3c;"><strong>Warning:</strong> Mirror mode will delete files in the destination that do not exist in the source.</p>' : '') +
-            '<p>This copies all files with permissions, timestamps, and ownership.</p>',
-            'Run', function() {
-                closeModal();
-                setStatus('Robocopy running... this may take a while', 'working');
-                document.getElementById('btnRobocopy').disabled = true;
-                document.getElementById('btnRoboPreview').disabled = true;
+    api('/api/acl?path=' + encodeURIComponent(path)).then(function(data) {
+        document.getElementById('folderOwner').textContent = data.owner || '—';
+        var tbody = document.getElementById('folderAclBody');
+        tbody.innerHTML = '';
+        (data.entries || []).forEach(function(e) {
+            var tr = document.createElement('tr');
+            tr.innerHTML =
+                '<td>' + e.identity + '</td>' +
+                '<td>' + e.rights + '</td>' +
+                '<td><span class="badge badge-' + e.type.toLowerCase() + '">' + e.type + '</span></td>' +
+                '<td>' + (e.isInherited ? '<span class="badge badge-inherited">Yes</span>' : '') + '</td>';
+            tbody.appendChild(tr);
+        });
+    }).catch(function(e) { setStatus('Failed to load ACL: ' + e.message, 'error'); });
+}
 
-                var payload = {
-                    source: source,
-                    destination: dest,
-                    mode: mode,
-                    threads: parseInt(document.getElementById('roboThreads').value) || 8,
-                    retries: parseInt(document.getElementById('roboRetries').value) || 3,
-                    waitTime: parseInt(document.getElementById('roboWait').value) || 5,
-                    logFile: (document.getElementById('roboLogEnabled').checked ? document.getElementById('roboLog').value.trim() : null) || null,
-                    extraFlags: document.getElementById('roboExtra').value.trim() || null
-                };
+// --- Files list ---
+function loadFiles(path) {
+    var list = document.getElementById('filesList');
+    list.innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:12px;">Loading...</div>';
+    api('/api/files?path=' + encodeURIComponent(path)).then(function(files) {
+        currentFiles = files;
+        renderFilesList();
+    }).catch(function(e) {
+        list.innerHTML = '<div style="padding:12px;color:var(--danger);font-size:12px;">Failed to load files: ' + e.message + '</div>';
+    });
+}
 
-                apiPost('/api/robocopy', payload).then(function(data) {
-                    var outBox = document.getElementById('roboOutputBox');
-                    var outContent = document.getElementById('roboOutputContent');
-                    outBox.style.display = 'block';
-                    outContent.textContent = 'Command: ' + data.command + '\n\nExit Code: ' + data.exitCode + ' (' + data.exitMeaning + ')\n\n' + (data.output || '');
+function renderFilesList() {
+    var list = document.getElementById('filesList');
+    list.innerHTML = '';
+    if (!currentFiles || currentFiles.length === 0) {
+        list.innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:12px;">No files in this folder</div>';
+        updateActionBar();
+        return;
+    }
+    currentFiles.forEach(function(f) {
+        var row = document.createElement('div');
+        row.className = 'file-row' + (checkedFiles.has(f.path) ? ' checked' : '');
+        row.dataset.path = f.path;
 
-                    if (data.status === 'success') {
-                        setStatus('Robocopy completed -- ' + data.exitMeaning, 'success');
-                    } else {
-                        setStatus('Robocopy error -- ' + data.exitMeaning, 'error');
-                    }
-                }).catch(function(err) {
-                    setStatus('Robocopy failed: ' + err.message, 'error');
-                }).finally(function() {
-                    document.getElementById('btnRobocopy').disabled = false;
-                    document.getElementById('btnRoboPreview').disabled = false;
-                });
+        var cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = checkedFiles.has(f.path);
+        cb.addEventListener('change', function() { toggleFileCheck(f.path, cb.checked, row); });
+
+        var nameEl = document.createElement('span');
+        nameEl.className = 'file-name';
+        nameEl.textContent = f.name;
+        nameEl.title = f.name;
+
+        var sizeEl = document.createElement('span');
+        sizeEl.className = 'file-size';
+        sizeEl.textContent = f.sizeDisplay;
+
+        var dateEl = document.createElement('span');
+        dateEl.className = 'file-date';
+        dateEl.textContent = f.lastModified;
+
+        var expandBtn = document.createElement('button');
+        expandBtn.className = 'expand-btn';
+        expandBtn.textContent = '▶';
+        expandBtn.title = 'Show ACL';
+        expandBtn.addEventListener('click', function(e) { e.stopPropagation(); toggleFileAcl(f.path, row, expandBtn); });
+
+        row.appendChild(cb);
+        row.appendChild(nameEl);
+        row.appendChild(sizeEl);
+        row.appendChild(dateEl);
+        row.appendChild(expandBtn);
+        list.appendChild(row);
+    });
+    updateActionBar();
+}
+
+function toggleFileCheck(path, checked, row) {
+    if (checked) { checkedFiles.add(path); } else { checkedFiles.delete(path); }
+    row.classList.toggle('checked', checked);
+    document.getElementById('selectAllFiles').checked = checkedFiles.size === currentFiles.length && currentFiles.length > 0;
+    updateActionBar();
+}
+
+function toggleSelectAll(checked) {
+    checkedFiles.clear();
+    if (checked) { currentFiles.forEach(function(f) { checkedFiles.add(f.path); }); }
+    renderFilesList();
+    document.getElementById('selectAllFiles').checked = checked;
+}
+
+function updateActionBar() {
+    var bar = document.getElementById('actionBar');
+    var count = checkedFiles.size;
+    document.getElementById('selectionCount').textContent = count + ' file' + (count === 1 ? '' : 's') + ' selected';
+    bar.classList.toggle('visible', count > 0);
+    // ACL diff check — only when 2+ files are checked and we have their ACLs cached
+    checkAclDiff();
+}
+
+// --- Inline file ACL expand ---
+function toggleFileAcl(path, row, btn) {
+    // If already expanded, collapse
+    var existing = row.nextSibling;
+    if (existing && existing.classList && existing.classList.contains('file-acl-row')) {
+        existing.remove();
+        btn.textContent = '▶';
+        return;
+    }
+    btn.textContent = '▼';
+    btn.disabled = true;
+    setStatus('Loading file ACL...', 'info');
+
+    api('/api/file-acl?path=' + encodeURIComponent(path)).then(function(data) {
+        fileAclCache[path] = data;
+        var aclRow = document.createElement('div');
+        aclRow.className = 'file-acl-row';
+        var html = '<strong style="font-size:11px;color:var(--text-muted);">Owner: ' + (data.owner || '—') + '</strong>';
+        (data.entries || []).forEach(function(e) {
+            html += '<div class="acl-entry"><span class="badge badge-' + e.type.toLowerCase() + '">' + e.type + '</span>' +
+                    '<span>' + e.identity + '</span><span style="color:var(--text-muted);">' + e.rights + '</span>' +
+                    (e.isInherited ? '<span class="badge badge-inherited">inherited</span>' : '') + '</div>';
+        });
+        aclRow.innerHTML = html;
+        row.insertAdjacentElement('afterend', aclRow);
+        setStatus('Ready');
+        checkAclDiff();
+    }).catch(function(e) {
+        btn.textContent = '▶';
+        setStatus('Failed to load file ACL: ' + e.message, 'error');
+    }).finally(function() { btn.disabled = false; });
+}
+
+function checkAclDiff() {
+    var warning = document.getElementById('aclDiffWarning');
+    if (checkedFiles.size < 2) { warning.style.display = 'none'; return; }
+    var checkedCached = Array.from(checkedFiles).filter(function(p) { return fileAclCache[p]; });
+    if (checkedCached.length < 2) { warning.style.display = 'none'; return; }
+    var first = JSON.stringify((fileAclCache[checkedCached[0]].entries || []).map(function(e) { return e.identity + e.rights + e.type; }).sort());
+    var differs = checkedCached.slice(1).some(function(p) {
+        return JSON.stringify((fileAclCache[p].entries || []).map(function(e) { return e.identity + e.rights + e.type; }).sort()) !== first;
+    });
+    warning.style.display = differs ? 'block' : 'none';
+}
+
+// --- Folder ACL operations ---
+function showAddAceModal(target) {
+    addAceTarget = target;
+    document.getElementById('addAceModalTitle').textContent = target === 'files' ? 'Add Permission to Selected Files' : 'Add Permission Entry';
+    document.getElementById('addAceIdentity').value = '';
+    openModal('addAceModal');
+}
+
+function submitAddAce() {
+    var identity = document.getElementById('addAceIdentity').value.trim();
+    var rights   = document.getElementById('addAceRights').value;
+    var type     = document.getElementById('addAceType').value;
+    if (!identity) { setStatus('Identity is required', 'error'); return; }
+    closeModal('addAceModal');
+
+    if (addAceTarget === 'files') {
+        var paths = Array.from(checkedFiles);
+        setStatus('Adding ACE to ' + paths.length + ' file(s)...', 'info');
+        api('/api/file-acl/add', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ paths: paths, identity: identity, rights: rights, type: type }) })
+            .then(function(r) {
+                var failed = (r.results || []).filter(function(x) { return x.status === 'error'; });
+                if (failed.length) { setStatus(failed.length + ' file(s) failed. First error: ' + failed[0].message, 'error'); }
+                else { setStatus('ACE added to ' + paths.length + ' file(s)', 'success'); }
+            }).catch(function(e) { setStatus('Failed: ' + e.message, 'error'); });
+    } else {
+        setStatus('Adding ACE...', 'info');
+        api('/api/add-ace', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: currentFolder, identity: identity, rights: rights, type: type }) })
+            .then(function() { setStatus('ACE added', 'success'); loadFolderAcl(currentFolder); })
+            .catch(function(e) { setStatus('Failed: ' + e.message, 'error'); });
+    }
+}
+
+function showRemoveAceModal(target) {
+    removeAceTarget = target;
+    document.getElementById('removeAceModalTitle').textContent = target === 'files' ? 'Remove Permission from Selected Files' : 'Remove Permission Entry';
+    var select = document.getElementById('removeAceIdentity');
+    select.innerHTML = '';
+
+    if (target === 'files') {
+        // Populate from cached ACLs of checked files — combined unique identities
+        var identities = new Set();
+        Array.from(checkedFiles).forEach(function(p) {
+            if (fileAclCache[p]) {
+                (fileAclCache[p].entries || []).forEach(function(e) { identities.add(e.identity); });
             }
-        );
-    };
+        });
+        if (identities.size === 0) { setStatus('Expand file ACLs first to load identities', 'warning'); return; }
+        identities.forEach(function(id) { var o = document.createElement('option'); o.value = id; o.textContent = id; select.appendChild(o); });
+    } else {
+        // Populate from current folder ACL table
+        var rows = document.querySelectorAll('#folderAclBody tr');
+        var seen = new Set();
+        rows.forEach(function(r) {
+            var id = r.cells[0] && r.cells[0].textContent;
+            if (id && !seen.has(id)) { seen.add(id); var o = document.createElement('option'); o.value = id; o.textContent = id; select.appendChild(o); }
+        });
+    }
+    openModal('removeAceModal');
+}
 
-    // --- Init ---
-    initTheme();
-    loadDrives();
+function submitRemoveAce() {
+    var identity = document.getElementById('removeAceIdentity').value;
+    var rights   = document.getElementById('removeAceRights').value;
+    var type     = document.getElementById('removeAceType').value;
+    closeModal('removeAceModal');
+
+    if (removeAceTarget === 'files') {
+        var paths = Array.from(checkedFiles);
+        setStatus('Removing ACE from ' + paths.length + ' file(s)...', 'info');
+        api('/api/file-acl/remove', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ paths: paths, identity: identity, rights: rights, type: type }) })
+            .then(function(r) {
+                var failed = (r.results || []).filter(function(x) { return x.status === 'error'; });
+                if (failed.length) { setStatus(failed.length + ' file(s) failed. First error: ' + failed[0].message, 'error'); }
+                else { setStatus('ACE removed from ' + paths.length + ' file(s)', 'success'); }
+            }).catch(function(e) { setStatus('Failed: ' + e.message, 'error'); });
+    } else {
+        setStatus('Removing ACE...', 'info');
+        api('/api/remove-ace', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: currentFolder, identity: identity, rights: rights, type: type }) })
+            .then(function() { setStatus('ACE removed', 'success'); loadFolderAcl(currentFolder); })
+            .catch(function(e) { setStatus('Failed: ' + e.message, 'error'); });
+    }
+}
+
+function takeOwnership(recursive) {
+    if (!currentFolder) return;
+    var msg = recursive ? 'Take ownership RECURSIVELY on all files and subfolders in ' + currentFolder + '? This may take a while.' : 'Take ownership of ' + currentFolder + '?';
+    if (!confirm(msg)) return;
+    setStatus('Taking ownership...', 'info');
+    api('/api/take-ownership', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: currentFolder, recursive: recursive }) })
+        .then(function(r) { setStatus(r.message || 'Ownership taken', 'success'); loadFolderAcl(currentFolder); })
+        .catch(function(e) { setStatus('Failed: ' + e.message, 'error'); });
+}
+
+function showReplicateModal() {
+    document.getElementById('replicateTargets').value = '';
+    document.getElementById('replicateRecursive').checked = false;
+    openModal('replicateModal');
+}
+
+function submitReplicate() {
+    var raw = document.getElementById('replicateTargets').value;
+    var targets = raw.split('\n').map(function(s) { return s.trim(); }).filter(Boolean);
+    if (!targets.length) { setStatus('Enter at least one target path', 'error'); return; }
+    closeModal('replicateModal');
+    setStatus('Replicating permissions...', 'info');
+    api('/api/replicate', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ sourcePath: currentFolder, targetPaths: targets, recursive: document.getElementById('replicateRecursive').checked }) })
+        .then(function(r) {
+            var failed = (r.results || []).filter(function(x) { return x.status === 'error'; });
+            if (failed.length) { setStatus(failed.length + ' target(s) failed. First: ' + failed[0].message, 'error'); }
+            else { setStatus('Permissions replicated to ' + targets.length + ' target(s)', 'success'); }
+        }).catch(function(e) { setStatus('Failed: ' + e.message, 'error'); });
+}
+
+function exportReport() {
+    if (!currentFolder) return;
+    window.location.href = '/api/export?path=' + encodeURIComponent(currentFolder);
+}
+
+// --- File ownership ---
+function takeFileOwnership() {
+    var paths = Array.from(checkedFiles);
+    if (!paths.length) return;
+    if (!confirm('Take ownership of ' + paths.length + ' file(s)?')) return;
+    setStatus('Taking ownership of ' + paths.length + ' file(s)...', 'info');
+    api('/api/file-acl/take-ownership', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ paths: paths }) })
+        .then(function(r) {
+            var failed = (r.results || []).filter(function(x) { return x.status === 'error'; });
+            if (failed.length) { setStatus(failed.length + ' file(s) failed. First: ' + failed[0].message, 'error'); }
+            else { setStatus('Ownership taken on ' + paths.length + ' file(s)', 'success'); }
+        }).catch(function(e) { setStatus('Failed: ' + e.message, 'error'); });
+}
+
+// --- Copy files modal ---
+function showCopyFilesModal() {
+    document.getElementById('copyFilesDest').value = '';
+    document.getElementById('copyFilesExtra').value = '';
+    openModal('copyFilesModal');
+}
+
+function submitCopyFiles() {
+    var dest  = document.getElementById('copyFilesDest').value.trim();
+    var extra = document.getElementById('copyFilesExtra').value.trim();
+    var paths = Array.from(checkedFiles);
+    if (!dest) { setStatus('Destination folder is required', 'error'); return; }
+    if (!paths.length) { setStatus('No files selected', 'error'); return; }
+    closeModal('copyFilesModal');
+    // Filenames only — robocopy-files expects sourceDir + filenames
+    var filenames = paths.map(function(p) { return p.split('\\').pop(); });
+    setStatus('Copying ' + filenames.length + ' file(s)...', 'info');
+    api('/api/robocopy-files', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ sourceDir: currentFolder, destDir: dest, files: filenames, extraFlags: extra || null }) })
+        .then(function(r) {
+            setStatus((r.success ? 'Copy complete: ' : 'Copy finished with errors: ') + r.message, r.success ? 'success' : 'error');
+        }).catch(function(e) { setStatus('Failed: ' + e.message, 'error'); });
+}
+
+// --- Robocopy tab ---
+function setRoboMode(mode) {
+    document.getElementById('roboFolderForm').style.display = mode === 'folder' ? 'flex' : 'none';
+    document.getElementById('roboFileForm').style.display  = mode === 'file'   ? 'flex' : 'none';
+    document.getElementById('roboModeFolderBtn').classList.toggle('active', mode === 'folder');
+    document.getElementById('roboModeFileBtn').classList.toggle('active', mode === 'file');
+    document.getElementById('roboOutput').style.display = 'none';
+}
+
+function loadRoboFileList() {
+    var src = document.getElementById('roboFileSrc').value.trim();
+    var list = document.getElementById('roboFileList');
+    if (!src) { list.innerHTML = '<span style="padding:8px;color:var(--text-muted);font-size:12px;display:block;">Enter a source folder above</span>'; return; }
+    list.innerHTML = '<span style="padding:8px;color:var(--text-muted);font-size:12px;display:block;">Loading...</span>';
+    api('/api/files?path=' + encodeURIComponent(src)).then(function(files) {
+        list.innerHTML = '';
+        if (!files || files.length === 0) { list.innerHTML = '<span style="padding:8px;color:var(--text-muted);font-size:12px;display:block;">No files found</span>'; return; }
+        files.forEach(function(f) {
+            var item = document.createElement('div');
+            item.className = 'robo-file-item';
+            var cb = document.createElement('input'); cb.type = 'checkbox'; cb.value = f.name; cb.id = 'rfl-' + f.name;
+            var lbl = document.createElement('label'); lbl.htmlFor = 'rfl-' + f.name; lbl.style.fontSize = '12px'; lbl.style.cursor = 'pointer';
+            lbl.textContent = f.name + ' (' + f.sizeDisplay + ')';
+            item.appendChild(cb); item.appendChild(lbl);
+            list.appendChild(item);
+        });
+    }).catch(function(e) { list.innerHTML = '<span style="padding:8px;color:var(--danger);font-size:12px;display:block;">Error: ' + e.message + '</span>'; });
+}
+
+function runRobocopy() {
+    var src     = document.getElementById('roboSrc').value.trim();
+    var dst     = document.getElementById('roboDst').value.trim();
+    var mode    = document.getElementById('roboMode').value;
+    var threads = parseInt(document.getElementById('roboThreads').value) || 8;
+    var retries = parseInt(document.getElementById('roboRetries').value) || 3;
+    var wait    = parseInt(document.getElementById('roboWait').value) || 5;
+    var extra   = document.getElementById('roboExtra').value.trim();
+    var log     = document.getElementById('roboLog').value.trim();
+    if (!src || !dst) { setStatus('Source and destination are required', 'error'); return; }
+    document.getElementById('btnRobocopy').disabled = true;
+    document.getElementById('btnRoboPreview').disabled = true;
+    setStatus('Running robocopy...', 'info');
+    api('/api/robocopy', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ source: src, destination: dst, mode: mode, threads: threads, retries: retries, waitTime: wait, extraFlags: extra || null, logFile: log || null }) })
+        .then(function(r) {
+            showRoboOutput(r);
+            setStatus((r.success ? 'Robocopy complete: ' : 'Robocopy error: ') + r.message, r.success ? 'success' : 'error');
+        })
+        .catch(function(e) { setStatus('Robocopy failed: ' + e.message, 'error'); })
+        .finally(function() { document.getElementById('btnRobocopy').disabled = false; document.getElementById('btnRoboPreview').disabled = false; });
+}
+
+function roboPreview() {
+    var src = document.getElementById('roboSrc').value.trim();
+    var dst = document.getElementById('roboDst').value.trim();
+    if (!src) { setStatus('Source folder is required for preview', 'error'); return; }
+    document.getElementById('btnRoboPreview').disabled = true;
+    setStatus('Running preview...', 'info');
+    api('/api/robocopy-preview?source=' + encodeURIComponent(src) + '&destination=' + encodeURIComponent(dst))
+        .then(function(r) {
+            var out = document.getElementById('roboOutput');
+            out.style.display = 'block';
+            out.textContent = 'Preview: ' + r.dirs + ' dirs, ' + r.files + ' files, ' + r.sizeDisplay + '\n\n' + (r.rawSummary || '');
+            setStatus('Preview complete', 'success');
+        })
+        .catch(function(e) { setStatus('Preview failed: ' + e.message, 'error'); })
+        .finally(function() { document.getElementById('btnRoboPreview').disabled = false; });
+}
+
+function runRobocopyFiles() {
+    var src   = document.getElementById('roboFileSrc').value.trim();
+    var dst   = document.getElementById('roboFileDst').value.trim();
+    var extra = document.getElementById('roboFileExtra').value.trim();
+    if (!src || !dst) { setStatus('Source and destination are required', 'error'); return; }
+    var checked = Array.from(document.querySelectorAll('#roboFileList input[type=checkbox]:checked')).map(function(cb) { return cb.value; });
+    if (!checked.length) { setStatus('Select at least one file to copy', 'error'); return; }
+    document.getElementById('btnRobocopyFiles').disabled = true;
+    setStatus('Copying ' + checked.length + ' file(s)...', 'info');
+    api('/api/robocopy-files', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ sourceDir: src, destDir: dst, files: checked, extraFlags: extra || null }) })
+        .then(function(r) {
+            showRoboOutput(r);
+            setStatus((r.success ? 'Copy complete: ' : 'Copy error: ') + r.message, r.success ? 'success' : 'error');
+        })
+        .catch(function(e) { setStatus('Copy failed: ' + e.message, 'error'); })
+        .finally(function() { document.getElementById('btnRobocopyFiles').disabled = false; });
+}
+
+function showRoboOutput(r) {
+    var out = document.getElementById('roboOutput');
+    out.style.display = 'block';
+    out.textContent = 'Command: ' + r.command + '\nExit code: ' + r.exitCode + ' — ' + r.message + '\n\n' + (r.output || '');
+}
+
+// --- Init ---
+initTheme();
+loadDrives();
 })();
 </script>
 </body>
