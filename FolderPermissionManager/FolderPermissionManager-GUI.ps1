@@ -1181,6 +1181,20 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
 .robo-file-item { display: flex; align-items: center; gap: 6px; padding: 4px 8px; font-size: 12px; border-bottom: 1px solid var(--border); }
 .robo-file-item:last-child { border-bottom: none; }
 .robo-file-item input[type=checkbox] { cursor: pointer; }
+
+/* Icons */
+.btn svg, .btn-icon svg { vertical-align: middle; margin-right: 4px; flex-shrink: 0; }
+.btn-icon { display: inline-flex; align-items: center; gap: 4px; }
+.btn-ghost { background: transparent; color: var(--text-muted); border: 1px solid var(--border); }
+.btn-ghost:hover { background: rgba(231,76,60,0.1); color: var(--danger); border-color: var(--danger); }
+.tree-node .node-icon { flex-shrink: 0; color: var(--text-muted); }
+.tree-node.selected .node-icon { color: rgba(255,255,255,0.8); }
+.file-icon { color: var(--text-muted); flex-shrink: 0; }
+
+/* Path context header */
+.path-header { padding: 8px 16px; background: var(--bg-card); border-bottom: 1px solid var(--border); font-size: 12px; color: var(--text-muted); flex-shrink: 0; display: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.path-header .path-drive { color: var(--accent); font-weight: 600; }
+.path-header .path-rest { color: var(--text); }
 </style>
 </head>
 <body>
@@ -1188,8 +1202,14 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
 <div class="topbar">
   <h1>Folder Permission Manager</h1>
   <div class="topbar-actions">
-    <button class="btn btn-secondary" onclick="toggleTheme()" id="btnTheme">Light</button>
-    <button class="btn btn-danger" onclick="shutdown()">Shutdown</button>
+    <button class="btn btn-secondary btn-icon" onclick="toggleTheme()" id="btnTheme" title="Switch to light mode">
+      <svg id="iconTheme" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+      <span id="btnThemeLabel">Light</span>
+    </button>
+    <button class="btn btn-ghost btn-icon" onclick="shutdown()" title="Stop the server">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg>
+      Shut Down
+    </button>
   </div>
 </div>
 
@@ -1211,7 +1231,14 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
     <!-- Permissions tab pane -->
     <div class="tab-pane active" id="pane-permissions">
 
-      <div id="no-folder-msg" class="placeholder-msg">Select a folder to view permissions</div>
+      <div id="path-header" class="path-header"></div>
+
+      <div id="no-folder-msg" class="placeholder-msg">
+        <div style="text-align:center;">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="color:var(--border);display:block;margin:0 auto 10px;"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+          <div>Choose a folder from the left panel to view and manage its permissions.</div>
+        </div>
+      </div>
 
       <!-- Folder ACL section -->
       <div id="folder-acl-section" class="pane-section" style="display:none;">
@@ -1220,16 +1247,16 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
           <span class="owner-row">Owner: <span id="folderOwner">—</span></span>
         </div>
         <table class="acl-table">
-          <thead><tr><th>Identity</th><th>Rights</th><th>Type</th><th>Inherited</th></tr></thead>
+          <thead><tr><th>User or Group</th><th>Permission Level</th><th>Type</th><th>Inherited</th></tr></thead>
           <tbody id="folderAclBody"></tbody>
         </table>
         <div class="folder-actions">
-          <button class="btn btn-primary" onclick="showAddAceModal('folder')">Add ACE</button>
-          <button class="btn btn-secondary" onclick="showRemoveAceModal('folder')">Remove ACE</button>
-          <button class="btn btn-secondary" onclick="takeOwnership(false)">Take Ownership</button>
-          <button class="btn btn-secondary" onclick="takeOwnership(true)">Take Ownership (Recursive)</button>
-          <button class="btn btn-secondary" onclick="showReplicateModal()">Replicate Permissions</button>
-          <button class="btn btn-secondary" id="btnExport" onclick="exportReport()">Export CSV</button>
+          <button class="btn btn-primary btn-icon" onclick="showAddAceModal('folder')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Add Permission</button>
+          <button class="btn btn-secondary btn-icon" onclick="showRemoveAceModal('folder')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"/></svg>Remove Permission</button>
+          <button class="btn btn-secondary btn-icon" onclick="takeOwnership(false)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>Take Ownership</button>
+          <button class="btn btn-secondary btn-icon" onclick="takeOwnership(true)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>Take Ownership (All Files Too)</button>
+          <button class="btn btn-secondary btn-icon" onclick="showReplicateModal()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Copy Permissions To...</button>
+          <button class="btn btn-secondary btn-icon" id="btnExport" onclick="exportReport()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Export CSV</button>
         </div>
       </div>
 
@@ -1246,12 +1273,12 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
         <!-- Sticky batch action bar -->
         <div class="action-bar" id="actionBar">
           <span class="selection-count" id="selectionCount">0 selected</span>
-          <button class="btn btn-primary" onclick="showAddAceModal('files')">Add ACE</button>
-          <button class="btn btn-secondary" onclick="showRemoveAceModal('files')">Remove ACE</button>
-          <button class="btn btn-secondary" onclick="takeFileOwnership()">Take Ownership</button>
-          <button class="btn btn-secondary" onclick="showCopyFilesModal()">Copy to...</button>
+          <button class="btn btn-primary btn-icon" onclick="showAddAceModal('files')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Add Permission</button>
+          <button class="btn btn-secondary btn-icon" onclick="showRemoveAceModal('files')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"/></svg>Remove Permission</button>
+          <button class="btn btn-secondary btn-icon" onclick="takeFileOwnership()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>Take Ownership</button>
+          <button class="btn btn-secondary btn-icon" onclick="showCopyFilesModal()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Copy to...</button>
           <div class="acl-diff-warning" id="aclDiffWarning" style="display:none;">
-            ACLs differ across selected files — this operation applies uniformly
+            Selected files have different permissions — this operation applies uniformly to all
           </div>
         </div>
       </div>
@@ -1284,8 +1311,8 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
         <div><label>Extra flags (optional)</label><input type="text" id="roboExtra" placeholder="/XF *.tmp /XD .git"></div>
         <div><label>Log file path (optional)</label><input type="text" id="roboLog" placeholder="Leave empty to skip"></div>
         <div style="display:flex;gap:8px;">
-          <button class="btn btn-secondary" id="btnRoboPreview" onclick="roboPreview()">Preview</button>
-          <button class="btn btn-primary" id="btnRobocopy" onclick="runRobocopy()">Run Robocopy</button>
+          <button class="btn btn-secondary btn-icon" id="btnRoboPreview" onclick="roboPreview()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>Preview</button>
+          <button class="btn btn-primary btn-icon" id="btnRobocopy" onclick="runRobocopy()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>Run Robocopy</button>
         </div>
       </div>
 
@@ -1299,7 +1326,7 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
         <div><label>Destination folder</label><input type="text" id="roboFileDst" placeholder="\\server\share\dest"></div>
         <div><label>Extra flags (optional)</label><input type="text" id="roboFileExtra" placeholder="/XO"></div>
         <div>
-          <button class="btn btn-primary" id="btnRobocopyFiles" onclick="runRobocopyFiles()">Copy Selected Files</button>
+          <button class="btn btn-primary btn-icon" id="btnRobocopyFiles" onclick="runRobocopyFiles()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>Copy Selected Files</button>
         </div>
       </div>
 
@@ -1314,10 +1341,10 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
 <!-- Add ACE modal -->
 <div class="modal-overlay" id="addAceModal">
   <div class="modal">
-    <h3 id="addAceModalTitle">Add Permission Entry</h3>
-    <div class="form-row"><label>Identity (user or group)</label><input type="text" id="addAceIdentity" placeholder="DOMAIN\User or DOMAIN\Group"></div>
+    <h3 id="addAceModalTitle">Add Permission</h3>
+    <div class="form-row"><label>User or Group</label><input type="text" id="addAceIdentity" placeholder="DOMAIN\User or DOMAIN\Group"></div>
     <div class="form-row">
-      <label>Rights</label>
+      <label>Permission Level</label>
       <select id="addAceRights">
         <option value="FullControl">Full Control</option>
         <option value="Modify">Modify</option>
@@ -1343,13 +1370,13 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
 <!-- Remove ACE modal -->
 <div class="modal-overlay" id="removeAceModal">
   <div class="modal">
-    <h3 id="removeAceModalTitle">Remove Permission Entry</h3>
+    <h3 id="removeAceModalTitle">Remove Permission</h3>
     <div class="form-row">
-      <label>Identity</label>
+      <label>User or Group</label>
       <select id="removeAceIdentity"></select>
     </div>
     <div class="form-row">
-      <label>Rights</label>
+      <label>Permission Level</label>
       <select id="removeAceRights">
         <option value="FullControl">Full Control</option>
         <option value="Modify">Modify</option>
@@ -1375,13 +1402,13 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
 <!-- Replicate modal -->
 <div class="modal-overlay" id="replicateModal">
   <div class="modal">
-    <h3>Replicate Permissions</h3>
-    <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">Copy permissions from the selected folder to target paths (one per line).</p>
+    <h3>Copy Permissions To...</h3>
+    <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">Copies the current folder's permissions to each destination path you list below (one per line).</p>
     <div class="form-row"><label>Target paths</label><textarea id="replicateTargets" rows="5" style="width:100%;background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:6px 8px;font-size:12px;resize:vertical;" placeholder="C:\Shares\FolderA&#10;C:\Shares\FolderB"></textarea></div>
     <div class="form-row"><label><input type="checkbox" id="replicateRecursive"> Apply recursively</label></div>
     <div class="modal-actions">
       <button class="btn btn-secondary" onclick="closeModal('replicateModal')">Cancel</button>
-      <button class="btn btn-primary" onclick="submitReplicate()">Replicate</button>
+      <button class="btn btn-primary" onclick="submitReplicate()">Copy Permissions</button>
     </div>
   </div>
 </div>
@@ -1431,13 +1458,30 @@ function api(url, opts) {
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
 function openModal(id)  { document.getElementById(id).classList.add('open'); }
 
+function updateThemeButton(isLight) {
+    var lbl = document.getElementById('btnThemeLabel');
+    var icon = document.getElementById('iconTheme');
+    var btn = document.getElementById('btnTheme');
+    if (lbl) lbl.textContent = isLight ? 'Dark' : 'Light';
+    if (btn) btn.title = isLight ? 'Switch to dark mode' : 'Switch to light mode';
+    if (icon) {
+        if (isLight) {
+            // Moon icon for switching to dark
+            icon.innerHTML = '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>';
+        } else {
+            // Sun icon for switching to light
+            icon.innerHTML = '<circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>';
+        }
+    }
+}
 function toggleTheme() {
     document.body.classList.toggle('light');
-    document.getElementById('btnTheme').textContent = document.body.classList.contains('light') ? 'Dark' : 'Light';
-    localStorage.setItem('fpm-theme', document.body.classList.contains('light') ? 'light' : 'dark');
+    var isLight = document.body.classList.contains('light');
+    updateThemeButton(isLight);
+    localStorage.setItem('fpm-theme', isLight ? 'light' : 'dark');
 }
 function initTheme() {
-    if (localStorage.getItem('fpm-theme') === 'light') { document.body.classList.add('light'); document.getElementById('btnTheme').textContent = 'Dark'; }
+    if (localStorage.getItem('fpm-theme') === 'light') { document.body.classList.add('light'); updateThemeButton(true); }
 }
 
 function switchTab(name) {
@@ -1522,6 +1566,17 @@ function selectFolder(path) {
     currentFolder = path;
     checkedFiles.clear();
     fileAclCache = {};
+    // Update path header
+    var ph = document.getElementById('path-header');
+    if (ph) {
+        var drive = path.match(/^[A-Za-z]:[\\\/]/);
+        if (drive) {
+            ph.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:4px;"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg><span class="path-drive">' + drive[0].replace(/\\/g, '/') + '</span><span class="path-rest">' + path.substring(drive[0].length).replace(/\\/g, ' \u203a ') + '</span>';
+        } else {
+            ph.textContent = path;
+        }
+        ph.style.display = 'block';
+    }
     loadFolderAcl(path);
     loadFiles(path);
 }
@@ -1543,7 +1598,7 @@ function loadFolderAcl(path) {
                 '<td>' + e.identity + '</td>' +
                 '<td>' + e.rights + '</td>' +
                 '<td><span class="badge badge-' + e.type.toLowerCase() + '">' + e.type + '</span></td>' +
-                '<td>' + (e.isInherited ? '<span class="badge badge-inherited">Yes</span>' : '') + '</td>';
+                '<td>' + (e.isInherited ? '<span class="badge badge-inherited" title="This permission was inherited from a parent folder">Inherited</span>' : '') + '</td>';
             tbody.appendChild(tr);
         });
     }).catch(function(e) { setStatus('Failed to load ACL: ' + e.message, 'error'); });
@@ -1652,7 +1707,7 @@ function toggleFileAcl(path, row, btn) {
         (data.entries || []).forEach(function(e) {
             html += '<div class="acl-entry"><span class="badge badge-' + e.type.toLowerCase() + '">' + e.type + '</span>' +
                     '<span>' + e.identity + '</span><span style="color:var(--text-muted);">' + e.rights + '</span>' +
-                    (e.isInherited ? '<span class="badge badge-inherited">inherited</span>' : '') + '</div>';
+                    (e.isInherited ? '<span class="badge badge-inherited" title="This permission was inherited from a parent folder">Inherited</span>' : '') + '</div>';
         });
         aclRow.innerHTML = html;
         row.insertAdjacentElement('afterend', aclRow);
@@ -1722,7 +1777,7 @@ function showRemoveAceModal(target) {
                 (fileAclCache[p].entries || []).forEach(function(e) { identities.add(e.identity); });
             }
         });
-        if (identities.size === 0) { setStatus('Expand file ACLs first to load identities', 'warning'); return; }
+        if (identities.size === 0) { setStatus('Expand a file\'s permissions first (click ▶) to load available users and groups', 'warning'); return; }
         identities.forEach(function(id) { var o = document.createElement('option'); o.value = id; o.textContent = id; select.appendChild(o); });
     } else {
         // Populate from current folder ACL table
@@ -1761,7 +1816,9 @@ function submitRemoveAce() {
 
 function takeOwnership(recursive) {
     if (!currentFolder) return;
-    var msg = recursive ? 'Take ownership RECURSIVELY on all files and subfolders in ' + currentFolder + '? This may take a while.' : 'Take ownership of ' + currentFolder + '?';
+    var msg = recursive
+        ? 'This will change ownership on ALL files and subfolders under:\n\n' + currentFolder + '\n\nThis cannot be undone. Continue?'
+        : 'Take ownership of:\n\n' + currentFolder + '?';
     if (!confirm(msg)) return;
     setStatus('Taking ownership...', 'info');
     api('/api/take-ownership', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: currentFolder, recursive: recursive }) })
@@ -1827,7 +1884,8 @@ function submitCopyFiles() {
     setStatus('Copying ' + filenames.length + ' file(s)...', 'info');
     api('/api/robocopy-files', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ sourceDir: currentFolder, destDir: dest, files: filenames, extraFlags: extra || null }) })
         .then(function(r) {
-            setStatus((r.success ? 'Copy complete: ' : 'Copy finished with errors: ') + r.message, r.success ? 'success' : 'error');
+            var ok = r.exitCode === 0 || r.exitCode === 1;
+            setStatus((ok ? 'Copy complete: ' : 'Copy finished with warnings/errors: ') + (r.exitMeaning || r.status || ''), ok ? 'success' : 'warning');
         }).catch(function(e) { setStatus('Failed: ' + e.message, 'error'); });
 }
 
@@ -1876,7 +1934,8 @@ function runRobocopy() {
     api('/api/robocopy', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ source: src, destination: dst, mode: mode, threads: threads, retries: retries, waitTime: wait, extraFlags: extra || null, logFile: log || null }) })
         .then(function(r) {
             showRoboOutput(r);
-            setStatus((r.success ? 'Robocopy complete: ' : 'Robocopy error: ') + r.message, r.success ? 'success' : 'error');
+            var ok = r.exitCode === 0 || r.exitCode === 1;
+            setStatus((ok ? 'Robocopy complete: ' : 'Robocopy finished with warnings/errors: ') + (r.exitMeaning || r.status || ''), ok ? 'success' : 'warning');
         })
         .catch(function(e) { setStatus('Robocopy failed: ' + e.message, 'error'); })
         .finally(function() { document.getElementById('btnRobocopy').disabled = false; document.getElementById('btnRoboPreview').disabled = false; });
@@ -1911,7 +1970,8 @@ function runRobocopyFiles() {
     api('/api/robocopy-files', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ sourceDir: src, destDir: dst, files: checked, extraFlags: extra || null }) })
         .then(function(r) {
             showRoboOutput(r);
-            setStatus((r.success ? 'Copy complete: ' : 'Copy error: ') + r.message, r.success ? 'success' : 'error');
+            var ok = r.exitCode === 0 || r.exitCode === 1;
+            setStatus((ok ? 'Copy complete: ' : 'Copy finished with warnings/errors: ') + (r.exitMeaning || r.status || ''), ok ? 'success' : 'warning');
         })
         .catch(function(e) { setStatus('Copy failed: ' + e.message, 'error'); })
         .finally(function() { document.getElementById('btnRobocopyFiles').disabled = false; });
@@ -1920,7 +1980,7 @@ function runRobocopyFiles() {
 function showRoboOutput(r) {
     var out = document.getElementById('roboOutput');
     out.style.display = 'block';
-    out.textContent = 'Command: ' + r.command + '\nExit code: ' + r.exitCode + ' — ' + r.message + '\n\n' + (r.output || '');
+    out.textContent = 'Command: ' + r.command + '\nExit code: ' + r.exitCode + ' — ' + (r.exitMeaning || r.status || '') + '\n\n' + (r.output || '');
 }
 
 // --- Init ---

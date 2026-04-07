@@ -51,3 +51,27 @@ Use conventional commit prefixes: `feat:`, `fix:`, `docs:`. First line is a brie
 ## Folder Structure Pattern
 
 Each tool gets its own folder containing the main `.ps1` script and a `README.md`. No nested module structures — keep scripts flat and self-contained with no external dependencies beyond built-in Windows/RSAT PowerShell modules.
+
+## Design Context
+
+### Users
+Mixed audience — IT helpdesk staff using it occasionally alongside seasoned sysadmins who run it daily. Helpdesk staff need plain-English labels, clear affordances, and no jargon. Sysadmins need density, efficiency, and precision. The interface must serve both without patronizing either.
+
+Context: internal MSP tooling, run locally as a browser-based GUI over a PowerShell HTTP server. Always used on Windows workstations, often on dual monitors, usually in a task-focused flow (fix this folder's permissions, audit this share).
+
+### Brand Personality
+Bold · Trustworthy · Capable
+
+### Aesthetic Direction
+Bold modern tooling — confident dark UI with strong typographic hierarchy. Feels like VS Code or Windows Admin Center with personality. NOT generic IT dashboard gray soup. NOT neon cyberpunk. NOT consumer-app friendly-rounded. Opinionated, precise, professional with edge.
+
+Dark default. Light mode available via toggle. Blue accent (current #5dade2 range) is fine but should feel intentional, not generic.
+
+Anti-references: generic Bootstrap admin dashboards, Azure Portal blandness, rounded-everything SaaS UIs.
+
+### Design Principles
+1. **Plain English first** — no jargon where a plain word works. "Add Permission" not "Add ACE". "Who owns this?" not "Owner:". Labels must be immediately understood by someone who just started in IT.
+2. **Density with breathing room** — pack information efficiently but never feel claustrophobic. Sysadmins need to scan many rows; helpdesk staff need enough space to read carefully.
+3. **Drive letters and paths are data, not decoration** — always show where you are. Drive letters, folder names, full paths in context headers. Never leave the user guessing what they're looking at.
+4. **Icons as anchors** — use icons to help non-technical users identify action types at a glance, but never as the sole communication (always paired with text labels).
+5. **Confidence under the cursor** — every interactive element should feel solid and responsive. Hover states, active states, and loading indicators are mandatory, not optional.
