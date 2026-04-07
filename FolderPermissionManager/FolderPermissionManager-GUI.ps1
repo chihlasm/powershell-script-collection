@@ -724,6 +724,98 @@ function Invoke-TakeFileOwnership {
     Send-Json $Response @{ status = 'complete'; results = @($results) }
 }
 
+function Invoke-RobocopyFiles {
+    param(
+        [System.Net.HttpListenerRequest]$Request,
+        [System.Net.HttpListenerResponse]$Response
+    )
+
+    $body       = Read-RequestBody $Request
+    $sourceDir  = Resolve-MappedDrive $body.sourceDir
+    $destDir    = Resolve-MappedDrive $body.destDir
+    $files      = @($body.files)
+    $extraFlags = $body.extraFlags
+
+    # Explicit rejection — empty files[] must never fall through to a full directory copy
+    if (-not $files -or $files.Count -eq 0) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "files[] must not be empty" }
+        return
+    }
+
+    if (-not $sourceDir -or -not (Test-Path $sourceDir -PathType Container)) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Invalid or missing sourceDir" }
+        return
+    }
+
+    if (-not $destDir) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Missing destDir" }
+        return
+    }
+
+    # Validate each file exists as a leaf before invoking robocopy
+    $invalidFiles = $files | Where-Object { -not (Test-Path (Join-Path $sourceDir $_) -PathType Leaf) }
+    if ($invalidFiles) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Files not found in sourceDir: $($invalidFiles -join ', ')" }
+        return
+    }
+
+    # Build robocopy args
+    # /COPY:DATSO = Data, Attributes, Timestamps, Security (ACLs), Owner info
+    # /COPY:U (auditing) is intentionally excluded — requires SeSecurityPrivilege (Backup Operator+)
+    # which is not guaranteed in standard MSP environments and causes silent partial failures.
+    # /SECFIX is required for file copies — without it robocopy skips ACL copying on unchanged files
+    $roboArgs = [System.Collections.Generic.List[string]]::new()
+    $roboArgs.Add("`"$sourceDir`"")
+    $roboArgs.Add("`"$destDir`"")
+    foreach ($f in $files) { $roboArgs.Add("`"$f`"") }
+    $roboArgs.Add('/COPY:DATSO')
+    $roboArgs.Add('/SECFIX')
+    $roboArgs.Add('/ZB')
+    $roboArgs.Add('/NP')
+    $roboArgs.Add('/R:3')
+    $roboArgs.Add('/W:5')
+    if ($extraFlags) { $roboArgs.Add($extraFlags) }
+
+    $cmdLine = "robocopy $($roboArgs -join ' ')"
+
+    try {
+        $output   = robocopy $sourceDir $destDir $files /COPY:DATSO /SECFIX /ZB /NP /R:3 /W:5 2>&1
+        $exitCode = $LASTEXITCODE
+        $success  = $exitCode -lt 8
+
+        $message = switch ($exitCode) {
+            0  { 'No files copied — source and destination are identical' }
+            1  { 'Files copied successfully' }
+            2  { 'Extra files detected in destination' }
+            3  { 'Files copied + extra files detected' }
+            4  { 'Mismatched files detected' }
+            5  { 'Files copied + mismatched files' }
+            6  { 'Extra and mismatched files detected' }
+            7  { 'Files copied + extra + mismatched' }
+            8  { 'Some files could not be copied (errors occurred)' }
+            16 { 'Fatal error — no files were copied' }
+            default { "Exit code $exitCode" }
+        }
+
+        if (-not $success) { $Response.StatusCode = 500 }
+        Send-Json $Response @{
+            success  = $success
+            exitCode = $exitCode
+            message  = $message
+            command  = $cmdLine
+            output   = ($output | Out-String).Trim()
+        }
+    }
+    catch {
+        $Response.StatusCode = 500
+        Send-Json $Response @{ error = "Robocopy failed: $($_.Exception.Message)"; command = $cmdLine }
+    }
+}
+
 function Invoke-Robocopy {
     param(
         [System.Net.HttpListenerRequest]$Request,
