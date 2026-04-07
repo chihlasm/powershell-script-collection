@@ -133,7 +133,7 @@ function Get-Drives {
         $drives.Add([PSCustomObject]@{
             name     = $_.Name
             root     = $_.Root
-            label    = if ($_.Description) { $_.Description } else { $_.Name }
+            label    = if ($_.Description) { "$($_.Name):\ — $($_.Description)" } else { "$($_.Name):\" }
             usedGB   = $usedGB
             freeGB   = $freeGB
             provider = 'FileSystem'
@@ -1091,8 +1091,8 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
 .panel-right { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; }
 
 /* Tab content panes */
-.tab-pane { display: none; flex: 1; flex-direction: column; overflow: hidden; }
-.tab-pane.active { display: flex; }
+.tab-pane { display: none; flex: 1; overflow: hidden; }
+.tab-pane.active { display: flex; flex-direction: column; }
 
 /* Permissions pane — stacked: folder ACL top, files section below */
 #pane-permissions { flex-direction: column; }
