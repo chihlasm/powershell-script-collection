@@ -999,6 +999,11 @@ function Invoke-Route {
             '^GET /api/export$'          { Invoke-ExportReport $request $response }
             '^POST /api/robocopy$'       { Invoke-Robocopy $request $response }
             '^GET /api/robocopy-preview$' { Get-RobocopyPreview $request $response }
+            '^GET /api/file-acl$'                  { Get-FileAcl $request $response }
+            '^POST /api/file-acl/add$'             { Invoke-AddFileAce $request $response }
+            '^POST /api/file-acl/remove$'          { Invoke-RemoveFileAce $request $response }
+            '^POST /api/file-acl/take-ownership$'  { Invoke-TakeFileOwnership $request $response }
+            '^POST /api/robocopy-files$'           { Invoke-RobocopyFiles $request $response }
             '^GET /api/shutdown$'        {
                 Send-Json $response @{ status = 'shutting down' }
                 $script:running = $false
