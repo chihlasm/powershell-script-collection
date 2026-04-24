@@ -131,6 +131,79 @@ function Get-TargetDrive {
     }
 }
 
+# --- Folder walker ---------------------------------------------------------
+
+function New-WalkState {
+    [PSCustomObject]@{
+        Records     = [System.Collections.Generic.List[object]]::new()
+        Unreadable  = [System.Collections.Generic.List[string]]::new()
+        FolderCount = 0
+    }
+}
+
+function Invoke-FolderWalk {
+    param(
+        [string]$Path,
+        [int]$CurrentDepth,
+        [int]$MaxDepth,
+        [object]$State
+    )
+
+    $State.FolderCount++
+
+    # Sum files directly in this folder (non-recursive).
+    $directBytes = 0L
+    try {
+        $files = Get-ChildItem -LiteralPath $Path -File -Force -ErrorAction Stop
+        foreach ($f in $files) {
+            if ($f.Length) { $directBytes += [long]$f.Length }
+        }
+    }
+    catch [System.UnauthorizedAccessException], [System.IO.IOException] {
+        $State.Unreadable.Add($Path) | Out-Null
+    }
+    catch {
+        $State.Unreadable.Add($Path) | Out-Null
+    }
+
+    $totalBytes = $directBytes
+
+    # Recurse into subfolders; skip reparse points to avoid loops.
+    $subDirs = @()
+    try {
+        $subDirs = Get-ChildItem -LiteralPath $Path -Directory -Force -ErrorAction Stop |
+            Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) }
+    }
+    catch {
+        $State.Unreadable.Add($Path) | Out-Null
+    }
+
+    foreach ($sub in $subDirs) {
+        try {
+            $childBytes = Invoke-FolderWalk -Path $sub.FullName `
+                -CurrentDepth ($CurrentDepth + 1) `
+                -MaxDepth $MaxDepth `
+                -State $State
+            $totalBytes += $childBytes
+        }
+        catch {
+            $State.Unreadable.Add($sub.FullName) | Out-Null
+        }
+    }
+
+    if ($CurrentDepth -ge 1 -and $CurrentDepth -le $MaxDepth) {
+        $State.Records.Add([PSCustomObject]@{
+            Path       = $Path
+            Depth      = $CurrentDepth
+            SizeBytes  = $totalBytes
+            ParentPath = [System.IO.Path]::GetDirectoryName($Path)
+            IsMisc     = $false
+        }) | Out-Null
+    }
+
+    return $totalBytes
+}
+
 # --- Main flow -------------------------------------------------------------
 
 Write-Status INFO "Drive Storage Report starting on $env:COMPUTERNAME"
@@ -153,4 +226,32 @@ foreach ($d in $drives) {
     $pct = '{0:P0}' -f $d.UsedPercent
     Write-Status INFO ("  {0}  {1}  {2} used / {3} total ({4})" -f `
         $d.DeviceID, $d.VolumeName, (Format-Bytes $d.UsedBytes), (Format-Bytes $d.SizeBytes), $pct)
+}
+
+$allResults = @()
+
+foreach ($d in $drives) {
+    Write-Status INFO ("Scanning {0}\ ..." -f $d.DeviceID)
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+    $state = New-WalkState
+    try {
+        $rootBytes = Invoke-FolderWalk -Path ("{0}\" -f $d.DeviceID) `
+            -CurrentDepth 0 -MaxDepth $Depth -State $state
+    }
+    catch {
+        Write-Status WARN ("{0}\ failed to scan: {1}" -f $d.DeviceID, $_.Exception.Message)
+        continue
+    }
+
+    $sw.Stop()
+    Write-Status PASS ("{0}\ complete — {1} across {2} folders ({3:N0}s)" -f `
+        $d.DeviceID, (Format-Bytes $rootBytes), $state.FolderCount, $sw.Elapsed.TotalSeconds)
+
+    $allResults += [PSCustomObject]@{
+        Drive      = $d
+        Records    = $state.Records
+        Unreadable = $state.Unreadable
+        RootBytes  = $rootBytes
+    }
 }
