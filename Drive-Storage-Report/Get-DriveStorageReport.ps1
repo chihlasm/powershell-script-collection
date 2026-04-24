@@ -93,6 +93,16 @@ function Write-Status {
     Write-Host "[$Level]  $ts  $Message" -ForegroundColor $color
 }
 
+function Format-Bytes {
+    param([long]$Bytes)
+
+    if ($Bytes -lt 1KB)      { return "$Bytes B" }
+    if ($Bytes -lt 1MB)      { return ('{0:N0} KB' -f ($Bytes / 1KB)) }
+    if ($Bytes -lt 1GB)      { return ('{0:N0} MB' -f ($Bytes / 1MB)) }
+    if ($Bytes -lt 1TB)      { return ('{0:N1} GB' -f ($Bytes / 1GB)) }
+    return ('{0:N2} TB' -f ($Bytes / 1TB))
+}
+
 # --- Drive enumeration -----------------------------------------------------
 
 function Get-TargetDrive {
@@ -142,5 +152,5 @@ Write-Status INFO "Scanning $($drives.Count) fixed drive(s)"
 foreach ($d in $drives) {
     $pct = '{0:P0}' -f $d.UsedPercent
     Write-Status INFO ("  {0}  {1}  {2} used / {3} total ({4})" -f `
-        $d.DeviceID, $d.VolumeName, $d.UsedBytes, $d.SizeBytes, $pct)
+        $d.DeviceID, $d.VolumeName, (Format-Bytes $d.UsedBytes), (Format-Bytes $d.SizeBytes), $pct)
 }
