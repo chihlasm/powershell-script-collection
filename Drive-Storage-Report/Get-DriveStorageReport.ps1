@@ -349,6 +349,87 @@ function New-HtmlFooter {
 "@
 }
 
+function Get-FolderDisplayName {
+    param([string]$Path, [int]$Depth)
+    if ($Depth -le 1) { return $Path }
+    return [System.IO.Path]::GetFileName($Path)
+}
+
+function Sort-FolderRecords {
+    param([object[]]$Records)
+
+    $byParent = @{}
+    foreach ($r in $Records) {
+        if (-not $byParent.ContainsKey($r.ParentPath)) {
+            $byParent[$r.ParentPath] = [System.Collections.Generic.List[object]]::new()
+        }
+        $byParent[$r.ParentPath].Add($r) | Out-Null
+    }
+
+    $ordered = [System.Collections.Generic.List[object]]::new()
+
+    $emit = {
+        param($parent)
+        if (-not $byParent.ContainsKey($parent)) { return }
+        $children = $byParent[$parent] |
+            Sort-Object @{Expression = { $_.IsMisc }}, @{Expression = { -$_.SizeBytes }}
+        foreach ($c in $children) {
+            $ordered.Add($c) | Out-Null
+            if (-not $c.IsMisc) {
+                & $emit $c.Path
+            }
+        }
+    }
+
+    $rootParents = $Records | Where-Object { $_.Depth -eq 1 } |
+        Select-Object -ExpandProperty ParentPath -Unique
+    foreach ($root in $rootParents) { & $emit $root }
+
+    return $ordered
+}
+
+function New-HtmlFolderSection {
+    param(
+        [object]$Drive,
+        [object[]]$Records
+    )
+
+    if (-not $Records -or $Records.Count -eq 0) {
+        return "<h2>$(ConvertTo-HtmlText $Drive.DeviceID)\</h2><p style='color:var(--text-muted)'>No folders above the size threshold.</p>"
+    }
+
+    $ordered = Sort-FolderRecords -Records $Records
+    $maxBytes = ($Records | Measure-Object -Property SizeBytes -Maximum).Maximum
+    if (-not $maxBytes) { $maxBytes = 1 }
+
+    $rows = foreach ($r in $ordered) {
+        $indent = ($r.Depth - 1) * 16
+        $display = ConvertTo-HtmlText (Get-FolderDisplayName -Path $r.Path -Depth $r.Depth)
+        $cls = if ($r.IsMisc) { ' class="misc"' } else { '' }
+        $barW = [math]::Round(($r.SizeBytes / $maxBytes) * 100, 1)
+        $leftPad = 10 + $indent
+@"
+<tr$cls>
+  <td class="path" style="padding-left:${leftPad}px">$display</td>
+  <td class="size">$(Format-Bytes $r.SizeBytes)</td>
+  <td class="bar-cell"><div class="bar"><span style="width:$barW%; background:var(--accent)"></span></div></td>
+</tr>
+"@
+    }
+
+    $heading = ConvertTo-HtmlText ("{0}\ — {1} used" -f $Drive.DeviceID, (Format-Bytes $Drive.UsedBytes))
+
+    @"
+<h2>$heading</h2>
+<table class="folders">
+  <thead><tr><th>Folder</th><th style="text-align:right">Size</th><th>Share of drive</th></tr></thead>
+  <tbody>
+$($rows -join "`n")
+  </tbody>
+</table>
+"@
+}
+
 function New-HtmlDriveCards {
     param([object[]]$Drives)
 
