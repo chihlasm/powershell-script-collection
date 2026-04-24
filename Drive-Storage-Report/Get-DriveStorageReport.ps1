@@ -93,5 +93,54 @@ function Write-Status {
     Write-Host "[$Level]  $ts  $Message" -ForegroundColor $color
 }
 
+# --- Drive enumeration -----------------------------------------------------
+
+function Get-TargetDrive {
+    param([string[]]$Filter)
+
+    $all = Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType=3' `
+        -ErrorAction Stop
+
+    if ($Filter) {
+        # Normalize filter input: "C", "C:", "C:\" all -> "C:"
+        $normalized = $Filter | ForEach-Object {
+            ($_ -replace '[:\\]', '').ToUpperInvariant() + ':'
+        }
+        $all = $all | Where-Object { $normalized -contains $_.DeviceID }
+    }
+
+    $all | ForEach-Object {
+        [PSCustomObject]@{
+            DeviceID    = $_.DeviceID
+            VolumeName  = if ($_.VolumeName) { $_.VolumeName } else { '(no label)' }
+            SizeBytes   = [long]$_.Size
+            FreeBytes   = [long]$_.FreeSpace
+            UsedBytes   = [long]($_.Size - $_.FreeSpace)
+            UsedPercent = if ($_.Size) { ($_.Size - $_.FreeSpace) / $_.Size } else { 0 }
+        }
+    }
+}
+
+# --- Main flow -------------------------------------------------------------
+
 Write-Status INFO "Drive Storage Report starting on $env:COMPUTERNAME"
 Write-Status INFO "Depth=$Depth, MinSizeMB=$MinSizeMB, OutputPath=$OutputPath"
+
+$drives = @(Get-TargetDrive -Filter $Drive)
+
+if (-not $drives) {
+    if ($Drive) {
+        Write-Warning "No fixed drives matched filter: $($Drive -join ', ')"
+        return
+    }
+    Write-Error "No fixed drives found on $env:COMPUTERNAME"
+    return
+}
+
+Write-Status INFO "Scanning $($drives.Count) fixed drive(s)"
+
+foreach ($d in $drives) {
+    $pct = '{0:P0}' -f $d.UsedPercent
+    Write-Status INFO ("  {0}  {1}  {2} used / {3} total ({4})" -f `
+        $d.DeviceID, $d.VolumeName, $d.UsedBytes, $d.SizeBytes, $pct)
+}
