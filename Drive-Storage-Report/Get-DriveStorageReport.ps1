@@ -430,6 +430,48 @@ $($rows -join "`n")
 "@
 }
 
+function New-HtmlUnreadableSection {
+    param([string[]]$Paths)
+
+    if (-not $Paths -or $Paths.Count -eq 0) { return '' }
+
+    $unique = @($Paths | Sort-Object -Unique)
+    $items = foreach ($p in $unique) { "<li>$(ConvertTo-HtmlText $p)</li>" }
+    $suffix = if ($unique.Count -eq 1) { '' } else { 's' }
+
+    @"
+<details class="unreadable">
+  <summary>&#9888; $($unique.Count) folder$suffix could not be read (access denied)</summary>
+  <ul>
+$($items -join "`n")
+  </ul>
+</details>
+"@
+}
+
+function New-HtmlHeaderBlock {
+    param(
+        [string]$HostName,
+        [datetime]$Started,
+        [timespan]$Elapsed,
+        [int]$DriveCount,
+        [long]$TotalBytes
+    )
+    $tsStart = $Started.ToString('yyyy-MM-dd HH:mm:ss')
+    $elapsedStr = '{0:N0}s' -f $Elapsed.TotalSeconds
+    $driveSuffix = if ($DriveCount -eq 1) { '' } else { 's' }
+    @"
+<h1>Drive Storage Report</h1>
+<div class="meta">
+  <span>$(ConvertTo-HtmlText $HostName)</span>
+  <span>$tsStart</span>
+  <span>$DriveCount drive$driveSuffix</span>
+  <span>$(Format-Bytes $TotalBytes) total</span>
+  <span>scan $elapsedStr</span>
+</div>
+"@
+}
+
 function New-HtmlDriveCards {
     param([object[]]$Drives)
 
@@ -476,6 +518,8 @@ foreach ($d in $drives) {
 }
 
 $allResults = @()
+$overall = [System.Diagnostics.Stopwatch]::StartNew()
+$scanStart = Get-Date
 
 foreach ($d in $drives) {
     Write-Status INFO ("Scanning {0}\ ..." -f $d.DeviceID)
@@ -506,4 +550,55 @@ foreach ($d in $drives) {
         Unreadable = $state.Unreadable
         RootBytes  = $rootBytes
     }
+}
+
+$overall.Stop()
+
+if (-not $allResults) {
+    Write-Warning "No drives were successfully scanned. Nothing to report."
+    return
+}
+
+$totalBytes = [long](($allResults | Measure-Object -Property RootBytes -Sum).Sum)
+$allUnreadable = @()
+foreach ($r in $allResults) { $allUnreadable += $r.Unreadable }
+
+if (-not (Test-Path -LiteralPath $OutputPath)) {
+    try {
+        New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
+    }
+    catch {
+        Write-Error "Could not create OutputPath '$OutputPath': $($_.Exception.Message)"
+        return
+    }
+}
+
+$fileName = "DriveStorageReport_{0}_{1}.html" -f $env:COMPUTERNAME, (Get-Date -Format 'yyyy-MM-dd_HHmmss')
+$reportPath = Join-Path $OutputPath $fileName
+
+$sb = [System.Text.StringBuilder]::new()
+[void]$sb.Append((New-HtmlHead))
+[void]$sb.Append((New-HtmlHeaderBlock -HostName $env:COMPUTERNAME `
+    -Started $scanStart -Elapsed $overall.Elapsed `
+    -DriveCount $allResults.Count -TotalBytes $totalBytes))
+[void]$sb.Append((New-HtmlDriveCards -Drives ($allResults | ForEach-Object { $_.Drive })))
+foreach ($r in $allResults) {
+    [void]$sb.Append((New-HtmlFolderSection -Drive $r.Drive -Records $r.Records))
+}
+[void]$sb.Append((New-HtmlUnreadableSection -Paths $allUnreadable))
+[void]$sb.Append((New-HtmlFooter -HostName $env:COMPUTERNAME `
+    -Generated (Get-Date) -UnreadableCount $allUnreadable.Count))
+
+try {
+    Set-Content -LiteralPath $reportPath -Value $sb.ToString() -Encoding UTF8
+}
+catch {
+    Write-Error "Failed to write report to '$reportPath': $($_.Exception.Message)"
+    return
+}
+
+Write-Status PASS ("Report generated: {0} ({1:N0}s total)" -f $reportPath, $overall.Elapsed.TotalSeconds)
+
+if (-not $NoOpen) {
+    try { Start-Process $reportPath } catch { Write-Status WARN "Could not auto-open report: $($_.Exception.Message)" }
 }
