@@ -204,6 +204,47 @@ function Invoke-FolderWalk {
     return $totalBytes
 }
 
+# --- Misc rollup -----------------------------------------------------------
+
+function Merge-SmallFolders {
+    param(
+        [System.Collections.Generic.List[object]]$Records,
+        [long]$ThresholdBytes,
+        [string]$DriveRootPath
+    )
+
+    $kept = [System.Collections.Generic.List[object]]::new()
+
+    $byParent = $Records | Group-Object -Property ParentPath
+
+    foreach ($g in $byParent) {
+        $parent = $g.Name
+        $children = $g.Group
+
+        $big   = $children | Where-Object { $_.SizeBytes -ge $ThresholdBytes }
+        $small = $children | Where-Object { $_.SizeBytes -lt $ThresholdBytes }
+
+        foreach ($b in $big) { $kept.Add($b) | Out-Null }
+
+        if ($small.Count -gt 0) {
+            $miscBytes = ($small | Measure-Object -Property SizeBytes -Sum).Sum
+            $miscDepth = $small[0].Depth
+            $suffix    = if ($small.Count -eq 1) { '' } else { 's' }
+            $miscLabel = "(Misc. — {0} folder{1})" -f $small.Count, $suffix
+
+            $kept.Add([PSCustomObject]@{
+                Path       = Join-Path $parent $miscLabel
+                Depth      = $miscDepth
+                SizeBytes  = [long]$miscBytes
+                ParentPath = $parent
+                IsMisc     = $true
+            }) | Out-Null
+        }
+    }
+
+    return $kept
+}
+
 # --- Main flow -------------------------------------------------------------
 
 Write-Status INFO "Drive Storage Report starting on $env:COMPUTERNAME"
@@ -248,9 +289,14 @@ foreach ($d in $drives) {
     Write-Status PASS ("{0}\ complete — {1} across {2} folders ({3:N0}s)" -f `
         $d.DeviceID, (Format-Bytes $rootBytes), $state.FolderCount, $sw.Elapsed.TotalSeconds)
 
+    $thresholdBytes = [long]($MinSizeMB * 1MB)
+    $merged = Merge-SmallFolders -Records $state.Records `
+        -ThresholdBytes $thresholdBytes `
+        -DriveRootPath ("{0}\" -f $d.DeviceID)
+
     $allResults += [PSCustomObject]@{
         Drive      = $d
-        Records    = $state.Records
+        Records    = $merged
         Unreadable = $state.Unreadable
         RootBytes  = $rootBytes
     }
