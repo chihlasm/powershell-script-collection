@@ -137,3 +137,36 @@ function Resolve-TimeWindow {
 
     return @{ Start = $start; End = $end }
 }
+
+# Validates that $Path is an existing writable directory. Returns its absolute path.
+# Throws with a clear message on failure (caller is responsible for fail-fast).
+function Resolve-OutputPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        throw "Output path does not exist or is not a directory: $Path"
+    }
+
+    $resolved = (Resolve-Path -LiteralPath $Path).ProviderPath
+
+    # Probe write access by creating and deleting a hidden temp file.
+    $probe = Join-Path $resolved (".write-probe-{0}.tmp" -f ([guid]::NewGuid().ToString('N')))
+    try {
+        New-Item -ItemType File -Path $probe -Force -ErrorAction Stop | Out-Null
+        Remove-Item -LiteralPath $probe -Force -ErrorAction Stop
+    }
+    catch {
+        throw "Output path is not writable: $resolved ($($_.Exception.Message))"
+    }
+
+    return $resolved
+}
+
+function Test-IsElevated {
+    $id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object System.Security.Principal.WindowsPrincipal($id)
+    return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+}
