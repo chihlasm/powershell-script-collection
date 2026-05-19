@@ -205,28 +205,38 @@ $script:Xaml = @'
                         <ComboBoxItem Content="Custom"/>
                     </ComboBox>
                 </StackPanel>
-                <Expander x:Name="ExpAdvanced" Header="Advanced overrides" Margin="0,8,0,0">
-                    <Grid Margin="8">
+                <TextBlock x:Name="TbProfileDescription" Margin="84,4,0,0" Foreground="#9aa0a6"
+                           FontSize="11" TextWrapping="Wrap" MaxWidth="760"
+                           Text="Pick a preset above to see its description."/>
+                <Expander x:Name="ExpAdvanced" Header="Advanced overrides" Margin="0,12,0,0">
+                    <Grid Margin="8,12,8,8">
                         <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="140"/><ColumnDefinition Width="100"/>
-                            <ColumnDefinition Width="140"/><ColumnDefinition Width="100"/>
-                            <ColumnDefinition Width="140"/><ColumnDefinition Width="100"/>
+                            <ColumnDefinition Width="180"/><ColumnDefinition Width="130"/>
+                            <ColumnDefinition Width="180"/><ColumnDefinition Width="130"/>
+                            <ColumnDefinition Width="180"/><ColumnDefinition Width="130"/>
                         </Grid.ColumnDefinitions>
                         <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
-                        <Label Content="Block size:"    Grid.Row="0" Grid.Column="0"/>
-                        <TextBox x:Name="TbBlock"       Grid.Row="0" Grid.Column="1"/>
-                        <Label Content="Threads:"       Grid.Row="0" Grid.Column="2"/>
-                        <TextBox x:Name="TbThreads"     Grid.Row="0" Grid.Column="3"/>
-                        <Label Content="Queue depth:"   Grid.Row="0" Grid.Column="4"/>
-                        <TextBox x:Name="TbQd"          Grid.Row="0" Grid.Column="5"/>
-                        <Label Content="Write %:"       Grid.Row="1" Grid.Column="0"/>
-                        <TextBox x:Name="TbWritePct"    Grid.Row="1" Grid.Column="1"/>
-                        <Label Content="Duration (s):"  Grid.Row="1" Grid.Column="2"/>
-                        <TextBox x:Name="TbDuration"    Grid.Row="1" Grid.Column="3"/>
-                        <Label Content="File size (MB):" Grid.Row="1" Grid.Column="4"/>
-                        <TextBox x:Name="TbFileMb"      Grid.Row="1" Grid.Column="5"/>
+                        <Label Content="Block size (e.g. 4K, 64K):"    Grid.Row="0" Grid.Column="0" Margin="0,4"/>
+                        <TextBox x:Name="TbBlock"       Grid.Row="0" Grid.Column="1" Margin="0,4" Padding="4,2"
+                                 ToolTip="diskspd -b flag. Smaller blocks (4K) stress IOPS, larger blocks (64K, 1M) stress throughput."/>
+                        <Label Content="Threads (1-64):"               Grid.Row="0" Grid.Column="2" Margin="0,4"/>
+                        <TextBox x:Name="TbThreads"     Grid.Row="0" Grid.Column="3" Margin="0,4" Padding="4,2"
+                                 ToolTip="diskspd -t flag. Parallel I/O threads. More threads = more concurrent pressure on the storage."/>
+                        <Label Content="Queue depth (1-256):"          Grid.Row="0" Grid.Column="4" Margin="0,4"/>
+                        <TextBox x:Name="TbQd"          Grid.Row="0" Grid.Column="5" Margin="0,4" Padding="4,2"
+                                 ToolTip="diskspd -o flag. Outstanding I/Os per thread. Higher queues saturate NVMe; lower simulates light workloads."/>
+                        <Label Content="Write % (0-100):"              Grid.Row="1" Grid.Column="0" Margin="0,4"/>
+                        <TextBox x:Name="TbWritePct"    Grid.Row="1" Grid.Column="1" Margin="0,4" Padding="4,2"
+                                 ToolTip="diskspd -w flag. 0 = all reads (read-only test), 100 = all writes, 30 = mixed."/>
+                        <Label Content="Duration (seconds):"           Grid.Row="1" Grid.Column="2" Margin="0,4"/>
+                        <TextBox x:Name="TbDuration"    Grid.Row="1" Grid.Column="3" Margin="0,4" Padding="4,2"
+                                 ToolTip="diskspd -d flag. How long the test runs. 10s gives a sanity check; 30-60s gives stable numbers."/>
+                        <Label Content="File size (MB):"               Grid.Row="1" Grid.Column="4" Margin="0,4"/>
+                        <TextBox x:Name="TbFileMb"      Grid.Row="1" Grid.Column="5" Margin="0,4" Padding="4,2"
+                                 ToolTip="diskspd -c flag. Size of the scratch file. Must fit on the target with headroom."/>
                     </Grid>
                 </Expander>
             </StackPanel>
@@ -246,7 +256,8 @@ $script:Xaml = @'
                     <Button x:Name="BtnSave"   Content="Save Report"  IsEnabled="False"/>
                     <TextBlock x:Name="TbStatus" Text="Idle" VerticalAlignment="Center" Margin="20,0,0,0"/>
                 </StackPanel>
-                <ProgressBar x:Name="PbProgress" Grid.Row="1" Height="6" Margin="0,8" Minimum="0" Maximum="100"/>
+                <ProgressBar x:Name="PbProgress" Grid.Row="1" Height="10" Margin="0,8" Minimum="0" Maximum="100"
+                             Foreground="#5dade2" Background="#252526"/>
                 <DataGrid x:Name="DgResults" Grid.Row="2" AutoGenerateColumns="False" CanUserAddRows="False"
                           IsReadOnly="True" Background="#252526" Foreground="#eaeaea" GridLinesVisibility="None">
                     <DataGrid.Columns>
@@ -988,6 +999,18 @@ function Show-DiskSpdGui {
     $tbWritePct   = & $get 'TbWritePct';   $tbDuration  = & $get 'TbDuration';   $tbFileMb    = & $get 'TbFileMb'
     $btnRun       = & $get 'BtnRun';       $btnCancel   = & $get 'BtnCancel';    $btnSave     = & $get 'BtnSave'
     $tbStatus     = & $get 'TbStatus';     $pbProgress  = & $get 'PbProgress';   $dgResults   = & $get 'DgResults'
+    $tbProfileDescription = & $get 'TbProfileDescription'
+
+    # Plain-English descriptions for each preset so the operator can pick
+    # without having to remember diskspd flag semantics. Shown below the
+    # dropdown and updated on selection change.
+    $profileDescriptions = @{
+        'FSLogixLike' = "4K random, 30% writes, 4 threads, QD8, 30s. Simulates FSLogix profile container I/O. Best for testing FSLogix shares and VDA local disks."
+        'SequentialRead' = "64K sequential read, 1 thread, QD4, 30s. Measures raw read throughput. Best for: boot/login scenarios, large file copies, image deployment."
+        'MixedUserLoad' = "8K random, 20% writes, 2 threads, QD4, 60s. Simulates a moderate user session workload. Best for: general 'is this drive fast enough?' checks."
+        'QuickSanity' = "64K random, 100% reads, 1 thread, QD2, 10s. Fast smoke test (~10s). Best for: confirming a drive is reachable and producing sane numbers, not a performance benchmark."
+        'Custom' = "Operator-supplied values. All 6 advanced fields below must be filled in. Use when none of the presets fit your workload."
+    }
 
     # Shared state between the UI thread and the background runspace.
     # [hashtable]::Synchronized so reads/writes don't race.
@@ -1016,9 +1039,13 @@ function Show-DiskSpdGui {
         if ($dlg.ShowDialog() -eq 'OK') { $tbLocalPath.Text = $dlg.SelectedPath }
     })
 
-    # --- Profile change: prefill the override fields ---
+    # --- Profile change: prefill the override fields and update the description ---
     $fillFromProfile = {
         $name = $cbProfile.SelectedItem.Content
+        # Always update the description line, even for Custom.
+        if ($profileDescriptions.ContainsKey($name)) {
+            $tbProfileDescription.Text = $profileDescriptions[$name]
+        }
         if ($name -eq 'Custom') { return }
         $p = Get-DiskSpdWorkloadProfile -Name $name
         $tbBlock.Text    = $p.BlockSize
@@ -1118,8 +1145,28 @@ function Show-DiskSpdGui {
         $btnRun.IsEnabled    = $false
         $btnSave.IsEnabled   = $false
         $btnCancel.IsEnabled = $true
-        $pbProgress.IsIndeterminate = $true
-        & $setStatus 'Running diskspd...'
+
+        # Determinate progress bar: estimate total runtime as the test's
+        # DurationSeconds plus ~6s of diskspd warmup/cooldown overhead. Empirical
+        # from the integration tests (a 3s test takes ~9s wall-clock).
+        $expectedSec = [int]$resolvedSettings.DurationSeconds + 6
+        $startTime   = Get-Date
+        $pbProgress.IsIndeterminate = $false
+        $pbProgress.Value = 0
+        & $setStatus "Running diskspd (0s / ${expectedSec}s)"
+
+        # Tick the progress bar every 250ms based on real elapsed time. Doesn't
+        # touch diskspd; just gives the operator a "things are happening" signal.
+        $progressTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $progressTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+        $progressTimer.Add_Tick({
+            $elapsed = (New-TimeSpan -Start $startTime).TotalSeconds
+            # Cap at 99% until the completion timer fires; never show 100% before done.
+            $pct = [math]::Min(99, [int](($elapsed / $expectedSec) * 100))
+            $pbProgress.Value = $pct
+            $tbStatus.Text    = "Running diskspd ($([int]$elapsed)s / ${expectedSec}s)"
+        })
+        $progressTimer.Start()
 
         # Build the background runspace. The scriptblock re-dot-sources the script
         # to access the engine functions in a fresh scope, then runs the orchestrator.
@@ -1164,6 +1211,7 @@ function Show-DiskSpdGui {
         $timer.Add_Tick({
             if (-not $async.IsCompleted) { return }
             $timer.Stop()
+            $progressTimer.Stop()
 
             try {
                 $out = $ps.EndInvoke($async) | Select-Object -First 1
@@ -1172,19 +1220,23 @@ function Show-DiskSpdGui {
             }
             $ps.Dispose()
 
-            $pbProgress.IsIndeterminate = $false
             $btnCancel.IsEnabled = $false
             $btnRun.IsEnabled    = $true
 
             if ($script:uiState.Cancelled) {
+                $pbProgress.Value = 0
                 & $setStatus 'Cancelled'
                 return
             }
             if (-not $out.Ok) {
+                $pbProgress.Value = 0
                 & $setStatus "Failed: $($out.Error)"
                 [System.Windows.MessageBox]::Show($out.Error, 'diskspd failed', 'OK', 'Error') | Out-Null
                 return
             }
+
+            # Finish the bar — diskspd is done.
+            $pbProgress.Value = 100
 
             $script:uiState.ReportPath = $out.ReportPath
             $script:uiState.Result     = $out.Result
@@ -1205,6 +1257,8 @@ function Show-DiskSpdGui {
             $script:uiState.Cancelled = $true
             $script:uiState.Runspace.Stop() | Out-Null
         }
+        # The completion timer will see IsCompleted true (because Stop()
+        # cancels the runspace) and tear down the progress timer.
         & $setStatus 'Cancelling...'
     })
 
