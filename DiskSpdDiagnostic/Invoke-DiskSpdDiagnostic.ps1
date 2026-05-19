@@ -393,6 +393,19 @@ function Get-DiskSpdHealthAssessment {
     $result
 }
 
+# Returns [PSCustomObject] (not hashtable) because the result is consumer-facing —
+# the WPF UI binds Errors/Warnings to modal dialogs and the headless orchestrator
+# logs them by name. Keep the field names (Pass, Errors, Warnings) stable.
+#
+# NOTE: signature-warning branches (bad Authenticode status / non-Microsoft signer
+# / read-failure) are not unit-tested — a fixture exe with each signature state
+# is more setup cost than the ~5 lines of logic justify. They are exercised
+# manually when the bundled binary is updated.
+#
+# NOTE: UNC targets ('\\server\share\...') can make Test-Path / Get-Item block
+# for the full SMB timeout (~30s) when the server is unreachable. The WPF UI
+# (Task 13) runs preflight on a background runspace to avoid hanging the
+# dispatcher — don't call this synchronously from a UI-thread event handler.
 function Test-DiskSpdPreflight {
     [CmdletBinding()]
     [OutputType([PSCustomObject])]
