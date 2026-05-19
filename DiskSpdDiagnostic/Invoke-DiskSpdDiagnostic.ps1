@@ -21,32 +21,33 @@
 .PARAMETER ComputerName
     Optional. If set, diskspd runs on this remote VDA targeting -Target from there.
 
-.PARAMETER Profile
+.PARAMETER Workload
     Workload profile: FSLogixLike, SequentialRead, MixedUserLoad, QuickSanity, Custom.
 
 .PARAMETER BlockSize
-    Block size override (e.g., 4K, 64K). Required with -Profile Custom.
+    Block size override (e.g., 4K, 64K). Required with -Workload Custom.
 
 .PARAMETER Threads
-    Thread count override. Required with -Profile Custom.
+    Thread count override. Required with -Workload Custom.
 
 .PARAMETER QueueDepth
-    Outstanding I/Os per thread. Required with -Profile Custom.
+    Outstanding I/Os per thread. Required with -Workload Custom.
 
 .PARAMETER WriteRatioPercent
-    Percentage of writes (0-100). Required with -Profile Custom.
+    Percentage of writes (0-100). Required with -Workload Custom.
 
 .PARAMETER DurationSeconds
-    Test duration in seconds. Required with -Profile Custom.
+    Test duration in seconds. Required with -Workload Custom.
 
 .PARAMETER TestFileSizeMB
-    Test file size in MB. Required with -Profile Custom.
+    Test file size in MB. Required with -Workload Custom.
 
 .PARAMETER NoUI
     Run in headless mode. Requires -Target.
 
 .PARAMETER OutputPath
-    Directory for the HTML report. Defaults to Documents\DiskSpdReports.
+    Directory for the HTML report. Defaults to the script folder so reports land
+    predictably even under -RunAsAdministrator with a different admin account.
 
 .PARAMETER Force
     Bypass business-hours confirmation.
@@ -55,7 +56,7 @@
     .\Invoke-DiskSpdDiagnostic.ps1
 
 .EXAMPLE
-    .\Invoke-DiskSpdDiagnostic.ps1 -NoUI -Target '\\FileServer01\FSLogix' -Profile FSLogixLike
+    .\Invoke-DiskSpdDiagnostic.ps1 -NoUI -Target '\\FileServer01\FSLogix' -Workload FSLogixLike
 
 .NOTES
     Requires diskspd.exe (bundled) next to this script.
@@ -72,7 +73,7 @@ param(
 
     [Parameter()]
     [ValidateSet('FSLogixLike','SequentialRead','MixedUserLoad','QuickSanity','Custom')]
-    [string]$Profile = 'FSLogixLike',
+    [string]$Workload = 'FSLogixLike',
 
     [Parameter()]
     [ValidatePattern('^\d+[KMG]?$')]
@@ -102,7 +103,7 @@ param(
     [switch]$NoUI,
 
     [Parameter()]
-    [string]$OutputPath = (Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'DiskSpdReports'),
+    [string]$OutputPath = $PSScriptRoot,
 
     [Parameter()]
     [switch]$Force
