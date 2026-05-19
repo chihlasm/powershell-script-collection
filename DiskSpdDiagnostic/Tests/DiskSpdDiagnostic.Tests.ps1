@@ -207,6 +207,18 @@ Describe 'ConvertFrom-DiskSpdXml' {
         $r.RawXml       | Should -Be $script:fixtureXml
     }
 
+    It 'extracts exact values from the committed fixture (XPath regression guard)' {
+        # These values are read directly from sample-diskspd-output.xml.
+        # If diskspd's XML schema changes in a future version, this test will fail
+        # and tell us we need to update the parser, NOT just the fixture.
+        $r = ConvertFrom-DiskSpdXml -Xml $script:fixtureXml -ProfileName QuickSanity
+        $r.Duration     | Should -Be 5.01     -Because 'TestTimeSeconds=5.01 in the fixture'
+        $r.AvgLatencyMs | Should -Be 0.106    -Because 'AverageTotalMilliseconds=0.106 in the fixture'
+        $r.CpuPercent   | Should -Be 33.45    -Because 'CpuUtilization.Average.UsagePercent=33.45 in the fixture'
+        $r.TestFilePath | Should -Match 'diskspd-fixture\.dat$' -Because 'fixture was run against $env:TEMP\diskspd-fixture.dat'
+        $r.WriteMBps    | Should -Be 0        -Because 'fixture used -w0 (100% reads)'
+    }
+
     It 'computes IOPS as (ReadCount + WriteCount) divided by duration' {
         # Minimal synthetic XML so we can assert exact arithmetic
         $xml = @'
