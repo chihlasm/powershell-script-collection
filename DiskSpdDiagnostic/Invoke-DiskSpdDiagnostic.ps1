@@ -480,22 +480,18 @@ function Test-DiskSpdPreflight {
     }
 
     # 4. Remote reachability (only in remote mode).
-    # Test-WSMan can either throw OR return $null depending on Windows version and
-    # the kind of failure (DNS lookup vs. WinRM listener missing). Handle both.
+    # Test-WSMan can throw on DNS failure, or return $null when -ErrorAction Stop
+    # doesn't catch (varies by Windows build). Handle both by tracking the outcome
+    # explicitly, then also probe the admin share as a separate check.
     if ($ComputerName) {
-        $wsManOk        = $false
-        $wsManThrew     = $false
+        $wsManReachable = $false
         try {
             $wsManResult = Test-WSMan -ComputerName $ComputerName -ErrorAction Stop
-            if ($wsManResult) { $wsManOk = $true }
+            if ($wsManResult) { $wsManReachable = $true }
         } catch {
-            $wsManThrew = $true
             $errors += "Test-WSMan failed for ${ComputerName}: $($_.Exception.Message)"
         }
-        if (-not $wsManOk -and -not $wsManThrew) {
-            # Returned $null/empty without throwing — surface as the same error class.
-            # Some Windows builds don't terminate on DNS resolution failure even
-            # under -ErrorAction Stop, so we synthesize the diagnostic here.
+        if (-not $wsManReachable -and -not ($errors -match 'Test-WSMan')) {
             $errors += "Test-WSMan failed for ${ComputerName}: no response (host unreachable or WinRM not listening)"
         }
         $admin = "\\$ComputerName\C`$\Windows\Temp"
