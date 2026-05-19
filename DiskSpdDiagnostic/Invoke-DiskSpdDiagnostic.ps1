@@ -290,20 +290,27 @@ function ConvertFrom-DiskSpdXml {
     $iops       = [math]::Round(($readCount + $writeCount) / $durationSec, 0)
 
     # Average latency: prefer AverageTotalMilliseconds (combined R+W average from diskspd v2.2).
-    # Fall back to ReadOnly average if Total is absent (very old diskspd builds).
+    # Fall back to Read-only or Write-only averages depending on what the test contained.
+    # The Write fallback matters for 100%-write workloads (FSLogix profile creation, OLTP)
+    # on older diskspd builds that don't emit AverageTotalMilliseconds.
     $avgMs = if ($timeSpan.Latency.AverageTotalMilliseconds) {
         [double]$timeSpan.Latency.AverageTotalMilliseconds
     } elseif ($timeSpan.Latency.AverageReadMilliseconds) {
         [double]$timeSpan.Latency.AverageReadMilliseconds
+    } elseif ($timeSpan.Latency.AverageWriteMilliseconds) {
+        [double]$timeSpan.Latency.AverageWriteMilliseconds
     } else { 0 }
 
     # Bucket lookup: TotalMilliseconds is the combined R+W percentile latency.
-    # If TotalMilliseconds is absent, fall back to ReadMilliseconds.
+    # Falls back to Read- or Write-only latency for pure-read / pure-write workloads.
+    # The integer-percentile comparison is safe: 95 and 99 parse to exact doubles
+    # (would NOT be safe for fractional buckets like 99.9).
     function Get-BucketLatency([object]$buckets, [int]$percentile) {
         $b = $buckets | Where-Object { [double]$_.Percentile -eq $percentile } | Select-Object -First 1
         if (-not $b) { return $null }
         if ($b.TotalMilliseconds) { return [double]$b.TotalMilliseconds }
         if ($b.ReadMilliseconds)  { return [double]$b.ReadMilliseconds }
+        if ($b.WriteMilliseconds) { return [double]$b.WriteMilliseconds }
         return $null
     }
 
