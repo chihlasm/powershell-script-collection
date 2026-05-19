@@ -402,3 +402,79 @@ Describe 'Get-DiskSpdHealthAssessment' {
         $a.ContainsKey('Latency99Ms') | Should -BeFalse
     }
 }
+
+Describe 'Test-DiskSpdPreflight (local mode)' {
+    BeforeAll {
+        # We need a known-good path to the bundled diskspd.exe for these tests.
+        # Resolve via the test's own location so this works regardless of cwd.
+        $script:DiskSpdExePath = (Resolve-Path (Join-Path $PSScriptRoot '..\diskspd.exe')).Path
+    }
+
+    BeforeEach {
+        $script:probeDir = Join-Path $env:TEMP "diskspd-pf-$([guid]::NewGuid())"
+        New-Item -ItemType Directory -Path $script:probeDir -Force | Out-Null
+    }
+    AfterEach {
+        Remove-Item $script:probeDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'passes when binary exists, target writable, free space ample' {
+        $r = Test-DiskSpdPreflight -DiskSpdPath $script:DiskSpdExePath -Target $script:probeDir `
+            -TestFileSizeMB 64 -BusinessHoursForce
+        $r.Pass     | Should -BeTrue
+        $r.Errors   | Should -BeNullOrEmpty
+    }
+
+    It 'fails if diskspd.exe missing' {
+        $r = Test-DiskSpdPreflight -DiskSpdPath 'C:\does\not\exist\diskspd.exe' -Target $script:probeDir `
+            -TestFileSizeMB 64 -BusinessHoursForce
+        $r.Pass   | Should -BeFalse
+        $r.Errors | Should -Match 'diskspd.exe not found'
+    }
+
+    It 'fails if target not reachable' {
+        $r = Test-DiskSpdPreflight -DiskSpdPath $script:DiskSpdExePath -Target 'Z:\definitely\not\there' `
+            -TestFileSizeMB 64 -BusinessHoursForce
+        $r.Pass   | Should -BeFalse
+        $r.Errors | Should -Match '(reachable|not found)'
+    }
+
+    It 'warns during business hours' {
+        # Wednesday 2026-05-20 at 10:00 — Mon-Fri 7-18 = business hours
+        $r = Test-DiskSpdPreflight -DiskSpdPath $script:DiskSpdExePath -Target $script:probeDir `
+            -TestFileSizeMB 64 -BusinessHoursNow ([datetime]'2026-05-20 10:00:00')
+        $r.Warnings | Should -Match 'business hours'
+    }
+
+    It '-BusinessHoursForce suppresses business-hours warning' {
+        $r = Test-DiskSpdPreflight -DiskSpdPath $script:DiskSpdExePath -Target $script:probeDir `
+            -TestFileSizeMB 64 -BusinessHoursForce -BusinessHoursNow ([datetime]'2026-05-20 10:00:00')
+        ($r.Warnings -join ' ') | Should -Not -Match 'business hours'
+    }
+
+    It 'does NOT warn outside business hours' {
+        # Saturday 2026-05-23 at 10:00 (weekend) - should not warn
+        $r = Test-DiskSpdPreflight -DiskSpdPath $script:DiskSpdExePath -Target $script:probeDir `
+            -TestFileSizeMB 64 -BusinessHoursNow ([datetime]'2026-05-23 10:00:00')
+        ($r.Warnings -join ' ') | Should -Not -Match 'business hours'
+    }
+
+    It 'does NOT warn at 6:59 AM on a weekday' {
+        $r = Test-DiskSpdPreflight -DiskSpdPath $script:DiskSpdExePath -Target $script:probeDir `
+            -TestFileSizeMB 64 -BusinessHoursNow ([datetime]'2026-05-20 06:59:00')
+        ($r.Warnings -join ' ') | Should -Not -Match 'business hours'
+    }
+
+    It 'warns at 7:00 AM on a weekday (lower boundary)' {
+        $r = Test-DiskSpdPreflight -DiskSpdPath $script:DiskSpdExePath -Target $script:probeDir `
+            -TestFileSizeMB 64 -BusinessHoursNow ([datetime]'2026-05-20 07:00:00')
+        $r.Warnings | Should -Match 'business hours'
+    }
+
+    It 'does NOT warn at 6:00 PM on a weekday (upper boundary - exclusive)' {
+        # Spec: 7am-6pm means hour >= 7 AND hour < 18. So 18:00 should NOT warn.
+        $r = Test-DiskSpdPreflight -DiskSpdPath $script:DiskSpdExePath -Target $script:probeDir `
+            -TestFileSizeMB 64 -BusinessHoursNow ([datetime]'2026-05-20 18:00:00')
+        ($r.Warnings -join ' ') | Should -Not -Match 'business hours'
+    }
+}
