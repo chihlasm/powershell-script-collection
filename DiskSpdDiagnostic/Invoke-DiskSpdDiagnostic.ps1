@@ -849,5 +849,50 @@ function Invoke-DiskSpdHeadless {
     return $report
 }
 
-# Entry-point dispatch (filled in Task 12):
-# if ($NoUI) { Invoke-DiskSpdHeadless ... } else { Show-DiskSpdGui }
+# Temporary stub. Task 13 replaces this with the real WPF UI. Keeping it here
+# so Task 12's dispatch wiring can be smoke-tested before the UI lands.
+function Show-DiskSpdGui {
+    Write-Host "[INFO] GUI not yet implemented. Use -NoUI with -Target for now." -ForegroundColor Cyan
+}
+
+# --- Entry point ---
+
+# Guard against dot-sourcing (e.g., from Pester tests that load the engine
+# functions via `. $scriptPath`). When dot-sourced, $MyInvocation.InvocationName
+# is '.' and we MUST NOT execute the dispatch — otherwise every Pester run would
+# either error on preflight or pop a WPF window.
+if ($MyInvocation.InvocationName -eq '.') { return }
+
+if ($NoUI) {
+    if (-not $Target) { throw "-Target is required when -NoUI is set." }
+
+    # Collect CLI-supplied overrides. Only keys the operator actually passed
+    # get added — Resolve-DiskSpdSettings will reject unknown keys and merge
+    # the rest on top of the named preset (or use them as the full Custom set).
+    $overrides = @{}
+    foreach ($key in @('BlockSize','Threads','QueueDepth','WriteRatioPercent','DurationSeconds','TestFileSizeMB')) {
+        if ($PSBoundParameters.ContainsKey($key)) { $overrides[$key] = $PSBoundParameters[$key] }
+    }
+    # RandomIO is not a CLI parameter; it derives from the workload. For Custom,
+    # default to $true unless the GUI provided otherwise (the GUI's collectInputs
+    # block sets RandomIO explicitly).
+    if ($Workload -eq 'Custom' -and -not $overrides.ContainsKey('RandomIO')) {
+        $overrides['RandomIO'] = $true
+    }
+
+    if (-not (Test-Path $OutputPath)) {
+        New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
+    }
+
+    Invoke-DiskSpdHeadless `
+        -DiskSpdPath $script:DiskSpdExe `
+        -Target $Target `
+        -ProfileName $Workload `
+        -Overrides $overrides `
+        -ComputerName $ComputerName `
+        -OutputPath $OutputPath `
+        -Force:$Force
+    return
+}
+
+Show-DiskSpdGui
