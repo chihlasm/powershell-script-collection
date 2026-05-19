@@ -581,12 +581,12 @@ function Get-DiskSpdHealthAssessment {
 
     # Throughput: higher is better, so > OK is OK, >= Warn is WARN, else CRIT.
     # Latency: lower is better, so < OK is OK, <= Warn is WARN, else CRIT.
-    function Classify-Throughput($v, $ok, $warn) {
+    function Get-ThroughputStatus($v, $ok, $warn) {
         if ($v -gt $ok)       { 'OK' }
         elseif ($v -ge $warn) { 'WARN' }
         else                  { 'CRIT' }
     }
-    function Classify-Latency($v, $ok, $warn) {
+    function Get-LatencyStatus($v, $ok, $warn) {
         if ($v -lt $ok)       { 'OK' }
         elseif ($v -le $warn) { 'WARN' }
         else                  { 'CRIT' }
@@ -599,15 +599,15 @@ function Get-DiskSpdHealthAssessment {
     # and $result would silently shadow the $Result parameter — meaning the
     # subsequent $Result.Latency95Ms reads would target our empty hashtable instead.
     $out = @{
-        ReadMBps     = Classify-Throughput $Result.ReadMBps     $thresholds.ReadOK    $thresholds.ReadWarn
-        WriteMBps    = Classify-Throughput $Result.WriteMBps    $thresholds.WriteOK   $thresholds.WriteWarn
-        AvgLatencyMs = Classify-Latency    $Result.AvgLatencyMs $thresholds.LatencyOK $thresholds.LatencyWarn
+        ReadMBps     = Get-ThroughputStatus $Result.ReadMBps     $thresholds.ReadOK    $thresholds.ReadWarn
+        WriteMBps    = Get-ThroughputStatus $Result.WriteMBps    $thresholds.WriteOK   $thresholds.WriteWarn
+        AvgLatencyMs = Get-LatencyStatus    $Result.AvgLatencyMs $thresholds.LatencyOK $thresholds.LatencyWarn
     }
     if ($null -ne $Result.Latency95Ms) {
-        $out.Latency95Ms = Classify-Latency $Result.Latency95Ms $thresholds.LatencyOK $thresholds.LatencyWarn
+        $out.Latency95Ms = Get-LatencyStatus $Result.Latency95Ms $thresholds.LatencyOK $thresholds.LatencyWarn
     }
     if ($null -ne $Result.Latency99Ms) {
-        $out.Latency99Ms = Classify-Latency $Result.Latency99Ms $thresholds.LatencyOK $thresholds.LatencyWarn
+        $out.Latency99Ms = Get-LatencyStatus $Result.Latency99Ms $thresholds.LatencyOK $thresholds.LatencyWarn
     }
     $out
 }
