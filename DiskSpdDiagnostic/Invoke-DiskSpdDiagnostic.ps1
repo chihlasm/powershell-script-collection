@@ -164,9 +164,11 @@ $script:Xaml = @'
             <Setter Property="Foreground" Value="#0f1115"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
         </Style>
-        <!-- Input control styles: WPF TextBox/ComboBox/CheckBox/Expander default
-             to system (light) chrome regardless of the window-level Foreground.
-             Set them explicitly so dark mode actually reaches the input fields. -->
+        <!-- TextBox style only: WPF TextBox defaults to system (light) chrome
+             regardless of the window-level Foreground. Restyling ComboBox here
+             is risky because the dropdown's popup is in a separate visual tree
+             where partial styling breaks the existing rendering — leave the
+             preset combobox at WPF default. -->
         <Style TargetType="TextBox">
             <Setter Property="Background"     Value="#2d2d30"/>
             <Setter Property="Foreground"     Value="#eaeaea"/>
@@ -175,15 +177,6 @@ $script:Xaml = @'
             <Setter Property="CaretBrush"     Value="#eaeaea"/>
             <Setter Property="SelectionBrush" Value="#5dade2"/>
             <Setter Property="Padding"        Value="4,2"/>
-        </Style>
-        <Style TargetType="ComboBox">
-            <Setter Property="Background"  Value="#2d2d30"/>
-            <Setter Property="Foreground"  Value="#eaeaea"/>
-            <Setter Property="BorderBrush" Value="#3f3f46"/>
-        </Style>
-        <Style TargetType="ComboBoxItem">
-            <Setter Property="Background" Value="#2d2d30"/>
-            <Setter Property="Foreground" Value="#eaeaea"/>
         </Style>
         <Style TargetType="Expander">
             <Setter Property="Foreground" Value="#9aa0a6"/>
