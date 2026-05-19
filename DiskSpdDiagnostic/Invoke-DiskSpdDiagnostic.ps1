@@ -744,12 +744,13 @@ function Export-DiskSpdHtmlReport {
     # parameter; "Profile" is the legacy internal name preserved for now.)
     $encodedTarget   = [System.Web.HttpUtility]::HtmlEncode($Target)
     $encodedWorkload = [System.Web.HttpUtility]::HtmlEncode($Result.ProfileName)
-    $html = $tpl.Replace('{{TARGET}}',        $encodedTarget) `
-                .Replace('{{PROFILE}}',       $encodedWorkload) `
-                .Replace('{{TIMESTAMP}}',     $timestamp) `
-                .Replace('{{RESULTS_TABLE}}', $rowsHtml) `
-                .Replace('{{HEALTH_BADGES}}', $badgesHtml) `
-                .Replace('{{RAW_XML}}',       $rawXmlEncoded)
+    $html = $tpl
+    $html = $html.Replace('{{TARGET}}',        $encodedTarget)
+    $html = $html.Replace('{{PROFILE}}',       $encodedWorkload)
+    $html = $html.Replace('{{TIMESTAMP}}',     $timestamp)
+    $html = $html.Replace('{{RESULTS_TABLE}}', $rowsHtml)
+    $html = $html.Replace('{{HEALTH_BADGES}}', $badgesHtml)
+    $html = $html.Replace('{{RAW_XML}}',       $rawXmlEncoded)
 
     $filename = "diskspd_${safeTarget}_${fileTimestamp}.html"
     $outFile  = Join-Path $OutputDirectory $filename
