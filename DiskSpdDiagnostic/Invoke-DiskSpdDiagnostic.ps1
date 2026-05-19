@@ -142,6 +142,125 @@ function Write-DiskSpdStatus {
     Write-Host "[$ts] [$Level] $Message" -ForegroundColor $color
 }
 
+# WPF XAML for the diagnostic GUI. Loaded by Show-DiskSpdGui via XamlReader.Load.
+# Kept as a here-string (not a separate .xaml file) so the script remains
+# self-contained per the project's flat-folder convention.
+$script:Xaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="DiskSpd Diagnostic" Height="650" Width="900"
+        Background="#1e1e1e" Foreground="#eaeaea" FontFamily="Segoe UI">
+    <Window.Resources>
+        <Style TargetType="TextBlock"><Setter Property="Foreground" Value="#eaeaea"/></Style>
+        <Style TargetType="Label"><Setter Property="Foreground" Value="#eaeaea"/></Style>
+        <Style TargetType="RadioButton"><Setter Property="Foreground" Value="#eaeaea"/></Style>
+        <Style TargetType="GroupBox"><Setter Property="Foreground" Value="#9aa0a6"/></Style>
+        <Style TargetType="Button">
+            <Setter Property="Padding" Value="12,4"/>
+            <Setter Property="Margin"  Value="0,0,8,0"/>
+        </Style>
+        <Style x:Key="Accent" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Background" Value="#5dade2"/>
+            <Setter Property="Foreground" Value="#0f1115"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
+    </Window.Resources>
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- Zone 1: Target -->
+        <GroupBox Header="Target" Grid.Row="0" Padding="12">
+            <StackPanel>
+                <RadioButton x:Name="RbLocal"  GroupName="Target" Content="Local disk on this machine" IsChecked="True"/>
+                <StackPanel Orientation="Horizontal" Margin="20,4,0,8">
+                    <TextBox x:Name="TbLocalPath" Width="500" Text="C:\"/>
+                    <Button  x:Name="BtnBrowseLocal" Content="Browse..." Margin="8,0,0,0"/>
+                </StackPanel>
+                <RadioButton x:Name="RbUnc"    GroupName="Target" Content="Network path from this machine"/>
+                <TextBox x:Name="TbUncPath" Width="540" Margin="20,4,0,8" IsEnabled="False"/>
+                <RadioButton x:Name="RbRemote" GroupName="Target" Content="Run on remote VDA, target a path"/>
+                <StackPanel Orientation="Horizontal" Margin="20,4,0,4">
+                    <Label Content="VDA name:" Width="80"/>
+                    <TextBox x:Name="TbVdaName" Width="200" IsEnabled="False"/>
+                    <Label Content="Target path:" Margin="12,0,0,0"/>
+                    <TextBox x:Name="TbVdaTarget" Width="260" IsEnabled="False"/>
+                </StackPanel>
+            </StackPanel>
+        </GroupBox>
+
+        <!-- Zone 2: Workload -->
+        <GroupBox Header="Workload profile" Grid.Row="1" Padding="12" Margin="0,12,0,0">
+            <StackPanel>
+                <StackPanel Orientation="Horizontal">
+                    <Label Content="Preset:" Width="80"/>
+                    <ComboBox x:Name="CbProfile" Width="200">
+                        <ComboBoxItem Content="FSLogixLike"     IsSelected="True"/>
+                        <ComboBoxItem Content="SequentialRead"/>
+                        <ComboBoxItem Content="MixedUserLoad"/>
+                        <ComboBoxItem Content="QuickSanity"/>
+                        <ComboBoxItem Content="Custom"/>
+                    </ComboBox>
+                </StackPanel>
+                <Expander x:Name="ExpAdvanced" Header="Advanced overrides" Margin="0,8,0,0">
+                    <Grid Margin="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="140"/><ColumnDefinition Width="100"/>
+                            <ColumnDefinition Width="140"/><ColumnDefinition Width="100"/>
+                            <ColumnDefinition Width="140"/><ColumnDefinition Width="100"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <Label Content="Block size:"    Grid.Row="0" Grid.Column="0"/>
+                        <TextBox x:Name="TbBlock"       Grid.Row="0" Grid.Column="1"/>
+                        <Label Content="Threads:"       Grid.Row="0" Grid.Column="2"/>
+                        <TextBox x:Name="TbThreads"     Grid.Row="0" Grid.Column="3"/>
+                        <Label Content="Queue depth:"   Grid.Row="0" Grid.Column="4"/>
+                        <TextBox x:Name="TbQd"          Grid.Row="0" Grid.Column="5"/>
+                        <Label Content="Write %:"       Grid.Row="1" Grid.Column="0"/>
+                        <TextBox x:Name="TbWritePct"    Grid.Row="1" Grid.Column="1"/>
+                        <Label Content="Duration (s):"  Grid.Row="1" Grid.Column="2"/>
+                        <TextBox x:Name="TbDuration"    Grid.Row="1" Grid.Column="3"/>
+                        <Label Content="File size (MB):" Grid.Row="1" Grid.Column="4"/>
+                        <TextBox x:Name="TbFileMb"      Grid.Row="1" Grid.Column="5"/>
+                    </Grid>
+                </Expander>
+            </StackPanel>
+        </GroupBox>
+
+        <!-- Zone 3: Run + Results -->
+        <GroupBox Header="Run" Grid.Row="2" Padding="12" Margin="0,12,0,0">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <StackPanel Orientation="Horizontal" Grid.Row="0">
+                    <Button x:Name="BtnRun"    Content="Run Test"     Style="{StaticResource Accent}"/>
+                    <Button x:Name="BtnCancel" Content="Cancel"       IsEnabled="False"/>
+                    <Button x:Name="BtnSave"   Content="Save Report"  IsEnabled="False"/>
+                    <TextBlock x:Name="TbStatus" Text="Idle" VerticalAlignment="Center" Margin="20,0,0,0"/>
+                </StackPanel>
+                <ProgressBar x:Name="PbProgress" Grid.Row="1" Height="6" Margin="0,8" Minimum="0" Maximum="100"/>
+                <DataGrid x:Name="DgResults" Grid.Row="2" AutoGenerateColumns="False" CanUserAddRows="False"
+                          IsReadOnly="True" Background="#252526" Foreground="#eaeaea" GridLinesVisibility="None">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Metric" Binding="{Binding Metric}" Width="200"/>
+                        <DataGridTextColumn Header="Value"  Binding="{Binding Value}"  Width="200"/>
+                        <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="100"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </Grid>
+        </GroupBox>
+    </Grid>
+</Window>
+'@
+
 # --- Engine functions go here (Tasks 1-9) ---
 
 # Returns hashtable (not PSCustomObject) so callers can merge operator overrides.
@@ -849,10 +968,255 @@ function Invoke-DiskSpdHeadless {
     return $report
 }
 
-# Temporary stub. Task 13 replaces this with the real WPF UI. Keeping it here
-# so Task 12's dispatch wiring can be smoke-tested before the UI lands.
 function Show-DiskSpdGui {
-    Write-Host "[INFO] GUI not yet implemented. Use -NoUI with -Target for now." -ForegroundColor Cyan
+    [CmdletBinding()] param()
+
+    Add-Type -AssemblyName PresentationFramework, System.Xaml, System.Windows.Forms
+
+    [xml]$xamlDoc = $script:Xaml
+    $reader = New-Object System.Xml.XmlNodeReader $xamlDoc
+    $window = [Windows.Markup.XamlReader]::Load($reader)
+
+    # Bind named XAML elements to local variables for easy reference.
+    $get = { param($n) $window.FindName($n) }
+    $rbLocal      = & $get 'RbLocal';      $rbUnc       = & $get 'RbUnc';        $rbRemote    = & $get 'RbRemote'
+    $tbLocalPath  = & $get 'TbLocalPath';  $tbUncPath   = & $get 'TbUncPath'
+    $tbVdaName    = & $get 'TbVdaName';    $tbVdaTarget = & $get 'TbVdaTarget'
+    $btnBrowse    = & $get 'BtnBrowseLocal'
+    $cbProfile    = & $get 'CbProfile'
+    $tbBlock      = & $get 'TbBlock';      $tbThreads   = & $get 'TbThreads';    $tbQd        = & $get 'TbQd'
+    $tbWritePct   = & $get 'TbWritePct';   $tbDuration  = & $get 'TbDuration';   $tbFileMb    = & $get 'TbFileMb'
+    $btnRun       = & $get 'BtnRun';       $btnCancel   = & $get 'BtnCancel';    $btnSave     = & $get 'BtnSave'
+    $tbStatus     = & $get 'TbStatus';     $pbProgress  = & $get 'PbProgress';   $dgResults   = & $get 'DgResults'
+
+    # Shared state between the UI thread and the background runspace.
+    # [hashtable]::Synchronized so reads/writes don't race.
+    $script:uiState = [hashtable]::Synchronized(@{
+        ReportPath  = $null
+        Result      = $null
+        Assessment  = $null
+        Runspace    = $null
+        Cancelled   = $false
+    })
+
+    # --- Target mode wiring: enable only the active mode's fields ---
+    $updateTargetFields = {
+        $tbLocalPath.IsEnabled  = $rbLocal.IsChecked
+        $tbUncPath.IsEnabled    = $rbUnc.IsChecked
+        $tbVdaName.IsEnabled    = $rbRemote.IsChecked
+        $tbVdaTarget.IsEnabled  = $rbRemote.IsChecked
+        $btnBrowse.IsEnabled    = $rbLocal.IsChecked
+    }
+    $rbLocal.Add_Checked($updateTargetFields)
+    $rbUnc.Add_Checked($updateTargetFields)
+    $rbRemote.Add_Checked($updateTargetFields)
+
+    $btnBrowse.Add_Click({
+        $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+        if ($dlg.ShowDialog() -eq 'OK') { $tbLocalPath.Text = $dlg.SelectedPath }
+    })
+
+    # --- Profile change: prefill the override fields ---
+    $fillFromProfile = {
+        $name = $cbProfile.SelectedItem.Content
+        if ($name -eq 'Custom') { return }
+        $p = Get-DiskSpdWorkloadProfile -Name $name
+        $tbBlock.Text    = $p.BlockSize
+        $tbThreads.Text  = $p.Threads
+        $tbQd.Text       = $p.QueueDepth
+        $tbWritePct.Text = $p.WriteRatioPercent
+        $tbDuration.Text = $p.DurationSeconds
+        $tbFileMb.Text   = $p.TestFileSizeMB
+    }
+    $cbProfile.Add_SelectionChanged($fillFromProfile)
+    & $fillFromProfile  # initial prefill
+
+    # --- Collect inputs from the form into a structured hashtable ---
+    $collectInputs = {
+        $mode = if ($rbLocal.IsChecked) { 'Local' } elseif ($rbUnc.IsChecked) { 'Unc' } else { 'Remote' }
+        $target = switch ($mode) {
+            'Local'  { $tbLocalPath.Text }
+            'Unc'    { $tbUncPath.Text }
+            'Remote' { $tbVdaTarget.Text }
+        }
+        $computerName = if ($mode -eq 'Remote') { $tbVdaName.Text } else { $null }
+        $workload = $cbProfile.SelectedItem.Content
+
+        # Only forward override fields the operator actually filled in. Empty text
+        # means "use the preset value" except for Custom, where all fields are required.
+        $overrides = @{}
+        if ($tbBlock.Text)    { $overrides.BlockSize         = $tbBlock.Text }
+        if ($tbThreads.Text)  { $overrides.Threads           = [int]$tbThreads.Text }
+        if ($tbQd.Text)       { $overrides.QueueDepth        = [int]$tbQd.Text }
+        if ($tbWritePct.Text) { $overrides.WriteRatioPercent = [int]$tbWritePct.Text }
+        if ($tbDuration.Text) { $overrides.DurationSeconds   = [int]$tbDuration.Text }
+        if ($tbFileMb.Text)   { $overrides.TestFileSizeMB    = [int]$tbFileMb.Text }
+        # RandomIO defaults to $true for Custom because the GUI doesn't currently
+        # surface a checkbox for it (the preset comes from the dropdown otherwise).
+        if ($workload -eq 'Custom' -and -not $overrides.ContainsKey('RandomIO')) {
+            $overrides.RandomIO = $true
+        }
+
+        @{ Mode = $mode; Target = $target; ComputerName = $computerName; Workload = $workload; Overrides = $overrides }
+    }
+
+    # --- UI helpers (must run on the WPF dispatcher) ---
+    $setStatus = {
+        param($txt)
+        $window.Dispatcher.Invoke([action]{ $tbStatus.Text = $txt })
+    }
+
+    $populateResultsGrid = {
+        param($result, $assess)
+        if (-not $result) { return }
+        $rows = New-Object System.Collections.ObjectModel.ObservableCollection[object]
+        $rows.Add([PSCustomObject]@{ Metric = 'IOPS';             Value = $result.IOPS;         Status = '' })
+        $rows.Add([PSCustomObject]@{ Metric = 'Read MB/s';        Value = $result.ReadMBps;     Status = $assess.ReadMBps })
+        $rows.Add([PSCustomObject]@{ Metric = 'Write MB/s';       Value = $result.WriteMBps;    Status = $assess.WriteMBps })
+        $rows.Add([PSCustomObject]@{ Metric = 'Avg latency (ms)'; Value = $result.AvgLatencyMs; Status = $assess.AvgLatencyMs })
+        $rows.Add([PSCustomObject]@{ Metric = 'P95 latency (ms)'; Value = $result.Latency95Ms;  Status = $assess.Latency95Ms })
+        $rows.Add([PSCustomObject]@{ Metric = 'P99 latency (ms)'; Value = $result.Latency99Ms;  Status = $assess.Latency99Ms })
+        $rows.Add([PSCustomObject]@{ Metric = 'CPU %';            Value = $result.CpuPercent;   Status = '' })
+        $rows.Add([PSCustomObject]@{ Metric = 'Test file';        Value = $result.TestFilePath; Status = '' })
+        $rows.Add([PSCustomObject]@{ Metric = 'Duration (s)';     Value = $result.Duration;     Status = '' })
+        $window.Dispatcher.Invoke([action]{ $dgResults.ItemsSource = $rows })
+    }
+
+    # --- Run button: preflight on UI thread, then dispatch the actual run ---
+    $btnRun.Add_Click({
+        $inputs = & $collectInputs
+
+        # Preflight runs on the UI thread because it's fast (<1s for local paths,
+        # could hang up to ~30s for an unreachable UNC — acceptable for an MVP).
+        $diskSpdPath = $script:DiskSpdExe
+        $resolvedSettings = if ($inputs.Workload -eq 'Custom') {
+            $inputs.Overrides
+        } else {
+            try {
+                Resolve-DiskSpdSettings -ProfileName $inputs.Workload -Overrides $inputs.Overrides
+            } catch {
+                [System.Windows.MessageBox]::Show($_.Exception.Message, 'Invalid settings', 'OK', 'Error') | Out-Null
+                return
+            }
+        }
+
+        $pf = Test-DiskSpdPreflight -DiskSpdPath $diskSpdPath -Target $inputs.Target `
+                -TestFileSizeMB $resolvedSettings.TestFileSizeMB `
+                -ComputerName $inputs.ComputerName -BusinessHoursForce:$false
+
+        if (-not $pf.Pass) {
+            [System.Windows.MessageBox]::Show(($pf.Errors -join "`n"), 'Preflight failed', 'OK', 'Error') | Out-Null
+            return
+        }
+        if ($pf.Warnings) {
+            $msg  = ($pf.Warnings -join "`n") + "`n`nContinue?"
+            $resp = [System.Windows.MessageBox]::Show($msg, 'Confirm', 'OKCancel', 'Warning')
+            if ($resp -ne 'OK') { return }
+        }
+
+        # Lock the controls during the run.
+        $btnRun.IsEnabled    = $false
+        $btnSave.IsEnabled   = $false
+        $btnCancel.IsEnabled = $true
+        $pbProgress.IsIndeterminate = $true
+        & $setStatus 'Running diskspd...'
+
+        # Build the background runspace. The scriptblock re-dot-sources the script
+        # to access the engine functions in a fresh scope, then runs the orchestrator.
+        # Returns a hashtable with Ok + ReportPath + Result + Assessment so the UI
+        # timer can populate the in-window grid in addition to the saved report.
+        $ps = [PowerShell]::Create()
+        $null = $ps.AddScript({
+            param($scriptPath, $inputs, $outDir)
+            . $scriptPath -ErrorAction SilentlyContinue *> $null
+            try {
+                $diskSpdPath = Join-Path (Split-Path $scriptPath -Parent) 'diskspd.exe'
+                $settings = Resolve-DiskSpdSettings -ProfileName $inputs.Workload -Overrides $inputs.Overrides
+                $transport = if ($inputs.ComputerName -or $inputs.Target -match '^\\\\') { 'Network' } else { 'Local' }
+
+                $testFile = if ($inputs.Target -match '\.dat$') {
+                    $inputs.Target
+                } else {
+                    Join-Path $inputs.Target ("diskspd-{0}.dat" -f (Get-Date -Format 'yyyy-MM-dd_HHmmss_fff'))
+                }
+                $xml = if ($inputs.ComputerName) {
+                    Invoke-DiskSpdRemote -DiskSpdPath $diskSpdPath -ComputerName $inputs.ComputerName -Settings $settings -TestFilePath $testFile
+                } else {
+                    Invoke-DiskSpdLocal  -DiskSpdPath $diskSpdPath -Settings $settings -TestFilePath $testFile
+                }
+                $result = ConvertFrom-DiskSpdXml -Xml $xml -ProfileName $inputs.Workload
+                $assess = Get-DiskSpdHealthAssessment -Result $result -Transport $transport
+                $report = Export-DiskSpdHtmlReport -Result $result -Assessment $assess -Target $inputs.Target -OutputDirectory $outDir
+                @{ Ok = $true; ReportPath = $report; Result = $result; Assessment = $assess }
+            } catch {
+                @{ Ok = $false; Error = $_.Exception.Message }
+            }
+        }).AddArgument($PSCommandPath).AddArgument($inputs).AddArgument($script:ScriptRoot)
+
+        $async = $ps.BeginInvoke()
+        $script:uiState.Runspace  = $ps
+        $script:uiState.Cancelled = $false
+
+        # Poll for completion via DispatcherTimer (runs on the UI thread, safe to
+        # touch UI controls).
+        $timer = New-Object System.Windows.Threading.DispatcherTimer
+        $timer.Interval = [TimeSpan]::FromMilliseconds(250)
+        $timer.Add_Tick({
+            if (-not $async.IsCompleted) { return }
+            $timer.Stop()
+
+            try {
+                $out = $ps.EndInvoke($async) | Select-Object -First 1
+            } catch {
+                $out = @{ Ok = $false; Error = $_.Exception.Message }
+            }
+            $ps.Dispose()
+
+            $pbProgress.IsIndeterminate = $false
+            $btnCancel.IsEnabled = $false
+            $btnRun.IsEnabled    = $true
+
+            if ($script:uiState.Cancelled) {
+                & $setStatus 'Cancelled'
+                return
+            }
+            if (-not $out.Ok) {
+                & $setStatus "Failed: $($out.Error)"
+                [System.Windows.MessageBox]::Show($out.Error, 'diskspd failed', 'OK', 'Error') | Out-Null
+                return
+            }
+
+            $script:uiState.ReportPath = $out.ReportPath
+            $script:uiState.Result     = $out.Result
+            $script:uiState.Assessment = $out.Assessment
+
+            # Populate the in-window results grid so the operator sees numbers
+            # before they click "Save Report" to open the HTML.
+            & $populateResultsGrid $out.Result $out.Assessment
+
+            & $setStatus "Done - report saved"
+            $btnSave.IsEnabled = $true
+        })
+        $timer.Start()
+    })
+
+    $btnCancel.Add_Click({
+        if ($script:uiState.Runspace) {
+            $script:uiState.Cancelled = $true
+            $script:uiState.Runspace.Stop() | Out-Null
+        }
+        & $setStatus 'Cancelling...'
+    })
+
+    $btnSave.Add_Click({
+        if ($script:uiState.ReportPath -and (Test-Path $script:uiState.ReportPath)) {
+            Start-Process $script:uiState.ReportPath
+        }
+    })
+
+    & $updateTargetFields  # initial control state
+
+    $window.ShowDialog() | Out-Null
 }
 
 # --- Entry point ---
