@@ -337,6 +337,48 @@ function ConvertFrom-DiskSpdXml {
     }
 }
 
+function Get-DiskSpdHealthAssessment {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory)] [PSCustomObject]$Result,
+        [Parameter(Mandatory)] [ValidateSet('Local','Network')] [string]$Transport
+    )
+
+    $thresholds = if ($Transport -eq 'Local') {
+        @{
+            ReadOK = 100; ReadWarn = 50
+            WriteOK = 100; WriteWarn = 50
+            LatencyOK = 10; LatencyWarn = 20
+        }
+    } else {
+        @{
+            ReadOK = 50; ReadWarn = 25
+            WriteOK = 40; WriteWarn = 20
+            LatencyOK = 20; LatencyWarn = 50
+        }
+    }
+
+    # Throughput: higher is better, so > OK is OK, >= Warn is WARN, else CRIT.
+    # Latency: lower is better, so < OK is OK, <= Warn is WARN, else CRIT.
+    function Classify-Throughput($v, $ok, $warn) {
+        if ($v -gt $ok)       { 'OK' }
+        elseif ($v -ge $warn) { 'WARN' }
+        else                  { 'CRIT' }
+    }
+    function Classify-Latency($v, $ok, $warn) {
+        if ($v -lt $ok)       { 'OK' }
+        elseif ($v -le $warn) { 'WARN' }
+        else                  { 'CRIT' }
+    }
+
+    @{
+        ReadMBps     = Classify-Throughput $Result.ReadMBps     $thresholds.ReadOK    $thresholds.ReadWarn
+        WriteMBps    = Classify-Throughput $Result.WriteMBps    $thresholds.WriteOK   $thresholds.WriteWarn
+        AvgLatencyMs = Classify-Latency    $Result.AvgLatencyMs $thresholds.LatencyOK $thresholds.LatencyWarn
+    }
+}
+
 # --- UI / headless dispatch goes here (Tasks 10-11) ---
 
 # Entry-point dispatch (filled in Task 12):
