@@ -113,6 +113,10 @@ function Resolve-TimeWindow {
     $now = Get-Date
     $bound = $PSBoundParameters
 
+    if ($bound.ContainsKey('LastHours') -and $bound.ContainsKey('LastDays')) {
+        throw "-LastHours and -LastDays are mutually exclusive. Specify only one."
+    }
+
     if ($bound.ContainsKey('StartTime')) {
         $start = $StartTime
         $end   = if ($bound.ContainsKey('EndTime')) { $EndTime } else { $now }
@@ -246,21 +250,21 @@ function Get-EventsFromLog {
 function ConvertTo-NormalizedEvent {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory, ValueFromPipeline)]$Event,
+        [Parameter(Mandatory, ValueFromPipeline)]$Record,
         [Parameter(Mandatory)][string]$Category
     )
     process {
         [pscustomobject]@{
-            TimeCreated      = $Event.TimeCreated
+            TimeCreated      = $Record.TimeCreated
             Category         = $Category
-            LogName          = $Event.LogName
-            Id               = $Event.Id
-            Level            = $Event.Level
-            LevelDisplayName = $Event.LevelDisplayName
-            ProviderName     = $Event.ProviderName
-            MachineName      = $Event.MachineName
-            UserId           = if ($Event.UserId) { $Event.UserId.Value } else { '' }
-            Message          = ($Event.Message -replace "`r?`n", ' ' -replace '\s+', ' ').Trim()
+            LogName          = $Record.LogName
+            Id               = $Record.Id
+            Level            = $Record.Level
+            LevelDisplayName = $Record.LevelDisplayName
+            ProviderName     = $Record.ProviderName
+            MachineName      = $Record.MachineName
+            UserId           = if ($Record.UserId) { $Record.UserId.Value } else { '' }
+            Message          = ($Record.Message -replace "`r?`n", ' ' -replace '\s+', ' ').Trim()
         }
     }
 }
@@ -392,7 +396,7 @@ function Get-SystemAppCategoryEvents {
         }
 
         foreach ($e in @($literalEvents) + @($wildcardEvents)) {
-            $results.Add((ConvertTo-NormalizedEvent -Event $e -Category 'System/App'))
+            $results.Add((ConvertTo-NormalizedEvent -Record $e -Category 'System/App'))
         }
     }
 
@@ -448,8 +452,9 @@ function Export-EventsToCsv {
     $columns = 'TimeCreated','Category','LogName','Id','Level','LevelDisplayName','ProviderName','MachineName','UserId','Message'
 
     if ($Events.Count -eq 0) {
-        # Write header-only CSV.
-        ($columns -join ',') | Out-File -LiteralPath $Path -Encoding UTF8
+        # Write header-only CSV. Match Export-Csv -NoTypeInformation's quoted-header format
+        # so empty and non-empty outputs are parseable the same way.
+        ('"' + ($columns -join '","') + '"') | Out-File -LiteralPath $Path -Encoding UTF8
     } else {
         $Events |
             Select-Object $columns |
