@@ -89,7 +89,7 @@ Describe 'Resolve-DiskSpdSettings' {
 
     It 'requires every key when ProfileName is Custom' {
         { Resolve-DiskSpdSettings -ProfileName Custom -Overrides @{ BlockSize = '4K' } } |
-            Should -Throw -ExpectedMessage '*Custom*requires*'
+            Should -Throw -ExpectedMessage "*Profile 'Custom' requires all override keys*"
     }
 
     It 'accepts a complete Custom override set' {
@@ -104,5 +104,24 @@ Describe 'Resolve-DiskSpdSettings' {
         }
         $s.BlockSize | Should -Be '512K'
         $s.RandomIO  | Should -BeTrue
+    }
+
+    It 'rejects unknown override keys (typo guard)' {
+        { Resolve-DiskSpdSettings -ProfileName FSLogixLike -Overrides @{ Treads = 16 } } |
+            Should -Throw -ExpectedMessage '*Unknown override key*Treads*'
+    }
+
+    It 'does not mutate the caller''s overrides hashtable' {
+        $overrides = @{ Threads = 16 }
+        $s = Resolve-DiskSpdSettings -ProfileName FSLogixLike -Overrides $overrides
+        $s.BlockSize = 'mutated-by-test'
+        $overrides.ContainsKey('BlockSize') | Should -BeFalse -Because 'callers may keep using the overrides hashtable after the call'
+    }
+
+    It 'returns a fresh hashtable per call (no shared state across calls)' {
+        $a = Resolve-DiskSpdSettings -ProfileName FSLogixLike -Overrides @{}
+        $b = Resolve-DiskSpdSettings -ProfileName FSLogixLike -Overrides @{}
+        $a.Threads = 99
+        $b.Threads | Should -Be 4 -Because 'each call must return an independent hashtable'
     }
 }
