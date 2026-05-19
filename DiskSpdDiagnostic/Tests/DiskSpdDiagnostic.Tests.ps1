@@ -318,3 +318,51 @@ Describe 'ConvertFrom-DiskSpdXml' {
             Should -Throw -ExpectedMessage '*zero duration*'
     }
 }
+
+Describe 'Get-DiskSpdHealthAssessment' {
+    BeforeAll {
+        $script:localFast = [PSCustomObject]@{ ReadMBps=150; WriteMBps=120; AvgLatencyMs=5  }
+        $script:localSlow = [PSCustomObject]@{ ReadMBps=30;  WriteMBps=20;  AvgLatencyMs=25 }
+        $script:netGood   = [PSCustomObject]@{ ReadMBps=60;  WriteMBps=50;  AvgLatencyMs=15 }
+        $script:netBad    = [PSCustomObject]@{ ReadMBps=20;  WriteMBps=15;  AvgLatencyMs=60 }
+    }
+
+    It 'flags fast local storage as OK across the board' {
+        $a = Get-DiskSpdHealthAssessment -Result $script:localFast -Transport Local
+        $a.ReadMBps     | Should -Be 'OK'
+        $a.WriteMBps    | Should -Be 'OK'
+        $a.AvgLatencyMs | Should -Be 'OK'
+    }
+
+    It 'flags slow local storage as CRIT' {
+        $a = Get-DiskSpdHealthAssessment -Result $script:localSlow -Transport Local
+        $a.ReadMBps     | Should -Be 'CRIT'
+        $a.WriteMBps    | Should -Be 'CRIT'
+        $a.AvgLatencyMs | Should -Be 'CRIT'
+    }
+
+    It 'applies network thresholds for network transport' {
+        $a = Get-DiskSpdHealthAssessment -Result $script:netGood -Transport Network
+        $a.ReadMBps     | Should -Be 'OK'
+        $a.AvgLatencyMs | Should -Be 'OK'
+    }
+
+    It 'flags poor network storage as CRIT' {
+        $a = Get-DiskSpdHealthAssessment -Result $script:netBad -Transport Network
+        $a.ReadMBps     | Should -Be 'CRIT'
+        $a.AvgLatencyMs | Should -Be 'CRIT'
+    }
+
+    It 'flags borderline values as WARN' {
+        $b = [PSCustomObject]@{ ReadMBps=75; WriteMBps=75; AvgLatencyMs=15 }
+        $a = Get-DiskSpdHealthAssessment -Result $b -Transport Local
+        $a.ReadMBps     | Should -Be 'WARN'
+        $a.WriteMBps    | Should -Be 'WARN'
+        $a.AvgLatencyMs | Should -Be 'WARN'
+    }
+
+    It 'rejects unknown transport' {
+        $b = [PSCustomObject]@{ ReadMBps=75; WriteMBps=75; AvgLatencyMs=15 }
+        { Get-DiskSpdHealthAssessment -Result $b -Transport Mars } | Should -Throw
+    }
+}
