@@ -681,7 +681,9 @@ function Test-DiskSpdPreflight {
                 $root  = (Resolve-Path $Target -ErrorAction Stop).ProviderPath
                 $drive = (Get-Item $root).PSDrive
                 if ($drive -and $drive.Free) {
-                    $neededBytes = $TestFileSizeMB * 1.2MB
+                    # 1.2x headroom on the test file size so diskspd has room for
+                    # extents and the FS has room for journaling.
+                    $neededBytes = [int64]($TestFileSizeMB * 1.2 * 1MB)
                     if ($drive.Free -lt $neededBytes) {
                         $errors += ("Insufficient free space at {0}: have {1:N0} MB, need {2:N0} MB (file size x1.2)." -f
                                     $Target, ($drive.Free/1MB), ($neededBytes/1MB))
@@ -1345,8 +1347,11 @@ function Show-DiskSpdGui {
             $script:uiState.Cancelled = $true
             $script:uiState.Runspace.Stop() | Out-Null
         }
-        # The completion timer will see IsCompleted true (because Stop()
-        # cancels the runspace) and tear down the progress timer.
+        # Stop the progress timer here too — Runspace.Stop() on a runspace that's
+        # inside a Start-Process -Wait may not signal completion promptly (diskspd
+        # itself isn't killed, only the PowerShell wrapper), so we can't rely on
+        # the completion timer to clean up the progress timer in a reasonable time.
+        if ($script:uiState.ProgressTimer) { $script:uiState.ProgressTimer.Stop() }
         & $setStatus 'Cancelling...'
     })
 
@@ -1403,6 +1408,18 @@ function Show-DiskSpdGui {
 # is '.' and we MUST NOT execute the dispatch — otherwise every Pester run would
 # either error on preflight or pop a WPF window.
 if ($MyInvocation.InvocationName -eq '.') { return }
+
+# Fast-fail on missing binary before doing anything else. The full Authenticode
+# verification happens in Test-DiskSpdPreflight; this is the cheap "is the file
+# even there" check so an operator doesn't open the GUI, configure a test,
+# click Run, then get a modal saying the binary is missing.
+if (-not (Test-Path $script:DiskSpdExe)) {
+    Write-Host "[FAIL] Bundled diskspd.exe not found at: $script:DiskSpdExe" -ForegroundColor Red
+    Write-Host "       Re-clone the repo, or download diskspd v2.2 from" -ForegroundColor Red
+    Write-Host "       https://github.com/microsoft/diskspd/releases/tag/v2.2 and" -ForegroundColor Red
+    Write-Host "       place diskspd.exe (amd64) next to this script." -ForegroundColor Red
+    exit 1
+}
 
 if ($NoUI) {
     if (-not $Target) { throw "-Target is required when -NoUI is set." }
