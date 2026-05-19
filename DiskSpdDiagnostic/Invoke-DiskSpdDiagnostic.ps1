@@ -191,11 +191,18 @@ function Resolve-DiskSpdSettings {
     $requiredKeys = @('BlockSize','Threads','QueueDepth','WriteRatioPercent',
                       'DurationSeconds','TestFileSizeMB','RandomIO')
 
+    # Reject typos like @{ Treads = 16 } before they silently drop the intended override.
+    $unknown = $Overrides.Keys | Where-Object { $_ -notin $requiredKeys }
+    if ($unknown) {
+        throw "Unknown override key(s): $($unknown -join ', '). Expected one of: $($requiredKeys -join ', ')"
+    }
+
     if ($ProfileName -eq 'Custom') {
         $missing = $requiredKeys | Where-Object { -not $Overrides.ContainsKey($_) }
         if ($missing) {
             throw "Profile 'Custom' requires all override keys. Missing: $($missing -join ', ')"
         }
+        # Shallow clone is sufficient: all values are primitives (string/int/bool).
         return [hashtable]$Overrides.Clone()
     }
 
