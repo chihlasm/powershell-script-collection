@@ -19,6 +19,9 @@
   .ok   { background: #1f4d2a; color: #7ee695; }
   .warn { background: #5a4416; color: #ffd58a; }
   .crit { background: #5a1f1f; color: #ff8a8a; }
+  .desc { color: #c8c8c8; line-height: 1.5; }
+  .threshold-table th, .threshold-table td { padding: 6px 10px; font-size: 0.85rem; }
+  .threshold-table th:first-child, .threshold-table td:first-child { font-weight: 500; color: #d4d4d4; }
   details { margin-top: 24px; }
   summary { cursor: pointer; color: #9aa0a6; padding: 8px 0; }
   pre { background: #111; padding: 12px; overflow-x: auto; border-radius: 4px; font-size: 0.8rem; color: #c8c8c8; }
@@ -27,6 +30,11 @@
 <body>
   <h1>DiskSpd Diagnostic Report</h1>
   <div class="sub">Target: <span class="accent">{{TARGET}}</span> &middot; Workload: <span class="accent">{{PROFILE}}</span> &middot; Run at <span class="accent">{{TIMESTAMP}}</span></div>
+
+  <div class="card">
+    <h2>What this test measured</h2>
+    <p class="desc">{{WORKLOAD_DESCRIPTION}}</p>
+  </div>
 
   <div class="card">
     <h2>Results</h2>
@@ -41,6 +49,23 @@
   <div class="card">
     <h2>Health Assessment</h2>
     {{HEALTH_BADGES}}
+  </div>
+
+  <div class="card">
+    <h2>How to read these numbers</h2>
+    <p class="desc"><strong>IOPS</strong>: input/output operations per second. Higher = more requests handled. <strong>MB/s</strong>: throughput. Higher = more data moved. <strong>Latency</strong>: how long each I/O takes. Lower = snappier. <strong>P95/P99</strong>: the slowest 5%/1% of I/Os &mdash; outliers that real users feel.</p>
+    <p class="desc">Status bands depend on whether the target was tested as <strong>Local</strong> storage (this machine&rsquo;s disk) or <strong>Network</strong> storage (UNC share or remote VDA). Thresholds match the existing CitrixVDADiagnostics health checks so reports from both tools tell a consistent story.</p>
+    <table class="threshold-table">
+      <thead><tr><th>Metric</th><th>OK</th><th>WARN</th><th>CRIT</th></tr></thead>
+      <tbody>
+        <tr><td>Read MB/s (Local)</td>   <td>&gt; 100</td>   <td>50&ndash;100</td>  <td>&lt; 50</td></tr>
+        <tr><td>Read MB/s (Network)</td> <td>&gt; 50</td>    <td>25&ndash;50</td>   <td>&lt; 25</td></tr>
+        <tr><td>Write MB/s (Local)</td>  <td>&gt; 100</td>   <td>50&ndash;100</td>  <td>&lt; 50</td></tr>
+        <tr><td>Write MB/s (Network)</td><td>&gt; 40</td>    <td>20&ndash;40</td>   <td>&lt; 20</td></tr>
+        <tr><td>Latency (Local)</td>     <td>&lt; 10 ms</td> <td>10&ndash;20 ms</td><td>&gt; 20 ms</td></tr>
+        <tr><td>Latency (Network)</td>   <td>&lt; 20 ms</td> <td>20&ndash;50 ms</td><td>&gt; 50 ms</td></tr>
+      </tbody>
+    </table>
   </div>
 
   <details>

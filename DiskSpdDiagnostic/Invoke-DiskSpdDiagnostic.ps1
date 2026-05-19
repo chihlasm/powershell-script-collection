@@ -125,6 +125,17 @@ Add-Type -AssemblyName System.Web
 $script:DiskSpdRequiredKeys = @('BlockSize','Threads','QueueDepth','WriteRatioPercent',
                                 'DurationSeconds','TestFileSizeMB','RandomIO')
 
+# Plain-English descriptions of each preset workload. Surfaced both in the WPF
+# UI (under the preset dropdown) and in the saved HTML report so the operator
+# can tell what the numbers actually represent without flag-spelunking.
+$script:DiskSpdProfileDescriptions = @{
+    'FSLogixLike'    = '4K random, 30% writes, 4 threads, QD8, 30s. Simulates FSLogix profile container I/O. Best for testing FSLogix shares and VDA local disks.'
+    'SequentialRead' = '64K sequential read, 1 thread, QD4, 30s. Measures raw read throughput. Best for: boot/login scenarios, large file copies, image deployment.'
+    'MixedUserLoad'  = "8K random, 20% writes, 2 threads, QD4, 60s. Simulates a moderate user session workload. Best for: general 'is this drive fast enough?' checks."
+    'QuickSanity'    = '64K random, 100% reads, 1 thread, QD2, 10s. Fast smoke test (~10s). Best for: confirming a drive is reachable and producing sane numbers, not a performance benchmark.'
+    'Custom'         = 'Operator-supplied values. All 6 advanced fields below must be filled in. Use when none of the presets fit your workload.'
+}
+
 # Color-prefixed status output per CLAUDE.md ([PASS]/[WARN]/[FAIL]/[INFO]).
 # Used by Invoke-DiskSpdHeadless and re-usable by the WPF UI's runspace handler
 # (Task 13) so the level->color mapping isn't duplicated.
@@ -946,12 +957,22 @@ function Export-DiskSpdHtmlReport {
     $encodedTarget   = [System.Web.HttpUtility]::HtmlEncode($Target)
     $encodedWorkload = [System.Web.HttpUtility]::HtmlEncode($Result.ProfileName)
     $html = $tpl
-    $html = $html.Replace('{{TARGET}}',        $encodedTarget)
-    $html = $html.Replace('{{PROFILE}}',       $encodedWorkload)
-    $html = $html.Replace('{{TIMESTAMP}}',     $timestamp)
-    $html = $html.Replace('{{RESULTS_TABLE}}', $rowsHtml)
-    $html = $html.Replace('{{HEALTH_BADGES}}', $badgesHtml)
-    $html = $html.Replace('{{RAW_XML}}',       $rawXmlEncoded)
+    # Look up the workload description by name. Custom and unknown profiles get
+    # a generic message because there is no preset to describe.
+    $workloadDescription = if ($script:DiskSpdProfileDescriptions.ContainsKey($Result.ProfileName)) {
+        $script:DiskSpdProfileDescriptions[$Result.ProfileName]
+    } else {
+        'Operator-supplied workload (no preset description available).'
+    }
+    $encodedWorkloadDescription = [System.Web.HttpUtility]::HtmlEncode($workloadDescription)
+
+    $html = $html.Replace('{{TARGET}}',               $encodedTarget)
+    $html = $html.Replace('{{PROFILE}}',              $encodedWorkload)
+    $html = $html.Replace('{{TIMESTAMP}}',            $timestamp)
+    $html = $html.Replace('{{WORKLOAD_DESCRIPTION}}', $encodedWorkloadDescription)
+    $html = $html.Replace('{{RESULTS_TABLE}}',        $rowsHtml)
+    $html = $html.Replace('{{HEALTH_BADGES}}',        $badgesHtml)
+    $html = $html.Replace('{{RAW_XML}}',              $rawXmlEncoded)
 
     $filename = "diskspd_${safeTarget}_${fileTimestamp}.html"
     $outFile  = Join-Path $OutputDirectory $filename
@@ -1055,16 +1076,10 @@ function Show-DiskSpdGui {
     $tbStatus     = & $get 'TbStatus';     $pbProgress  = & $get 'PbProgress';   $dgResults   = & $get 'DgResults'
     $tbProfileDescription = & $get 'TbProfileDescription'
 
-    # Plain-English descriptions for each preset so the operator can pick
-    # without having to remember diskspd flag semantics. Shown below the
-    # dropdown and updated on selection change.
-    $profileDescriptions = @{
-        'FSLogixLike' = "4K random, 30% writes, 4 threads, QD8, 30s. Simulates FSLogix profile container I/O. Best for testing FSLogix shares and VDA local disks."
-        'SequentialRead' = "64K sequential read, 1 thread, QD4, 30s. Measures raw read throughput. Best for: boot/login scenarios, large file copies, image deployment."
-        'MixedUserLoad' = "8K random, 20% writes, 2 threads, QD4, 60s. Simulates a moderate user session workload. Best for: general 'is this drive fast enough?' checks."
-        'QuickSanity' = "64K random, 100% reads, 1 thread, QD2, 10s. Fast smoke test (~10s). Best for: confirming a drive is reachable and producing sane numbers, not a performance benchmark."
-        'Custom' = "Operator-supplied values. All 6 advanced fields below must be filled in. Use when none of the presets fit your workload."
-    }
+    # Plain-English descriptions for each preset live at script scope
+    # ($script:DiskSpdProfileDescriptions) so the same text is shown here in the
+    # GUI and inside the saved HTML report.
+    $profileDescriptions = $script:DiskSpdProfileDescriptions
 
     # Shared state between the UI thread and the background runspace.
     # [hashtable]::Synchronized so reads/writes don't race.
@@ -1080,6 +1095,7 @@ function Show-DiskSpdGui {
         Async         = $null
         Ps            = $null
         Timer         = $null
+        LastSaveDir   = $null
     })
 
     # --- Target mode wiring: enable only the active mode's fields ---
@@ -1335,8 +1351,43 @@ function Show-DiskSpdGui {
     })
 
     $btnSave.Add_Click({
-        if ($script:uiState.ReportPath -and (Test-Path $script:uiState.ReportPath)) {
-            Start-Process $script:uiState.ReportPath
+        $srcPath = $script:uiState.ReportPath
+        if (-not ($srcPath -and (Test-Path $srcPath))) {
+            [System.Windows.MessageBox]::Show('No report to save. Run a test first.', 'No report', 'OK', 'Information') | Out-Null
+            return
+        }
+
+        # Microsoft.Win32.SaveFileDialog is the WPF-native counterpart to
+        # System.Windows.Forms.SaveFileDialog. PresentationFramework is already
+        # loaded, so no extra Add-Type needed.
+        $dlg = New-Object Microsoft.Win32.SaveFileDialog
+        $dlg.Title       = 'Save DiskSpd Report'
+        $dlg.Filter      = 'HTML report (*.html)|*.html|All files (*.*)|*.*'
+        $dlg.DefaultExt  = '.html'
+        $dlg.FileName    = Split-Path $srcPath -Leaf
+        $dlg.OverwritePrompt = $true
+
+        # Default to Documents on first save, then remember the last folder for
+        # subsequent saves in the same session.
+        if ($script:uiState.LastSaveDir -and (Test-Path $script:uiState.LastSaveDir)) {
+            $dlg.InitialDirectory = $script:uiState.LastSaveDir
+        } else {
+            $dlg.InitialDirectory = [Environment]::GetFolderPath('MyDocuments')
+        }
+
+        if ($dlg.ShowDialog() -ne $true) { return }  # user cancelled
+
+        $destPath = $dlg.FileName
+        try {
+            Copy-Item -Path $srcPath -Destination $destPath -Force -ErrorAction Stop
+            $script:uiState.LastSaveDir = Split-Path $destPath -Parent
+            # Open the saved copy in the default browser so the operator can
+            # actually look at it.
+            Start-Process $destPath
+        } catch {
+            [System.Windows.MessageBox]::Show(
+                "Could not save report to:`n$destPath`n`n$($_.Exception.Message)",
+                'Save failed', 'OK', 'Error') | Out-Null
         }
     })
 
