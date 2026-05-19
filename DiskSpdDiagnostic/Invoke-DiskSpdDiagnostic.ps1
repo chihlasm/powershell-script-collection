@@ -116,6 +116,7 @@ $script:ReportTpl   = Join-Path $script:ScriptRoot 'ReportTemplate.html'
 
 # --- Engine functions go here (Tasks 1-9) ---
 
+# Returns hashtable (not PSCustomObject) so callers can merge operator overrides.
 function Get-DiskSpdWorkloadProfile {
     [CmdletBinding()]
     [OutputType([hashtable])]
@@ -171,6 +172,7 @@ function Get-DiskSpdWorkloadProfile {
             }
         }
         'Custom' { $null }
+        default  { throw "Unhandled workload profile: $Name" }
     }
 }
 

@@ -30,7 +30,7 @@ Describe 'Get-DiskSpdWorkloadProfile' {
         $p.RandomIO           | Should -BeTrue
     }
 
-    It 'returns Sequential read profile values' {
+    It 'returns SequentialRead profile values' {
         $p = Get-DiskSpdWorkloadProfile -Name SequentialRead
         $p.BlockSize          | Should -Be '64K'
         $p.WriteRatioPercent  | Should -Be 0
@@ -50,8 +50,19 @@ Describe 'Get-DiskSpdWorkloadProfile' {
         $p.WriteRatioPercent  | Should -Be 0
     }
 
-    It 'returns null for Custom' {
-        Get-DiskSpdWorkloadProfile -Name Custom | Should -BeNullOrEmpty
+    It 'returns null (not empty hashtable) for Custom' {
+        $p = Get-DiskSpdWorkloadProfile -Name Custom
+        ($null -eq $p) | Should -BeTrue -Because 'Resolve-DiskSpdSettings distinguishes $null (use overrides) from @{} (merge nothing)'
+    }
+
+    It 'every named preset has all 7 expected keys' {
+        $expected = @('BlockSize','Threads','QueueDepth','WriteRatioPercent','DurationSeconds','TestFileSizeMB','RandomIO')
+        foreach ($name in @('FSLogixLike','SequentialRead','MixedUserLoad','QuickSanity')) {
+            $p = Get-DiskSpdWorkloadProfile -Name $name
+            foreach ($key in $expected) {
+                $p.ContainsKey($key) | Should -BeTrue -Because "$name must define $key"
+            }
+        }
     }
 
     It 'rejects unknown profile names' {
