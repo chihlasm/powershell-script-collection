@@ -164,6 +164,30 @@ $script:Xaml = @'
             <Setter Property="Foreground" Value="#0f1115"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
         </Style>
+        <!-- Input control styles: WPF TextBox/ComboBox/CheckBox/Expander default
+             to system (light) chrome regardless of the window-level Foreground.
+             Set them explicitly so dark mode actually reaches the input fields. -->
+        <Style TargetType="TextBox">
+            <Setter Property="Background"     Value="#2d2d30"/>
+            <Setter Property="Foreground"     Value="#eaeaea"/>
+            <Setter Property="BorderBrush"    Value="#3f3f46"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CaretBrush"     Value="#eaeaea"/>
+            <Setter Property="SelectionBrush" Value="#5dade2"/>
+            <Setter Property="Padding"        Value="4,2"/>
+        </Style>
+        <Style TargetType="ComboBox">
+            <Setter Property="Background"  Value="#2d2d30"/>
+            <Setter Property="Foreground"  Value="#eaeaea"/>
+            <Setter Property="BorderBrush" Value="#3f3f46"/>
+        </Style>
+        <Style TargetType="ComboBoxItem">
+            <Setter Property="Background" Value="#2d2d30"/>
+            <Setter Property="Foreground" Value="#eaeaea"/>
+        </Style>
+        <Style TargetType="Expander">
+            <Setter Property="Foreground" Value="#9aa0a6"/>
+        </Style>
         <!-- DataGrid styles: WPF's default cell/row/header templates use their own
              brushes that don't inherit from the parent DataGrid's Foreground. Set
              them explicitly so dark mode actually applies to the metrics table. -->
