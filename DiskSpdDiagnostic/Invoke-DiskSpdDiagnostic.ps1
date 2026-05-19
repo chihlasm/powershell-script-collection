@@ -558,6 +558,91 @@ function Invoke-DiskSpdLocal {
     }
 }
 
+# BLOCKING and SLOW: copies the binary over SMB, opens a PSSession, runs diskspd
+# remotely, then tears down. Callers on UI threads MUST dispatch this off-thread.
+# Per the design: this is the most operationally-valuable mode (VDA -> FileServer),
+# but also the most likely to surface environmental quirks (WinRM, admin share,
+# remote PSSession quotas). Manual integration testing is required — no Pester
+# unit tests because we can't simulate a remote machine.
+function Invoke-DiskSpdRemote {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)] [string]   $DiskSpdPath,
+        [Parameter(Mandatory)] [string]   $ComputerName,
+        [Parameter(Mandatory)] [hashtable]$Settings,
+        [Parameter(Mandatory)] [string]   $TestFilePath
+    )
+
+    # Where the binary will live on the remote VDA. We deposit it via the admin share
+    # and reference it locally on the remote side via the C:\ path.
+    $remoteExe = 'C:\Windows\Temp\diskspd.exe'
+    $remoteUnc = "\\$ComputerName\C`$\Windows\Temp\diskspd.exe"
+
+    # Skip the copy if the same SHA-256 is already there. Saves time on repeated runs
+    # and avoids hammering the admin share for no reason.
+    $localHash  = (Get-FileHash $DiskSpdPath -Algorithm SHA256).Hash
+    $copyNeeded = $true
+    if (Test-Path $remoteUnc) {
+        try {
+            $remoteHash = (Get-FileHash $remoteUnc -Algorithm SHA256).Hash
+            if ($remoteHash -eq $localHash) { $copyNeeded = $false }
+        } catch {
+            # If we can't read the existing file, just overwrite it.
+            $copyNeeded = $true
+        }
+    }
+    if ($copyNeeded) {
+        Copy-Item -Path $DiskSpdPath -Destination $remoteUnc -Force -ErrorAction Stop
+    }
+
+    $argv = Build-DiskSpdArguments -Settings $Settings -TestFilePath $TestFilePath
+
+    try {
+        $session = New-PSSession -ComputerName $ComputerName -ErrorAction Stop
+        try {
+            # Run diskspd on the remote machine. The remote scriptblock uses the
+            # same Start-Process pattern as Invoke-DiskSpdLocal so stdout/stderr
+            # capture is consistent. Returns a structured object so we can route
+            # the exit code and stderr back into a local exception.
+            $remoteResult = Invoke-Command -Session $session -ScriptBlock {
+                param($exe, $argList, $file)
+                $stdoutFile = [IO.Path]::GetTempFileName()
+                $stderrFile = [IO.Path]::GetTempFileName()
+                try {
+                    $proc = Start-Process -FilePath $exe -ArgumentList $argList -NoNewWindow `
+                                          -PassThru -RedirectStandardOutput $stdoutFile `
+                                          -RedirectStandardError $stderrFile -Wait
+                    [PSCustomObject]@{
+                        ExitCode = $proc.ExitCode
+                        StdOut   = Get-Content $stdoutFile -Raw
+                        StdErr   = Get-Content $stderrFile -Raw
+                    }
+                } finally {
+                    Remove-Item $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
+                    # Clean up the test data file on the remote machine too.
+                    Remove-Item $file -Force -ErrorAction SilentlyContinue
+                }
+            } -ArgumentList $remoteExe, $argv, $TestFilePath
+
+            if ($remoteResult.ExitCode -ne 0) {
+                throw "diskspd on $ComputerName exited with code $($remoteResult.ExitCode). stderr: $($remoteResult.StdErr)"
+            }
+            if ([string]::IsNullOrWhiteSpace($remoteResult.StdOut) -or $remoteResult.StdOut -notmatch '<Results>') {
+                throw "diskspd on $ComputerName produced no XML output. stderr: $($remoteResult.StdErr)"
+            }
+            return $remoteResult.StdOut
+        } finally {
+            Remove-PSSession $session -ErrorAction SilentlyContinue
+        }
+    } finally {
+        # Always try to remove the deposited binary on the remote machine. If we copied
+        # it this run AND the remote run failed, the file is orphaned otherwise.
+        # Failure here is non-fatal — the operator can clean up manually.
+        Remove-Item $remoteUnc -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # --- UI / headless dispatch goes here (Tasks 10-11) ---
 
 # Entry-point dispatch (filled in Task 12):
