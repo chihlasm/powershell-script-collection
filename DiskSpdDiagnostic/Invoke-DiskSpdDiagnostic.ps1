@@ -564,6 +564,16 @@ function Invoke-DiskSpdLocal {
 # but also the most likely to surface environmental quirks (WinRM, admin share,
 # remote PSSession quotas). Manual integration testing is required — no Pester
 # unit tests because we can't simulate a remote machine.
+#
+# REQUIRES: Test-DiskSpdPreflight -ComputerName <vda> must succeed first. This
+# function trusts that WinRM is listening and the admin share is reachable;
+# calling it without preflight produces confusing New-PSSession exceptions
+# instead of the clean error messages preflight returns.
+#
+# NOTE on the SHA-256 cache: the goal is to skip the binary copy on repeated
+# runs against the same VDA. The outer finally{} only removes the deposited
+# binary if THIS invocation copied it ($copyNeeded was true). Otherwise the
+# next call's hash check would always miss and the cache would be useless.
 function Invoke-DiskSpdRemote {
     [CmdletBinding()]
     [OutputType([string])]
@@ -581,6 +591,10 @@ function Invoke-DiskSpdRemote {
 
     # Skip the copy if the same SHA-256 is already there. Saves time on repeated runs
     # and avoids hammering the admin share for no reason.
+    # Race note: two concurrent operators against the same VDA could (in theory)
+    # interleave copies and deletes. Acceptable for on-demand triage tooling because
+    # all operators bundle the same binary and the SHA check is byte-identical;
+    # if this ever becomes a scheduled job, the cache strategy needs revisiting.
     $localHash  = (Get-FileHash $DiskSpdPath -Algorithm SHA256).Hash
     $copyNeeded = $true
     if (Test-Path $remoteUnc) {
@@ -593,6 +607,7 @@ function Invoke-DiskSpdRemote {
         }
     }
     if ($copyNeeded) {
+        # Mismatch or missing: our bundled binary is authoritative; overwrite without warning.
         Copy-Item -Path $DiskSpdPath -Destination $remoteUnc -Force -ErrorAction Stop
     }
 
@@ -606,11 +621,11 @@ function Invoke-DiskSpdRemote {
             # capture is consistent. Returns a structured object so we can route
             # the exit code and stderr back into a local exception.
             $remoteResult = Invoke-Command -Session $session -ScriptBlock {
-                param($exe, $argList, $file)
+                param($DiskSpdPath, $Arguments, $TestFilePath)
                 $stdoutFile = [IO.Path]::GetTempFileName()
                 $stderrFile = [IO.Path]::GetTempFileName()
                 try {
-                    $proc = Start-Process -FilePath $exe -ArgumentList $argList -NoNewWindow `
+                    $proc = Start-Process -FilePath $DiskSpdPath -ArgumentList $Arguments -NoNewWindow `
                                           -PassThru -RedirectStandardOutput $stdoutFile `
                                           -RedirectStandardError $stderrFile -Wait
                     [PSCustomObject]@{
@@ -621,7 +636,7 @@ function Invoke-DiskSpdRemote {
                 } finally {
                     Remove-Item $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
                     # Clean up the test data file on the remote machine too.
-                    Remove-Item $file -Force -ErrorAction SilentlyContinue
+                    Remove-Item $TestFilePath -Force -ErrorAction SilentlyContinue
                 }
             } -ArgumentList $remoteExe, $argv, $TestFilePath
 
@@ -636,10 +651,17 @@ function Invoke-DiskSpdRemote {
             Remove-PSSession $session -ErrorAction SilentlyContinue
         }
     } finally {
-        # Always try to remove the deposited binary on the remote machine. If we copied
-        # it this run AND the remote run failed, the file is orphaned otherwise.
-        # Failure here is non-fatal — the operator can clean up manually.
-        Remove-Item $remoteUnc -Force -ErrorAction SilentlyContinue
+        # Only clean up the deposited binary if THIS invocation copied it.
+        # Otherwise we'd defeat the SHA-256 cache: the next call's hash check
+        # would always miss because we'd already deleted the file.
+        # Surface cleanup failures as warnings so an orphaned binary on the VDA
+        # doesn't go unnoticed; failure is non-fatal so we don't mask the real error.
+        if ($copyNeeded) {
+            Remove-Item $remoteUnc -Force -ErrorAction SilentlyContinue -ErrorVariable rmErr
+            if ($rmErr) {
+                Write-Warning "Could not remove deposited diskspd.exe at ${remoteUnc}: $($rmErr[0].Exception.Message)"
+            }
+        }
     }
 }
 
