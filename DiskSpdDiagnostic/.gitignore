@@ -1,0 +1,6 @@
+# Generated reports (operators will produce many of these)
+*.html
+!ReportTemplate.html
+# Local test artifacts
+Tests/output/
+*.tmp
