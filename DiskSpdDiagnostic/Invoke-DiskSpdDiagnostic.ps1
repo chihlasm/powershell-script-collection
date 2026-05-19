@@ -114,6 +114,13 @@ $script:ScriptRoot = $PSScriptRoot
 $script:DiskSpdExe  = Join-Path $script:ScriptRoot 'diskspd.exe'
 $script:ReportTpl   = Join-Path $script:ScriptRoot 'ReportTemplate.html'
 
+# Single source of truth for the workload-settings hashtable contract.
+# Every preset in Get-DiskSpdWorkloadProfile, every -Overrides hashtable on
+# Resolve-DiskSpdSettings, and every $Settings hashtable on Build-DiskSpdArguments
+# must contain exactly these keys.
+$script:DiskSpdRequiredKeys = @('BlockSize','Threads','QueueDepth','WriteRatioPercent',
+                                'DurationSeconds','TestFileSizeMB','RandomIO')
+
 # --- Engine functions go here (Tasks 1-9) ---
 
 # Returns hashtable (not PSCustomObject) so callers can merge operator overrides.
@@ -188,17 +195,14 @@ function Resolve-DiskSpdSettings {
         [hashtable]$Overrides
     )
 
-    $requiredKeys = @('BlockSize','Threads','QueueDepth','WriteRatioPercent',
-                      'DurationSeconds','TestFileSizeMB','RandomIO')
-
     # Reject typos like @{ Treads = 16 } before they silently drop the intended override.
-    $unknown = $Overrides.Keys | Where-Object { $_ -notin $requiredKeys }
+    $unknown = $Overrides.Keys | Where-Object { $_ -notin $script:DiskSpdRequiredKeys }
     if ($unknown) {
-        throw "Unknown override key(s): $($unknown -join ', '). Expected one of: $($requiredKeys -join ', ')"
+        throw "Unknown override key(s): $($unknown -join ', '). Expected one of: $($script:DiskSpdRequiredKeys -join ', ')"
     }
 
     if ($ProfileName -eq 'Custom') {
-        $missing = $requiredKeys | Where-Object { -not $Overrides.ContainsKey($_) }
+        $missing = $script:DiskSpdRequiredKeys | Where-Object { -not $Overrides.ContainsKey($_) }
         if ($missing) {
             throw "Profile 'Custom' requires all override keys. Missing: $($missing -join ', ')"
         }
@@ -221,9 +225,16 @@ function Build-DiskSpdArguments {
         [Parameter(Mandatory)] [string]   $TestFilePath
     )
 
+    # Catch malformed settings at the boundary so diskspd doesn't get -t with no value.
+    $missing = $script:DiskSpdRequiredKeys | Where-Object { -not $Settings.ContainsKey($_) }
+    if ($missing) {
+        throw "Build-DiskSpdArguments: Settings hashtable is missing required key(s): $($missing -join ', ')"
+    }
+
     # Size suffix: use G for whole-GB sizes (>= 1024 MB and evenly divisible), M otherwise.
+    # Explicit [int] cast so future readers don't wonder whether "1024/1024" produces "1" or "1.0".
     $size = if ($Settings.TestFileSizeMB -ge 1024 -and ($Settings.TestFileSizeMB % 1024) -eq 0) {
-        "$($Settings.TestFileSizeMB / 1024)G"
+        "$([int]($Settings.TestFileSizeMB / 1024))G"
     } else {
         "$($Settings.TestFileSizeMB)M"
     }

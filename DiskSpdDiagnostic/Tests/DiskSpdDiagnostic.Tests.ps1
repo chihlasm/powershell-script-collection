@@ -139,7 +139,7 @@ Describe 'Build-DiskSpdArguments' {
         }
     }
 
-    It 'emits all required flags in order' {
+    It 'emits all required flags' {
         $argv = Build-DiskSpdArguments -Settings $script:baseSettings -TestFilePath 'C:\Temp\test.dat'
         $argv | Should -Contain '-b4K'
         $argv | Should -Contain '-t4'
@@ -161,15 +161,26 @@ Describe 'Build-DiskSpdArguments' {
         $argv | Should -Not -Contain '-r'
     }
 
-    It 'uses M suffix for sub-GB sizes' {
-        $small = $script:baseSettings.Clone()
-        $small.TestFileSizeMB = 256
-        $argv = Build-DiskSpdArguments -Settings $small -TestFilePath 'C:\Temp\test.dat'
-        $argv | Should -Contain '-c256M'
+    It 'computes size suffix correctly for <mb> MB' -ForEach @(
+        @{ mb = 256;  expected = '-c256M'  }
+        @{ mb = 1024; expected = '-c1G'    }
+        @{ mb = 1025; expected = '-c1025M' }
+        @{ mb = 2048; expected = '-c2G'    }
+    ) {
+        $s = $script:baseSettings.Clone()
+        $s.TestFileSizeMB = $mb
+        $argv = Build-DiskSpdArguments -Settings $s -TestFilePath 'C:\Temp\test.dat'
+        $argv | Should -Contain $expected
     }
 
     It 'handles UNC paths' {
         $argv = Build-DiskSpdArguments -Settings $script:baseSettings -TestFilePath '\\FileServer01\Share\test.dat'
         $argv[-1] | Should -Be '\\FileServer01\Share\test.dat'
+    }
+
+    It 'throws on Settings hashtable missing required keys' {
+        $bad = @{ BlockSize = '4K'; Threads = 4 }  # missing 5 keys
+        { Build-DiskSpdArguments -Settings $bad -TestFilePath 'C:\Temp\test.dat' } |
+            Should -Throw -ExpectedMessage '*missing required key*'
     }
 }
