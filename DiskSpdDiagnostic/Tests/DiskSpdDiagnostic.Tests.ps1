@@ -125,3 +125,51 @@ Describe 'Resolve-DiskSpdSettings' {
         $b.Threads | Should -Be 4 -Because 'each call must return an independent hashtable'
     }
 }
+
+Describe 'Build-DiskSpdArguments' {
+    BeforeAll {
+        $script:baseSettings = @{
+            BlockSize         = '4K'
+            Threads           = 4
+            QueueDepth        = 8
+            WriteRatioPercent = 30
+            DurationSeconds   = 30
+            TestFileSizeMB    = 1024
+            RandomIO          = $true
+        }
+    }
+
+    It 'emits all required flags in order' {
+        $argv = Build-DiskSpdArguments -Settings $script:baseSettings -TestFilePath 'C:\Temp\test.dat'
+        $argv | Should -Contain '-b4K'
+        $argv | Should -Contain '-t4'
+        $argv | Should -Contain '-o8'
+        $argv | Should -Contain '-w30'
+        $argv | Should -Contain '-d30'
+        $argv | Should -Contain '-c1G'
+        $argv | Should -Contain '-r'
+        $argv | Should -Contain '-Rxml'
+        $argv | Should -Contain '-L'
+        $argv | Should -Contain '-Sh'
+        $argv[-1] | Should -Be 'C:\Temp\test.dat' -Because 'target path must be last'
+    }
+
+    It 'omits -r when RandomIO is false (sequential)' {
+        $seq = $script:baseSettings.Clone()
+        $seq.RandomIO = $false
+        $argv = Build-DiskSpdArguments -Settings $seq -TestFilePath 'C:\Temp\test.dat'
+        $argv | Should -Not -Contain '-r'
+    }
+
+    It 'uses M suffix for sub-GB sizes' {
+        $small = $script:baseSettings.Clone()
+        $small.TestFileSizeMB = 256
+        $argv = Build-DiskSpdArguments -Settings $small -TestFilePath 'C:\Temp\test.dat'
+        $argv | Should -Contain '-c256M'
+    }
+
+    It 'handles UNC paths' {
+        $argv = Build-DiskSpdArguments -Settings $script:baseSettings -TestFilePath '\\FileServer01\Share\test.dat'
+        $argv[-1] | Should -Be '\\FileServer01\Share\test.dat'
+    }
+}

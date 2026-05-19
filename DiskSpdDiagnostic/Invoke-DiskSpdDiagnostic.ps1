@@ -213,6 +213,37 @@ function Resolve-DiskSpdSettings {
     return $settings
 }
 
+function Build-DiskSpdArguments {
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory)] [hashtable]$Settings,
+        [Parameter(Mandatory)] [string]   $TestFilePath
+    )
+
+    # Size suffix: use G for whole-GB sizes (>= 1024 MB and evenly divisible), M otherwise.
+    $size = if ($Settings.TestFileSizeMB -ge 1024 -and ($Settings.TestFileSizeMB % 1024) -eq 0) {
+        "$($Settings.TestFileSizeMB / 1024)G"
+    } else {
+        "$($Settings.TestFileSizeMB)M"
+    }
+
+    $argv = @(
+        "-b$($Settings.BlockSize)"
+        "-t$($Settings.Threads)"
+        "-o$($Settings.QueueDepth)"
+        "-w$($Settings.WriteRatioPercent)"
+        "-d$($Settings.DurationSeconds)"
+        "-c$size"
+        '-Rxml'
+        '-L'
+        '-Sh'
+    )
+    if ($Settings.RandomIO) { $argv += '-r' }
+    $argv += $TestFilePath
+    return $argv
+}
+
 # --- UI / headless dispatch goes here (Tasks 10-11) ---
 
 # Entry-point dispatch (filled in Task 12):
