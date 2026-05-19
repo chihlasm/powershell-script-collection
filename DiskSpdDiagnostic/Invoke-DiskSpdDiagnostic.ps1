@@ -515,6 +515,10 @@ function Test-DiskSpdPreflight {
     }
 }
 
+# BLOCKING: this function waits for diskspd to finish (DurationSeconds + warmup),
+# which can be 30+ seconds. Callers on UI threads MUST dispatch this to a background
+# runspace or the WPF dispatcher will freeze. Task 13's Run-button handler does this.
+# The cleanup in finally{} runs even if the caller cancels the runspace.
 function Invoke-DiskSpdLocal {
     [CmdletBinding()]
     [OutputType([string])]
