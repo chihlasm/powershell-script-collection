@@ -379,18 +379,21 @@ function Get-DiskSpdHealthAssessment {
     # P95/P99 are classified with the same latency thresholds as average. P95 in
     # particular is more operationally relevant than mean for storage triage,
     # so the HTML report (Task 10) colors all three latency rows.
-    $result = @{
+    # NOTE: local var is $out (NOT $result) because PowerShell is case-insensitive
+    # and $result would silently shadow the $Result parameter — meaning the
+    # subsequent $Result.Latency95Ms reads would target our empty hashtable instead.
+    $out = @{
         ReadMBps     = Classify-Throughput $Result.ReadMBps     $thresholds.ReadOK    $thresholds.ReadWarn
         WriteMBps    = Classify-Throughput $Result.WriteMBps    $thresholds.WriteOK   $thresholds.WriteWarn
         AvgLatencyMs = Classify-Latency    $Result.AvgLatencyMs $thresholds.LatencyOK $thresholds.LatencyWarn
     }
     if ($null -ne $Result.Latency95Ms) {
-        $result.Latency95Ms = Classify-Latency $Result.Latency95Ms $thresholds.LatencyOK $thresholds.LatencyWarn
+        $out.Latency95Ms = Classify-Latency $Result.Latency95Ms $thresholds.LatencyOK $thresholds.LatencyWarn
     }
     if ($null -ne $Result.Latency99Ms) {
-        $result.Latency99Ms = Classify-Latency $Result.Latency99Ms $thresholds.LatencyOK $thresholds.LatencyWarn
+        $out.Latency99Ms = Classify-Latency $Result.Latency99Ms $thresholds.LatencyOK $thresholds.LatencyWarn
     }
-    $result
+    $out
 }
 
 # Returns [PSCustomObject] (not hashtable) because the result is consumer-facing —
@@ -477,11 +480,19 @@ function Test-DiskSpdPreflight {
     }
 
     # 4. Remote reachability (only in remote mode).
+    # Test-WSMan can either throw OR return $null depending on Windows version and
+    # the kind of failure (DNS lookup vs. WinRM listener missing). Handle both.
     if ($ComputerName) {
+        $wsManOk = $false
         try {
-            $null = Test-WSMan -ComputerName $ComputerName -ErrorAction Stop
+            $wsManResult = Test-WSMan -ComputerName $ComputerName -ErrorAction Stop
+            if ($wsManResult) { $wsManOk = $true }
         } catch {
             $errors += "Test-WSMan failed for ${ComputerName}: $($_.Exception.Message)"
+        }
+        if (-not $wsManOk -and ($errors -notmatch 'Test-WSMan failed')) {
+            # Returned $null/empty without throwing — surface as the same error class.
+            $errors += "Test-WSMan failed for ${ComputerName}: no response (host unreachable or WinRM not listening)"
         }
         $admin = "\\$ComputerName\C`$\Windows\Temp"
         if (-not (Test-Path $admin)) {
