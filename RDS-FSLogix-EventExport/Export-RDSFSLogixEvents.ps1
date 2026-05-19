@@ -170,3 +170,72 @@ function Test-IsElevated {
     $principal = New-Object System.Security.Principal.WindowsPrincipal($id)
     return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
 }
+
+# Query a single Windows event log with a time + level filter.
+# Returns an array of [pscustomobject] tagged with the supplied Category and original LogName.
+# Catches the "no events were found" exception and treats it as success-with-zero.
+# Catches access denied (Security log without admin) and emits a WARN.
+function Get-EventsFromLog {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$LogName,
+        [Parameter(Mandatory)][string]$Category,
+        [Parameter(Mandatory)][datetime]$Start,
+        [Parameter(Mandatory)][datetime]$End,
+        [Parameter(Mandatory)][int[]]$Level,
+        [int[]]$Id          # optional: restrict to specific event IDs
+    )
+
+    $filter = @{
+        LogName   = $LogName
+        StartTime = $Start
+        EndTime   = $End
+        Level     = $Level
+    }
+    if ($PSBoundParameters.ContainsKey('Id')) { $filter['Id'] = $Id }
+
+    try {
+        $raw = @(Get-WinEvent -FilterHashtable $filter -ErrorAction Stop)
+    }
+    catch {
+        $msg = $_.Exception.Message
+        # Get-WinEvent throws when no matching events exist; detect via message.
+        if ($msg -match 'No events were found') {
+            Write-StatusLine -Status 'INFO' -Message ("0 events from {0}" -f $LogName)
+            return @()
+        }
+        # Log not present on this host
+        if ($msg -match 'There is not a log named' -or
+            $msg -match 'The specified channel could not be found' -or
+            $msg -match 'There is not an event log on the .* computer that matches') {
+            Write-StatusLine -Status 'INFO' -Message ("Log not present, skipping: {0}" -f $LogName)
+            return @()
+        }
+        # Permission denied (Security log without admin)
+        if ($msg -match 'Attempted to perform an unauthorized operation' -or
+            $_.CategoryInfo.Category -eq 'PermissionDenied') {
+            Write-StatusLine -Status 'WARN' -Message ("Access denied reading {0} (try elevation)" -f $LogName)
+            return @()
+        }
+        Write-StatusLine -Status 'FAIL' -Message ("Error reading {0}: {1}" -f $LogName, $msg)
+        return @()
+    }
+
+    Write-StatusLine -Status 'PASS' -Message ("{0,5} events from {1}" -f $raw.Count, $LogName)
+
+    # Normalize to a flat pscustomobject.
+    return @($raw | ForEach-Object {
+        [pscustomobject]@{
+            TimeCreated      = $_.TimeCreated
+            Category         = $Category
+            LogName          = $_.LogName
+            Id               = $_.Id
+            Level            = $_.Level
+            LevelDisplayName = $_.LevelDisplayName
+            ProviderName     = $_.ProviderName
+            MachineName      = $_.MachineName
+            UserId           = if ($_.UserId) { $_.UserId.Value } else { '' }
+            Message          = ($_.Message -replace "`r?`n", ' ' -replace '\s+', ' ').Trim()
+        }
+    })
+}
