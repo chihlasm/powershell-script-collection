@@ -116,6 +116,64 @@ $script:ReportTpl   = Join-Path $script:ScriptRoot 'ReportTemplate.html'
 
 # --- Engine functions go here (Tasks 1-9) ---
 
+function Get-DiskSpdWorkloadProfile {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('FSLogixLike','SequentialRead','MixedUserLoad','QuickSanity','Custom')]
+        [string]$Name
+    )
+
+    switch ($Name) {
+        'FSLogixLike' {
+            @{
+                BlockSize         = '4K'
+                Threads           = 4
+                QueueDepth        = 8
+                WriteRatioPercent = 30
+                DurationSeconds   = 30
+                TestFileSizeMB    = 1024
+                RandomIO          = $true
+            }
+        }
+        'SequentialRead' {
+            @{
+                BlockSize         = '64K'
+                Threads           = 1
+                QueueDepth        = 4
+                WriteRatioPercent = 0
+                DurationSeconds   = 30
+                TestFileSizeMB    = 1024
+                RandomIO          = $false
+            }
+        }
+        'MixedUserLoad' {
+            @{
+                BlockSize         = '8K'
+                Threads           = 2
+                QueueDepth        = 4
+                WriteRatioPercent = 20
+                DurationSeconds   = 60
+                TestFileSizeMB    = 1024
+                RandomIO          = $true
+            }
+        }
+        'QuickSanity' {
+            @{
+                BlockSize         = '64K'
+                Threads           = 1
+                QueueDepth        = 2
+                WriteRatioPercent = 0
+                DurationSeconds   = 10
+                TestFileSizeMB    = 256
+                RandomIO          = $true
+            }
+        }
+        'Custom' { $null }
+    }
+}
+
 # --- UI / headless dispatch goes here (Tasks 10-11) ---
 
 # Entry-point dispatch (filled in Task 12):
