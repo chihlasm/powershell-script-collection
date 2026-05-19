@@ -9,7 +9,7 @@ BeforeAll {
 
 Describe 'DiskSpd Diagnostic — script entry' {
     It 'parses without syntax errors' {
-        { . $script:ScriptUnderTest -NoUI -Target 'C:\nonexistent-path-for-syntax-check' -Profile QuickSanity -ErrorAction SilentlyContinue } |
+        { . $script:ScriptUnderTest -NoUI -Target 'C:\nonexistent-path-for-syntax-check' -Workload QuickSanity -ErrorAction SilentlyContinue } |
             Should -Not -Throw -Because 'syntax errors would surface at parse time'
     }
 }
