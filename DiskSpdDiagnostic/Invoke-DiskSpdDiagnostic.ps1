@@ -114,6 +114,10 @@ $script:ScriptRoot = $PSScriptRoot
 $script:DiskSpdExe  = Join-Path $script:ScriptRoot 'diskspd.exe'
 $script:ReportTpl   = Join-Path $script:ScriptRoot 'ReportTemplate.html'
 
+# System.Web is in-box on PowerShell 5.1 / .NET Framework 4.x. Required for
+# HtmlEncode in Export-DiskSpdHtmlReport. Loaded once at script scope.
+Add-Type -AssemblyName System.Web
+
 # Single source of truth for the workload-settings hashtable contract.
 # Every preset in Get-DiskSpdWorkloadProfile, every -Overrides hashtable on
 # Resolve-DiskSpdSettings, and every $Settings hashtable on Build-DiskSpdArguments
@@ -663,6 +667,81 @@ function Invoke-DiskSpdRemote {
             }
         }
     }
+}
+
+function Export-DiskSpdHtmlReport {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)] [PSCustomObject]$Result,
+        [Parameter(Mandatory)] [hashtable]     $Assessment,
+        [Parameter(Mandatory)] [string]        $Target,
+        [Parameter(Mandatory)] [string]        $OutputDirectory
+    )
+
+    if (-not (Test-Path $OutputDirectory)) {
+        New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
+    }
+
+    if (-not (Test-Path $script:ReportTpl)) {
+        throw "Report template not found at $script:ReportTpl"
+    }
+    $tpl = Get-Content $script:ReportTpl -Raw
+
+    $timestamp     = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $fileTimestamp = Get-Date -Format 'yyyy-MM-dd_HHmmss'
+    # Sanitize target for filename: strip any character Windows rejects in a filename.
+    $safeTarget    = ($Target -replace '[\\\/\:\*\?\"\<\>\|]', '_').TrimStart('_').TrimEnd('_')
+    if ([string]::IsNullOrWhiteSpace($safeTarget)) { $safeTarget = 'target' }
+
+    function Get-BadgeClass($status) {
+        switch ($status) {
+            'OK'   { 'badge ok' }
+            'WARN' { 'badge warn' }
+            'CRIT' { 'badge crit' }
+            default { 'badge' }
+        }
+    }
+
+    # Results table rows. The Status column is only populated for metrics the
+    # Assessment hashtable bands (ReadMBps/WriteMBps/AvgLatencyMs and optionally
+    # Latency95Ms/Latency99Ms — see Get-DiskSpdHealthAssessment).
+    $rows = @(
+        @{ M = 'IOPS';             V = $Result.IOPS;         S = $null                     }
+        @{ M = 'Read MB/s';        V = $Result.ReadMBps;     S = $Assessment.ReadMBps      }
+        @{ M = 'Write MB/s';       V = $Result.WriteMBps;    S = $Assessment.WriteMBps     }
+        @{ M = 'Avg latency (ms)'; V = $Result.AvgLatencyMs; S = $Assessment.AvgLatencyMs  }
+        @{ M = 'P95 latency (ms)'; V = $Result.Latency95Ms;  S = $Assessment.Latency95Ms   }
+        @{ M = 'P99 latency (ms)'; V = $Result.Latency99Ms;  S = $Assessment.Latency99Ms   }
+        @{ M = 'CPU %';            V = $Result.CpuPercent;   S = $null                     }
+        @{ M = 'Test file';        V = $Result.TestFilePath; S = $null                     }
+        @{ M = 'Duration (s)';     V = $Result.Duration;     S = $null                     }
+    )
+
+    $rowsHtml = ($rows | ForEach-Object {
+        $valueEncoded = [System.Web.HttpUtility]::HtmlEncode([string]$_.V)
+        $badge = if ($_.S) { "<span class=`"$(Get-BadgeClass $_.S)`">$($_.S)</span>" } else { '' }
+        "<tr><td>$($_.M)</td><td class=`"num`">$valueEncoded</td><td>$badge</td></tr>"
+    }) -join "`n"
+
+    $badgesHtml = ($Assessment.GetEnumerator() | ForEach-Object {
+        "<span class=`"$(Get-BadgeClass $_.Value)`">$($_.Key): $($_.Value)</span>"
+    }) -join ' '
+
+    $rawXmlEncoded = [System.Web.HttpUtility]::HtmlEncode($Result.RawXml)
+
+    $html = $tpl `
+        -replace '\{\{TARGET\}\}',        [System.Web.HttpUtility]::HtmlEncode($Target) `
+        -replace '\{\{PROFILE\}\}',       [System.Web.HttpUtility]::HtmlEncode($Result.ProfileName) `
+        -replace '\{\{TIMESTAMP\}\}',     $timestamp `
+        -replace '\{\{RESULTS_TABLE\}\}', $rowsHtml `
+        -replace '\{\{HEALTH_BADGES\}\}', $badgesHtml `
+        -replace '\{\{RAW_XML\}\}',       $rawXmlEncoded
+
+    $filename = "diskspd_${safeTarget}_${fileTimestamp}.html"
+    $outFile  = Join-Path $OutputDirectory $filename
+    Set-Content -Path $outFile -Value $html -Encoding UTF8
+    return $outFile
 }
 
 # --- UI / headless dispatch goes here (Tasks 10-11) ---

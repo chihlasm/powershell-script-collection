@@ -573,3 +573,111 @@ Describe 'Invoke-DiskSpdLocal (integration)' -Tag 'Integration' {
         }
     }
 }
+
+Describe 'Export-DiskSpdHtmlReport' {
+    BeforeAll {
+        $script:reportFixtureResult = [PSCustomObject]@{
+            IOPS         = 12345
+            ReadMBps     = 85.3
+            WriteMBps    = 22.1
+            AvgLatencyMs = 4.2
+            Latency95Ms  = 8.1
+            Latency99Ms  = 12.5
+            CpuPercent   = 15.3
+            TestFilePath = '\\FileServer01\Share\test.dat'
+            Duration     = 30
+            ProfileName  = 'FSLogixLike'
+            RawXml       = '<Results><TimeSpan/></Results>'
+        }
+        $script:reportFixtureAssess = @{
+            ReadMBps     = 'OK'
+            WriteMBps    = 'WARN'
+            AvgLatencyMs = 'OK'
+        }
+    }
+
+    BeforeEach {
+        $script:reportDir = Join-Path $env:TEMP "diskspd-report-$([guid]::NewGuid())"
+        New-Item -ItemType Directory -Path $script:reportDir -Force | Out-Null
+    }
+
+    AfterEach {
+        Remove-Item $script:reportDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'produces an HTML file at the expected path' {
+        $out = Export-DiskSpdHtmlReport -Result $script:reportFixtureResult `
+                -Assessment $script:reportFixtureAssess -Target '\\FileServer01\Share' `
+                -OutputDirectory $script:reportDir
+        Test-Path $out | Should -BeTrue
+        $out | Should -Match '\.html$'
+    }
+
+    It 'fills in target, profile, and key metric values' {
+        $out = Export-DiskSpdHtmlReport -Result $script:reportFixtureResult `
+                -Assessment $script:reportFixtureAssess -Target '\\FileServer01\Share' `
+                -OutputDirectory $script:reportDir
+        $html = Get-Content $out -Raw
+        $html | Should -Match 'FileServer01'
+        $html | Should -Match 'FSLogixLike'
+        $html | Should -Match '12345'    # IOPS
+        $html | Should -Match '85\.3'    # ReadMBps
+    }
+
+    It 'colors badges by status' {
+        $out = Export-DiskSpdHtmlReport -Result $script:reportFixtureResult `
+                -Assessment $script:reportFixtureAssess -Target '\\FileServer01\Share' `
+                -OutputDirectory $script:reportDir
+        $html = Get-Content $out -Raw
+        $html | Should -Match 'badge ok'      # ReadMBps and AvgLatencyMs are OK
+        $html | Should -Match 'badge warn'    # WriteMBps is WARN
+    }
+
+    It 'HTML-encodes target and profile to prevent injection' {
+        $injection = '<script>alert("xss")</script>'
+        $out = Export-DiskSpdHtmlReport -Result $script:reportFixtureResult `
+                -Assessment $script:reportFixtureAssess -Target $injection `
+                -OutputDirectory $script:reportDir
+        $html = Get-Content $out -Raw
+        $html | Should -Not -Match '<script>alert'
+        $html | Should -Match '&lt;script&gt;alert'
+    }
+
+    It 'embeds the raw XML (HTML-encoded) in the appendix' {
+        $out = Export-DiskSpdHtmlReport -Result $script:reportFixtureResult `
+                -Assessment $script:reportFixtureAssess -Target '\\FileServer01\Share' `
+                -OutputDirectory $script:reportDir
+        $html = Get-Content $out -Raw
+        # RawXml contains <Results>, which should appear HTML-encoded in the <pre> block.
+        $html | Should -Match '&lt;Results&gt;'
+    }
+
+    It 'filenames use yyyy-MM-dd_HHmmss timestamp pattern' {
+        $out = Export-DiskSpdHtmlReport -Result $script:reportFixtureResult `
+                -Assessment $script:reportFixtureAssess -Target 'X:\' `
+                -OutputDirectory $script:reportDir
+        (Split-Path $out -Leaf) | Should -Match '\d{4}-\d{2}-\d{2}_\d{6}'
+    }
+
+    It 'sanitizes target characters that are illegal in filenames' {
+        $out = Export-DiskSpdHtmlReport -Result $script:reportFixtureResult `
+                -Assessment $script:reportFixtureAssess -Target '\\FileServer01\Share\sub:path' `
+                -OutputDirectory $script:reportDir
+        $filename = Split-Path $out -Leaf
+        $filename | Should -Not -Match '[\\\/\:\*\?\"\<\>\|]'
+    }
+
+    It 'creates the OutputDirectory if it does not exist' {
+        $newDir = Join-Path $env:TEMP "diskspd-report-newdir-$([guid]::NewGuid())"
+        try {
+            Test-Path $newDir | Should -BeFalse -Because 'directory must not exist before the call'
+            $out = Export-DiskSpdHtmlReport -Result $script:reportFixtureResult `
+                    -Assessment $script:reportFixtureAssess -Target 'C:\' `
+                    -OutputDirectory $newDir
+            Test-Path $newDir | Should -BeTrue
+            Test-Path $out    | Should -BeTrue
+        } finally {
+            Remove-Item $newDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
