@@ -760,5 +760,88 @@ function Export-DiskSpdHtmlReport {
 
 # --- UI / headless dispatch goes here (Tasks 10-11) ---
 
+# Headless orchestrator: preflight -> run -> parse -> assess -> export. Drives the
+# entire diskspd pipeline in one call for -NoUI mode and for the WPF UI's Run
+# button. Returns the path to the generated HTML report.
+#
+# BLOCKING: takes DurationSeconds + ~5s diskspd warmup. Callers must dispatch
+# this off the UI thread (Task 13 does so via a background runspace).
+function Invoke-DiskSpdHeadless {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)] [string]   $DiskSpdPath,
+        [Parameter(Mandatory)] [string]   $Target,
+        [Parameter(Mandatory)] [string]   $ProfileName,
+        [Parameter(Mandatory)] [hashtable]$Overrides,
+        [string]    $ComputerName,
+        [Parameter(Mandatory)] [string]   $OutputPath,
+        [switch]    $Force
+    )
+
+    # [PASS]/[WARN]/[FAIL]/[INFO] color-prefixed console output per CLAUDE.md
+    # conventions. Used only for -NoUI runs; the WPF UI captures these via a
+    # runspace and routes them to the status line instead.
+    function Write-Status {
+        param([string]$Level, [string]$Message)
+        $color = switch ($Level) {
+            'PASS' { 'Green'  }
+            'WARN' { 'Yellow' }
+            'FAIL' { 'Red'    }
+            default { 'Cyan'  }
+        }
+        $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        Write-Host "[$ts] [$Level] $Message" -ForegroundColor $color
+    }
+
+    # Resolve settings before preflight so we can pass the actual TestFileSizeMB
+    # to the free-space check.
+    $settings  = Resolve-DiskSpdSettings -ProfileName $ProfileName -Overrides $Overrides
+    $transport = if ($ComputerName -or $Target -match '^\\\\') { 'Network' } else { 'Local' }
+
+    Write-Status 'INFO' "Preflight starting for target '$Target' (transport: $transport)"
+    $pf = Test-DiskSpdPreflight -DiskSpdPath $DiskSpdPath -Target $Target `
+            -TestFileSizeMB $settings.TestFileSizeMB -ComputerName $ComputerName -BusinessHoursForce:$Force
+
+    foreach ($w in $pf.Warnings) { Write-Status 'WARN' $w }
+    foreach ($e in $pf.Errors)   { Write-Status 'FAIL' $e }
+    if (-not $pf.Pass) {
+        throw "Preflight failed for target '$Target'. See errors above."
+    }
+    Write-Status 'PASS' 'Preflight OK'
+
+    # Pick the test data file path. If the operator passed a real .dat file path,
+    # use it as-is (advanced use). Otherwise create one inside the target directory
+    # named with a timestamp so concurrent runs don't collide.
+    $testFile = if ($Target -match '\.dat$') {
+        $Target
+    } else {
+        Join-Path $Target ("diskspd-{0}.dat" -f (Get-Date -Format 'yyyy-MM-dd_HHmmss'))
+    }
+
+    Write-Status 'INFO' ("Running diskspd ({0}s, {1}t/QD{2}){3}" -f `
+        $settings.DurationSeconds, $settings.Threads, $settings.QueueDepth, `
+        $(if ($ComputerName) { " on $ComputerName" } else { '' }))
+
+    $xml = if ($ComputerName) {
+        Invoke-DiskSpdRemote -DiskSpdPath $DiskSpdPath -ComputerName $ComputerName `
+                             -Settings $settings -TestFilePath $testFile
+    } else {
+        Invoke-DiskSpdLocal  -DiskSpdPath $DiskSpdPath -Settings $settings -TestFilePath $testFile
+    }
+    Write-Status 'PASS' 'diskspd completed'
+
+    $result = ConvertFrom-DiskSpdXml -Xml $xml -ProfileName $ProfileName
+    $assess = Get-DiskSpdHealthAssessment -Result $result -Transport $transport
+
+    Write-Status 'INFO' ("Results: {0} IOPS / {1} MB/s read / {2} MB/s write / {3} ms avg latency" -f `
+        $result.IOPS, $result.ReadMBps, $result.WriteMBps, $result.AvgLatencyMs)
+
+    $report = Export-DiskSpdHtmlReport -Result $result -Assessment $assess `
+                -Target $Target -OutputDirectory $OutputPath
+    Write-Status 'PASS' "Report saved: $report"
+    return $report
+}
+
 # Entry-point dispatch (filled in Task 12):
 # if ($NoUI) { Invoke-DiskSpdHeadless ... } else { Show-DiskSpdGui }

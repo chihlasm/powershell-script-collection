@@ -727,3 +727,53 @@ Describe 'Export-DiskSpdHtmlReport' {
         $idx95    | Should -BeLessThan $idx99
     }
 }
+
+Describe 'Invoke-DiskSpdHeadless (integration)' -Tag 'Integration' {
+    BeforeAll {
+        $script:DiskSpdExePath = (Resolve-Path (Join-Path $PSScriptRoot '..\diskspd.exe')).Path
+    }
+
+    BeforeEach {
+        $script:headlessReportDir = Join-Path $env:TEMP "diskspd-headless-$([guid]::NewGuid())"
+        New-Item -ItemType Directory -Path $script:headlessReportDir -Force | Out-Null
+    }
+
+    AfterEach {
+        Remove-Item $script:headlessReportDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'runs end-to-end against a temp directory and writes a report' {
+        $out = Invoke-DiskSpdHeadless `
+            -DiskSpdPath $script:DiskSpdExePath `
+            -Target $env:TEMP `
+            -ProfileName QuickSanity `
+            -Overrides @{ DurationSeconds = 3 } `
+            -OutputPath $script:headlessReportDir `
+            -Force
+        Test-Path $out | Should -BeTrue
+        (Get-Content $out -Raw) | Should -Match '<title>'
+    }
+
+    It 'throws on preflight failure with a clear message' {
+        { Invoke-DiskSpdHeadless `
+            -DiskSpdPath $script:DiskSpdExePath `
+            -Target 'Z:\definitely-not-there-12345' `
+            -ProfileName QuickSanity -Overrides @{} `
+            -OutputPath $script:headlessReportDir -Force } |
+            Should -Throw -ExpectedMessage '*Preflight failed*'
+    }
+
+    It 'returns the path to a report containing parsed metrics' {
+        $out = Invoke-DiskSpdHeadless `
+            -DiskSpdPath $script:DiskSpdExePath `
+            -Target $env:TEMP `
+            -ProfileName QuickSanity `
+            -Overrides @{ DurationSeconds = 3 } `
+            -OutputPath $script:headlessReportDir `
+            -Force
+        $html = Get-Content $out -Raw
+        $html | Should -Match 'QuickSanity'           # profile name
+        $html | Should -Match 'Read MB/s'             # one of the metric rows
+        $html | Should -Match 'badge'                 # health assessment colored a row
+    }
+}
