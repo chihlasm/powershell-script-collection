@@ -515,6 +515,45 @@ function Test-DiskSpdPreflight {
     }
 }
 
+function Invoke-DiskSpdLocal {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)] [string]   $DiskSpdPath,
+        [Parameter(Mandatory)] [hashtable]$Settings,
+        [Parameter(Mandatory)] [string]   $TestFilePath
+    )
+
+    $argv = Build-DiskSpdArguments -Settings $Settings -TestFilePath $TestFilePath
+
+    # Capture stdout and stderr to temp files because Start-Process can't return them
+    # as strings directly — it returns a Process object and requires -RedirectStandard*.
+    $stdoutFile = [IO.Path]::GetTempFileName()
+    $stderrFile = [IO.Path]::GetTempFileName()
+
+    try {
+        $proc = Start-Process -FilePath $DiskSpdPath -ArgumentList $argv -NoNewWindow -PassThru `
+                              -RedirectStandardOutput $stdoutFile `
+                              -RedirectStandardError  $stderrFile -Wait
+
+        $stdout = Get-Content $stdoutFile -Raw
+        $stderr = Get-Content $stderrFile -Raw
+
+        if ($proc.ExitCode -ne 0) {
+            throw "diskspd exited with code $($proc.ExitCode). stderr: $stderr"
+        }
+        if ([string]::IsNullOrWhiteSpace($stdout) -or $stdout -notmatch '<Results>') {
+            throw "diskspd produced no XML output. stderr: $stderr"
+        }
+        return $stdout
+    } finally {
+        # Cleanup regardless of success/failure. -ErrorAction SilentlyContinue
+        # because Remove-Item on an already-deleted file shouldn't mask the original error.
+        Remove-Item $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
+        Remove-Item $TestFilePath           -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # --- UI / headless dispatch goes here (Tasks 10-11) ---
 
 # Entry-point dispatch (filled in Task 12):
