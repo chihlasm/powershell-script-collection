@@ -239,3 +239,199 @@ function Get-EventsFromLog {
         }
     })
 }
+
+# Normalize a raw EventLogRecord (from a direct Get-WinEvent call) into the same
+# flat shape Get-EventsFromLog produces. Used by Get-SystemAppCategoryEvents which
+# does its own two-pass Get-WinEvent calls.
+function ConvertTo-NormalizedEvent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, ValueFromPipeline)]$Event,
+        [Parameter(Mandatory)][string]$Category
+    )
+    process {
+        [pscustomobject]@{
+            TimeCreated      = $Event.TimeCreated
+            Category         = $Category
+            LogName          = $Event.LogName
+            Id               = $Event.Id
+            Level            = $Event.Level
+            LevelDisplayName = $Event.LevelDisplayName
+            ProviderName     = $Event.ProviderName
+            MachineName      = $Event.MachineName
+            UserId           = if ($Event.UserId) { $Event.UserId.Value } else { '' }
+            Message          = ($Event.Message -replace "`r?`n", ' ' -replace '\s+', ' ').Trim()
+        }
+    }
+}
+
+# Enumerate Microsoft-Windows-TerminalServices-* logs that exist on this host.
+# Returns an array of [string] log names.
+function Get-RDSOperationalLogs {
+    try {
+        $logs = Get-WinEvent -ListLog 'Microsoft-Windows-TerminalServices-*' -ErrorAction Stop |
+                Where-Object { $_.LogName -like '*/Operational' }
+        return ,@($logs | Select-Object -ExpandProperty LogName)
+    }
+    catch {
+        Write-StatusLine -Status 'WARN' -Message ("Could not enumerate TerminalServices logs: {0}" -f $_.Exception.Message)
+        return @()
+    }
+}
+
+function Get-RDSCategoryEvents {
+    param(
+        [Parameter(Mandatory)][datetime]$Start,
+        [Parameter(Mandatory)][datetime]$End,
+        [Parameter(Mandatory)][int[]]$Level
+    )
+    $results = New-Object System.Collections.Generic.List[object]
+    foreach ($logName in (Get-RDSOperationalLogs)) {
+        $events = Get-EventsFromLog -LogName $logName -Category 'RDS' -Start $Start -End $End -Level $Level
+        foreach ($e in $events) { $results.Add($e) }
+    }
+    return ,$results.ToArray()
+}
+
+function Get-FSLogixCategoryEvents {
+    param(
+        [Parameter(Mandatory)][datetime]$Start,
+        [Parameter(Mandatory)][datetime]$End,
+        [Parameter(Mandatory)][int[]]$Level
+    )
+    $logs = @(
+        'Microsoft-FSLogix-Apps/Operational'
+        'Microsoft-FSLogix-Apps/Admin'
+        'Microsoft-FSLogix-CloudCache/Operational'
+    )
+    $results = New-Object System.Collections.Generic.List[object]
+    foreach ($logName in $logs) {
+        $events = Get-EventsFromLog -LogName $logName -Category 'FSLogix' -Start $Start -End $End -Level $Level
+        foreach ($e in $events) { $results.Add($e) }
+    }
+    return ,$results.ToArray()
+}
+
+function Get-SystemAppCategoryEvents {
+    param(
+        [Parameter(Mandatory)][datetime]$Start,
+        [Parameter(Mandatory)][datetime]$End,
+        [Parameter(Mandatory)][int[]]$Level
+    )
+    # ProviderName supports a literal list in FilterHashtable, but no wildcard.
+    # Pass 1: query with literal providers (filtered to those actually present on this
+    # host — Get-WinEvent errors out if even one named provider is missing).
+    # Pass 2: query the whole log (level + time filtered) and post-filter providers
+    # matching Microsoft-Windows-TerminalServices-*.
+    $literalProvidersAll = @(
+        'TermService','TermDD','RemoteDesktopServices',
+        'frxsvc','frxccd','frxdrv','frxdrvvt'
+    )
+
+    # Check each candidate individually so one bad provider on the host doesn't poison the enumeration.
+    $literalProviders = @($literalProvidersAll | ForEach-Object {
+        $name = $_
+        try {
+            $null = Get-WinEvent -ListProvider $name -ErrorAction Stop
+            $name
+        } catch {
+            # Provider not present — silently skip.
+        }
+    })
+    if ($literalProviders.Count -eq 0) {
+        Write-StatusLine -Status 'INFO' -Message 'No RDS/FSLogix literal providers present on this host - skipping literal pass'
+    } else {
+        Write-StatusLine -Status 'INFO' -Message ("Literal providers found: {0}" -f ($literalProviders -join ', '))
+    }
+
+    $results = New-Object System.Collections.Generic.List[object]
+
+    foreach ($logName in @('System','Application')) {
+        # --- Literal-provider pass ---
+        $literalEvents = @()
+        if ($literalProviders.Count -gt 0) {
+            try {
+                $literalEvents = @(Get-WinEvent -FilterHashtable @{
+                    LogName      = $logName
+                    StartTime    = $Start
+                    EndTime      = $End
+                    Level        = $Level
+                    ProviderName = $literalProviders
+                } -ErrorAction Stop)
+                Write-StatusLine -Status 'PASS' -Message ("{0,5} events from {1} (literal providers)" -f $literalEvents.Count, $logName)
+            }
+            catch {
+                if ($_.Exception.Message -match 'No events were found') {
+                    Write-StatusLine -Status 'INFO' -Message ("0 events from {0} (literal providers)" -f $logName)
+                } else {
+                    Write-StatusLine -Status 'FAIL' -Message ("Error on {0} literal pass: {1}" -f $logName, $_.Exception.Message)
+                }
+            }
+        }
+
+        # --- Wildcard-provider pass ---
+        $wildcardEvents = @()
+        try {
+            $wildcardEvents = @(
+                Get-WinEvent -FilterHashtable @{
+                    LogName   = $logName
+                    StartTime = $Start
+                    EndTime   = $End
+                    Level     = $Level
+                } -ErrorAction Stop |
+                    Where-Object { $_.ProviderName -like 'Microsoft-Windows-TerminalServices-*' }
+            )
+            Write-StatusLine -Status 'PASS' -Message ("{0,5} events from {1} (RDS provider wildcard)" -f $wildcardEvents.Count, $logName)
+        }
+        catch {
+            if ($_.Exception.Message -match 'No events were found') {
+                Write-StatusLine -Status 'INFO' -Message ("0 events from {0} (RDS provider wildcard)" -f $logName)
+            } else {
+                Write-StatusLine -Status 'FAIL' -Message ("Error on {0} wildcard pass: {1}" -f $logName, $_.Exception.Message)
+            }
+        }
+
+        foreach ($e in @($literalEvents) + @($wildcardEvents)) {
+            $results.Add((ConvertTo-NormalizedEvent -Event $e -Category 'System/App'))
+        }
+    }
+
+    if ($results.Count -eq 0) { return ,@() }
+
+    # De-duplicate: an event could in principle match both passes; sort -Unique
+    # on TimeCreated+Id+LogName+ProviderName is a safe key.
+    return ,@($results | Sort-Object TimeCreated, Id, LogName, ProviderName -Unique)
+}
+
+function Get-SecurityCategoryEvents {
+    param(
+        [Parameter(Mandatory)][datetime]$Start,
+        [Parameter(Mandatory)][datetime]$End,
+        [Parameter(Mandatory)][int[]]$Level
+    )
+
+    if (-not (Test-IsElevated)) {
+        Write-StatusLine -Status 'WARN' -Message 'Security log requires elevation - skipping'
+        return @()
+    }
+
+    # Pull the four logon-related IDs, then post-filter on LogonType.
+    $events = Get-EventsFromLog -LogName 'Security' -Category 'Security' -Start $Start -End $End -Level $Level -Id 4624,4625,4634,4647
+
+    # 4634 (logoff) and 4647 (initiated logoff) are session-end events and we keep them all;
+    # 4624/4625 we filter to LogonType 7 (unlock) or 10 (RemoteInteractive) by parsing
+    # the collapsed Message string ("Logon Type:        10").
+    $filtered = New-Object System.Collections.Generic.List[object]
+    foreach ($evt in $events) {
+        if ($evt.Id -in 4634,4647) {
+            $filtered.Add($evt)
+            continue
+        }
+        if ($evt.Message -match 'Logon Type:\s*(\d+)') {
+            $lt = [int]$Matches[1]
+            if ($lt -in 7,10) { $filtered.Add($evt) }
+        }
+    }
+    Write-StatusLine -Status 'INFO' -Message ("Filtered Security to {0} RDP-relevant events (LogonType 7/10)" -f $filtered.Count)
+    return ,$filtered.ToArray()
+}
