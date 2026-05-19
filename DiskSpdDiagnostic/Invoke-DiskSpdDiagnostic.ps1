@@ -176,6 +176,36 @@ function Get-DiskSpdWorkloadProfile {
     }
 }
 
+function Resolve-DiskSpdSettings {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('FSLogixLike','SequentialRead','MixedUserLoad','QuickSanity','Custom')]
+        [string]$ProfileName,
+
+        [Parameter(Mandatory)]
+        [hashtable]$Overrides
+    )
+
+    $requiredKeys = @('BlockSize','Threads','QueueDepth','WriteRatioPercent',
+                      'DurationSeconds','TestFileSizeMB','RandomIO')
+
+    if ($ProfileName -eq 'Custom') {
+        $missing = $requiredKeys | Where-Object { -not $Overrides.ContainsKey($_) }
+        if ($missing) {
+            throw "Profile 'Custom' requires all override keys. Missing: $($missing -join ', ')"
+        }
+        return [hashtable]$Overrides.Clone()
+    }
+
+    $settings = Get-DiskSpdWorkloadProfile -Name $ProfileName
+    foreach ($key in $Overrides.Keys) {
+        $settings[$key] = $Overrides[$key]
+    }
+    return $settings
+}
+
 # --- UI / headless dispatch goes here (Tasks 10-11) ---
 
 # Entry-point dispatch (filled in Task 12):
