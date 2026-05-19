@@ -125,6 +125,23 @@ Add-Type -AssemblyName System.Web
 $script:DiskSpdRequiredKeys = @('BlockSize','Threads','QueueDepth','WriteRatioPercent',
                                 'DurationSeconds','TestFileSizeMB','RandomIO')
 
+# Color-prefixed status output per CLAUDE.md ([PASS]/[WARN]/[FAIL]/[INFO]).
+# Used by Invoke-DiskSpdHeadless and re-usable by the WPF UI's runspace handler
+# (Task 13) so the level->color mapping isn't duplicated.
+# TODO Task 13: Write-Host output is not captured by a runspace's success stream;
+# the WPF status routing will need either Write-Information or a callback param.
+function Write-DiskSpdStatus {
+    param([string]$Level, [string]$Message)
+    $color = switch ($Level) {
+        'PASS' { 'Green'  }
+        'WARN' { 'Yellow' }
+        'FAIL' { 'Red'    }
+        default { 'Cyan'  }
+    }
+    $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    Write-Host "[$ts] [$Level] $Message" -ForegroundColor $color
+}
+
 # --- Engine functions go here (Tasks 1-9) ---
 
 # Returns hashtable (not PSCustomObject) so callers can merge operator overrides.
@@ -779,47 +796,36 @@ function Invoke-DiskSpdHeadless {
         [switch]    $Force
     )
 
-    # [PASS]/[WARN]/[FAIL]/[INFO] color-prefixed console output per CLAUDE.md
-    # conventions. Used only for -NoUI runs; the WPF UI captures these via a
-    # runspace and routes them to the status line instead.
-    function Write-Status {
-        param([string]$Level, [string]$Message)
-        $color = switch ($Level) {
-            'PASS' { 'Green'  }
-            'WARN' { 'Yellow' }
-            'FAIL' { 'Red'    }
-            default { 'Cyan'  }
-        }
-        $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-        Write-Host "[$ts] [$Level] $Message" -ForegroundColor $color
-    }
-
     # Resolve settings before preflight so we can pass the actual TestFileSizeMB
     # to the free-space check.
     $settings  = Resolve-DiskSpdSettings -ProfileName $ProfileName -Overrides $Overrides
     $transport = if ($ComputerName -or $Target -match '^\\\\') { 'Network' } else { 'Local' }
 
-    Write-Status 'INFO' "Preflight starting for target '$Target' (transport: $transport)"
+    Write-DiskSpdStatus 'INFO' "Preflight starting for target '$Target' (transport: $transport)"
     $pf = Test-DiskSpdPreflight -DiskSpdPath $DiskSpdPath -Target $Target `
             -TestFileSizeMB $settings.TestFileSizeMB -ComputerName $ComputerName -BusinessHoursForce:$Force
 
-    foreach ($w in $pf.Warnings) { Write-Status 'WARN' $w }
-    foreach ($e in $pf.Errors)   { Write-Status 'FAIL' $e }
+    foreach ($w in $pf.Warnings) { Write-DiskSpdStatus 'WARN' $w }
+    foreach ($e in $pf.Errors)   { Write-DiskSpdStatus 'FAIL' $e }
     if (-not $pf.Pass) {
-        throw "Preflight failed for target '$Target'. See errors above."
+        # Include the errors in the thrown message so consumers that catch the
+        # exception (e.g., Task 13's WPF runspace) see the failure detail without
+        # needing access to the host's captured console output.
+        throw ("Preflight failed for target '{0}': {1}" -f $Target, ($pf.Errors -join '; '))
     }
-    Write-Status 'PASS' 'Preflight OK'
+    Write-DiskSpdStatus 'PASS' 'Preflight OK'
 
     # Pick the test data file path. If the operator passed a real .dat file path,
     # use it as-is (advanced use). Otherwise create one inside the target directory
-    # named with a timestamp so concurrent runs don't collide.
+    # named with a millisecond-precision timestamp so concurrent runs within the
+    # same second don't collide.
     $testFile = if ($Target -match '\.dat$') {
         $Target
     } else {
-        Join-Path $Target ("diskspd-{0}.dat" -f (Get-Date -Format 'yyyy-MM-dd_HHmmss'))
+        Join-Path $Target ("diskspd-{0}.dat" -f (Get-Date -Format 'yyyy-MM-dd_HHmmss_fff'))
     }
 
-    Write-Status 'INFO' ("Running diskspd ({0}s, {1}t/QD{2}){3}" -f `
+    Write-DiskSpdStatus 'INFO' ("Running diskspd ({0}s, {1}t/QD{2}){3}" -f `
         $settings.DurationSeconds, $settings.Threads, $settings.QueueDepth, `
         $(if ($ComputerName) { " on $ComputerName" } else { '' }))
 
@@ -829,17 +835,17 @@ function Invoke-DiskSpdHeadless {
     } else {
         Invoke-DiskSpdLocal  -DiskSpdPath $DiskSpdPath -Settings $settings -TestFilePath $testFile
     }
-    Write-Status 'PASS' 'diskspd completed'
+    Write-DiskSpdStatus 'PASS' 'diskspd completed'
 
     $result = ConvertFrom-DiskSpdXml -Xml $xml -ProfileName $ProfileName
     $assess = Get-DiskSpdHealthAssessment -Result $result -Transport $transport
 
-    Write-Status 'INFO' ("Results: {0} IOPS / {1} MB/s read / {2} MB/s write / {3} ms avg latency" -f `
+    Write-DiskSpdStatus 'INFO' ("Results: {0} IOPS / {1} MB/s read / {2} MB/s write / {3} ms avg latency" -f `
         $result.IOPS, $result.ReadMBps, $result.WriteMBps, $result.AvgLatencyMs)
 
     $report = Export-DiskSpdHtmlReport -Result $result -Assessment $assess `
                 -Target $Target -OutputDirectory $OutputPath
-    Write-Status 'PASS' "Report saved: $report"
+    Write-DiskSpdStatus 'PASS' "Report saved: $report"
     return $report
 }
 
