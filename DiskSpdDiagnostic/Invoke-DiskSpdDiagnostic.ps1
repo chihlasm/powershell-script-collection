@@ -345,6 +345,10 @@ function Get-DiskSpdHealthAssessment {
         [Parameter(Mandatory)] [ValidateSet('Local','Network')] [string]$Transport
     )
 
+    # Threshold source of truth: CitrixVDADiagnostics/README.md. Keep these in sync
+    # so the new diagnostic's color-coding matches the existing FSLogix tooling.
+    # WARN band is inclusive on both edges (50/100 MB/s land in WARN, 10/20ms land
+    # in WARN) — pinned by the boundary tests in Tests/DiskSpdDiagnostic.Tests.ps1.
     $thresholds = if ($Transport -eq 'Local') {
         @{
             ReadOK = 100; ReadWarn = 50
@@ -372,11 +376,21 @@ function Get-DiskSpdHealthAssessment {
         else                  { 'CRIT' }
     }
 
-    @{
+    # P95/P99 are classified with the same latency thresholds as average. P95 in
+    # particular is more operationally relevant than mean for storage triage,
+    # so the HTML report (Task 10) colors all three latency rows.
+    $result = @{
         ReadMBps     = Classify-Throughput $Result.ReadMBps     $thresholds.ReadOK    $thresholds.ReadWarn
         WriteMBps    = Classify-Throughput $Result.WriteMBps    $thresholds.WriteOK   $thresholds.WriteWarn
         AvgLatencyMs = Classify-Latency    $Result.AvgLatencyMs $thresholds.LatencyOK $thresholds.LatencyWarn
     }
+    if ($null -ne $Result.Latency95Ms) {
+        $result.Latency95Ms = Classify-Latency $Result.Latency95Ms $thresholds.LatencyOK $thresholds.LatencyWarn
+    }
+    if ($null -ne $Result.Latency99Ms) {
+        $result.Latency99Ms = Classify-Latency $Result.Latency99Ms $thresholds.LatencyOK $thresholds.LatencyWarn
+    }
+    $result
 }
 
 # --- UI / headless dispatch goes here (Tasks 10-11) ---
