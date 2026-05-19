@@ -1015,11 +1015,17 @@ function Show-DiskSpdGui {
     # Shared state between the UI thread and the background runspace.
     # [hashtable]::Synchronized so reads/writes don't race.
     $script:uiState = [hashtable]::Synchronized(@{
-        ReportPath  = $null
-        Result      = $null
-        Assessment  = $null
-        Runspace    = $null
-        Cancelled   = $false
+        ReportPath    = $null
+        Result        = $null
+        Assessment    = $null
+        Runspace      = $null
+        Cancelled     = $false
+        StartTime     = $null
+        ExpectedSec   = 0
+        ProgressTimer = $null
+        Async         = $null
+        Ps            = $null
+        Timer         = $null
     })
 
     # --- Target mode wiring: enable only the active mode's fields ---
@@ -1149,24 +1155,29 @@ function Show-DiskSpdGui {
         # Determinate progress bar: estimate total runtime as the test's
         # DurationSeconds plus ~6s of diskspd warmup/cooldown overhead. Empirical
         # from the integration tests (a 3s test takes ~9s wall-clock).
-        $expectedSec = [int]$resolvedSettings.DurationSeconds + 6
-        $startTime   = Get-Date
+        # Store StartTime/ExpectedSec on $script:uiState so the tick handler can
+        # read them without relying on closure capture (WPF event handlers in
+        # PowerShell don't reliably close over outer-scope locals).
+        $script:uiState.StartTime   = Get-Date
+        $script:uiState.ExpectedSec = [int]$resolvedSettings.DurationSeconds + 6
         $pbProgress.IsIndeterminate = $false
         $pbProgress.Value = 0
-        & $setStatus "Running diskspd (0s / ${expectedSec}s)"
+        & $setStatus "Running diskspd (0s / $($script:uiState.ExpectedSec)s)"
 
         # Tick the progress bar every 250ms based on real elapsed time. Doesn't
         # touch diskspd; just gives the operator a "things are happening" signal.
         $progressTimer = New-Object System.Windows.Threading.DispatcherTimer
         $progressTimer.Interval = [TimeSpan]::FromMilliseconds(250)
         $progressTimer.Add_Tick({
-            $elapsed = (New-TimeSpan -Start $startTime).TotalSeconds
+            $elapsed = (New-TimeSpan -Start $script:uiState.StartTime).TotalSeconds
+            $total   = $script:uiState.ExpectedSec
             # Cap at 99% until the completion timer fires; never show 100% before done.
-            $pct = [math]::Min(99, [int](($elapsed / $expectedSec) * 100))
+            $pct = [math]::Min(99, [int](($elapsed / $total) * 100))
             $pbProgress.Value = $pct
-            $tbStatus.Text    = "Running diskspd ($([int]$elapsed)s / ${expectedSec}s)"
+            $tbStatus.Text    = "Running diskspd ($([int]$elapsed)s / ${total}s)"
         })
         $progressTimer.Start()
+        $script:uiState.ProgressTimer = $progressTimer
 
         # Build the background runspace. The scriptblock re-dot-sources the script
         # to access the engine functions in a fresh scope, then runs the orchestrator.
@@ -1203,16 +1214,23 @@ function Show-DiskSpdGui {
         $async = $ps.BeginInvoke()
         $script:uiState.Runspace  = $ps
         $script:uiState.Cancelled = $false
+        $script:uiState.Async     = $async
+        $script:uiState.Ps        = $ps
 
         # Poll for completion via DispatcherTimer (runs on the UI thread, safe to
-        # touch UI controls).
+        # touch UI controls). All cross-handler state (timers, async handle, runspace)
+        # lives on $script:uiState because WPF event handlers in PowerShell don't
+        # reliably close over outer-scope locals — especially value types.
         $timer = New-Object System.Windows.Threading.DispatcherTimer
         $timer.Interval = [TimeSpan]::FromMilliseconds(250)
+        $script:uiState.Timer = $timer
         $timer.Add_Tick({
+            $async = $script:uiState.Async
             if (-not $async.IsCompleted) { return }
-            $timer.Stop()
-            $progressTimer.Stop()
+            $script:uiState.Timer.Stop()
+            if ($script:uiState.ProgressTimer) { $script:uiState.ProgressTimer.Stop() }
 
+            $ps = $script:uiState.Ps
             try {
                 $out = $ps.EndInvoke($async) | Select-Object -First 1
             } catch {
