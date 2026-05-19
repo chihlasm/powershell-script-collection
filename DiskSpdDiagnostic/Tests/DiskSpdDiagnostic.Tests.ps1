@@ -69,3 +69,40 @@ Describe 'Get-DiskSpdWorkloadProfile' {
         { Get-DiskSpdWorkloadProfile -Name DoesNotExist } | Should -Throw
     }
 }
+
+Describe 'Resolve-DiskSpdSettings' {
+    It 'returns the profile unchanged when no overrides supplied' {
+        $s = Resolve-DiskSpdSettings -ProfileName FSLogixLike -Overrides @{}
+        $s.BlockSize  | Should -Be '4K'
+        $s.Threads    | Should -Be 4
+    }
+
+    It 'applies overrides on top of a preset' {
+        $s = Resolve-DiskSpdSettings -ProfileName FSLogixLike -Overrides @{
+            Threads         = 16
+            DurationSeconds = 120
+        }
+        $s.Threads          | Should -Be 16
+        $s.DurationSeconds  | Should -Be 120
+        $s.BlockSize        | Should -Be '4K' -Because 'unmodified keys keep preset values'
+    }
+
+    It 'requires every key when ProfileName is Custom' {
+        { Resolve-DiskSpdSettings -ProfileName Custom -Overrides @{ BlockSize = '4K' } } |
+            Should -Throw -ExpectedMessage '*Custom*requires*'
+    }
+
+    It 'accepts a complete Custom override set' {
+        $s = Resolve-DiskSpdSettings -ProfileName Custom -Overrides @{
+            BlockSize         = '512K'
+            Threads           = 8
+            QueueDepth        = 32
+            WriteRatioPercent = 50
+            DurationSeconds   = 45
+            TestFileSizeMB    = 2048
+            RandomIO          = $true
+        }
+        $s.BlockSize | Should -Be '512K'
+        $s.RandomIO  | Should -BeTrue
+    }
+}
