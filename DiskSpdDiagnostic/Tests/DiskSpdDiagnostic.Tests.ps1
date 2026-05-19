@@ -518,3 +518,58 @@ Describe 'Test-DiskSpdPreflight (local mode)' {
         ($r.Errors -join ' ') | Should -Not -Match 'Target not reachable'
     }
 }
+
+Describe 'Invoke-DiskSpdLocal (integration)' -Tag 'Integration' {
+    BeforeAll {
+        $script:DiskSpdExePath = (Resolve-Path (Join-Path $PSScriptRoot '..\diskspd.exe')).Path
+    }
+
+    It 'runs a quick test and returns XML containing <Results>' {
+        $settings = Get-DiskSpdWorkloadProfile -Name QuickSanity
+        $settings.DurationSeconds = 3  # keep the test fast
+        $testFile = Join-Path $env:TEMP "diskspd-itest-$([guid]::NewGuid()).dat"
+
+        try {
+            $xml = Invoke-DiskSpdLocal -DiskSpdPath $script:DiskSpdExePath -Settings $settings -TestFilePath $testFile
+            $xml | Should -Match '<Results>'
+            $xml | Should -Match '<TimeSpan>'
+        } finally {
+            Remove-Item $testFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'cleans up the test file after a successful run' {
+        $settings = Get-DiskSpdWorkloadProfile -Name QuickSanity
+        $settings.DurationSeconds = 3
+        $testFile = Join-Path $env:TEMP "diskspd-itest-$([guid]::NewGuid()).dat"
+        $null = Invoke-DiskSpdLocal -DiskSpdPath $script:DiskSpdExePath -Settings $settings -TestFilePath $testFile
+        Test-Path $testFile | Should -BeFalse -Because 'finally block must delete the test file'
+    }
+
+    It 'throws when diskspd exits non-zero (bad target path)' {
+        $settings = Get-DiskSpdWorkloadProfile -Name QuickSanity
+        $settings.DurationSeconds = 3
+        # Z:\nope\bad.dat — bogus drive, diskspd will fail to create the file
+        { Invoke-DiskSpdLocal -DiskSpdPath $script:DiskSpdExePath -Settings $settings -TestFilePath 'Z:\nope\bad.dat' } |
+            Should -Throw
+    }
+
+    It 'produces parseable XML compatible with ConvertFrom-DiskSpdXml' {
+        # End-to-end: run diskspd, pipe its output through the parser, verify shape.
+        # This is the most important integration test — it proves the whole local run
+        # pipeline produces output the parser can consume.
+        $settings = Get-DiskSpdWorkloadProfile -Name QuickSanity
+        $settings.DurationSeconds = 3
+        $testFile = Join-Path $env:TEMP "diskspd-itest-$([guid]::NewGuid()).dat"
+
+        try {
+            $xml    = Invoke-DiskSpdLocal -DiskSpdPath $script:DiskSpdExePath -Settings $settings -TestFilePath $testFile
+            $result = ConvertFrom-DiskSpdXml -Xml $xml -ProfileName QuickSanity
+            $result.IOPS        | Should -BeGreaterThan 0
+            $result.Duration    | Should -BeGreaterThan 0
+            $result.TestFilePath| Should -Match 'diskspd-itest-'
+        } finally {
+            Remove-Item $testFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
