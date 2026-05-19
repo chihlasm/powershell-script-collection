@@ -435,3 +435,27 @@ function Get-SecurityCategoryEvents {
     Write-StatusLine -Status 'INFO' -Message ("Filtered Security to {0} RDP-relevant events (LogonType 7/10)" -f $filtered.Count)
     return ,$filtered.ToArray()
 }
+
+# Writes the events to a CSV file. Always writes a header row, even when $Events is empty,
+# so downstream consumers can rely on a consistent shape.
+function Export-EventsToCsv {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Events,
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    $columns = 'TimeCreated','Category','LogName','Id','Level','LevelDisplayName','ProviderName','MachineName','UserId','Message'
+
+    if ($Events.Count -eq 0) {
+        # Write header-only CSV.
+        ($columns -join ',') | Out-File -LiteralPath $Path -Encoding UTF8
+    } else {
+        $Events |
+            Select-Object $columns |
+            Sort-Object TimeCreated |
+            Export-Csv -LiteralPath $Path -NoTypeInformation -Encoding UTF8
+    }
+
+    Write-StatusLine -Status 'PASS' -Message ("Wrote CSV: {0}" -f $Path)
+}
