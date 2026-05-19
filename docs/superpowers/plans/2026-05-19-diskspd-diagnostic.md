@@ -235,6 +235,10 @@ Write `DiskSpdDiagnostic/Tests/DiskSpdDiagnostic.Tests.ps1`:
 
 BeforeAll {
     $script:ScriptUnderTest = Join-Path $PSScriptRoot '..\Invoke-DiskSpdDiagnostic.ps1'
+    # Load the engine functions once for the whole file. Each Describe block runs
+    # in its own scope in Pester 5, but functions loaded in the file-level BeforeAll
+    # are visible to all of them. Don't add a per-Describe BeforeAll just for this.
+    . $script:ScriptUnderTest -ErrorAction SilentlyContinue *> $null
 }
 
 Describe 'DiskSpd Diagnostic — script entry' {
@@ -286,10 +290,6 @@ Append to `DiskSpdDiagnostic/Tests/DiskSpdDiagnostic.Tests.ps1`:
 
 ```powershell
 Describe 'Get-DiskSpdWorkloadProfile' {
-    BeforeAll {
-        . $script:ScriptUnderTest -ErrorAction SilentlyContinue *> $null
-    }
-
     It 'returns FSLogix-like profile values' {
         $p = Get-DiskSpdWorkloadProfile -Name FSLogixLike
         $p.BlockSize          | Should -Be '4K'
@@ -1785,6 +1785,12 @@ At the bottom of `Invoke-DiskSpdDiagnostic.ps1`, replace the placeholder dispatc
 
 ```powershell
 # --- Entry point ---
+
+# Guard against dot-sourcing (e.g., from Pester tests that load the engine functions
+# via `. $scriptPath`). When dot-sourced, $MyInvocation.InvocationName is '.' and we
+# must NOT execute the dispatch — otherwise every Pester run would either error on
+# preflight or pop a WPF window.
+if ($MyInvocation.InvocationName -eq '.') { return }
 
 if ($NoUI) {
     if (-not $Target) { throw "-Target is required when -NoUI is set." }

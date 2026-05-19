@@ -5,6 +5,10 @@
 
 BeforeAll {
     $script:ScriptUnderTest = Join-Path $PSScriptRoot '..\Invoke-DiskSpdDiagnostic.ps1'
+    # Load the engine functions once for the whole file. Each Describe block runs
+    # in its own scope in Pester 5, but functions loaded in the file-level BeforeAll
+    # are visible to all of them. Don't add a per-Describe BeforeAll just for this.
+    . $script:ScriptUnderTest -ErrorAction SilentlyContinue *> $null
 }
 
 Describe 'DiskSpd Diagnostic — script entry' {
@@ -15,10 +19,6 @@ Describe 'DiskSpd Diagnostic — script entry' {
 }
 
 Describe 'Get-DiskSpdWorkloadProfile' {
-    BeforeAll {
-        . $script:ScriptUnderTest -ErrorAction SilentlyContinue *> $null
-    }
-
     It 'returns FSLogix-like profile values' {
         $p = Get-DiskSpdWorkloadProfile -Name FSLogixLike
         $p.BlockSize          | Should -Be '4K'
