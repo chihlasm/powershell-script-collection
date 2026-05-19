@@ -79,3 +79,61 @@ param(
 )
 
 # ---- Functions defined below; orchestration block at the bottom ----
+
+# Color-coded console output matching project convention.
+function Write-StatusLine {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('INFO','PASS','WARN','FAIL')][string]$Status,
+        [Parameter(Mandatory)][string]$Message
+    )
+    $color = switch ($Status) {
+        'INFO' { 'Cyan' }
+        'PASS' { 'Green' }
+        'WARN' { 'Yellow' }
+        'FAIL' { 'Red' }
+    }
+    $stamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    Write-Host ("{0} [{1}] {2}" -f $stamp, $Status, $Message) -ForegroundColor $color
+}
+
+# Returns a hashtable @{ Start = [datetime]; End = [datetime] } from the script's parameters.
+# Defaults to the last 24 hours when neither -StartTime nor -LastHours/-LastDays were given.
+# Caller passes only the parameters they want considered (PowerShell's parameter sets
+# already enforce that StartTime and LastHours/LastDays are mutually exclusive).
+function Resolve-TimeWindow {
+    [CmdletBinding()]
+    param(
+        [datetime]$StartTime,
+        [datetime]$EndTime,
+        [int]$LastHours,
+        [int]$LastDays
+    )
+
+    $now = Get-Date
+    $bound = $PSBoundParameters
+
+    if ($bound.ContainsKey('StartTime')) {
+        $start = $StartTime
+        $end   = if ($bound.ContainsKey('EndTime')) { $EndTime } else { $now }
+    }
+    elseif ($bound.ContainsKey('LastHours')) {
+        $end   = $now
+        $start = $now.AddHours(-1 * $LastHours)
+    }
+    elseif ($bound.ContainsKey('LastDays')) {
+        $end   = $now
+        $start = $now.AddDays(-1 * $LastDays)
+    }
+    else {
+        # Default: last 24 hours
+        $end   = $now
+        $start = $now.AddHours(-24)
+    }
+
+    if ($start -ge $end) {
+        throw "StartTime ($start) must be earlier than EndTime ($end)."
+    }
+
+    return @{ Start = $start; End = $end }
+}
