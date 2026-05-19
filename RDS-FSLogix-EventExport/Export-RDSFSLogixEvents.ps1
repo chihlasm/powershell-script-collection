@@ -459,3 +459,210 @@ function Export-EventsToCsv {
 
     Write-StatusLine -Status 'PASS' -Message ("Wrote CSV: {0}" -f $Path)
 }
+
+# HTML-encode an arbitrary string. Loads System.Web on first call.
+function ConvertTo-HtmlEncoded {
+    param([string]$Text)
+    if ($null -eq $Text) { return '' }
+    if (-not ('System.Web.HttpUtility' -as [type])) {
+        Add-Type -AssemblyName System.Web -ErrorAction SilentlyContinue
+    }
+    return [System.Web.HttpUtility]::HtmlEncode($Text)
+}
+
+function Export-EventsToHtml {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Events,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$ComputerName,
+        [Parameter(Mandatory)][datetime]$Start,
+        [Parameter(Mandatory)][datetime]$End,
+        [Parameter(Mandatory)][int[]]$Level,
+        [bool]$IncludedSecurity
+    )
+
+    $css = @'
+<style>
+  :root {
+    --bg: #14181d; --panel: #1c2128; --panel2: #232a32; --border: #2d3540;
+    --text: #e6edf3; --muted: #8b96a3; --accent: #5dade2;
+    --err: #f85149; --warn: #d29922; --info: #58a6ff; --ok: #3fb950;
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; margin: 0; padding: 24px; }
+  h1 { margin: 0 0 4px; font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+  h2 { margin: 32px 0 12px; font-size: 16px; font-weight: 600; color: var(--text); border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+  .header { display: flex; justify-content: space-between; align-items: baseline; border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 24px; }
+  .header .meta { color: var(--muted); font-size: 13px; }
+  .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 8px; }
+  .chip { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; }
+  .chip .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .chip .value { font-size: 20px; font-weight: 600; margin-top: 4px; }
+  details { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 16px; overflow: hidden; }
+  details > summary { cursor: pointer; padding: 12px 16px; font-weight: 600; user-select: none; list-style: none; display: flex; justify-content: space-between; align-items: center; }
+  details > summary::-webkit-details-marker { display: none; }
+  details > summary::after { content: '\25BC'; color: var(--muted); font-size: 10px; transition: transform 0.15s; }
+  details[open] > summary::after { transform: rotate(180deg); }
+  details > summary .count { color: var(--muted); font-weight: 400; font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  thead th { background: var(--panel2); text-align: left; padding: 8px 12px; font-weight: 600; cursor: pointer; user-select: none; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  thead th:hover { color: var(--accent); }
+  tbody td { padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tbody tr:hover { background: rgba(255,255,255,0.02); }
+  .lvl-err  { color: var(--err); font-weight: 600; }
+  .lvl-warn { color: var(--warn); font-weight: 600; }
+  .lvl-info { color: var(--info); }
+  .lvl-muted{ color: var(--muted); }
+  .msg { color: var(--text); max-width: 520px; }
+  .msg.truncated { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+  .msg.truncated:hover { color: var(--accent); }
+  .empty { text-align: center; padding: 64px 16px; color: var(--muted); }
+  .empty strong { color: var(--text); display: block; font-size: 18px; margin-bottom: 8px; }
+  code { background: var(--panel2); padding: 1px 6px; border-radius: 3px; font-size: 12px; color: var(--accent); }
+</style>
+'@
+
+    $scriptBlock = @'
+<script>
+  document.addEventListener('click', function (e) {
+    if (e.target.classList && e.target.classList.contains('truncated')) {
+      e.target.classList.remove('truncated');
+    }
+  });
+  document.querySelectorAll('table').forEach(function (table) {
+    var headers = table.querySelectorAll('thead th');
+    headers.forEach(function (th, idx) {
+      var asc = true;
+      th.addEventListener('click', function () {
+        var tbody = table.querySelector('tbody');
+        var rows = Array.from(tbody.querySelectorAll('tr'));
+        rows.sort(function (a, b) {
+          var av = a.children[idx].dataset.sort || a.children[idx].textContent;
+          var bv = b.children[idx].dataset.sort || b.children[idx].textContent;
+          var an = parseFloat(av), bn = parseFloat(bv);
+          var cmp = (!isNaN(an) && !isNaN(bn)) ? (an - bn) : av.localeCompare(bv);
+          return asc ? cmp : -cmp;
+        });
+        rows.forEach(function (r) { tbody.appendChild(r); });
+        asc = !asc;
+      });
+    });
+  });
+</script>
+'@
+
+    # ----- Summary aggregates -----
+    $total = $Events.Count
+    $byCat = @{ 'RDS' = 0; 'FSLogix' = 0; 'System/App' = 0; 'Security' = 0 }
+    foreach ($e in $Events) {
+        if ($byCat.ContainsKey($e.Category)) { $byCat[$e.Category]++ }
+    }
+
+    $bySev = @{ Critical = 0; Error = 0; Warning = 0; Information = 0; Verbose = 0; Other = 0 }
+    foreach ($e in $Events) {
+        switch ($e.LevelDisplayName) {
+            'Critical'    { $bySev.Critical++ }
+            'Error'       { $bySev.Error++ }
+            'Warning'     { $bySev.Warning++ }
+            'Information' { $bySev.Information++ }
+            'Verbose'     { $bySev.Verbose++ }
+            default       { $bySev.Other++ }
+        }
+    }
+
+    # ----- Build per-category sections -----
+    $sectionsBuilder = New-Object System.Text.StringBuilder
+    foreach ($cat in @('RDS','FSLogix','System/App','Security')) {
+        if ($cat -eq 'Security' -and -not $IncludedSecurity) { continue }
+        $catEvents = @($Events | Where-Object { $_.Category -eq $cat } | Sort-Object TimeCreated -Descending)
+        $catCount = $catEvents.Count
+        $openAttr = if ($catCount -gt 0) { ' open' } else { '' }
+
+        [void]$sectionsBuilder.Append("<details$openAttr>")
+        [void]$sectionsBuilder.Append("<summary>$(ConvertTo-HtmlEncoded $cat) <span class=`"count`">$catCount events</span></summary>")
+        if ($catCount -eq 0) {
+            [void]$sectionsBuilder.Append('<div class="empty"><strong>No events</strong>None in this window.</div>')
+        } else {
+            [void]$sectionsBuilder.Append('<table><thead><tr>')
+            foreach ($h in 'Time','Level','Id','Provider','LogName','Message') {
+                [void]$sectionsBuilder.Append("<th>$h</th>")
+            }
+            [void]$sectionsBuilder.Append('</tr></thead><tbody>')
+            foreach ($e in $catEvents) {
+                $lvlClass = switch ($e.LevelDisplayName) {
+                    'Critical'    { 'lvl-err' }
+                    'Error'       { 'lvl-err' }
+                    'Warning'     { 'lvl-warn' }
+                    'Information' { 'lvl-info' }
+                    default       { 'lvl-muted' }
+                }
+                $timeIso = $e.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')
+                [void]$sectionsBuilder.Append('<tr>')
+                [void]$sectionsBuilder.Append("<td data-sort=`"$($e.TimeCreated.Ticks)`">$timeIso</td>")
+                [void]$sectionsBuilder.Append("<td class=`"$lvlClass`">$(ConvertTo-HtmlEncoded $e.LevelDisplayName)</td>")
+                [void]$sectionsBuilder.Append("<td>$($e.Id)</td>")
+                [void]$sectionsBuilder.Append("<td>$(ConvertTo-HtmlEncoded $e.ProviderName)</td>")
+                [void]$sectionsBuilder.Append("<td>$(ConvertTo-HtmlEncoded $e.LogName)</td>")
+                $msg = ConvertTo-HtmlEncoded $e.Message
+                [void]$sectionsBuilder.Append("<td class=`"msg truncated`" title=`"Click to expand`">$msg</td>")
+                [void]$sectionsBuilder.Append('</tr>')
+            }
+            [void]$sectionsBuilder.Append('</tbody></table>')
+        }
+        [void]$sectionsBuilder.Append('</details>')
+    }
+    $sectionsHtml = $sectionsBuilder.ToString()
+
+    # ----- Empty-state header replaces the sections if there are zero events -----
+    if ($total -eq 0) {
+        $sectionsHtml = '<div class="empty"><strong>No events in the specified window</strong>Try widening the time range or including Information-level events with <code>-Level 1,2,3,4</code>.</div>'
+    }
+
+    $levelText = ($Level | Sort-Object) -join ', '
+    $generatedAt = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    $compEnc = ConvertTo-HtmlEncoded $ComputerName
+    $startFmt = $Start.ToString('yyyy-MM-dd HH:mm')
+    $endFmt = $End.ToString('yyyy-MM-dd HH:mm')
+
+    $securityChip = ''
+    if ($IncludedSecurity) {
+        $securityChip = "    <div class=`"chip`"><div class=`"label`">Security</div><div class=`"value`">$($byCat['Security'])</div></div>"
+    }
+    $errTotal = $bySev.Critical + $bySev.Error
+
+    $html = @"
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>RDS / FSLogix Events &mdash; $compEnc</title>
+$css
+</head><body>
+  <div class="header">
+    <div>
+      <h1>RDS / FSLogix Events</h1>
+      <div class="meta">Host <code>$compEnc</code> &middot; Window <code>$startFmt</code> &rarr; <code>$endFmt</code> &middot; Levels <code>$levelText</code></div>
+    </div>
+    <div class="meta">Generated $generatedAt</div>
+  </div>
+
+  <div class="summary">
+    <div class="chip"><div class="label">Total</div><div class="value">$total</div></div>
+    <div class="chip"><div class="label">RDS</div><div class="value">$($byCat['RDS'])</div></div>
+    <div class="chip"><div class="label">FSLogix</div><div class="value">$($byCat['FSLogix'])</div></div>
+    <div class="chip"><div class="label">System / App</div><div class="value">$($byCat['System/App'])</div></div>
+$securityChip
+    <div class="chip"><div class="label">Errors</div><div class="value lvl-err">$errTotal</div></div>
+    <div class="chip"><div class="label">Warnings</div><div class="value lvl-warn">$($bySev.Warning)</div></div>
+  </div>
+
+  <h2>Events by Category</h2>
+  $sectionsHtml
+
+$scriptBlock
+</body></html>
+"@
+
+    $html | Out-File -LiteralPath $Path -Encoding UTF8
+    Write-StatusLine -Status 'PASS' -Message ("Wrote HTML: {0}" -f $Path)
+}
