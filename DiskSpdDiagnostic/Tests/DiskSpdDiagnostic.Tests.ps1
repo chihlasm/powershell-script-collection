@@ -184,3 +184,125 @@ Describe 'Build-DiskSpdArguments' {
             Should -Throw -ExpectedMessage '*missing required key*'
     }
 }
+
+Describe 'ConvertFrom-DiskSpdXml' {
+    BeforeAll {
+        $script:fixturePath = Join-Path $PSScriptRoot 'sample-diskspd-output.xml'
+        $script:fixtureXml  = Get-Content $script:fixturePath -Raw
+    }
+
+    It 'returns a PSCustomObject with all expected properties' {
+        $r = ConvertFrom-DiskSpdXml -Xml $script:fixtureXml -ProfileName QuickSanity
+        $r              | Should -BeOfType [PSCustomObject]
+        $r.IOPS         | Should -BeGreaterThan 0
+        $r.ReadMBps     | Should -BeGreaterOrEqual 0
+        $r.WriteMBps    | Should -BeGreaterOrEqual 0
+        $r.AvgLatencyMs | Should -BeGreaterThan 0
+        $r.Latency95Ms  | Should -BeGreaterOrEqual $r.AvgLatencyMs
+        $r.Latency99Ms  | Should -BeGreaterOrEqual $r.Latency95Ms
+        $r.CpuPercent   | Should -BeGreaterOrEqual 0
+        $r.TestFilePath | Should -Not -BeNullOrEmpty
+        $r.Duration     | Should -BeGreaterThan 0
+        $r.ProfileName  | Should -Be 'QuickSanity'
+        $r.RawXml       | Should -Be $script:fixtureXml
+    }
+
+    It 'computes IOPS as (ReadCount + WriteCount) divided by duration' {
+        # Minimal synthetic XML so we can assert exact arithmetic
+        $xml = @'
+<Results>
+  <TimeSpan>
+    <TestTimeSeconds>10</TestTimeSeconds>
+    <ThreadCount>1</ThreadCount>
+    <CpuUtilization>
+      <Average><UsagePercent>0</UsagePercent></Average>
+    </CpuUtilization>
+    <Thread>
+      <Id>0</Id>
+      <Target>
+        <Path>X:\t.dat</Path>
+        <ReadBytes>4096000</ReadBytes>
+        <ReadCount>1000</ReadCount>
+        <WriteBytes>2048000</WriteBytes>
+        <WriteCount>500</WriteCount>
+      </Target>
+    </Thread>
+    <Latency>
+      <AverageTotalMilliseconds>2</AverageTotalMilliseconds>
+      <Bucket><Percentile>95</Percentile><TotalMilliseconds>3</TotalMilliseconds></Bucket>
+      <Bucket><Percentile>99</Percentile><TotalMilliseconds>5</TotalMilliseconds></Bucket>
+    </Latency>
+  </TimeSpan>
+</Results>
+'@
+        $r = ConvertFrom-DiskSpdXml -Xml $xml -ProfileName QuickSanity
+        $r.IOPS | Should -Be 150 -Because '(1000 + 500) / 10 seconds'
+    }
+
+    It 'sums per-thread totals across multiple threads' {
+        $xml = @'
+<Results>
+  <TimeSpan>
+    <TestTimeSeconds>10</TestTimeSeconds>
+    <ThreadCount>2</ThreadCount>
+    <CpuUtilization>
+      <Average><UsagePercent>0</UsagePercent></Average>
+    </CpuUtilization>
+    <Thread>
+      <Id>0</Id>
+      <Target>
+        <Path>X:\t.dat</Path>
+        <ReadBytes>1048576</ReadBytes>
+        <ReadCount>100</ReadCount>
+        <WriteBytes>0</WriteBytes>
+        <WriteCount>0</WriteCount>
+      </Target>
+    </Thread>
+    <Thread>
+      <Id>1</Id>
+      <Target>
+        <Path>X:\t.dat</Path>
+        <ReadBytes>2097152</ReadBytes>
+        <ReadCount>200</ReadCount>
+        <WriteBytes>0</WriteBytes>
+        <WriteCount>0</WriteCount>
+      </Target>
+    </Thread>
+    <Latency>
+      <AverageTotalMilliseconds>1</AverageTotalMilliseconds>
+      <Bucket><Percentile>95</Percentile><TotalMilliseconds>2</TotalMilliseconds></Bucket>
+      <Bucket><Percentile>99</Percentile><TotalMilliseconds>3</TotalMilliseconds></Bucket>
+    </Latency>
+  </TimeSpan>
+</Results>
+'@
+        $r = ConvertFrom-DiskSpdXml -Xml $xml -ProfileName QuickSanity
+        $r.IOPS | Should -Be 30 -Because '(100 + 200) / 10 seconds, summed across both threads'
+    }
+
+    It 'throws on malformed XML with a clear message' {
+        { ConvertFrom-DiskSpdXml -Xml '<not valid xml' -ProfileName QuickSanity } |
+            Should -Throw -ExpectedMessage '*XML*'
+    }
+
+    It 'throws when TimeSpan is missing' {
+        $xml = '<Results></Results>'
+        { ConvertFrom-DiskSpdXml -Xml $xml -ProfileName QuickSanity } |
+            Should -Throw -ExpectedMessage '*TimeSpan*'
+    }
+
+    It 'throws when duration is zero (test did not run)' {
+        $xml = @'
+<Results>
+  <TimeSpan>
+    <TestTimeSeconds>0</TestTimeSeconds>
+    <CpuUtilization><Average><UsagePercent>0</UsagePercent></Average></CpuUtilization>
+    <Thread><Id>0</Id><Target><Path>x</Path><ReadBytes>0</ReadBytes><ReadCount>0</ReadCount><WriteBytes>0</WriteBytes><WriteCount>0</WriteCount></Target></Thread>
+    <Latency><AverageTotalMilliseconds>0</AverageTotalMilliseconds></Latency>
+  </TimeSpan>
+</Results>
+'@
+        { ConvertFrom-DiskSpdXml -Xml $xml -ProfileName QuickSanity } |
+            Should -Throw -ExpectedMessage '*zero duration*'
+    }
+}
