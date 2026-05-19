@@ -549,8 +549,10 @@ Describe 'Invoke-DiskSpdLocal (integration)' -Tag 'Integration' {
     It 'throws when diskspd exits non-zero (bad target path)' {
         $settings = Get-DiskSpdWorkloadProfile -Name QuickSanity
         $settings.DurationSeconds = 3
-        # Z:\nope\bad.dat — bogus drive, diskspd will fail to create the file
-        { Invoke-DiskSpdLocal -DiskSpdPath $script:DiskSpdExePath -Settings $settings -TestFilePath 'Z:\nope\bad.dat' } |
+        # Use a GUID-based path under a non-existent drive root that can't accidentally
+        # exist on a dev machine (Z: might be mapped). The path is guaranteed bogus.
+        $badPath = "Z:\diskspd-nonexistent-$([guid]::NewGuid())\bad.dat"
+        { Invoke-DiskSpdLocal -DiskSpdPath $script:DiskSpdExePath -Settings $settings -TestFilePath $badPath } |
             Should -Throw
     }
 
@@ -757,7 +759,7 @@ Describe 'Invoke-DiskSpdHeadless (integration)' -Tag 'Integration' {
     It 'throws on preflight failure with a clear message' {
         { Invoke-DiskSpdHeadless `
             -DiskSpdPath $script:DiskSpdExePath `
-            -Target 'Z:\definitely-not-there-12345' `
+            -Target "Z:\diskspd-nonexistent-$([guid]::NewGuid())" `
             -ProfileName QuickSanity -Overrides @{} `
             -OutputPath $script:headlessReportDir -Force } |
             Should -Throw -ExpectedMessage '*Preflight failed*'
