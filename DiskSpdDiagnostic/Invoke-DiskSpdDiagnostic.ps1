@@ -255,6 +255,81 @@ function Build-DiskSpdArguments {
     return $argv
 }
 
+function ConvertFrom-DiskSpdXml {
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory)] [string]$Xml,
+        [Parameter(Mandatory)] [string]$ProfileName
+    )
+
+    try {
+        [xml]$doc = $Xml
+    } catch {
+        throw "Failed to parse diskspd XML output: $($_.Exception.Message)"
+    }
+
+    $timeSpan = $doc.Results.TimeSpan
+    if (-not $timeSpan) { throw "diskspd XML missing <TimeSpan> - output may be a partial run." }
+
+    $durationSec = [double]$timeSpan.TestTimeSeconds
+    if ($durationSec -le 0) { throw "diskspd XML reports zero duration - test did not run." }
+
+    # Force array semantics: PowerShell XML returns a single element (not a 1-element array)
+    # when there's only one Thread, so @(...) ensures the sum/aggregate pipeline works in both
+    # single-thread and multi-thread cases.
+    $threads = @($timeSpan.Thread)
+    $readBytes  = ($threads | ForEach-Object { [int64]$_.Target.ReadBytes  } | Measure-Object -Sum).Sum
+    $writeBytes = ($threads | ForEach-Object { [int64]$_.Target.WriteBytes } | Measure-Object -Sum).Sum
+    $readCount  = ($threads | ForEach-Object { [int64]$_.Target.ReadCount  } | Measure-Object -Sum).Sum
+    $writeCount = ($threads | ForEach-Object { [int64]$_.Target.WriteCount } | Measure-Object -Sum).Sum
+    $testFile   = $threads[0].Target.Path
+
+    $readMBps   = [math]::Round($readBytes  / 1MB / $durationSec, 2)
+    $writeMBps  = [math]::Round($writeBytes / 1MB / $durationSec, 2)
+    $iops       = [math]::Round(($readCount + $writeCount) / $durationSec, 0)
+
+    # Average latency: prefer AverageTotalMilliseconds (combined R+W average from diskspd v2.2).
+    # Fall back to ReadOnly average if Total is absent (very old diskspd builds).
+    $avgMs = if ($timeSpan.Latency.AverageTotalMilliseconds) {
+        [double]$timeSpan.Latency.AverageTotalMilliseconds
+    } elseif ($timeSpan.Latency.AverageReadMilliseconds) {
+        [double]$timeSpan.Latency.AverageReadMilliseconds
+    } else { 0 }
+
+    # Bucket lookup: TotalMilliseconds is the combined R+W percentile latency.
+    # If TotalMilliseconds is absent, fall back to ReadMilliseconds.
+    function Get-BucketLatency([object]$buckets, [int]$percentile) {
+        $b = $buckets | Where-Object { [double]$_.Percentile -eq $percentile } | Select-Object -First 1
+        if (-not $b) { return $null }
+        if ($b.TotalMilliseconds) { return [double]$b.TotalMilliseconds }
+        if ($b.ReadMilliseconds)  { return [double]$b.ReadMilliseconds }
+        return $null
+    }
+
+    $buckets = @($timeSpan.Latency.Bucket)
+    $p95 = Get-BucketLatency -buckets $buckets -percentile 95
+    $p99 = Get-BucketLatency -buckets $buckets -percentile 99
+    if ($null -eq $p95) { $p95 = $avgMs }
+    if ($null -eq $p99) { $p99 = $p95   }
+
+    $cpu = [double]$timeSpan.CpuUtilization.Average.UsagePercent
+
+    [PSCustomObject]@{
+        IOPS         = [int]$iops
+        ReadMBps     = $readMBps
+        WriteMBps    = $writeMBps
+        AvgLatencyMs = [math]::Round($avgMs, 3)
+        Latency95Ms  = [math]::Round([double]$p95, 3)
+        Latency99Ms  = [math]::Round([double]$p99, 3)
+        CpuPercent   = [math]::Round($cpu, 2)
+        TestFilePath = $testFile
+        Duration     = $durationSec
+        ProfileName  = $ProfileName
+        RawXml       = $Xml
+    }
+}
+
 # --- UI / headless dispatch goes here (Tasks 10-11) ---
 
 # Entry-point dispatch (filled in Task 12):
