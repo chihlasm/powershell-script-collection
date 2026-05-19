@@ -393,6 +393,104 @@ function Get-DiskSpdHealthAssessment {
     $result
 }
 
+function Test-DiskSpdPreflight {
+    [CmdletBinding()]
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory)] [string]$DiskSpdPath,
+        [Parameter(Mandatory)] [string]$Target,
+        [Parameter(Mandatory)] [int]   $TestFileSizeMB,
+        [string]    $ComputerName,
+        [switch]    $BusinessHoursForce,
+        [datetime]  $BusinessHoursNow = (Get-Date)
+    )
+
+    $errors   = @()
+    $warnings = @()
+
+    # 1. Binary present + Microsoft-signed.
+    # A missing binary is an ERROR (we cannot proceed). A bad signature is a WARNING
+    # (operator can still proceed knowingly — useful for offline lab environments).
+    if (-not (Test-Path $DiskSpdPath)) {
+        $errors += "diskspd.exe not found at: $DiskSpdPath"
+    } else {
+        try {
+            $sig = Get-AuthenticodeSignature -FilePath $DiskSpdPath -ErrorAction Stop
+            if ($sig.Status -ne 'Valid') {
+                $warnings += "diskspd.exe Authenticode status is '$($sig.Status)'."
+            } elseif ($sig.SignerCertificate.Subject -notmatch 'Microsoft') {
+                $warnings += "diskspd.exe is signed but not by Microsoft: $($sig.SignerCertificate.Subject)"
+            }
+        } catch {
+            $warnings += "Could not verify diskspd.exe signature: $($_.Exception.Message)"
+        }
+    }
+
+    # 2-3. Target reachable + writable + free space (local-mode only).
+    # When -ComputerName is set, the target lives on the remote machine — we skip these
+    # checks here and rely on the remote-mode admin-share check + the actual remote run.
+    if (-not $ComputerName) {
+        if ([string]::IsNullOrWhiteSpace($Target)) {
+            $errors += "Target is empty or whitespace."
+        } elseif (-not (Test-Path $Target)) {
+            $errors += "Target not reachable: $Target"
+        } else {
+            $probe = Join-Path $Target "diskspd-preflight-$([guid]::NewGuid()).tmp"
+            try {
+                [IO.File]::WriteAllBytes($probe, [byte[]]@(0))
+                Remove-Item $probe -Force -ErrorAction Stop
+            } catch {
+                $errors += "Target not writable: $Target - $($_.Exception.Message)"
+            }
+
+            # Free space check. UNC shares often don't expose PSDrive.Free reliably;
+            # in that case we surface a WARNING (not an error) so the operator decides.
+            try {
+                $root  = (Resolve-Path $Target -ErrorAction Stop).ProviderPath
+                $drive = (Get-Item $root).PSDrive
+                if ($drive -and $drive.Free) {
+                    $neededBytes = $TestFileSizeMB * 1.2MB
+                    if ($drive.Free -lt $neededBytes) {
+                        $errors += ("Insufficient free space at {0}: have {1:N0} MB, need {2:N0} MB (file size x1.2)." -f
+                                    $Target, ($drive.Free/1MB), ($neededBytes/1MB))
+                    }
+                } else {
+                    $warnings += "Could not determine free space at $Target (UNC share or unmapped drive)."
+                }
+            } catch {
+                $warnings += "Could not check free space at ${Target}: $($_.Exception.Message)"
+            }
+        }
+    }
+
+    # 4. Remote reachability (only in remote mode).
+    if ($ComputerName) {
+        try {
+            $null = Test-WSMan -ComputerName $ComputerName -ErrorAction Stop
+        } catch {
+            $errors += "Test-WSMan failed for ${ComputerName}: $($_.Exception.Message)"
+        }
+        $admin = "\\$ComputerName\C`$\Windows\Temp"
+        if (-not (Test-Path $admin)) {
+            $errors += "Admin share not accessible: $admin"
+        }
+    }
+
+    # 5. Business hours warning. 7am-6pm Mon-Fri local time.
+    # Upper bound is EXCLUSIVE: 7:00 warns, 18:00 does not (lunchtime to end-of-day).
+    $isBusinessHours = ($BusinessHoursNow.DayOfWeek -in @('Monday','Tuesday','Wednesday','Thursday','Friday')) `
+                       -and ($BusinessHoursNow.Hour -ge 7 -and $BusinessHoursNow.Hour -lt 18)
+    if ($isBusinessHours -and -not $BusinessHoursForce) {
+        $warnings += "Running during business hours ($($BusinessHoursNow.ToString('yyyy-MM-dd HH:mm:ss'))). Sustained I/O may affect users."
+    }
+
+    [PSCustomObject]@{
+        Pass     = ($errors.Count -eq 0)
+        Errors   = $errors
+        Warnings = $warnings
+    }
+}
+
 # --- UI / headless dispatch goes here (Tasks 10-11) ---
 
 # Entry-point dispatch (filled in Task 12):
