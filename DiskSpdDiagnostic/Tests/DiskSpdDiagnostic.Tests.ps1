@@ -680,4 +680,50 @@ Describe 'Export-DiskSpdHtmlReport' {
             Remove-Item $newDir -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
+
+    It 'emits all 9 metric labels in the results table' {
+        # Regression guard: if anyone drops a row from the $rows array, only this
+        # test will catch it (visual review of the report is the only other gate).
+        $out = Export-DiskSpdHtmlReport -Result $script:reportFixtureResult `
+                -Assessment $script:reportFixtureAssess -Target 'C:\' `
+                -OutputDirectory $script:reportDir
+        $html = Get-Content $out -Raw
+        foreach ($label in @('IOPS','Read MB/s','Write MB/s','Avg latency','P95 latency','P99 latency','CPU %','Test file','Duration')) {
+            $html | Should -Match ([regex]::Escape($label)) -Because "row '$label' must be present"
+        }
+    }
+
+    It 'preserves admin-share characters like $ in the target without backreference loss' {
+        # -replace would consume $1 as a regex backreference; .Replace() is literal.
+        $out = Export-DiskSpdHtmlReport -Result $script:reportFixtureResult `
+                -Assessment $script:reportFixtureAssess -Target '\\server\C$' `
+                -OutputDirectory $script:reportDir
+        $html = Get-Content $out -Raw
+        # The $ should survive into the rendered HTML (HtmlEncode preserves $).
+        $html | Should -Match 'server.*C\$'
+    }
+
+    It 'orders P95/P99 badges deterministically in the health assessment' {
+        $assess = @{
+            ReadMBps     = 'OK'
+            WriteMBps    = 'WARN'
+            AvgLatencyMs = 'OK'
+            Latency95Ms  = 'WARN'
+            Latency99Ms  = 'CRIT'
+        }
+        $out = Export-DiskSpdHtmlReport -Result $script:reportFixtureResult `
+                -Assessment $assess -Target 'C:\' `
+                -OutputDirectory $script:reportDir
+        $html = Get-Content $out -Raw
+        # Locate the index of each badge label; they must appear in the documented order.
+        $idxRead = $html.IndexOf('ReadMBps:')
+        $idxWrite = $html.IndexOf('WriteMBps:')
+        $idxAvg = $html.IndexOf('AvgLatencyMs:')
+        $idx95 = $html.IndexOf('Latency95Ms:')
+        $idx99 = $html.IndexOf('Latency99Ms:')
+        $idxRead  | Should -BeLessThan $idxWrite
+        $idxWrite | Should -BeLessThan $idxAvg
+        $idxAvg   | Should -BeLessThan $idx95
+        $idx95    | Should -BeLessThan $idx99
+    }
 }

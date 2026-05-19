@@ -724,19 +724,32 @@ function Export-DiskSpdHtmlReport {
         "<tr><td>$($_.M)</td><td class=`"num`">$valueEncoded</td><td>$badge</td></tr>"
     }) -join "`n"
 
-    $badgesHtml = ($Assessment.GetEnumerator() | ForEach-Object {
-        "<span class=`"$(Get-BadgeClass $_.Value)`">$($_.Key): $($_.Value)</span>"
-    }) -join ' '
+    # Iterate in a fixed display order so reports from different runs can be
+    # diff'd side-by-side without spurious badge reordering. Skip keys the
+    # assessment didn't populate (P95/P99 only present when input has them).
+    $badgeKeyOrder = @('ReadMBps','WriteMBps','AvgLatencyMs','Latency95Ms','Latency99Ms')
+    $badgesHtml = (@(foreach ($key in $badgeKeyOrder) {
+        if ($Assessment.ContainsKey($key)) {
+            "<span class=`"$(Get-BadgeClass $Assessment[$key])`">${key}: $($Assessment[$key])</span>"
+        }
+    }) -join ' ')
 
     $rawXmlEncoded = [System.Web.HttpUtility]::HtmlEncode($Result.RawXml)
 
-    $html = $tpl `
-        -replace '\{\{TARGET\}\}',        [System.Web.HttpUtility]::HtmlEncode($Target) `
-        -replace '\{\{PROFILE\}\}',       [System.Web.HttpUtility]::HtmlEncode($Result.ProfileName) `
-        -replace '\{\{TIMESTAMP\}\}',     $timestamp `
-        -replace '\{\{RESULTS_TABLE\}\}', $rowsHtml `
-        -replace '\{\{HEALTH_BADGES\}\}', $badgesHtml `
-        -replace '\{\{RAW_XML\}\}',       $rawXmlEncoded
+    # Use [string]::Replace (not -replace) for placeholder substitution.
+    # -replace treats the replacement as a regex pattern, so a target like
+    # \\server\C$1 would have $1 consumed as a backreference. .Replace() is
+    # a literal-string method on both sides and avoids the foot-gun.
+    # (NOTE: {{PROFILE}} placeholder corresponds to the user-facing -Workload
+    # parameter; "Profile" is the legacy internal name preserved for now.)
+    $encodedTarget   = [System.Web.HttpUtility]::HtmlEncode($Target)
+    $encodedWorkload = [System.Web.HttpUtility]::HtmlEncode($Result.ProfileName)
+    $html = $tpl.Replace('{{TARGET}}',        $encodedTarget) `
+                .Replace('{{PROFILE}}',       $encodedWorkload) `
+                .Replace('{{TIMESTAMP}}',     $timestamp) `
+                .Replace('{{RESULTS_TABLE}}', $rowsHtml) `
+                .Replace('{{HEALTH_BADGES}}', $badgesHtml) `
+                .Replace('{{RAW_XML}}',       $rawXmlEncoded)
 
     $filename = "diskspd_${safeTarget}_${fileTimestamp}.html"
     $outFile  = Join-Path $OutputDirectory $filename
