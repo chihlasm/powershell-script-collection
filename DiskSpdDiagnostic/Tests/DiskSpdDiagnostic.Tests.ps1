@@ -436,7 +436,7 @@ Describe 'Test-DiskSpdPreflight (local mode)' {
         $r = Test-DiskSpdPreflight -DiskSpdPath $script:DiskSpdExePath -Target 'Z:\definitely\not\there' `
             -TestFileSizeMB 64 -BusinessHoursForce
         $r.Pass   | Should -BeFalse
-        $r.Errors | Should -Match '(reachable|not found)'
+        $r.Errors | Should -Match 'Target not reachable'
     }
 
     It 'warns during business hours' {
@@ -476,5 +476,46 @@ Describe 'Test-DiskSpdPreflight (local mode)' {
         $r = Test-DiskSpdPreflight -DiskSpdPath $script:DiskSpdExePath -Target $script:probeDir `
             -TestFileSizeMB 64 -BusinessHoursNow ([datetime]'2026-05-20 18:00:00')
         ($r.Warnings -join ' ') | Should -Not -Match 'business hours'
+    }
+
+    It 'warns at 5:59 PM on a weekday (inside upper boundary)' {
+        # 17:59 has Hour=17 which is -lt 18, so we should warn.
+        $r = Test-DiskSpdPreflight -DiskSpdPath $script:DiskSpdExePath -Target $script:probeDir `
+            -TestFileSizeMB 64 -BusinessHoursNow ([datetime]'2026-05-20 17:59:00')
+        $r.Warnings | Should -Match 'business hours'
+    }
+
+    It 'fails with a clear message when free space is insufficient' {
+        # Mock Get-Item ONLY for the test's probe directory so we don't perturb any
+        # other Get-Item calls (Pester internals, signature check, etc.). Force the
+        # PSDrive.Free to 10 MB so a 64 MB test (needs 76.8 MB) fails the headroom check.
+        # If this test is flaky in your Pester version, the fallback is to assume the
+        # comparison logic is correct and treat this branch as a documented gap.
+        $probeDir = $script:probeDir
+        Mock -CommandName Get-Item -ParameterFilter { $Path -eq $probeDir } -MockWith {
+            [PSCustomObject]@{ PSDrive = [PSCustomObject]@{ Free = 10MB } }
+        }
+        $r = Test-DiskSpdPreflight -DiskSpdPath $script:DiskSpdExePath -Target $probeDir `
+            -TestFileSizeMB 64 -BusinessHoursForce
+        $r.Pass   | Should -BeFalse
+        $r.Errors | Should -Match 'Insufficient free space'
+        $r.Errors | Should -Match 'have 10'
+    }
+
+    It 'remote mode: reports Test-WSMan failure for an unreachable computer' {
+        # 'definitely-does-not-exist-12345' won't resolve; Test-WSMan throws fast.
+        $r = Test-DiskSpdPreflight -DiskSpdPath $script:DiskSpdExePath -Target 'C:\Windows\Temp' `
+            -ComputerName 'definitely-does-not-exist-12345' -TestFileSizeMB 64 -BusinessHoursForce
+        $r.Pass   | Should -BeFalse
+        $r.Errors | Should -Match 'Test-WSMan failed'
+    }
+
+    It 'remote mode: skips local-target reachability checks' {
+        # With -ComputerName set, the target lives on the remote machine, so a bogus
+        # local path must NOT produce a 'Target not reachable' error here. The remote
+        # call itself will error out, but for a different reason.
+        $r = Test-DiskSpdPreflight -DiskSpdPath $script:DiskSpdExePath -Target 'Z:\nope' `
+            -ComputerName 'definitely-does-not-exist-12345' -TestFileSizeMB 64 -BusinessHoursForce
+        ($r.Errors -join ' ') | Should -Not -Match 'Target not reachable'
     }
 }
