@@ -483,15 +483,19 @@ function Test-DiskSpdPreflight {
     # Test-WSMan can either throw OR return $null depending on Windows version and
     # the kind of failure (DNS lookup vs. WinRM listener missing). Handle both.
     if ($ComputerName) {
-        $wsManOk = $false
+        $wsManOk        = $false
+        $wsManThrew     = $false
         try {
             $wsManResult = Test-WSMan -ComputerName $ComputerName -ErrorAction Stop
             if ($wsManResult) { $wsManOk = $true }
         } catch {
+            $wsManThrew = $true
             $errors += "Test-WSMan failed for ${ComputerName}: $($_.Exception.Message)"
         }
-        if (-not $wsManOk -and ($errors -notmatch 'Test-WSMan failed')) {
+        if (-not $wsManOk -and -not $wsManThrew) {
             # Returned $null/empty without throwing — surface as the same error class.
+            # Some Windows builds don't terminate on DNS resolution failure even
+            # under -ErrorAction Stop, so we synthesize the diagnostic here.
             $errors += "Test-WSMan failed for ${ComputerName}: no response (host unreachable or WinRM not listening)"
         }
         $admin = "\\$ComputerName\C`$\Windows\Temp"
