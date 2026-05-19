@@ -666,3 +666,68 @@ $scriptBlock
     $html | Out-File -LiteralPath $Path -Encoding UTF8
     Write-StatusLine -Status 'PASS' -Message ("Wrote HTML: {0}" -f $Path)
 }
+
+# ============================================================================
+# Orchestration
+# ============================================================================
+
+try {
+    if (-not ('System.Web.HttpUtility' -as [type])) {
+        Add-Type -AssemblyName System.Web -ErrorAction SilentlyContinue
+    }
+
+    # Forward only the time-window parameters the caller actually supplied.
+    $windowArgs = @{}
+    foreach ($p in 'StartTime','EndTime','LastHours','LastDays') {
+        if ($PSBoundParameters.ContainsKey($p)) { $windowArgs[$p] = $PSBoundParameters[$p] }
+    }
+    $window = Resolve-TimeWindow @windowArgs
+
+    $resolvedOut = Resolve-OutputPath -Path $OutputPath
+    $stamp = (Get-Date).ToString('yyyy-MM-dd_HHmmss')
+    $csvPath  = Join-Path $resolvedOut ("RDS-FSLogix-Events_{0}_{1}.csv"  -f $env:COMPUTERNAME, $stamp)
+    $htmlPath = Join-Path $resolvedOut ("RDS-FSLogix-Events_{0}_{1}.html" -f $env:COMPUTERNAME, $stamp)
+
+    Write-StatusLine -Status 'INFO' -Message ("Host:    {0}" -f $env:COMPUTERNAME)
+    Write-StatusLine -Status 'INFO' -Message ("Window:  {0}  ->  {1}" -f $window.Start, $window.End)
+    Write-StatusLine -Status 'INFO' -Message ("Levels:  {0}" -f (($Level | Sort-Object) -join ', '))
+    Write-StatusLine -Status 'INFO' -Message ("Output:  {0}" -f $resolvedOut)
+    if ($IncludeSecurity) { Write-StatusLine -Status 'INFO' -Message 'Security log: requested (admin required)' }
+
+    $all = New-Object System.Collections.Generic.List[object]
+
+    Write-StatusLine -Status 'INFO' -Message '--- Collecting RDS Operational logs ---'
+    foreach ($e in (Get-RDSCategoryEvents -Start $window.Start -End $window.End -Level $Level)) {
+        $all.Add($e)
+    }
+
+    Write-StatusLine -Status 'INFO' -Message '--- Collecting FSLogix logs ---'
+    foreach ($e in (Get-FSLogixCategoryEvents -Start $window.Start -End $window.End -Level $Level)) {
+        $all.Add($e)
+    }
+
+    Write-StatusLine -Status 'INFO' -Message '--- Collecting System / Application (filtered) ---'
+    foreach ($e in (Get-SystemAppCategoryEvents -Start $window.Start -End $window.End -Level $Level)) {
+        $all.Add($e)
+    }
+
+    if ($IncludeSecurity) {
+        Write-StatusLine -Status 'INFO' -Message '--- Collecting Security (RDP logon events) ---'
+        foreach ($e in (Get-SecurityCategoryEvents -Start $window.Start -End $window.End -Level $Level)) {
+            $all.Add($e)
+        }
+    }
+
+    Write-StatusLine -Status 'INFO' -Message ("--- Total events collected: {0} ---" -f $all.Count)
+
+    Export-EventsToCsv  -Events $all.ToArray() -Path $csvPath
+    Export-EventsToHtml -Events $all.ToArray() -Path $htmlPath `
+        -ComputerName $env:COMPUTERNAME -Start $window.Start -End $window.End `
+        -Level $Level -IncludedSecurity ([bool]$IncludeSecurity)
+
+    Write-StatusLine -Status 'PASS' -Message 'Done.'
+}
+catch {
+    Write-StatusLine -Status 'FAIL' -Message ("Fatal: {0}" -f $_.Exception.Message)
+    exit 1
+}
