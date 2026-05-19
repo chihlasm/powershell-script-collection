@@ -365,4 +365,40 @@ Describe 'Get-DiskSpdHealthAssessment' {
         $b = [PSCustomObject]@{ ReadMBps=75; WriteMBps=75; AvgLatencyMs=15 }
         { Get-DiskSpdHealthAssessment -Result $b -Transport Mars } | Should -Throw
     }
+
+    It 'flags Network borderline values as WARN' {
+        $b = [PSCustomObject]@{ ReadMBps=37; WriteMBps=30; AvgLatencyMs=35 }
+        $a = Get-DiskSpdHealthAssessment -Result $b -Transport Network
+        $a.ReadMBps     | Should -Be 'WARN'
+        $a.WriteMBps    | Should -Be 'WARN'
+        $a.AvgLatencyMs | Should -Be 'WARN'
+    }
+
+    It 'pins exact-boundary semantics (WARN inclusive on both edges)' -ForEach @(
+        @{ ReadMBps = 100;   expected = 'WARN' -as [string]  }  # upper edge
+        @{ ReadMBps = 100.01;expected = 'OK'                 }
+        @{ ReadMBps = 50;    expected = 'WARN'               }  # lower edge
+        @{ ReadMBps = 49.99; expected = 'CRIT'               }
+    ) {
+        $r = [PSCustomObject]@{ ReadMBps = $ReadMBps; WriteMBps = 999; AvgLatencyMs = 0 }
+        (Get-DiskSpdHealthAssessment -Result $r -Transport Local).ReadMBps | Should -Be $expected
+    }
+
+    It 'classifies P95 and P99 latency when present' {
+        $r = [PSCustomObject]@{
+            ReadMBps=999; WriteMBps=999; AvgLatencyMs=5
+            Latency95Ms=15; Latency99Ms=25
+        }
+        $a = Get-DiskSpdHealthAssessment -Result $r -Transport Local
+        $a.AvgLatencyMs | Should -Be 'OK'    -Because '5ms < 10ms (LatencyOK)'
+        $a.Latency95Ms  | Should -Be 'WARN'  -Because '15ms is in 10-20ms WARN band'
+        $a.Latency99Ms  | Should -Be 'CRIT'  -Because '25ms > 20ms (LatencyWarn)'
+    }
+
+    It 'omits P95/P99 keys when not present on the Result object' {
+        $r = [PSCustomObject]@{ ReadMBps=999; WriteMBps=999; AvgLatencyMs=5 }
+        $a = Get-DiskSpdHealthAssessment -Result $r -Transport Local
+        $a.ContainsKey('Latency95Ms') | Should -BeFalse
+        $a.ContainsKey('Latency99Ms') | Should -BeFalse
+    }
 }
