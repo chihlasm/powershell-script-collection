@@ -19,11 +19,15 @@ The current script supports two deployment modes — `CitrixVDA` and `RDS` — b
 
 ## Non-goals
 
-- Installing the AVD WebRTC Redirector MSI (separate component, image-build pipelines handle it independently).
 - Supporting the new "SlimCore-based" VDI 2.0 optimization stack — `IsWVDEnvironment` remains required through April 2027 per Microsoft Learn, and this script targets today's deployments.
 - Adding `-WhatIf` / `-Confirm` plumbing (out of scope; flag for future).
 - Renaming the `-DeploymentType` enum values (`RDS` → `MultiSession`) — breaking change rejected during brainstorm.
 - Any unit test framework — repo doesn't have one; manual testing only.
+
+## Revision history
+
+- **2026-05-20 (initial)** — design as captured below.
+- **2026-05-20 (amendment 1)** — added WebRTC Redirector install and per-machine classic Teams MSI cleanup after comparing against a working Nerdio scripted-action (`RDS-FSLogix-EventExport/Nerdio.ps1`). Without the WebRTC Redirector, `IsWVDEnvironment=1` flags Teams as VDI-aware but no codec partner exists for AV redirection, so calls fall back to server-side rendering. Without per-machine MSI cleanup, image-build VMs that previously had classic Teams Machine-Wide Installer leave the MSI registered after our run.
 
 ## Authoritative source
 
@@ -58,17 +62,21 @@ Root `README.md` references (TOC anchor, section heading, two example paths at l
 [string]$DeploymentType,
 ```
 
-New parameter for the bootstrapper download URL, mirroring the existing `$TeamsDownloadUrl` and `$WebView2Url` pattern:
+New parameters mirroring the existing `$TeamsDownloadUrl` / `$WebView2Url` pattern:
 
 ```powershell
-[string]$TeamsBootstrapperUrl = "https://go.microsoft.com/fwlink/?linkid=2243204"
+[string]$TeamsBootstrapperUrl = "https://go.microsoft.com/fwlink/?linkid=2243204",
+[string]$WebRTCRedirectorUrl  = "https://aka.ms/msrdcwebrtcsvc/msi",
+[switch]$SkipWebRTCRedirector
 ```
 
-`.SYNOPSIS`, `.DESCRIPTION`, `.NOTES`, and `.EXAMPLE` blocks updated. New `.EXAMPLE` blocks demonstrate AVD mode with download and with a local MSIX. `.NOTES` gains a paragraph on the image-build workflow (run once in the build VM before sealing) and a paragraph citing the WebRTC deprecation timeline.
+`-WebRTCRedirectorUrl` and `-SkipWebRTCRedirector` are AVD-only and quietly ignored in `CitrixVDA` / `RDS` modes (Citrix has its own HDX optimization stack; RDS without AVD doesn't use the MS WebRTC redirector).
+
+`.SYNOPSIS`, `.DESCRIPTION`, `.NOTES`, and `.EXAMPLE` blocks updated. New `.EXAMPLE` blocks demonstrate AVD mode with download, with a local MSIX, and with `-SkipWebRTCRedirector`. `.NOTES` gains a paragraph on the image-build workflow (run once in the build VM before sealing) and a paragraph citing the WebRTC deprecation timeline.
 
 ### 3. AVD branch behavior
 
-The `AVD` branch is mostly the existing `RDS` provisioning flow with three additions:
+The `AVD` branch is mostly the existing `RDS` provisioning flow with five additions:
 
 **a. Live-host warning** (before any removal/install work, only in AVD mode):
 
@@ -122,6 +130,88 @@ New-ItemProperty -Path $teamsRegPath -Name "IsWVDEnvironment" `
 Write-Log "Set HKLM\SOFTWARE\Microsoft\Teams\IsWVDEnvironment = 1 (enables AVD media optimization)"
 ```
 
+**d. Per-machine classic Teams MSI cleanup** (added to existing all-users cleanup phase):
+
+The existing `Remove-OldTeamsAllUsers` handles per-user classic Teams installs under `%LOCALAPPDATA%\Microsoft\Teams`. It does **not** remove the Teams Machine-Wide Installer MSI (product code `{731F6BAA-A986-45A4-8936-7C3AAAAA760B}`) — a separate per-machine install that's common on older image-build VMs.
+
+New helper `Remove-OldTeamsPerMachine`:
+
+```powershell
+function Remove-OldTeamsPerMachine {
+    # Detect via uninstall registry hive (NOT Win32_Product — that triggers
+    # MSI self-repair on every product and is dog-slow).
+    $teamsMsiCode = '{731F6BAA-A986-45A4-8936-7C3AAAAA760B}'
+    $uninstallKeys = @(
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$teamsMsiCode",
+        "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\$teamsMsiCode"
+    )
+    $found = $uninstallKeys | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $found) {
+        Write-Log "Per-machine classic Teams MSI not detected"
+        return
+    }
+    Write-Log "Per-machine classic Teams MSI detected, uninstalling..."
+    $proc = Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" `
+                          -ArgumentList "/x", $teamsMsiCode, "/qn", "/norestart" `
+                          -Wait -PassThru -NoNewWindow
+    if ($proc.ExitCode -in @(0, 1605, 3010)) {
+        # 0 = success, 1605 = product not installed (race), 3010 = success but reboot required
+        Write-Log "Per-machine classic Teams MSI uninstall completed (exit $($proc.ExitCode))"
+    }
+    else {
+        Write-Log "[WARN] msiexec /x for classic Teams MSI returned $($proc.ExitCode); continuing"
+    }
+}
+```
+
+Called from both `RDS` and `AVD` cleanup phases — it's safe to run when not installed (early return on registry miss).
+
+**e. WebRTC Redirector install** (AVD only, after `IsWVDEnvironment` set, unless `-SkipWebRTCRedirector`):
+
+Without the WebRTC Redirector service installed, `IsWVDEnvironment=1` flags Teams as VDI-aware but no codec partner exists. Calls work but AV is server-rendered on the VM — exactly the load AVD is supposed to offload to the client.
+
+New helper `Install-WebRTCRedirector`:
+
+```powershell
+function Install-WebRTCRedirector {
+    # Check existing version via uninstall registry first (idempotent re-runs)
+    $rtcMsiCode = '{FB41EDB3-4138-4240-AC09-B5A184E8F8E4}'
+    $existingPath = @(
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$rtcMsiCode",
+        "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\$rtcMsiCode"
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+    if ($existingPath) {
+        $existingVersion = (Get-ItemProperty $existingPath).DisplayVersion
+        Write-Log "WebRTC Redirector $existingVersion already installed; uninstalling before upgrade..."
+        Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" `
+                      -ArgumentList "/x", $rtcMsiCode, "/qn", "/norestart" `
+                      -Wait -NoNewWindow | Out-Null
+    }
+
+    $installerPath = "$env:TEMP\MsRdcWebRTCSvc_x64.msi"
+    try {
+        Invoke-WebRequest -Uri $WebRTCRedirectorUrl -OutFile $installerPath
+        Write-Log "WebRTC Redirector MSI downloaded to $installerPath"
+
+        $proc = Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" `
+                              -ArgumentList "/i", $installerPath, "/qn", "/norestart" `
+                              -Wait -PassThru -NoNewWindow
+        if ($proc.ExitCode -in @(0, 3010)) {
+            Write-Log "WebRTC Redirector installed (exit $($proc.ExitCode))"
+        }
+        else {
+            throw "WebRTC Redirector install failed with exit code $($proc.ExitCode)"
+        }
+    }
+    finally {
+        if (Test-Path $installerPath) { Remove-Item $installerPath -Force }
+    }
+}
+```
+
+Failure to install the WebRTC Redirector is **not fatal** — script logs `[WARN]` and continues. Teams itself is installed and `IsWVDEnvironment` is set; an operator can rerun or install manually. This keeps a transient network failure from forcing a full image-build retry.
+
 ### 4. OS gate becomes mode-aware
 
 Today: throws at `$osBuild -lt 17763` regardless of mode.
@@ -162,27 +252,30 @@ The condition pattern across these functions becomes `if ($DeploymentType -in @(
 | Location | Today (line) | Change |
 |---|---|---|
 | `param()` ValidateSet | 68 | Add `'AVD'` |
-| `param()` new param | after 73 | Add `$TeamsBootstrapperUrl` |
+| `param()` new params | after 73 | Add `$TeamsBootstrapperUrl`, `$WebRTCRedirectorUrl`, `$SkipWebRTCRedirector` |
 | `Test-NewTeamsInstalled` | 179 | Mode check includes AVD |
 | `Remove-NewTeams` | 200 | Mode check includes AVD |
 | `Install-WebView2` toggles | 265, 288 | Mode check includes AVD |
 | Main: OS gate | 365–368 | Mode-aware (19041 for AVD, 17763 otherwise) |
 | Main: post-install AVD warning | top of `try` block | New, AVD-only, 5-sec sleep |
-| Main: old Teams cleanup branch | 383–392 | AVD takes AllUsers branch |
+| Main: old Teams cleanup branch | 383–392 | AVD/RDS take AllUsers branch + call `Remove-OldTeamsPerMachine` |
 | Main: install dispatch | 424–429, 435–440 | AVD calls new `Install-TeamsAVD` |
 | New function | end of function block | `Install-TeamsAVD` |
-| Main: after install | after dispatch | Set `IsWVDEnvironment=1` (AVD only) |
+| New function | end of function block | `Remove-OldTeamsPerMachine` |
+| New function | end of function block | `Install-WebRTCRedirector` |
+| Main: after install | after dispatch | Set `IsWVDEnvironment=1` + call `Install-WebRTCRedirector` (AVD only, unless `-SkipWebRTCRedirector`) |
 
 ### 7. README updates
 
 **Folder `README.md`** (now `Install-TeamsOnVirtualDesktop/README.md`):
 
 - Title and description updated to "Citrix VDA, RDS Terminal Server, or Azure Virtual Desktop"
-- Parameters table: `-DeploymentType` row updated to `CitrixVDA`, `RDS`, or `AVD`; new `-TeamsBootstrapperUrl` row
-- New "How It Works" subsection for AVD mode explaining the image-build workflow, bootstrapper path, Server 2019 fallback, and `IsWVDEnvironment` registry key
+- Parameters table: `-DeploymentType` row updated to `CitrixVDA`, `RDS`, or `AVD`; new rows for `-TeamsBootstrapperUrl`, `-WebRTCRedirectorUrl`, `-SkipWebRTCRedirector`
+- New "How It Works" subsection for AVD mode explaining the image-build workflow, bootstrapper path, Server 2019 fallback, `IsWVDEnvironment` registry key, and WebRTC Redirector install
 - New "Why AVD mode exists" callout: non-persistent AVD reimages nightly, so Teams must be in the golden image; the live-host warning exists because running on a session host affects all users
-- New AVD usage examples (with and without local MSIX)
+- New AVD usage examples (with download, with local MSIX, with `-SkipWebRTCRedirector`)
 - Compatibility section: add Win11 22H2+ and AVD multi-session
+- Note that the WebRTC Redirector is now installed by AVD mode (previously listed as out-of-scope)
 
 **Root `README.md`**:
 
@@ -202,26 +295,35 @@ Manual only; matches repo convention.
 5. **RDS mode regression**: existing behavior unchanged — same `Add-AppxProvisionedPackage` call.
 6. **AVD mode dry-run on Win11**: run in an AVD image-build VM. Verify:
    - 5-second warning fires
+   - `Remove-OldTeamsPerMachine` runs (logs "not detected" on a clean image, completes if present)
    - `teamsbootstrapper.exe` downloads and runs to exit code 0
    - `Get-AppxProvisionedPackage -Online | Where-Object DisplayName -like '*Teams*'` returns the package
    - `Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Teams' IsWVDEnvironment` returns `1`
-   - Temp file cleaned up
-7. **AVD mode on Server 2019**: verify falls back to `Add-AppxProvisionedPackage` path (build 17763 < 19041 gate, but mode-specific path picks DISM equivalent on the fallback).
+   - WebRTC Redirector MSI downloads and installs (or is skipped if `-SkipWebRTCRedirector`)
+   - `Get-Service MsRdcWebRTCSvc` returns Running after install
+   - Temp files cleaned up
+7. **AVD mode with `-SkipWebRTCRedirector`**: verify WebRTC step is skipped and logged as such.
+8. **AVD mode WebRTC failure tolerance**: temporarily set `-WebRTCRedirectorUrl` to a bad URL; verify `[WARN]` is logged and the script still exits 0 (Teams + reg key already set successfully).
+9. **AVD mode on Server 2019**: verify falls back to `Add-AppxProvisionedPackage` path (build 17763 < 19041 gate, but mode-specific path picks DISM equivalent on the fallback).
 
 ## Risks and mitigations
 
 - **Bootstrapper URL stability**: Microsoft's fwlink for `teamsbootstrapper.exe` (`linkid=2243204`) could change. Mitigation: it's a parameter; operators can override.
 - **Bootstrapper requires elevated install mode on multi-session**: handled by reusing the existing `change user /install`/`/execute` toggle.
 - **`IsWVDEnvironment` deprecation**: WebRTC-based optimization End of Support 2026-10-01. Mitigation: `.NOTES` documents the timeline; the key remains correct and required until then.
-- **AVD WebRTC Redirector not installed by this script**: documented as out-of-scope in folder README. Image-build pipelines install it separately.
+- **WebRTC Redirector version drift**: Microsoft ships new redirector versions periodically. The script always uninstalls any existing version before installing the latest from `aka.ms/msrdcwebrtcsvc/msi`, so reruns stay current. Operators can pin a version by passing `-WebRTCRedirectorUrl <pinned-msi-url>`.
+- **WebRTC Redirector install fails**: non-fatal `[WARN]`; Teams + `IsWVDEnvironment` succeed independently. Mitigation: `-SkipWebRTCRedirector` lets pipelines opt out entirely if they manage the redirector separately.
+- **`msiexec /x` on classic Teams MSI**: rare exit codes (e.g. 1603) are logged as `[WARN]` and the script continues; we don't want a stale classic install to block a new Teams provisioning.
 - **Running on live AVD session host**: 5-second warning + log message. Operators have time to abort.
 
 ## Open questions
 
-None remaining after brainstorm. All scope decisions confirmed:
+None remaining after brainstorm and Nerdio script comparison. All scope decisions confirmed:
 
 - AVD as third ValidateSet value (additive)
-- Just `IsWVDEnvironment`, no WebRTC redirector handling
+- `IsWVDEnvironment` registry key set after Teams install
+- WebRTC Redirector installed by default in AVD mode, `-SkipWebRTCRedirector` to opt out
+- Per-machine classic Teams MSI cleanup for AVD/RDS via uninstall-registry detection (not `Win32_Product`)
 - Warn + proceed on live hosts, no `quser` gating
 - Update both folder README and root README
 - Rename folder + script
