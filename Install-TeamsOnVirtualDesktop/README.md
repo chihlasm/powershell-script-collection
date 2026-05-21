@@ -5,7 +5,7 @@
 ## Features
 
 - **Three deployment modes**: Citrix VDA, RDS Terminal Server, and Azure Virtual Desktop via the `-DeploymentType` parameter.
-- **AVD uses Microsoft's recommended path**: `teamsbootstrapper.exe -p -o <msix>` on Windows 10 build 19041+, Windows 11, and Server 2022+. Falls back to `Add-AppxProvisionedPackage` on Server 2019, which Microsoft Learn lists as the only supported method on that OS.
+- **AVD uses Microsoft's recommended path**: `teamsbootstrapper.exe -p -o <msix>` on Windows 10 build 19041+, Windows 11, and Server 2022+. Server 2019 is not supported in AVD mode — use RDS mode on Server 2019.
 - **AVD media optimization**: sets `HKLM\SOFTWARE\Microsoft\Teams\IsWVDEnvironment = 1` and installs the AVD WebRTC Redirector after a successful AVD install so Teams enables AV redirection. Skip the redirector with `-SkipWebRTCRedirector` if a pipeline manages it separately.
 - **Clean installation**: detects and removes old Microsoft Teams (classic, per-user and per-machine MSI) and new Microsoft Teams (MSIX) before proceeding. Per-machine MSI detection uses the uninstall registry hive — not `Win32_Product`, which triggers MSI self-repair across every installed product.
 - **Machine-wide provisioning (RDS / AVD)**: ensures all current and future users receive Teams.
@@ -102,10 +102,9 @@ Non-persistent AVD pools reimage their session hosts nightly. Any per-session in
 3. Removes the per-machine classic Teams Machine-Wide Installer MSI if present
 4. Checks and removes new Teams for all users, including the provisioned package
 5. Verifies prerequisites; installs WebView2 in install mode
-6. **On build 19041+ (Win10 20H1, Win11, Server 2022+)**: downloads `teamsbootstrapper.exe` and runs `teamsbootstrapper.exe -p -o <msix>` (Microsoft's recommended VDI deployment path)
-7. **On Server 2019 (build 17763)**: falls back to `Add-AppxProvisionedPackage` (the only supported method on that OS)
-8. Sets `HKLM\SOFTWARE\Microsoft\Teams\IsWVDEnvironment = 1` to enable AVD media optimization
-9. Installs the AVD WebRTC Redirector (`MsRdcWebRTCSvc_x64.msi`) unless `-SkipWebRTCRedirector` is set. Detects + uninstalls any existing redirector version first, then installs the latest. Failure to install the redirector is logged as `[WARN]` but is not fatal.
+6. Downloads `teamsbootstrapper.exe` and runs `teamsbootstrapper.exe -p -o <msix>` (Microsoft's recommended VDI deployment path)
+7. Sets `HKLM\SOFTWARE\Microsoft\Teams\IsWVDEnvironment = 1` to enable AVD media optimization
+8. Installs the AVD WebRTC Redirector (`MsRdcWebRTCSvc_x64.msi`) unless `-SkipWebRTCRedirector` is set. Detects + uninstalls any existing redirector version first, then installs the latest. Failure to install the redirector is logged as `[WARN]` but is not fatal.
 
 ## Requirements Verification
 
@@ -164,7 +163,7 @@ Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -like "*Teams
 ## Compatibility
 
 - **CitrixVDA / RDS**: Windows Server 2019+
-- **AVD**: Windows 10 build 19041+ (20H1), Windows 11 (all releases), Windows Server 2022+. Server 2019 supported via DISM fallback path.
+- **AVD**: Windows 10 build 19041+ (20H1), Windows 11 (all releases), Windows Server 2022+. Server 2019 is not supported in AVD mode — use RDS mode instead.
 - **PowerShell**: 5.1+
 - **Teams**: latest MSIX
 
