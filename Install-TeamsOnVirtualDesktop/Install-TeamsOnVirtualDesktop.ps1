@@ -3,30 +3,54 @@
 
 <#
 .SYNOPSIS
-    Downloads and installs Microsoft Teams on a Citrix VDA or RDS Terminal Server.
-    Removes old Teams and new Teams if present, ensures prerequisites are met, and performs clean installation.
+    Downloads and installs Microsoft Teams on a Citrix VDA, RDS Terminal Server,
+    or Azure Virtual Desktop session host. Removes old Teams and new Teams if
+    present, ensures prerequisites are met, and performs a clean installation.
 
 .DESCRIPTION
     This script performs the following actions:
     1. Checks for and removes old Microsoft Teams (classic) if installed
     2. Checks for and removes new Microsoft Teams (MSIX) if installed
     3. Verifies and installs prerequisites (WebView2, .NET Framework)
-    4. Downloads the latest Microsoft Teams MSIX package
+    4. Downloads the latest Microsoft Teams MSIX package (and on AVD, the
+       teamsbootstrapper.exe)
     5. Installs Microsoft Teams for the target environment
 
-    Two deployment modes are supported:
-    - CitrixVDA: Uses Add-AppxPackage; Teams auto-detects the VDA and provisions machine-wide
-    - RDS: Uses Add-AppxProvisionedPackage for machine-wide provisioning on standard
-      Remote Desktop Services terminal servers without Citrix
+    Three deployment modes are supported:
+    - CitrixVDA: Uses Add-AppxPackage; Teams auto-detects the VDA and provisions
+      machine-wide via Citrix registry keys.
+    - RDS: Uses Add-AppxProvisionedPackage for machine-wide provisioning on
+      standard Remote Desktop Services terminal servers without Citrix.
+    - AVD: Uses Microsoft's recommended teamsbootstrapper.exe -p -o <msix>
+      command on Windows 10 build 19041+ (20H1, Win11, Server 2022+), or falls
+      back to Add-AppxProvisionedPackage on Server 2019 (the only supported
+      method on that OS). After install, sets HKLM\SOFTWARE\Microsoft\Teams\
+      IsWVDEnvironment = 1 so Teams enables AVD media optimization.
 
 .PARAMETER DeploymentType
-    Target environment for the installation. Must be either 'CitrixVDA' or 'RDS'.
+    Target environment for the installation. Must be 'CitrixVDA', 'RDS', or 'AVD'.
     - CitrixVDA: Standard Citrix Virtual Delivery Agent servers
     - RDS: Windows Remote Desktop Services terminal servers (no Citrix)
+    - AVD: Azure Virtual Desktop session hosts. Intended for use in a
+      golden-image VM before sysprep/sealing; the script will warn for
+      5 seconds before proceeding to give an operator a chance to abort
+      on a live host.
 
 .PARAMETER TeamsDownloadUrl
     URL to download Teams MSIX. If not specified, uses the official Microsoft URL.
     Ignored if TeamsMsixPath is specified.
+
+.PARAMETER TeamsBootstrapperUrl
+    URL to download teamsbootstrapper.exe. Used only in AVD mode on build 19041+.
+    If not specified, uses the official Microsoft URL.
+
+.PARAMETER WebRTCRedirectorUrl
+    URL to download the AVD WebRTC Redirector MSI. Used only in AVD mode.
+    If not specified, uses the official Microsoft aka.ms URL.
+
+.PARAMETER SkipWebRTCRedirector
+    Skip the WebRTC Redirector install step in AVD mode. Use when an external
+    pipeline manages the redirector separately.
 
 .PARAMETER TeamsMsixPath
     Path to a local or network share MSIX file. If specified, the script will use this
@@ -42,24 +66,63 @@
     URL to download WebView2 runtime. If not specified, uses the official Microsoft URL.
 
 .EXAMPLE
-    .\Install-TeamsOnCitrixVDA.ps1 -DeploymentType CitrixVDA
+    .\Install-TeamsOnVirtualDesktop.ps1 -DeploymentType CitrixVDA
 
 .EXAMPLE
-    .\Install-TeamsOnCitrixVDA.ps1 -DeploymentType RDS
+    .\Install-TeamsOnVirtualDesktop.ps1 -DeploymentType RDS
 
 .EXAMPLE
-    .\Install-TeamsOnCitrixVDA.ps1 -DeploymentType CitrixVDA -Force
+    .\Install-TeamsOnVirtualDesktop.ps1 -DeploymentType CitrixVDA -Force
     Reinstalls Teams on a Citrix VDA even if it is already installed.
 
 .EXAMPLE
-    .\Install-TeamsOnCitrixVDA.ps1 -DeploymentType RDS -TeamsMsixPath "\\fileserver\software\Teams_x64.msix"
+    .\Install-TeamsOnVirtualDesktop.ps1 -DeploymentType RDS -TeamsMsixPath "\\fileserver\software\Teams_x64.msix"
 
 .EXAMPLE
-    .\Install-TeamsOnCitrixVDA.ps1 -DeploymentType CitrixVDA -TeamsDownloadUrl "https://custom.url/teams.msix"
+    .\Install-TeamsOnVirtualDesktop.ps1 -DeploymentType CitrixVDA -TeamsDownloadUrl "https://custom.url/teams.msix"
+
+.EXAMPLE
+    .\Install-TeamsOnVirtualDesktop.ps1 -DeploymentType AVD
+    Installs Teams on an AVD image-build VM using the Microsoft-recommended
+    teamsbootstrapper.exe path. Sets IsWVDEnvironment=1 and installs the
+    AVD WebRTC Redirector for media optimization.
+
+.EXAMPLE
+    .\Install-TeamsOnVirtualDesktop.ps1 -DeploymentType AVD -TeamsMsixPath "\\fileserver\software\Teams_x64.msix"
+    Same as above but uses a local/UNC MSIX path instead of downloading.
+
+.EXAMPLE
+    .\Install-TeamsOnVirtualDesktop.ps1 -DeploymentType AVD -SkipWebRTCRedirector
+    Installs Teams and sets IsWVDEnvironment, but does not install the
+    WebRTC Redirector. Useful when an image-build pipeline installs the
+    redirector separately.
 
 .NOTES
-    On Citrix VDA, Teams detects the VDA environment via registry keys and auto-provisions
-    machine-wide. On RDS, the script uses Add-AppxProvisionedPackage to achieve the same result.
+    On Citrix VDA, Teams detects the VDA environment via registry keys and
+    auto-provisions machine-wide. On RDS and AVD, the script ensures
+    machine-wide provisioning explicitly.
+
+    AVD image-build workflow:
+        1. Spin up the AVD image-build VM
+        2. Run this script with -DeploymentType AVD
+        3. Verify Get-AppxProvisionedPackage -Online shows Teams and
+           Get-ItemProperty HKLM:\SOFTWARE\Microsoft\Teams IsWVDEnvironment
+           returns 1
+        4. Sysprep and capture the image
+
+    AVD WebRTC Redirector: installed automatically in AVD mode (unless
+    -SkipWebRTCRedirector is specified). Detection + uninstall of any
+    existing version is done via the uninstall registry hive, then the
+    latest MSI is downloaded from aka.ms/msrdcwebrtcsvc/msi and installed.
+    Failure to install the redirector is logged as [WARN] but is not fatal.
+
+    Deprecation timeline (per Microsoft Learn 2026-05-15):
+        WebRTC-based optimization End of Support 2026-10-01,
+        End of Availability 2027-04-01. The IsWVDEnvironment key remains
+        required until that date. A new SlimCore-based VDI 2.0 stack
+        replaces it.
+
+    Reference: https://learn.microsoft.com/en-us/microsoftteams/new-teams-vdi-requirements-deploy
 #>
 
 [CmdletBinding()]
