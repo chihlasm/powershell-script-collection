@@ -500,10 +500,20 @@ try {
 
     Write-Log "Starting Teams installation script - Deployment Type: $DeploymentType"
 
-    # New Teams (MSIX) requires Server 2019+ / Windows 10 1809+
+    # OS gate is mode-aware:
+    #  - CitrixVDA / RDS: build 17763+ (Server 2019)
+    #  - AVD: build 19041+ (Win10 20H1, Win11, Server 2022+) per Microsoft Learn
+    #    https://learn.microsoft.com/en-us/microsoftteams/new-teams-vdi-requirements-deploy
     $osBuild = [System.Environment]::OSVersion.Version.Build
-    if ($osBuild -lt 17763) {
-        throw "New Teams requires Windows Server 2019 or later (build 17763+). This system is build $osBuild. Install Teams Classic (MSI) instead."
+    if ($DeploymentType -eq 'AVD') {
+        if ($osBuild -lt 19041) {
+            throw "AVD deployment requires Windows 10 build 19041 (20H1) or later, Windows 11, or Server 2022+. This system is build $osBuild."
+        }
+    }
+    else {
+        if ($osBuild -lt 17763) {
+            throw "New Teams requires Windows Server 2019 or later (build 17763+). This system is build $osBuild. Install Teams Classic (MSI) instead."
+        }
     }
 
     # Check if new Teams is already installed
