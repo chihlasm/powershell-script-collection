@@ -500,6 +500,15 @@ try {
 
     Write-Log "Starting Teams installation script - Deployment Type: $DeploymentType"
 
+    # AVD mode is intended for image-build VMs. Warn loudly if it's being
+    # run anywhere else so a live-host operator has a chance to abort.
+    if ($DeploymentType -eq 'AVD') {
+        Write-Log "[WARN] AVD mode provisions Teams machine-wide. This is intended for use inside a"
+        Write-Log "[WARN] golden-image VM before sysprep/sealing. Running on a live AVD session host"
+        Write-Log "[WARN] will affect all users on this host. Continuing in 5 seconds -- Ctrl+C to abort."
+        Start-Sleep -Seconds 5
+    }
+
     # OS gate is mode-aware:
     #  - CitrixVDA / RDS: build 17763+ (Server 2019)
     #  - AVD: build 19041+ (Win10 20H1, Win11, Server 2022+) per Microsoft Learn
@@ -529,10 +538,12 @@ try {
     }
 
     # Check and remove old Teams
-    if ($DeploymentType -eq 'RDS') {
+    if ($DeploymentType -in @('RDS', 'AVD')) {
         if (Test-OldTeamsInstalledAllUsers) {
             Remove-OldTeamsAllUsers
         }
+        # Also clean the per-machine classic Teams MSI if present
+        Remove-OldTeamsPerMachine
     }
     else {
         if (Test-OldTeamsInstalled) {
@@ -570,27 +581,63 @@ try {
             Write-Log "[WARN] File does not have .msix extension. Proceeding anyway..."
         }
 
-        if ($DeploymentType -eq 'CitrixVDA') {
-            Install-TeamsCitrixVDA -MsixPath $TeamsMsixPath
-        }
-        else {
-            Install-TeamsRDS -MsixPath $TeamsMsixPath
+        switch ($DeploymentType) {
+            'CitrixVDA' { Install-TeamsCitrixVDA -MsixPath $TeamsMsixPath }
+            'RDS'       { Install-TeamsRDS -MsixPath $TeamsMsixPath }
+            'AVD'       { Install-TeamsAVD -MsixPath $TeamsMsixPath }
         }
     }
     else {
         $downloadedMsixPath = "$env:TEMP\Teams_x64.msix"
         Get-TeamsInstaller -Url $TeamsDownloadUrl -OutputPath $downloadedMsixPath
 
-        if ($DeploymentType -eq 'CitrixVDA') {
-            Install-TeamsCitrixVDA -MsixPath $downloadedMsixPath
-        }
-        else {
-            Install-TeamsRDS -MsixPath $downloadedMsixPath
+        switch ($DeploymentType) {
+            'CitrixVDA' { Install-TeamsCitrixVDA -MsixPath $downloadedMsixPath }
+            'RDS'       { Install-TeamsRDS -MsixPath $downloadedMsixPath }
+            'AVD'       { Install-TeamsAVD -MsixPath $downloadedMsixPath }
         }
 
         # Clean up downloaded file
         if (Test-Path $downloadedMsixPath) {
             Remove-Item -Path $downloadedMsixPath -Force
+        }
+    }
+
+    # AVD media optimization requires this registry key. Per Microsoft Learn,
+    # without it Teams installs but won't enable AV redirection on AVD.
+    # NOTE: WebRTC-based optimization is deprecated — End of Support 2026-10-01,
+    # End of Availability 2027-04-01 — but the key remains required until then.
+    if ($DeploymentType -eq 'AVD') {
+        # IsWVDEnvironment — non-fatal on failure (Teams install already succeeded)
+        try {
+            $teamsRegPath = "HKLM:\SOFTWARE\Microsoft\Teams"
+            if (-not (Test-Path $teamsRegPath)) {
+                New-Item -Path $teamsRegPath -Force | Out-Null
+            }
+            New-ItemProperty -Path $teamsRegPath -Name "IsWVDEnvironment" `
+                             -Value 1 -PropertyType DWORD -Force | Out-Null
+            Write-Log "Set HKLM\SOFTWARE\Microsoft\Teams\IsWVDEnvironment = 1 (enables AVD media optimization)"
+        }
+        catch {
+            $errMsg = $_.Exception.Message
+            Write-Log "[WARN] Could not set IsWVDEnvironment registry key: $errMsg"
+            Write-Log "[WARN] Teams is installed; set HKLM\SOFTWARE\Microsoft\Teams\IsWVDEnvironment = 1 (DWORD) manually."
+        }
+
+        # WebRTC Redirector — non-fatal on failure (Teams install already succeeded)
+        if ($SkipWebRTCRedirector) {
+            Write-Log "Skipping WebRTC Redirector install (-SkipWebRTCRedirector)"
+        }
+        else {
+            Write-Log "Installing AVD WebRTC Redirector..."
+            try {
+                Install-WebRTCRedirector
+            }
+            catch {
+                $errMsg = $_.Exception.Message
+                Write-Log "[WARN] WebRTC Redirector install failed: $errMsg"
+                Write-Log "[WARN] Teams + IsWVDEnvironment are configured; install the redirector manually or rerun."
+            }
         }
     }
 
