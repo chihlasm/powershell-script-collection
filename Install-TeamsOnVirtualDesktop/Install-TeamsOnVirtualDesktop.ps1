@@ -65,10 +65,13 @@
 [CmdletBinding()]
 param (
     [Parameter(Mandatory)]
-    [ValidateSet('CitrixVDA', 'RDS')]
+    [ValidateSet('CitrixVDA', 'RDS', 'AVD')]
     [string]$DeploymentType,
 
     [string]$TeamsDownloadUrl = "https://go.microsoft.com/fwlink/?linkid=2196106",
+    [string]$TeamsBootstrapperUrl = "https://go.microsoft.com/fwlink/?linkid=2243204",
+    [string]$WebRTCRedirectorUrl = "https://aka.ms/msrdcwebrtcsvc/msi",
+    [switch]$SkipWebRTCRedirector,
     [string]$TeamsMsixPath,
     [string]$WebView2Url = "https://go.microsoft.com/fwlink/p/?LinkId=2124703",
     [switch]$Force
