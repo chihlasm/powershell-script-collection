@@ -128,7 +128,8 @@ function Remove-OldTeams {
             }
         }
         catch {
-            Write-Log "Error uninstalling old Teams: $($_.Exception.Message)"
+            $errMsg = $_.Exception.Message
+            Write-Log "Error uninstalling old Teams: $errMsg"
             throw
         }
     }
@@ -165,7 +166,8 @@ function Remove-OldTeamsAllUsers {
                 }
             }
             catch {
-                Write-Log "[WARN] Failed to remove old Teams for profile $($profile.Name): $($_.Exception.Message)"
+                $errMsg = $_.Exception.Message
+                Write-Log "[WARN] Failed to remove old Teams for profile $($profile.Name): $errMsg"
                 continue
             }
         }
@@ -227,7 +229,8 @@ function Remove-NewTeams {
         }
     }
     catch {
-        Write-Log "Error uninstalling new Teams: $($_.Exception.Message)"
+        $errMsg = $_.Exception.Message
+        Write-Log "Error uninstalling new Teams: $errMsg"
         throw
     }
 }
@@ -276,7 +279,8 @@ function Install-WebView2 {
         }
     }
     catch {
-        Write-Log "Error installing WebView2: $($_.Exception.Message)"
+        $errMsg = $_.Exception.Message
+        Write-Log "Error installing WebView2: $errMsg"
         throw
     }
     finally {
@@ -312,7 +316,8 @@ function Get-TeamsInstaller {
         Write-Log "Teams installer downloaded to $OutputPath"
     }
     catch {
-        Write-Log "Error downloading Teams installer: $($_.Exception.Message)"
+        $errMsg = $_.Exception.Message
+        Write-Log "Error downloading Teams installer: $errMsg"
         throw
     }
 }
@@ -327,7 +332,8 @@ function Install-TeamsCitrixVDA {
         Write-Log "Teams installation completed successfully (Citrix VDA - auto-provisions via VDA detection)"
     }
     catch {
-        Write-Log "Error installing Teams: $($_.Exception.Message)"
+        $errMsg = $_.Exception.Message
+        Write-Log "Error installing Teams: $errMsg"
         throw
     }
 }
@@ -342,14 +348,24 @@ function Install-TeamsRDS {
         Write-Log "Teams provisioned successfully for all users (RDS)"
     }
     catch {
-        Write-Log "Error provisioning Teams: $($_.Exception.Message)"
+        $errMsg = $_.Exception.Message
+        Write-Log "Error provisioning Teams: $errMsg"
         throw
     }
 }
 
 # Main script execution
 try {
+    # Ensure TLS 1.2 is available for HTTPS downloads
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
     Write-Log "Starting Teams installation script - Deployment Type: $DeploymentType"
+
+    # New Teams (MSIX) requires Server 2019+ / Windows 10 1809+
+    $osBuild = [System.Environment]::OSVersion.Version.Build
+    if ($osBuild -lt 17763) {
+        throw "New Teams requires Windows Server 2019 or later (build 17763+). This system is build $osBuild. Install Teams Classic (MSI) instead."
+    }
 
     # Check if new Teams is already installed
     $teamsAlreadyInstalled = Test-NewTeamsInstalled
@@ -432,6 +448,7 @@ try {
     Write-Log "Teams installation script completed successfully for $DeploymentType"
 }
 catch {
-    Write-Log "[FAIL] Script failed with error: $($_.Exception.Message)"
+    $errMsg = $_.Exception.Message
+    Write-Log "[FAIL] Script failed with error: $errMsg"
     exit 1
 }
