@@ -447,6 +447,52 @@ function Install-TeamsAVD {
     }
 }
 
+# Function to install / upgrade the AVD WebRTC Redirector
+function Install-WebRTCRedirector {
+    # Check existing version via uninstall registry first (idempotent re-runs)
+    $rtcMsiCode = '{FB41EDB3-4138-4240-AC09-B5A184E8F8E4}'
+    $existingPath = @(
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$rtcMsiCode",
+        "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\$rtcMsiCode"
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+    if ($existingPath) {
+        $existingVersion = (Get-ItemProperty $existingPath).DisplayVersion
+        Write-Log "WebRTC Redirector $existingVersion already installed; uninstalling before upgrade..."
+        $unProc = Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" `
+                                -ArgumentList "/x", $rtcMsiCode, "/qn", "/norestart" `
+                                -Wait -PassThru -NoNewWindow
+        if ($unProc.ExitCode -notin @(0, 1605, 3010, 1641)) {
+            Write-Log "[WARN] msiexec /x for WebRTC Redirector returned $($unProc.ExitCode); proceeding with install anyway"
+        }
+    }
+
+    $installerPath = "$env:TEMP\MsRdcWebRTCSvc_x64.msi"
+    $prevProgress = $ProgressPreference
+    try {
+        # Suppress progress bar — under PS 5.1 it can slow downloads 10-50x
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -Uri $WebRTCRedirectorUrl -OutFile $installerPath
+        $ProgressPreference = $prevProgress
+        Write-Log "WebRTC Redirector MSI downloaded to $installerPath"
+
+        $proc = Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" `
+                              -ArgumentList "/i", $installerPath, "/qn", "/norestart" `
+                              -Wait -PassThru -NoNewWindow
+        # 0 = success, 3010 = success/reboot queued, 1641 = success/reboot initiated
+        if ($proc.ExitCode -in @(0, 3010, 1641)) {
+            Write-Log "WebRTC Redirector installed (exit $($proc.ExitCode))"
+        }
+        else {
+            throw "WebRTC Redirector install failed with exit code $($proc.ExitCode)"
+        }
+    }
+    finally {
+        if ($prevProgress) { $ProgressPreference = $prevProgress }
+        if (Test-Path $installerPath) { Remove-Item $installerPath -Force }
+    }
+}
+
 # Main script execution
 try {
     # Ensure TLS 1.2 is available for HTTPS downloads
