@@ -357,6 +357,62 @@ function Install-TeamsRDS {
     }
 }
 
+# Function to install Teams on AVD (Azure Virtual Desktop)
+function Install-TeamsAVD {
+    param ([string]$MsixPath)
+
+    $osBuild = [System.Environment]::OSVersion.Version.Build
+
+    if ($osBuild -ge 19041) {
+        # Win10 20H1+, Win11, Server 2022+ — Microsoft-recommended path
+        Write-Log "Installing Microsoft Teams for AVD via teamsbootstrapper.exe (build $osBuild)..."
+        $bootstrapperPath = "$env:TEMP\teamsbootstrapper.exe"
+        try {
+            # Suppress progress bar — under PS 5.1 it can slow downloads 10-50x
+            $prevProgress = $ProgressPreference
+            $ProgressPreference = 'SilentlyContinue'
+            Invoke-WebRequest -Uri $TeamsBootstrapperUrl -OutFile $bootstrapperPath
+            $ProgressPreference = $prevProgress
+            Write-Log "teamsbootstrapper.exe downloaded to $bootstrapperPath"
+
+            $proc = Start-Process -FilePath $bootstrapperPath `
+                                  -ArgumentList "-p", "-o", $MsixPath `
+                                  -Wait -PassThru -NoNewWindow
+            if ($proc.ExitCode -ne 0) {
+                throw "teamsbootstrapper.exe failed with exit code $($proc.ExitCode). See C:\WINDOWS\Temp\teamsprovision.log.* for details."
+            }
+            Write-Log "Teams provisioned successfully via teamsbootstrapper.exe (AVD)"
+        }
+        catch {
+            $errMsg = $_.Exception.Message
+            Write-Log "Error provisioning Teams via bootstrapper: $errMsg"
+            throw
+        }
+        finally {
+            if ($prevProgress) { $ProgressPreference = $prevProgress }
+            if (Test-Path $bootstrapperPath) {
+                Remove-Item -Path $bootstrapperPath -Force
+            }
+        }
+    }
+    else {
+        # Server 2019 (build 17763) — DISM-equivalent is the only supported method.
+        # In the main script, Task 8's OS gate already throws on build < 19041 for AVD
+        # mode; this branch is reached only if Install-TeamsAVD is called directly,
+        # bypassing the main gate. Keeping it self-contained documents intent.
+        Write-Log "Installing Microsoft Teams for AVD via Add-AppxProvisionedPackage (build $osBuild — Server 2019 fallback)..."
+        try {
+            Add-AppxProvisionedPackage -Online -PackagePath $MsixPath -SkipLicense
+            Write-Log "Teams provisioned successfully for all users (AVD on Server 2019)"
+        }
+        catch {
+            $errMsg = $_.Exception.Message
+            Write-Log "Error provisioning Teams: $errMsg"
+            throw
+        }
+    }
+}
+
 # Main script execution
 try {
     # Ensure TLS 1.2 is available for HTTPS downloads
