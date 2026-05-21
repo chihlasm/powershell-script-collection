@@ -177,6 +177,40 @@ function Remove-OldTeamsAllUsers {
     }
 }
 
+# Function to remove per-machine classic Teams MSI (Teams Machine-Wide Installer)
+function Remove-OldTeamsPerMachine {
+    # Detect via uninstall registry hive — NOT Win32_Product (triggers MSI
+    # self-repair on every installed product, slow and disruptive).
+    $teamsMsiCode = '{731F6BAA-A986-45A4-8936-7C3AAAAA760B}'
+    $uninstallKeys = @(
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$teamsMsiCode",
+        "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\$teamsMsiCode"
+    )
+    $found = $uninstallKeys | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $found) {
+        Write-Log "Per-machine classic Teams MSI not detected"
+        return
+    }
+    Write-Log "Per-machine classic Teams MSI detected, uninstalling..."
+    try {
+        $proc = Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" `
+                              -ArgumentList "/x", $teamsMsiCode, "/qn", "/norestart" `
+                              -Wait -PassThru -NoNewWindow
+        # 0 = success, 1605 = product not installed (race),
+        # 3010 = success/reboot queued, 1641 = success/reboot initiated
+        if ($proc.ExitCode -in @(0, 1605, 3010, 1641)) {
+            Write-Log "Per-machine classic Teams MSI uninstall completed (exit $($proc.ExitCode))"
+        }
+        else {
+            Write-Log "[WARN] msiexec /x for classic Teams MSI returned $($proc.ExitCode); continuing"
+        }
+    }
+    catch {
+        $errMsg = $_.Exception.Message
+        Write-Log "[WARN] Could not launch msiexec to remove per-machine Teams MSI: $errMsg; continuing"
+    }
+}
+
 # Function to check if new Teams is installed
 function Test-NewTeamsInstalled {
     if ($DeploymentType -in @('RDS', 'AVD')) {
