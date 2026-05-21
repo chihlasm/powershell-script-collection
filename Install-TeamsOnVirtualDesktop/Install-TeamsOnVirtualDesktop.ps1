@@ -179,7 +179,7 @@ function Remove-OldTeamsAllUsers {
 
 # Function to check if new Teams is installed
 function Test-NewTeamsInstalled {
-    if ($DeploymentType -eq 'RDS') {
+    if ($DeploymentType -in @('RDS', 'AVD')) {
         $teamsPackage = Get-AppxPackage -AllUsers -Name "*Teams*" -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -like "*Teams*" }
     }
@@ -200,7 +200,7 @@ function Test-NewTeamsInstalled {
 function Remove-NewTeams {
     Write-Log "Attempting to uninstall new Teams..."
     try {
-        if ($DeploymentType -eq 'RDS') {
+        if ($DeploymentType -in @('RDS', 'AVD')) {
             $teamsPackage = Get-AppxPackage -AllUsers -Name "*Teams*" -ErrorAction SilentlyContinue |
                 Where-Object { $_.Name -like "*Teams*" }
             if ($teamsPackage) {
