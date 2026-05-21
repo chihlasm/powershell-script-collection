@@ -13,7 +13,7 @@ Collection of useful PowerShell scripts for automation and system administration
 - [FolderPermissionManager](#folderpermissionmanager)
 - [FSLogix-Profile-Backup](#fslogix-profile-backup)
 - [HideFromGal](#hidefromgal)
-- [Install-TeamsOnCitrixVDA](#install-teamsoncitrixvda)
+- [Install-TeamsOnVirtualDesktop](#install-teamsonvirtualdesktop)
 - [LocalAdminManager](#localadminmanager)
 - [PasswordPolicyAuditor](#passwordpolicyauditor)
 - [SMBTest](#smb-diagnostic--drive-mapping-script)
@@ -217,17 +217,17 @@ For full documentation, see [AD Export/README-AD-Group-Export.md](AD%20Export/RE
 - Supports both interactive and credential-based Azure AD authentication.
 - Exports include policy descriptions and current values.
 
-## Install-TeamsOnCitrixVDA
+## Install-TeamsOnVirtualDesktop
 
-**Description**: Downloads and installs Microsoft Teams on a Citrix VDA running Windows Server 2019. Removes old Teams and new Teams if present, ensures prerequisites are met, and performs clean installation.
+**Description**: Downloads and installs Microsoft Teams on a Citrix VDA, RDS Terminal Server, or Azure Virtual Desktop (AVD) session host. Removes old Teams and new Teams if present, ensures prerequisites are met, and performs a clean installation. Sets `IsWVDEnvironment=1` for AVD media optimization on AVD deployments.
 
 **Parameters**:
 - `-TeamsDownloadUrl <string>` (Optional, default: official Microsoft URL): URL to download Teams MSIX.
 - `-WebView2Url <string>` (Optional, default: official Microsoft URL): URL to download WebView2 runtime.
 
 **Usage Examples**:
-- Basic installation: `.\Install-TeamsOnCitrixVDA\Install-TeamsOnCitrixVDA.ps1`
-- Custom URLs: `.\Install-TeamsOnCitrixVDA\Install-TeamsOnCitrixVDA.ps1 -TeamsDownloadUrl "https://custom.url/teams.msix"`
+- Basic installation: `.\Install-TeamsOnVirtualDesktop\Install-TeamsOnVirtualDesktop.ps1 -DeploymentType AVD`
+- Custom URLs: `.\Install-TeamsOnVirtualDesktop\Install-TeamsOnVirtualDesktop.ps1 -DeploymentType RDS -TeamsDownloadUrl "https://custom.url/teams.msix"`
 
 **Notes**:
 - Requires administrator privileges.
