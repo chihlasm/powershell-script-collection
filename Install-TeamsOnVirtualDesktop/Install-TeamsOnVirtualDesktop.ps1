@@ -264,9 +264,9 @@ function Install-WebView2 {
     $installerPath = "$env:TEMP\MicrosoftEdgeWebview2Setup.exe"
 
     try {
-        # Switch to install mode on RDS so registry mappings work for all users
-        if ($DeploymentType -eq 'RDS') {
-            Write-Log "Switching to install mode for RDS..."
+        # Switch to install mode on RDS/AVD so registry mappings work for all users
+        if ($DeploymentType -in @('RDS', 'AVD')) {
+            Write-Log "Switching to install mode for multi-session ($DeploymentType)..."
             & change user /install 2>$null
         }
 
@@ -287,10 +287,10 @@ function Install-WebView2 {
         throw
     }
     finally {
-        # Switch back to execute mode on RDS
-        if ($DeploymentType -eq 'RDS') {
+        # Switch back to execute mode on RDS/AVD
+        if ($DeploymentType -in @('RDS', 'AVD')) {
             & change user /execute 2>$null
-            Write-Log "Switched back to execute mode"
+            Write-Log "Switched back to execute mode ($DeploymentType)"
         }
         if (Test-Path $installerPath) {
             Remove-Item -Path $installerPath -Force
