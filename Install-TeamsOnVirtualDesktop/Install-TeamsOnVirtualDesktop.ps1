@@ -22,10 +22,10 @@
     - RDS: Uses Add-AppxProvisionedPackage for machine-wide provisioning on
       standard Remote Desktop Services terminal servers without Citrix.
     - AVD: Uses Microsoft's recommended teamsbootstrapper.exe -p -o <msix>
-      command on Windows 10 build 19041+ (20H1, Win11, Server 2022+), or falls
-      back to Add-AppxProvisionedPackage on Server 2019 (the only supported
-      method on that OS). After install, sets HKLM\SOFTWARE\Microsoft\Teams\
-      IsWVDEnvironment = 1 so Teams enables AVD media optimization.
+      command. Requires Windows 10 build 19041+ (20H1), Windows 11, or
+      Server 2022+. Server 2019 is not supported in AVD mode — use RDS mode
+      on Server 2019 instead. After install, sets HKLM\SOFTWARE\Microsoft\
+      Teams\IsWVDEnvironment = 1 so Teams enables AVD media optimization.
 
 .PARAMETER DeploymentType
     Target environment for the installation. Must be 'CitrixVDA', 'RDS', or 'AVD'.
@@ -458,54 +458,36 @@ function Install-TeamsRDS {
 function Install-TeamsAVD {
     param ([string]$MsixPath)
 
-    $osBuild = [System.Environment]::OSVersion.Version.Build
+    # Microsoft-recommended path: teamsbootstrapper.exe -p -o <msix>
+    # The main script's OS gate enforces build 19041+ for AVD mode,
+    # so this function only runs on supported builds.
+    Write-Log "Installing Microsoft Teams for AVD via teamsbootstrapper.exe..."
+    $bootstrapperPath = "$env:TEMP\teamsbootstrapper.exe"
+    $prevProgress = $ProgressPreference
+    try {
+        # Suppress progress bar — under PS 5.1 it can slow downloads 10-50x
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -Uri $TeamsBootstrapperUrl -OutFile $bootstrapperPath
+        $ProgressPreference = $prevProgress
+        Write-Log "teamsbootstrapper.exe downloaded to $bootstrapperPath"
 
-    if ($osBuild -ge 19041) {
-        # Win10 20H1+, Win11, Server 2022+ — Microsoft-recommended path
-        Write-Log "Installing Microsoft Teams for AVD via teamsbootstrapper.exe (build $osBuild)..."
-        $bootstrapperPath = "$env:TEMP\teamsbootstrapper.exe"
-        try {
-            # Suppress progress bar — under PS 5.1 it can slow downloads 10-50x
-            $prevProgress = $ProgressPreference
-            $ProgressPreference = 'SilentlyContinue'
-            Invoke-WebRequest -Uri $TeamsBootstrapperUrl -OutFile $bootstrapperPath
-            $ProgressPreference = $prevProgress
-            Write-Log "teamsbootstrapper.exe downloaded to $bootstrapperPath"
-
-            $proc = Start-Process -FilePath $bootstrapperPath `
-                                  -ArgumentList "-p", "-o", $MsixPath `
-                                  -Wait -PassThru -NoNewWindow
-            if ($proc.ExitCode -ne 0) {
-                throw "teamsbootstrapper.exe failed with exit code $($proc.ExitCode). See C:\WINDOWS\Temp\teamsprovision.log.* for details."
-            }
-            Write-Log "Teams provisioned successfully via teamsbootstrapper.exe (AVD)"
+        $proc = Start-Process -FilePath $bootstrapperPath `
+                              -ArgumentList "-p", "-o", $MsixPath `
+                              -Wait -PassThru -NoNewWindow
+        if ($proc.ExitCode -ne 0) {
+            throw "teamsbootstrapper.exe failed with exit code $($proc.ExitCode). See C:\WINDOWS\Temp\teamsprovision.log.* for details."
         }
-        catch {
-            $errMsg = $_.Exception.Message
-            Write-Log "Error provisioning Teams via bootstrapper: $errMsg"
-            throw
-        }
-        finally {
-            if ($prevProgress) { $ProgressPreference = $prevProgress }
-            if (Test-Path $bootstrapperPath) {
-                Remove-Item -Path $bootstrapperPath -Force
-            }
-        }
+        Write-Log "Teams provisioned successfully via teamsbootstrapper.exe (AVD)"
     }
-    else {
-        # Server 2019 (build 17763) — DISM-equivalent is the only supported method.
-        # In the main script, Task 8's OS gate already throws on build < 19041 for AVD
-        # mode; this branch is reached only if Install-TeamsAVD is called directly,
-        # bypassing the main gate. Keeping it self-contained documents intent.
-        Write-Log "Installing Microsoft Teams for AVD via Add-AppxProvisionedPackage (build $osBuild — Server 2019 fallback)..."
-        try {
-            Add-AppxProvisionedPackage -Online -PackagePath $MsixPath -SkipLicense
-            Write-Log "Teams provisioned successfully for all users (AVD on Server 2019)"
-        }
-        catch {
-            $errMsg = $_.Exception.Message
-            Write-Log "Error provisioning Teams: $errMsg"
-            throw
+    catch {
+        $errMsg = $_.Exception.Message
+        Write-Log "Error provisioning Teams via bootstrapper: $errMsg"
+        throw
+    }
+    finally {
+        if ($prevProgress) { $ProgressPreference = $prevProgress }
+        if (Test-Path $bootstrapperPath) {
+            Remove-Item -Path $bootstrapperPath -Force
         }
     }
 }
