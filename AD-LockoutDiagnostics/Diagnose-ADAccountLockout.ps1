@@ -147,6 +147,13 @@ function Get-LockoutVerdict {
         $top         = $callerGroups[0]
         $totalCalled = ($callerGroups | Measure-Object -Property Count -Sum).Sum
         $findings.Add("Most lockouts ($($top.Count) of $totalCalled) originate from caller computer '$($top.Name)' — likely a stale cached credential on that machine (mapped drive, saved password, service, or mobile device).")
+
+        # Varied sources with no clear dominant caller can indicate a credential
+        # compromise (a spray/guessing attack) rather than one stale credential.
+        if ($callerGroups.Count -ge 4 -and $top.Count -lt ($totalCalled / 2)) {
+            $callerNames = (($callerGroups | Select-Object -First 5).Name) -join ', '
+            $findings.Add("Lockouts come from $($callerGroups.Count) different caller computers with no single dominant source ($callerNames ...) — this pattern can indicate a compromised credential or password-guessing attack rather than one stale credential. Consider forcing a password change and reviewing for unexpected sign-ins.")
+        }
     }
 
     # 2) Bad-logon source hint: summarize the top source (by host, else IP) and translate
@@ -302,7 +309,12 @@ function Get-EffectiveLockoutPolicy {
             }
         }
     } catch { }
-    $d = Get-ADDefaultDomainPasswordPolicy -Server $Server
+    try {
+        $d = Get-ADDefaultDomainPasswordPolicy -Server $Server -ErrorAction Stop
+    } catch {
+        Write-Status WARN "Could not read default domain password policy from ${Server}: $($_.Exception.Message)"
+        return $null
+    }
     [PSCustomObject]@{
         Source                   = 'Default Domain Policy'
         LockoutThreshold         = $d.LockoutThreshold
@@ -345,8 +357,12 @@ function Write-LockoutReport {
     # --- pwdLastSet: filetime Int64 or datetime ---
     $pwdLastSet = $null
     try {
-        if ($User.pwdLastSet -is [int64] -or $User.pwdLastSet -is [int]) {
+        if (($User.pwdLastSet -is [int64] -or $User.pwdLastSet -is [int]) -and [int64]$User.pwdLastSet -gt 0) {
             $pwdLastSet = [datetime]::FromFileTime([int64]$User.pwdLastSet)
+        } elseif (($User.pwdLastSet -is [int64] -or $User.pwdLastSet -is [int]) -and [int64]$User.pwdLastSet -eq 0) {
+            # pwdLastSet of 0 means "user must change password at next logon" — directly
+            # relevant to a reset/lockout investigation, so label it rather than show 1601.
+            $pwdLastSet = '0 (user must change password at next logon)'
         } else {
             $pwdLastSet = $User.pwdLastSet
         }
@@ -366,7 +382,6 @@ function Write-LockoutReport {
     }
 
     # --- Builders for HTML table rows ---
-    $sb = [System.Text.StringBuilder]::new()
     $nl = [Environment]::NewLine
 
     # 1) Likely Cause
@@ -570,7 +585,7 @@ if (-not $LoadFunctionsOnly) {
         $dcList = $DomainController
     } else {
         try {
-            $dcList = @(Get-ADDomainController -Filter * | Select-Object -ExpandProperty HostName)
+            $dcList = @(Get-ADDomainController -Filter * -Server $pdc | Select-Object -ExpandProperty HostName)
         } catch {
             Write-Status WARN "DC auto-discovery failed; falling back to PDC only. $($_.Exception.Message)"
             $dcList = @($pdc)
