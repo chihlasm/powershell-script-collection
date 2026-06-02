@@ -378,28 +378,31 @@ function Write-LockoutReport {
     }
 
     # 2) Account State
+    # NOTE: use [PSCustomObject] rows with Label/Value. A nested plain-array
+    # (@( @('a','b'), ... )) would be flattened by the pipeline, leaving $_ as a
+    # single string and $_[0] indexing its first CHARACTER.
     $accountRows = @(
-        @('Logon Name (SamAccountName)', $User.SamAccountName)
-        @('Full Account Path (DN)',      $User.DistinguishedName)
-        @('Currently Locked Out',        $User.LockedOut)
-        @('Bad Password Count',          $User.badPwdCount)
-        @('Last Bad Password Attempt',   $User.LastBadPasswordAttempt)
-        @('Password Last Set',           $pwdLastSet)
-        @('Lockout Time',                $lockoutTime)
+        [PSCustomObject]@{ Label = 'Logon Name (SamAccountName)'; Value = $User.SamAccountName }
+        [PSCustomObject]@{ Label = 'Full Account Path (DN)';      Value = $User.DistinguishedName }
+        [PSCustomObject]@{ Label = 'Currently Locked Out';        Value = $User.LockedOut }
+        [PSCustomObject]@{ Label = 'Bad Password Count';          Value = $User.badPwdCount }
+        [PSCustomObject]@{ Label = 'Last Bad Password Attempt';   Value = $User.LastBadPasswordAttempt }
+        [PSCustomObject]@{ Label = 'Password Last Set';           Value = $pwdLastSet }
+        [PSCustomObject]@{ Label = 'Lockout Time';                Value = $lockoutTime }
     )
     $accountHtml = ($accountRows | ForEach-Object {
-        "      <tr><th>$(Convert-Esc $_[0])</th><td>$(Convert-Esc $_[1])</td></tr>"
+        "      <tr><th>$(Convert-Esc $_.Label)</th><td>$(Convert-Esc $_.Value)</td></tr>"
     }) -join $nl
 
     # 3) Effective Lockout Policy
     $policyRows = @(
-        @('Where this policy comes from', $Policy.Source)
-        @('Lockout Threshold (bad tries before lockout)', $Policy.LockoutThreshold)
-        @('Observation Window (counter reset)', $Policy.LockoutObservationWindow)
-        @('Lockout Duration', $Policy.LockoutDuration)
+        [PSCustomObject]@{ Label = 'Where this policy comes from';                  Value = $Policy.Source }
+        [PSCustomObject]@{ Label = 'Lockout Threshold (bad tries before lockout)';  Value = $Policy.LockoutThreshold }
+        [PSCustomObject]@{ Label = 'Observation Window (counter reset)';            Value = $Policy.LockoutObservationWindow }
+        [PSCustomObject]@{ Label = 'Lockout Duration';                              Value = $Policy.LockoutDuration }
     )
     $policyHtml = ($policyRows | ForEach-Object {
-        "      <tr><th>$(Convert-Esc $_[0])</th><td>$(Convert-Esc $_[1])</td></tr>"
+        "      <tr><th>$(Convert-Esc $_.Label)</th><td>$(Convert-Esc $_.Value)</td></tr>"
     }) -join $nl
 
     # Generic data-table builder
