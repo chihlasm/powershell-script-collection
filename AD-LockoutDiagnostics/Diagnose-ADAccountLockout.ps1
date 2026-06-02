@@ -112,6 +112,86 @@ function ConvertFrom-BadLogonEvent {
     }
 }
 
+function Get-LockoutVerdict {
+    # Pure ranking helper. Takes parsed lockout rows, bad-logon rows, and the effective
+    # policy object, and returns an ORDERED [string[]] of plain-English findings shown as
+    # the "Likely cause" verdict at the top of the report. No event-log or AD calls here.
+    param(
+        [object[]]$Lockouts,    # rows from ConvertFrom-LockoutEvent (have .CallerComputer)
+        [object[]]$BadLogons,   # rows from ConvertFrom-BadLogonEvent (.SourceHost/.SourceIp/.LogonType)
+        [object]$Policy         # has .LockoutThreshold (int)
+    )
+
+    # Treat null arrays as empty so callers can pass $null without guarding.
+    if ($null -eq $Lockouts)  { $Lockouts  = @() }
+    if ($null -eq $BadLogons) { $BadLogons = @() }
+
+    $findings = [System.Collections.Generic.List[string]]::new()
+
+    # 4) No evidence: nothing in either bucket -> single guidance line, return early.
+    if ($Lockouts.Count -eq 0 -and $BadLogons.Count -eq 0) {
+        $findings.Add("Found no on-prem lockout or bad-password events in the searched window. Consider widening -DaysBack, or investigate hybrid/Entra ID sign-in logs if the account is synced.")
+        # Still surface an aggressive-policy note if the threshold is low.
+        if ($Policy -and $Policy.LockoutThreshold -gt 0 -and $Policy.LockoutThreshold -le 3) {
+            $findings.Add("Lockout policy threshold is $($Policy.LockoutThreshold) — this is an aggressively low threshold; a few stray bad passwords will lock the account.")
+        }
+        return $findings.ToArray()
+    }
+
+    # 1) Dominant caller computer: group lockouts by caller, ignoring null/empty names.
+    $callerGroups = $Lockouts |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_.CallerComputer) } |
+        Group-Object -Property CallerComputer |
+        Sort-Object -Property Count -Descending
+    if ($callerGroups) {
+        $top         = $callerGroups[0]
+        $totalCalled = ($callerGroups | Measure-Object -Property Count -Sum).Sum
+        $findings.Add("Most lockouts ($($top.Count) of $totalCalled) originate from caller computer '$($top.Name)' — likely a stale cached credential on that machine (mapped drive, saved password, service, or mobile device).")
+    }
+
+    # 2) Bad-logon source hint: summarize the top source (by host, else IP) and translate
+    #    the most common LogonType for that source into plain English.
+    if ($BadLogons.Count -gt 0) {
+        $logonTypeText = @{
+            '2'  = 'interactive logon'
+            '3'  = 'network (mapped drive / share)'
+            '4'  = 'batch / scheduled task'
+            '5'  = 'service'
+            '10' = 'RDP / Remote Desktop'
+        }
+        $sourceGroups = $BadLogons |
+            Group-Object -Property {
+                if (-not [string]::IsNullOrWhiteSpace($_.SourceHost)) { $_.SourceHost }
+                else { $_.SourceIp }
+            } |
+            Sort-Object -Property Count -Descending
+        $topSource = $sourceGroups[0]
+        $sourceName = if ([string]::IsNullOrWhiteSpace($topSource.Name)) { '(unknown source)' } else { $topSource.Name }
+
+        # Pick the dominant logon type within the top source, if any is present.
+        $ltGroup = $topSource.Group |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_.LogonType) } |
+            Group-Object -Property LogonType |
+            Sort-Object -Property Count -Descending |
+            Select-Object -First 1
+        $msg = "Most bad-password attempts ($($topSource.Count) of $($BadLogons.Count)) come from '$sourceName'"
+        if ($ltGroup) {
+            $lt    = $ltGroup.Name
+            $plain = if ($logonTypeText.ContainsKey($lt)) { $logonTypeText[$lt] } else { "logon type $lt" }
+            $msg  += " via $plain"
+        }
+        $msg += " — check that source for a saved or expired credential."
+        $findings.Add($msg)
+    }
+
+    # 3) Aggressive policy: low threshold means a few stray bad passwords lock the account.
+    if ($Policy -and $Policy.LockoutThreshold -gt 0 -and $Policy.LockoutThreshold -le 3) {
+        $findings.Add("Lockout policy threshold is $($Policy.LockoutThreshold) — this is an aggressively low threshold; a few stray bad passwords will lock the account.")
+    }
+
+    return $findings.ToArray()
+}
+
 if (-not $LoadFunctionsOnly) {
     try {
         Import-Module ActiveDirectory -ErrorAction Stop
