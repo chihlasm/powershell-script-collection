@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Diagnoses why an Active Directory account keeps locking out and traces the source.
@@ -286,6 +286,251 @@ function Get-AdminResetEvents {
     return @($all)
 }
 
+function Get-EffectiveLockoutPolicy {
+    # Returns the lockout policy that actually applies to the user. A Fine-Grained
+    # Password Policy (FGPP) overrides the default domain policy and can itself be the
+    # cause (e.g. a threshold of 3). Try resultant first; fall back to domain default.
+    param($User, $Server)
+    try {
+        $fgpp = Get-ADUserResultantPasswordPolicy -Identity $User -Server $Server -ErrorAction Stop
+        if ($fgpp) {
+            return [PSCustomObject]@{
+                Source                   = "Fine-Grained ($($fgpp.Name))"
+                LockoutThreshold         = $fgpp.LockoutThreshold
+                LockoutObservationWindow = $fgpp.LockoutObservationWindow
+                LockoutDuration          = $fgpp.LockoutDuration
+            }
+        }
+    } catch { }
+    $d = Get-ADDefaultDomainPasswordPolicy -Server $Server
+    [PSCustomObject]@{
+        Source                   = 'Default Domain Policy'
+        LockoutThreshold         = $d.LockoutThreshold
+        LockoutObservationWindow = $d.LockoutObservationWindow
+        LockoutDuration          = $d.LockoutDuration
+    }
+}
+
+function Write-LockoutReport {
+    # Builds a self-contained dark-themed HTML report and writes it to disk. Returns the
+    # full path. No console logging here (the orchestration body logs the path).
+    param(
+        $User,
+        $Policy,
+        [object[]]$Lockouts,
+        [object[]]$BadLogons,
+        [object[]]$Resets,
+        [string[]]$Verdict,
+        [string]$OutputPath,
+        [int]$DaysBack,
+        [string[]]$DcList,
+        [string]$Pdc
+    )
+
+    if (-not (Test-Path -LiteralPath $OutputPath)) {
+        New-Item -ItemType Directory -Force -Path $OutputPath | Out-Null
+    }
+
+    $stamp    = Get-Date -Format 'yyyy-MM-dd_HHmmss'
+    $sam      = $User.SamAccountName
+    $fileName = "ADLockout_${sam}_${stamp}.html"
+    $fullPath = Join-Path -Path $OutputPath -ChildPath $fileName
+
+    # --- HTML escaping helper (tolerant of nulls) ---
+    function Convert-Esc { param($v)
+        if ($null -eq $v) { return '' }
+        ([string]$v).Replace('&','&amp;').Replace('<','&lt;').Replace('>','&gt;')
+    }
+
+    # --- pwdLastSet: filetime Int64 or datetime ---
+    $pwdLastSet = $null
+    try {
+        if ($User.pwdLastSet -is [int64] -or $User.pwdLastSet -is [int]) {
+            $pwdLastSet = [datetime]::FromFileTime([int64]$User.pwdLastSet)
+        } else {
+            $pwdLastSet = $User.pwdLastSet
+        }
+    } catch {
+        $pwdLastSet = $User.pwdLastSet
+    }
+
+    $lockoutTime = $null
+    try {
+        if ($User.lockoutTime -and ($User.lockoutTime -is [int64] -or $User.lockoutTime -is [int]) -and [int64]$User.lockoutTime -gt 0) {
+            $lockoutTime = [datetime]::FromFileTime([int64]$User.lockoutTime)
+        } else {
+            $lockoutTime = $User.lockoutTime
+        }
+    } catch {
+        $lockoutTime = $User.lockoutTime
+    }
+
+    # --- Builders for HTML table rows ---
+    $sb = [System.Text.StringBuilder]::new()
+    $nl = [Environment]::NewLine
+
+    # 1) Likely Cause
+    $verdictHtml = if ($Verdict -and $Verdict.Count -gt 0) {
+        $items = ($Verdict | ForEach-Object { "      <li>$(Convert-Esc $_)</li>" }) -join $nl
+        "    <ol>$nl$items$nl    </ol>"
+    } else {
+        '    <p class="empty">No findings.</p>'
+    }
+
+    # 2) Account State
+    $accountRows = @(
+        @('Logon Name (SamAccountName)', $User.SamAccountName)
+        @('Full Account Path (DN)',      $User.DistinguishedName)
+        @('Currently Locked Out',        $User.LockedOut)
+        @('Bad Password Count',          $User.badPwdCount)
+        @('Last Bad Password Attempt',   $User.LastBadPasswordAttempt)
+        @('Password Last Set',           $pwdLastSet)
+        @('Lockout Time',                $lockoutTime)
+    )
+    $accountHtml = ($accountRows | ForEach-Object {
+        "      <tr><th>$(Convert-Esc $_[0])</th><td>$(Convert-Esc $_[1])</td></tr>"
+    }) -join $nl
+
+    # 3) Effective Lockout Policy
+    $policyRows = @(
+        @('Where this policy comes from', $Policy.Source)
+        @('Lockout Threshold (bad tries before lockout)', $Policy.LockoutThreshold)
+        @('Observation Window (counter reset)', $Policy.LockoutObservationWindow)
+        @('Lockout Duration', $Policy.LockoutDuration)
+    )
+    $policyHtml = ($policyRows | ForEach-Object {
+        "      <tr><th>$(Convert-Esc $_[0])</th><td>$(Convert-Esc $_[1])</td></tr>"
+    }) -join $nl
+
+    # Generic data-table builder
+    function New-DataTable {
+        param([object[]]$Rows, [string[]]$Headers, [string[]]$Props, [string]$EmptyText)
+        if (-not $Rows -or $Rows.Count -eq 0) {
+            return "    <p class=`"empty`">$(Convert-Esc $EmptyText)</p>"
+        }
+        $thead = ($Headers | ForEach-Object { "<th>$(Convert-Esc $_)</th>" }) -join ''
+        $body  = foreach ($r in $Rows) {
+            $cells = ($Props | ForEach-Object { "<td>$(Convert-Esc $r.$_)</td>" }) -join ''
+            "        <tr>$cells</tr>"
+        }
+        "    <table>$nl      <thead><tr>$thead</tr></thead>$nl      <tbody>$nl$($body -join $nl)$nl      </tbody>$nl    </table>"
+    }
+
+    # 4) Lockout Timeline (4740)
+    $lockoutHtml = New-DataTable -Rows $Lockouts `
+        -Headers @('Time','Caller Computer','DC') `
+        -Props   @('Time','CallerComputer','DC') `
+        -EmptyText "No lockout events in the last $DaysBack day(s)."
+
+    # 5) Bad-Password Sources (4625 / 4771)
+    $badHtml = New-DataTable -Rows $BadLogons `
+        -Headers @('Time','Event','Source Host','Source IP','Logon Type','Status','DC') `
+        -Props   @('Time','EventId','SourceHost','SourceIp','LogonType','Status','DC') `
+        -EmptyText "No bad-password events (4625 / 4771) found in the last $DaysBack day(s)."
+
+    # 6) Admin / Helpdesk Resets (4724)
+    $resetHtml = New-DataTable -Rows $Resets `
+        -Headers @('Time','Reset By','DC') `
+        -Props   @('Time','By','DC') `
+        -EmptyText "No admin password resets in window."
+
+    $genTime  = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $dcJoined = if ($DcList) { ($DcList -join ', ') } else { '' }
+
+    $html = @"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Account Lockout Diagnostics - $(Convert-Esc $sam)</title>
+<style>
+  :root { --bg:#1a1d21; --panel:#23272e; --row:#1f2329; --rowalt:#262b33;
+          --text:#e6e6e6; --muted:#9aa4b0; --accent:#5dade2; --border:#384150; }
+  * { box-sizing:border-box; }
+  body { background:var(--bg); color:var(--text); margin:0; padding:32px;
+         font-family:'Segoe UI',Consolas,Menlo,monospace; line-height:1.5; }
+  header { border-left:4px solid var(--accent); padding:8px 0 8px 16px; margin-bottom:28px; }
+  h1 { font-size:24px; margin:0 0 12px; color:#fff; letter-spacing:.3px; }
+  h2 { font-size:16px; text-transform:uppercase; letter-spacing:1px;
+       color:var(--accent); border-bottom:1px solid var(--border);
+       padding-bottom:6px; margin:32px 0 12px; }
+  .meta { color:var(--muted); font-size:13px; }
+  .meta b { color:var(--text); font-weight:600; }
+  section { background:var(--panel); border:1px solid var(--border);
+            border-radius:6px; padding:16px 20px; margin-bottom:20px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  thead th { background:var(--accent); color:#0b1117; text-align:left;
+             padding:8px 10px; font-weight:600; }
+  th { text-align:left; padding:6px 10px; color:var(--muted); font-weight:600;
+       white-space:nowrap; vertical-align:top; }
+  td { padding:6px 10px; border-top:1px solid var(--border); vertical-align:top;
+       word-break:break-word; }
+  tbody tr:nth-child(odd) { background:var(--row); }
+  tbody tr:nth-child(even) { background:var(--rowalt); }
+  ol { margin:4px 0; padding-left:22px; }
+  li { margin:6px 0; }
+  .empty { color:var(--muted); font-style:italic; margin:4px 0; }
+  footer { color:var(--muted); font-size:12px; margin-top:32px;
+           border-top:1px solid var(--border); padding-top:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Account Lockout Diagnostics</h1>
+  <div class="meta">
+    Account: <b>$(Convert-Esc $sam)</b><br>
+    Generated: <b>$genTime</b><br>
+    Search window: <b>$DaysBack day(s)</b><br>
+    Domain controllers queried: <b>$(Convert-Esc $dcJoined)</b>
+  </div>
+</header>
+
+<section>
+  <h2>Likely Cause</h2>
+$verdictHtml
+</section>
+
+<section>
+  <h2>Account State</h2>
+  <table><tbody>
+$accountHtml
+  </tbody></table>
+</section>
+
+<section>
+  <h2>Effective Lockout Policy</h2>
+  <table><tbody>
+$policyHtml
+  </tbody></table>
+</section>
+
+<section>
+  <h2>Lockout Timeline (Event 4740 - from PDC $(Convert-Esc $Pdc))</h2>
+$lockoutHtml
+</section>
+
+<section>
+  <h2>Bad-Password Sources (Events 4625 / 4771)</h2>
+$badHtml
+</section>
+
+<section>
+  <h2>Admin / Helpdesk Resets (Event 4724)</h2>
+$resetHtml
+</section>
+
+<footer>
+  Account Lockout Diagnostics - internal MSP tooling. Lockouts originate on-prem;
+  hybrid/Entra sign-in failures are out of scope.
+</footer>
+</body>
+</html>
+"@
+
+    Set-Content -Path $fullPath -Value $html -Encoding UTF8
+    return $fullPath
+}
+
 if (-not $LoadFunctionsOnly) {
     try {
         Import-Module ActiveDirectory -ErrorAction Stop
@@ -293,4 +538,56 @@ if (-not $LoadFunctionsOnly) {
         Write-Status FAIL "ActiveDirectory module not found. Install RSAT and retry."
         exit 1
     }
+
+    # --- Resolve PDC and target user (PDC is authoritative for 4740 + current counters) ---
+    try {
+        $pdc = (Get-ADDomain -ErrorAction Stop).PDCEmulator
+        Write-Status INFO "PDC emulator: $pdc"
+    } catch {
+        Write-Status FAIL "Could not contact the domain. $($_.Exception.Message)"
+        exit 1
+    }
+
+    $userProps = @('LockedOut','badPwdCount','lockoutTime','pwdLastSet',
+                   'LastBadPasswordAttempt','whenChanged')
+    try {
+        $user = Get-ADUser -Identity $Identity -Server $pdc -Properties $userProps -ErrorAction Stop
+        Write-Status PASS "Resolved user: $($user.SamAccountName) ($($user.DistinguishedName))"
+    } catch {
+        Write-Status FAIL "Could not resolve identity '$Identity'. $($_.Exception.Message)"
+        exit 1
+    }
+
+    # --- Effective lockout policy (FGPP-aware) ---
+    $policy = Get-EffectiveLockoutPolicy -User $user.SamAccountName -Server $pdc
+    Write-Status INFO "Lockout policy ($($policy.Source)): threshold=$($policy.LockoutThreshold)"
+
+    # --- Determine DC list (override or auto-discover) ---
+    if ($DomainController) {
+        $dcList = $DomainController
+    } else {
+        try {
+            $dcList = @(Get-ADDomainController -Filter * | Select-Object -ExpandProperty HostName)
+        } catch {
+            Write-Status WARN "DC auto-discovery failed; falling back to PDC only. $($_.Exception.Message)"
+            $dcList = @($pdc)
+        }
+    }
+    Write-Status INFO "Querying $($dcList.Count) DC(s) for the last $DaysBack day(s)."
+
+    # --- Gather evidence ---
+    $lockouts  = Get-LockoutEvents    -Pdc $pdc -SamAccountName $user.SamAccountName -DaysBack $DaysBack
+    $badLogons = Get-BadLogonEvents   -DomainControllers $dcList -SamAccountName $user.SamAccountName -DaysBack $DaysBack
+    $resets    = Get-AdminResetEvents -DomainControllers $dcList -SamAccountName $user.SamAccountName -DaysBack $DaysBack
+
+    # --- Verdict ---
+    $verdict = Get-LockoutVerdict -Lockouts $lockouts -BadLogons $badLogons -Policy $policy
+    Write-Status INFO "Verdict:"
+    foreach ($line in $verdict) { Write-Host "    - $line" -ForegroundColor White }
+
+    # --- Report ---
+    $reportPath = Write-LockoutReport -User $user -Policy $policy -Lockouts $lockouts `
+        -BadLogons $badLogons -Resets $resets -Verdict $verdict -OutputPath $OutputPath `
+        -DaysBack $DaysBack -DcList $dcList -Pdc $pdc
+    Write-Status PASS "Report written: $reportPath"
 }
