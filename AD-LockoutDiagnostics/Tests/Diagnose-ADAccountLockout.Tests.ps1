@@ -20,3 +20,84 @@ Describe 'ConvertFrom-LockoutEvent' {
         $row.DC             | Should -Be 'DC01'
     }
 }
+
+Describe 'ConvertFrom-BadLogonEvent' {
+    It 'parses a 4625 failed-logon event into a normalized row' {
+        $xml = @'
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System><TimeCreated SystemTime="2026-06-01T09:00:00.000Z"/></System>
+  <EventData>
+    <Data Name="TargetUserName">jdoe</Data>
+    <Data Name="WorkstationName">LAPTOP-7</Data>
+    <Data Name="IpAddress">192.168.1.50</Data>
+    <Data Name="LogonType">3</Data>
+    <Data Name="SubStatus">0xC000006A</Data>
+  </EventData>
+</Event>
+'@
+        $row = ConvertFrom-BadLogonEvent -EventXml $xml -EventId 4625 -DcName 'DC01'
+        $row.EventId    | Should -Be 4625
+        $row.User       | Should -Be 'jdoe'
+        $row.SourceHost | Should -Be 'LAPTOP-7'
+        $row.SourceIp   | Should -Be '192.168.1.50'
+        $row.LogonType  | Should -Be '3'
+        $row.Status     | Should -Be '0xC000006A'
+        $row.DC         | Should -Be 'DC01'
+        $row.Time       | Should -BeOfType [datetime]
+    }
+
+    It 'parses a 4771 Kerberos pre-auth event and leaves ::ffff: addresses unchanged' {
+        $xml = @'
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System><TimeCreated SystemTime="2026-06-01T10:15:00.000Z"/></System>
+  <EventData>
+    <Data Name="TargetUserName">jdoe</Data>
+    <Data Name="IpAddress">::ffff:192.168.1.5</Data>
+    <Data Name="Status">0x18</Data>
+  </EventData>
+</Event>
+'@
+        $row = ConvertFrom-BadLogonEvent -EventXml $xml -EventId 4771 -DcName 'DC02'
+        $row.EventId    | Should -Be 4771
+        $row.User       | Should -Be 'jdoe'
+        $row.SourceIp   | Should -Be '::ffff:192.168.1.5'
+        $row.SourceHost | Should -BeNullOrEmpty
+        $row.LogonType  | Should -BeNullOrEmpty
+        $row.Status     | Should -Be '0x18'
+        $row.DC         | Should -Be 'DC02'
+    }
+
+    It 'normalizes a 4625 with IpAddress "-" to (local)' {
+        $xml = @'
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System><TimeCreated SystemTime="2026-06-01T11:00:00.000Z"/></System>
+  <EventData>
+    <Data Name="TargetUserName">jdoe</Data>
+    <Data Name="WorkstationName">SERVER-1</Data>
+    <Data Name="IpAddress">-</Data>
+    <Data Name="LogonType">2</Data>
+    <Data Name="Status">0xC000006D</Data>
+  </EventData>
+</Event>
+'@
+        $row = ConvertFrom-BadLogonEvent -EventXml $xml -EventId 4625 -DcName 'DC01'
+        $row.SourceIp | Should -Be '(local)'
+    }
+
+    It 'normalizes a 4625 with IpAddress ::1 to (local)' {
+        $xml = @'
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System><TimeCreated SystemTime="2026-06-01T11:30:00.000Z"/></System>
+  <EventData>
+    <Data Name="TargetUserName">jdoe</Data>
+    <Data Name="WorkstationName">SERVER-1</Data>
+    <Data Name="IpAddress">::1</Data>
+    <Data Name="LogonType">10</Data>
+    <Data Name="SubStatus">0xC000006A</Data>
+  </EventData>
+</Event>
+'@
+        $row = ConvertFrom-BadLogonEvent -EventXml $xml -EventId 4625 -DcName 'DC01'
+        $row.SourceIp | Should -Be '(local)'
+    }
+}
