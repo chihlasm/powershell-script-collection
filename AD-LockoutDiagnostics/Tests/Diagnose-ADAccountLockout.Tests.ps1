@@ -138,4 +138,19 @@ Describe 'Get-LockoutVerdict' {
         $v[0] | Should -Match 'LAPTOP-7'
         ($v -join ' ') | Should -Match 'aggressive'
     }
+    It 'tolerates null inputs without error' {
+        $v = Get-LockoutVerdict -Lockouts $null -BadLogons $null -Policy ([PSCustomObject]@{LockoutThreshold=5})
+        ($v -join ' ') | Should -Match 'no on-prem'
+    }
+    It 'flags possible compromise when many distinct callers and none dominate' {
+        $lockouts = @(
+            [PSCustomObject]@{CallerComputer='HOST-A'},
+            [PSCustomObject]@{CallerComputer='HOST-B'},
+            [PSCustomObject]@{CallerComputer='HOST-C'},
+            [PSCustomObject]@{CallerComputer='HOST-D'},
+            [PSCustomObject]@{CallerComputer='HOST-E'}
+        )
+        $v = Get-LockoutVerdict -Lockouts $lockouts -BadLogons @() -Policy ([PSCustomObject]@{LockoutThreshold=5})
+        ($v -join ' ') | Should -Match 'compromised credential|password-guessing'
+    }
 }
