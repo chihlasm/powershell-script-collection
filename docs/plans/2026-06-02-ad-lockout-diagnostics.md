@@ -88,7 +88,7 @@ git commit -m "feat: scaffold Diagnose-ADAccountLockout with help and params"
 **Files:**
 - Modify: `AD-LockoutDiagnostics/Diagnose-ADAccountLockout.ps1`
 
-**Step 1:** Add a `Write-Status` helper (dual console pattern per repo convention) and the AD module import in try/catch:
+**Step 1:** Add a `Write-Status` helper (dual console pattern per repo convention) and the AD module import in try/catch. The import is guarded by `-not $LoadFunctionsOnly` so the Pester tests (Tasks 5–7) can dot-source the script on a box without RSAT without hitting `exit 1`:
 
 ```powershell
 function Write-Status {
@@ -100,13 +100,17 @@ function Write-Status {
     Write-Host ("[{0}] {1}" -f $Level, $Message) -ForegroundColor $color
 }
 
-try {
-    Import-Module ActiveDirectory -ErrorAction Stop
-} catch {
-    Write-Status FAIL "ActiveDirectory module not found. Install RSAT and retry."
-    exit 1
+if (-not $LoadFunctionsOnly) {
+    try {
+        Import-Module ActiveDirectory -ErrorAction Stop
+    } catch {
+        Write-Status FAIL "ActiveDirectory module not found. Install RSAT and retry."
+        exit 1
+    }
 }
 ```
+
+NOTE: this requires the `[switch]$LoadFunctionsOnly` param (added in Task 1's block — if not present, add it to the param block now). All orchestration code in later tasks goes inside one `if (-not $LoadFunctionsOnly) { ... }` block, with pure functions defined ABOVE that block so dot-sourcing always loads them.
 
 **Step 2: Verify** parse again (same command as Task 1 Step 2). On a domain box, run the script with a bogus identity to confirm the import path runs without crashing before AD lookups.
 
