@@ -50,6 +50,20 @@ function Write-Status {
     Write-Host ("[{0}] {1}" -f $Level, $Message) -ForegroundColor $color
 }
 
+function ConvertFrom-LockoutEvent {
+    param([string]$EventXml, [string]$DcName)
+    $x = [xml]$EventXml
+    $d = @{}
+    foreach ($node in $x.Event.EventData.Data) { $d[$node.Name] = $node.'#text' }
+    [PSCustomObject]@{
+        Time           = [datetime]$x.Event.System.TimeCreated.SystemTime
+        User           = $d['TargetUserName']
+        Domain         = $d['TargetDomainName']
+        CallerComputer = $d['CallerComputerName']
+        DC             = $DcName
+    }
+}
+
 if (-not $LoadFunctionsOnly) {
     try {
         Import-Module ActiveDirectory -ErrorAction Stop
