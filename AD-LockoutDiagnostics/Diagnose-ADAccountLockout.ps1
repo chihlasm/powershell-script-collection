@@ -64,6 +64,54 @@ function ConvertFrom-LockoutEvent {
     }
 }
 
+function ConvertFrom-BadLogonEvent {
+    # Parses event 4625 (failed logon) OR 4771 (Kerberos pre-auth failure) into a
+    # normalized row. The two event types have different field layouts, so the caller
+    # passes the EventId in (both types are queried together) and we branch on it.
+    param(
+        [string]$EventXml,
+        [int]$EventId,
+        [string]$DcName
+    )
+    $x = [xml]$EventXml
+    $d = @{}
+    foreach ($node in $x.Event.EventData.Data) { $d[$node.Name] = $node.'#text' }
+
+    if ($EventId -eq 4625) {
+        $sourceHost = $d['WorkstationName']
+        $sourceIp   = $d['IpAddress']
+        $logonType  = $d['LogonType']
+        # Prefer SubStatus (the precise failure reason) when present, else Status.
+        if ($d.ContainsKey('SubStatus'))  { $status = $d['SubStatus'] }
+        elseif ($d.ContainsKey('Status')) { $status = $d['Status'] }
+        else                              { $status = $null }
+    }
+    else {
+        # 4771: no WorkstationName / LogonType; client address is in IpAddress.
+        $sourceHost = $null
+        $sourceIp   = $d['IpAddress']
+        $logonType  = $null
+        $status     = $d['Status']
+    }
+
+    # Normalize loopback / empty source IPs to a readable marker. Leave ::ffff:
+    # mapped addresses untouched.
+    if ([string]::IsNullOrEmpty($sourceIp) -or $sourceIp -in @('-', '::1', '127.0.0.1')) {
+        $sourceIp = '(local)'
+    }
+
+    [PSCustomObject]@{
+        Time       = [datetime]$x.Event.System.TimeCreated.SystemTime
+        EventId    = [int]$EventId
+        User       = $d['TargetUserName']
+        SourceHost = $sourceHost
+        SourceIp   = $sourceIp
+        LogonType  = $logonType
+        Status     = $status
+        DC         = $DcName
+    }
+}
+
 if (-not $LoadFunctionsOnly) {
     try {
         Import-Module ActiveDirectory -ErrorAction Stop
