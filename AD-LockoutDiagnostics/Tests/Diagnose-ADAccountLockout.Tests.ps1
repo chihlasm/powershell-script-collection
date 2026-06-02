@@ -101,3 +101,41 @@ Describe 'ConvertFrom-BadLogonEvent' {
         $row.SourceIp | Should -Be '(local)'
     }
 }
+
+Describe 'Get-LockoutVerdict' {
+    It 'fingers the dominant caller computer' {
+        $lockouts = @(
+            [PSCustomObject]@{CallerComputer='LAPTOP-7'},
+            [PSCustomObject]@{CallerComputer='LAPTOP-7'},
+            [PSCustomObject]@{CallerComputer='PHONE-1'}
+        )
+        $v = Get-LockoutVerdict -Lockouts $lockouts -BadLogons @() -Policy ([PSCustomObject]@{LockoutThreshold=5})
+        ($v -join ' ') | Should -Match 'LAPTOP-7'
+    }
+    It 'flags aggressive policy' {
+        $v = Get-LockoutVerdict -Lockouts @() -BadLogons @() -Policy ([PSCustomObject]@{LockoutThreshold=3})
+        ($v -join ' ') | Should -Match 'aggressive'
+    }
+    It 'notes no evidence' {
+        $v = Get-LockoutVerdict -Lockouts @() -BadLogons @() -Policy ([PSCustomObject]@{LockoutThreshold=5})
+        ($v -join ' ') | Should -Match 'no on-prem'
+    }
+    It 'summarizes the bad-logon source with a plain-English logon type' {
+        $bad = @(
+            [PSCustomObject]@{SourceHost='LAPTOP-7'; SourceIp='192.168.1.50'; LogonType='3'},
+            [PSCustomObject]@{SourceHost='LAPTOP-7'; SourceIp='192.168.1.50'; LogonType='3'}
+        )
+        $v = Get-LockoutVerdict -Lockouts @() -BadLogons $bad -Policy ([PSCustomObject]@{LockoutThreshold=5})
+        ($v -join ' ') | Should -Match 'LAPTOP-7'
+        ($v -join ' ') | Should -Match 'mapped drive'
+    }
+    It 'returns an ordered array: dominant caller before policy note' {
+        $lockouts = @(
+            [PSCustomObject]@{CallerComputer='LAPTOP-7'},
+            [PSCustomObject]@{CallerComputer='LAPTOP-7'}
+        )
+        $v = Get-LockoutVerdict -Lockouts $lockouts -BadLogons @() -Policy ([PSCustomObject]@{LockoutThreshold=2})
+        $v[0] | Should -Match 'LAPTOP-7'
+        ($v -join ' ') | Should -Match 'aggressive'
+    }
+}
