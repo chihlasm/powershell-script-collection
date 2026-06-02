@@ -192,6 +192,100 @@ function Get-LockoutVerdict {
     return $findings.ToArray()
 }
 
+function Get-LockoutEvents {
+    # Query event 4740 (account lockout) on the PDC emulator (authoritative for 4740).
+    # Returns parsed lockout rows for the target user only. "No events" is normal -> WARN, return @().
+    param(
+        [string]$Pdc,
+        [string]$SamAccountName,
+        [int]$DaysBack
+    )
+    $filter = @{ LogName = 'Security'; Id = 4740; StartTime = (Get-Date).AddDays(-$DaysBack) }
+    try {
+        $events = Get-WinEvent -ComputerName $Pdc -FilterHashtable $filter -ErrorAction Stop
+    } catch {
+        # Get-WinEvent throws a specific (non-fatal) error when no events match the filter.
+        if ($_.Exception.Message -match 'No events were found') {
+            Write-Status WARN "No 4740 lockout events found on $Pdc in the last $DaysBack day(s)."
+        } else {
+            Write-Status WARN "Could not read 4740 events from ${Pdc}: $($_.Exception.Message)"
+        }
+        return @()
+    }
+    $rows = foreach ($e in $events) {
+        $row = ConvertFrom-LockoutEvent -EventXml $e.ToXml() -DcName $Pdc
+        if ($row.User -and $row.User -ieq $SamAccountName) { $row }
+    }
+    $rows = @($rows)
+    Write-Status PASS "Found $($rows.Count) lockout event(s) for $SamAccountName on $Pdc."
+    return $rows
+}
+
+function Get-BadLogonEvents {
+    # Query failed-logon (4625) and Kerberos pre-auth failure (4771) events across all
+    # supplied DCs, parse them, and return rows for the target user only. Each DC is
+    # queried in its own try/catch so one unreachable DC doesn't halt the run.
+    param(
+        [string[]]$DomainControllers,
+        [string]$SamAccountName,
+        [int]$DaysBack
+    )
+    $filter = @{ LogName = 'Security'; Id = 4625, 4771; StartTime = (Get-Date).AddDays(-$DaysBack) }
+    $all = foreach ($dc in $DomainControllers) {
+        try {
+            $events = Get-WinEvent -ComputerName $dc -FilterHashtable $filter -ErrorAction Stop
+            Write-Status PASS "${dc}: read $($events.Count) bad-logon event(s)."
+        } catch {
+            if ($_.Exception.Message -match 'No events were found') {
+                Write-Status INFO "${dc}: no 4625/4771 events in window."
+            } else {
+                Write-Status WARN "${dc}: $($_.Exception.Message)"
+            }
+            continue
+        }
+        foreach ($e in $events) {
+            $row = ConvertFrom-BadLogonEvent -EventXml $e.ToXml() -EventId $e.Id -DcName $dc
+            if ($row.User -and $row.User -ieq $SamAccountName) { $row }
+        }
+    }
+    return @($all)
+}
+
+function Get-AdminResetEvents {
+    # Query event 4724 (an admin/helpdesk attempted to reset the account's password)
+    # across all supplied DCs. Returns rows: Time, Target, By (who did it), DC.
+    param(
+        [string[]]$DomainControllers,
+        [string]$SamAccountName,
+        [int]$DaysBack
+    )
+    $filter = @{ LogName = 'Security'; Id = 4724; StartTime = (Get-Date).AddDays(-$DaysBack) }
+    $all = foreach ($dc in $DomainControllers) {
+        try {
+            $events = Get-WinEvent -ComputerName $dc -FilterHashtable $filter -ErrorAction Stop
+        } catch {
+            if ($_.Exception.Message -notmatch 'No events were found') {
+                Write-Status WARN "${dc}: $($_.Exception.Message)"
+            }
+            continue
+        }
+        foreach ($e in $events) {
+            $x = [xml]$e.ToXml()
+            $d = @{}
+            foreach ($node in $x.Event.EventData.Data) { $d[$node.Name] = $node.'#text' }
+            if ($d['TargetUserName'] -and $d['TargetUserName'] -ieq $SamAccountName) {
+                [PSCustomObject]@{
+                    Time   = [datetime]$x.Event.System.TimeCreated.SystemTime
+                    Target = $d['TargetUserName']
+                    By     = $d['SubjectUserName']
+                    DC     = $dc
+                }
+            }
+        }
+    }
+    return @($all)
+}
+
 if (-not $LoadFunctionsOnly) {
     try {
         Import-Module ActiveDirectory -ErrorAction Stop
