@@ -34,5 +34,27 @@ param(
     [ValidateRange(1, 90)]
     [int]$DaysBack = 7,
 
-    [string[]]$DomainController
+    [string[]]$DomainController,
+
+    # Internal: dot-source the functions without running the orchestration body.
+    # Used by the Pester tests so they can load helpers on a box without RSAT.
+    [switch]$LoadFunctionsOnly
 )
+
+function Write-Status {
+    param(
+        [ValidateSet('PASS','WARN','FAIL','INFO')][string]$Level,
+        [string]$Message
+    )
+    $color = @{ PASS='Green'; WARN='Yellow'; FAIL='Red'; INFO='Cyan' }[$Level]
+    Write-Host ("[{0}] {1}" -f $Level, $Message) -ForegroundColor $color
+}
+
+if (-not $LoadFunctionsOnly) {
+    try {
+        Import-Module ActiveDirectory -ErrorAction Stop
+    } catch {
+        Write-Status FAIL "ActiveDirectory module not found. Install RSAT and retry."
+        exit 1
+    }
+}
