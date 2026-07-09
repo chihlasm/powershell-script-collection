@@ -1514,6 +1514,415 @@ function Export-HTMLReport {
         ($AuditResults.PathValidation | Where-Object { -not $_.Reachable }).Count
     } else { 0 }
 
+    # The matrix CSS and JS below are built as SINGLE-QUOTED here-strings (@'...'@) so
+    # PowerShell does NOT attempt to interpolate the literal $ and { } characters that
+    # appear throughout the JavaScript (e.g. e.target.value, template-like concatenation,
+    # data-sort-key selectors). They are inserted into the main HTML here-string below via
+    # a plain $matrixStyle / $matrixScript variable reference, which is safe interpolation
+    # (a simple variable name, not raw JS/CSS text) - the trap this avoids is embedding the
+    # raw JS/CSS text directly inside the double-quoted @"..."@ block further down, where a
+    # literal $ would otherwise be mis-parsed as PowerShell variable/subexpression syntax.
+    $matrixStyle = @'
+        .m-ok { background: #eafaf1; }
+        .m-unreachable { background: #fdf2f2; color: #c0392b; }
+        .m-overlap { background: #fef5e7; }
+        .m-remove { background: #f4f6f6; color: #7f8c8d; }
+        .matrix-toolbar-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 10px; }
+        .matrix-search { padding: 6px 10px; border: 1px solid #bdc3c7; border-radius: 4px; min-width: 220px; font-size: 13px; }
+        .matrix-toggle { font-size: 13px; color: #2c3e50; white-space: nowrap; user-select: none; }
+        .matrix-toggle input { margin-right: 4px; }
+        .matrix-view-toggle { display: inline-flex; gap: 10px; align-items: center; font-size: 13px; }
+        .matrix-view-toggle label { white-space: nowrap; }
+        .matrix-disabled { color: #95a5a6; }
+        .matrix-note { font-size: 12px; color: #95a5a6; font-style: italic; }
+        .matrix-letters { border-top: 1px solid #eee; padding-top: 8px; }
+        .matrix-letters-label { font-size: 12px; color: #7f8c8d; font-weight: 600; margin-right: 4px; }
+        .matrix-table { border-collapse: separate; border-spacing: 0; width: auto; min-width: 100%; table-layout: auto; }
+        .matrix-table th, .matrix-table td { border: 1px solid #ddd; padding: 6px 8px; font-size: 13px; vertical-align: top; }
+        .matrix-table thead th { position: sticky; top: 0; background: #3498db; color: #fff; z-index: 2; cursor: pointer; white-space: nowrap; }
+        .matrix-table thead th:hover { background: #2f89c5; }
+        .matrix-col-name { position: sticky; left: 0; background: #fff; z-index: 1; text-align: left; min-width: 180px; font-weight: 600; }
+        .matrix-table thead th.matrix-col-name { z-index: 3; background: #3498db; }
+        .matrix-sort-indicator { font-size: 11px; }
+        .matrix-cell { min-width: 110px; }
+        .matrix-entry { padding: 3px 5px; border-radius: 3px; margin-bottom: 3px; font-size: 12px; }
+        .matrix-entry:last-child { margin-bottom: 0; }
+        .matrix-entry-name { display: block; font-weight: 600; }
+        .matrix-entry-gpo { display: block; font-size: 10px; color: #7f8c8d; }
+        .matrix-row-user .matrix-col-name { font-weight: 400; color: #555; background: #fbfbfb; }
+        .matrix-indent { padding-left: 24px; }
+        .matrix-expander { display: inline-block; width: 14px; cursor: pointer; font-weight: 700; color: #3498db; }
+        .matrix-expander-spacer { display: inline-block; width: 14px; }
+        .matrix-no-results { text-align: center; color: #95a5a6; padding: 20px; }
+        .matrix-row-notice td { text-align: center; color: #7f8c8d; font-style: italic; background: #fafafa; }
+'@
+
+    $matrixScript = @'
+    <script>
+    (function () {
+        "use strict";
+
+        var dataEl = document.getElementById("matrix-data");
+        if (!dataEl) { return; }
+
+        var matrix;
+        try {
+            matrix = JSON.parse(dataEl.textContent);
+        } catch (e) {
+            return;
+        }
+
+        var toolbarEl = document.getElementById("matrix-toolbar");
+        var gridEl = document.getElementById("matrix-grid");
+        if (!toolbarEl || !gridEl) { return; }
+
+        var letters = matrix.letters || [];
+        var groups = matrix.groups || [];
+        var hasUserData = !!matrix.hasUserData;
+
+        var STATUS_RANK = { unreachable: 0, overlap: 0, ok: 1, remove: 1, empty: 2 };
+        var USER_ROW_CAP = 500;
+
+        var state = {
+            search: "",
+            visibleLetters: {},
+            problemsOnly: false,
+            view: "groups",
+            sortKey: "name",
+            sortDir: "asc",
+            expanded: {}
+        };
+
+        letters.forEach(function (l) {
+            state.visibleLetters[l] = true;
+        });
+
+        function escapeHtml(value) {
+            if (value === null || value === undefined) { return ""; }
+            return String(value)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#39;");
+        }
+
+        function shortName(path) {
+            if (!path) { return ""; }
+            var parts = String(path).split("\\");
+            for (var i = parts.length - 1; i >= 0; i--) {
+                if (parts[i] !== "") { return parts[i]; }
+            }
+            return path;
+        }
+
+        function worstStatusForCells(cells) {
+            if (!cells || cells.length === 0) { return "empty"; }
+            var best = 2;
+            for (var i = 0; i < cells.length; i++) {
+                var rank = STATUS_RANK.hasOwnProperty(cells[i].status) ? STATUS_RANK[cells[i].status] : 1;
+                if (rank < best) { best = rank; }
+            }
+            if (best === 0) { return "problem"; }
+            if (best === 1) { return "ok"; }
+            return "empty";
+        }
+
+        function rowHasProblem(group) {
+            for (var i = 0; i < letters.length; i++) {
+                var cells = group.cells ? group.cells[letters[i]] : null;
+                if (cells) {
+                    for (var j = 0; j < cells.length; j++) {
+                        if (cells[j].status === "unreachable" || cells[j].status === "overlap") { return true; }
+                    }
+                }
+            }
+            return false;
+        }
+
+        function buildToolbar() {
+            var html = "";
+            html += "<div class=\"matrix-toolbar-row\">";
+            html += "<input type=\"text\" id=\"matrix-search\" class=\"matrix-search\" placeholder=\"Search by name...\">";
+
+            html += "<label class=\"matrix-toggle\"><input type=\"checkbox\" id=\"matrix-problems-only\"> Problems only</label>";
+
+            html += "<span class=\"matrix-view-toggle\">";
+            html += "<label><input type=\"radio\" name=\"matrix-view\" value=\"groups\" checked> Groups</label>";
+            if (hasUserData) {
+                html += "<label><input type=\"radio\" name=\"matrix-view\" value=\"users\"> Users</label>";
+            } else {
+                html += "<label class=\"matrix-disabled\" title=\"No user membership data available\"><input type=\"radio\" name=\"matrix-view\" value=\"users\" disabled> Users</label>";
+                html += "<span class=\"matrix-note\">(user view unavailable - no membership data)</span>";
+            }
+            html += "</span>";
+            html += "</div>";
+
+            html += "<div class=\"matrix-toolbar-row matrix-letters\">";
+            html += "<span class=\"matrix-letters-label\">Columns:</span>";
+            for (var i = 0; i < letters.length; i++) {
+                var l = letters[i];
+                html += "<label class=\"matrix-toggle\"><input type=\"checkbox\" class=\"matrix-letter-cb\" data-letter=\"" + escapeHtml(l) + "\" checked> " + escapeHtml(l) + "</label>";
+            }
+            html += "</div>";
+
+            toolbarEl.innerHTML = html;
+
+            document.getElementById("matrix-search").addEventListener("input", function (e) {
+                state.search = e.target.value.toLowerCase();
+                render();
+            });
+
+            document.getElementById("matrix-problems-only").addEventListener("change", function (e) {
+                state.problemsOnly = e.target.checked;
+                render();
+            });
+
+            var letterCbs = toolbarEl.querySelectorAll(".matrix-letter-cb");
+            for (var k = 0; k < letterCbs.length; k++) {
+                letterCbs[k].addEventListener("change", function (e) {
+                    state.visibleLetters[e.target.getAttribute("data-letter")] = e.target.checked;
+                    render();
+                });
+            }
+
+            var viewRadios = toolbarEl.querySelectorAll("input[name=\"matrix-view\"]");
+            for (var v = 0; v < viewRadios.length; v++) {
+                viewRadios[v].addEventListener("change", function (e) {
+                    if (e.target.disabled) { return; }
+                    state.view = e.target.value;
+                    render();
+                });
+            }
+        }
+
+        function getVisibleLetters() {
+            return letters.filter(function (l) { return state.visibleLetters[l]; });
+        }
+
+        function sortGroups(list, visLetters) {
+            var key = state.sortKey;
+            var dir = state.sortDir === "asc" ? 1 : -1;
+
+            var sorted = list.slice();
+            sorted.sort(function (a, b) {
+                var av, bv;
+                if (key === "name") {
+                    av = (a.name || "").toLowerCase();
+                    bv = (b.name || "").toLowerCase();
+                    if (av < bv) { return -1 * dir; }
+                    if (av > bv) { return 1 * dir; }
+                    return 0;
+                } else {
+                    var aCells = a.cells ? a.cells[key] : null;
+                    var bCells = b.cells ? b.cells[key] : null;
+                    var aStatus = worstStatusForCells(aCells);
+                    var bStatus = worstStatusForCells(bCells);
+                    var aRank = aStatus === "problem" ? 0 : (aStatus === "ok" ? 1 : 2);
+                    var bRank = bStatus === "problem" ? 0 : (bStatus === "ok" ? 1 : 2);
+                    if (aRank !== bRank) { return (aRank - bRank) * dir; }
+                    av = (a.name || "").toLowerCase();
+                    bv = (b.name || "").toLowerCase();
+                    if (av < bv) { return -1; }
+                    if (av > bv) { return 1; }
+                    return 0;
+                }
+            });
+            return sorted;
+        }
+
+        function cellHtml(cells) {
+            if (!cells || cells.length === 0) { return ""; }
+            var parts = [];
+            for (var i = 0; i < cells.length; i++) {
+                var c = cells[i];
+                var cls = "m-" + (c.status || "ok");
+                var title = escapeHtml(c.path) + " (" + escapeHtml(c.gpo) + ", " + escapeHtml(c.action) + ")";
+                parts.push(
+                    "<div class=\"matrix-entry " + cls + "\" title=\"" + title + "\">" +
+                    "<span class=\"matrix-entry-name\">" + escapeHtml(shortName(c.path)) + "</span>" +
+                    "<span class=\"matrix-entry-gpo\">" + escapeHtml(c.gpo) + "</span>" +
+                    "</div>"
+                );
+            }
+            return parts.join("");
+        }
+
+        function buildHeaderRow(visLetters) {
+            var html = "<tr>";
+            html += "<th class=\"matrix-col-name\" data-sort-key=\"name\">Group / User<span class=\"matrix-sort-indicator\"></span></th>";
+            for (var i = 0; i < visLetters.length; i++) {
+                var l = visLetters[i];
+                html += "<th class=\"matrix-col-letter\" data-sort-key=\"" + escapeHtml(l) + "\">" + escapeHtml(l) + "<span class=\"matrix-sort-indicator\"></span></th>";
+            }
+            html += "</tr>";
+            return html;
+        }
+
+        function buildGroupsRows(visLetters) {
+            var filtered = groups.filter(function (g) {
+                if (state.search && g.name.toLowerCase().indexOf(state.search) === -1) { return false; }
+                if (state.problemsOnly && !rowHasProblem(g)) { return false; }
+                return true;
+            });
+
+            var sorted = sortGroups(filtered, visLetters);
+
+            var rows = [];
+            for (var i = 0; i < sorted.length; i++) {
+                var g = sorted[i];
+                var hasUsers = hasUserData && g.users && g.users.length > 0;
+                var expandKey = "g:" + g.name;
+                var isExpanded = !!state.expanded[expandKey];
+
+                var expanderHtml = hasUsers
+                    ? "<span class=\"matrix-expander\" data-expand-key=\"" + escapeHtml(expandKey) + "\">" + (isExpanded ? "v" : "&gt;") + "</span> "
+                    : "<span class=\"matrix-expander-spacer\"></span> ";
+
+                var rowHtml = "<tr class=\"matrix-row-group\">";
+                rowHtml += "<td class=\"matrix-col-name\">" + expanderHtml + escapeHtml(g.name) + "</td>";
+                for (var j = 0; j < visLetters.length; j++) {
+                    var cells = g.cells ? g.cells[visLetters[j]] : null;
+                    rowHtml += "<td class=\"matrix-cell\">" + cellHtml(cells) + "</td>";
+                }
+                rowHtml += "</tr>";
+                rows.push(rowHtml);
+
+                if (hasUsers && isExpanded) {
+                    for (var u = 0; u < g.users.length; u++) {
+                        var userRow = "<tr class=\"matrix-row-user\">";
+                        userRow += "<td class=\"matrix-col-name matrix-indent\"><span class=\"matrix-expander-spacer\"></span> " + escapeHtml(g.users[u]) + "</td>";
+                        for (var jj = 0; jj < visLetters.length; jj++) {
+                            var ucells = g.cells ? g.cells[visLetters[jj]] : null;
+                            userRow += "<td class=\"matrix-cell\">" + cellHtml(ucells) + "</td>";
+                        }
+                        userRow += "</tr>";
+                        rows.push(userRow);
+                    }
+                }
+            }
+            return rows;
+        }
+
+        function buildUsersRows(visLetters) {
+            var userMap = {};
+            var userOrder = [];
+
+            for (var i = 0; i < groups.length; i++) {
+                var g = groups[i];
+                if (!g.users || g.users.length === 0) { continue; }
+                for (var u = 0; u < g.users.length; u++) {
+                    var uname = g.users[u];
+                    if (!userMap.hasOwnProperty(uname)) {
+                        userMap[uname] = { name: uname, cells: {} };
+                        userOrder.push(uname);
+                    }
+                    for (var li = 0; li < letters.length; li++) {
+                        var l = letters[li];
+                        var gcells = g.cells ? g.cells[l] : null;
+                        if (gcells && gcells.length > 0) {
+                            if (!userMap[uname].cells[l]) { userMap[uname].cells[l] = []; }
+                            userMap[uname].cells[l] = userMap[uname].cells[l].concat(gcells);
+                        }
+                    }
+                }
+            }
+
+            var allUsers = userOrder.map(function (n) { return userMap[n]; });
+
+            var filtered = allUsers.filter(function (uObj) {
+                if (state.search && uObj.name.toLowerCase().indexOf(state.search) === -1) { return false; }
+                if (state.problemsOnly && !rowHasProblem(uObj)) { return false; }
+                return true;
+            });
+
+            var sorted = sortGroups(filtered, visLetters);
+
+            var truncated = false;
+            var remainder = 0;
+            if (sorted.length > USER_ROW_CAP) {
+                remainder = sorted.length - USER_ROW_CAP;
+                sorted = sorted.slice(0, USER_ROW_CAP);
+                truncated = true;
+            }
+
+            var rows = [];
+            for (var s = 0; s < sorted.length; s++) {
+                var uo = sorted[s];
+                var rowHtml = "<tr class=\"matrix-row-user\">";
+                rowHtml += "<td class=\"matrix-col-name\">" + escapeHtml(uo.name) + "</td>";
+                for (var j = 0; j < visLetters.length; j++) {
+                    var cells = uo.cells ? uo.cells[visLetters[j]] : null;
+                    rowHtml += "<td class=\"matrix-cell\">" + cellHtml(cells) + "</td>";
+                }
+                rowHtml += "</tr>";
+                rows.push(rowHtml);
+            }
+
+            if (truncated) {
+                var colspan = visLetters.length + 1;
+                rows.push("<tr class=\"matrix-row-notice\"><td colspan=\"" + colspan + "\">" + remainder + " more - refine with search</td></tr>");
+            }
+
+            return rows;
+        }
+
+        function render() {
+            var visLetters = getVisibleLetters();
+
+            var tableHtml = "<table class=\"matrix-table\"><thead>" + buildHeaderRow(visLetters) + "</thead><tbody>";
+
+            var rows;
+            if (state.view === "users" && hasUserData) {
+                rows = buildUsersRows(visLetters);
+            } else {
+                rows = buildGroupsRows(visLetters);
+            }
+
+            if (rows.length === 0) {
+                var colspan = visLetters.length + 1;
+                tableHtml += "<tr><td colspan=\"" + colspan + "\" class=\"matrix-no-results\">No matching rows.</td></tr>";
+            } else {
+                tableHtml += rows.join("");
+            }
+
+            tableHtml += "</tbody></table>";
+            gridEl.innerHTML = tableHtml;
+
+            var headers = gridEl.querySelectorAll("th[data-sort-key]");
+            for (var h = 0; h < headers.length; h++) {
+                headers[h].addEventListener("click", function (e) {
+                    var key = e.currentTarget.getAttribute("data-sort-key");
+                    if (state.sortKey === key) {
+                        state.sortDir = state.sortDir === "asc" ? "desc" : "asc";
+                    } else {
+                        state.sortKey = key;
+                        state.sortDir = key === "name" ? "asc" : "asc";
+                    }
+                    render();
+                });
+                if (headers[h].getAttribute("data-sort-key") === state.sortKey) {
+                    var ind = headers[h].querySelector(".matrix-sort-indicator");
+                    if (ind) { ind.textContent = state.sortDir === "asc" ? " ^" : " v"; }
+                }
+            }
+
+            var expanders = gridEl.querySelectorAll(".matrix-expander");
+            for (var ex = 0; ex < expanders.length; ex++) {
+                expanders[ex].addEventListener("click", function (e) {
+                    var key = e.currentTarget.getAttribute("data-expand-key");
+                    state.expanded[key] = !state.expanded[key];
+                    render();
+                });
+            }
+        }
+
+        buildToolbar();
+        render();
+    })();
+    </script>
+'@
+
     $html = @"
 <!DOCTYPE html>
 <html>
@@ -1552,6 +1961,7 @@ function Export-HTMLReport {
         .badge-info { background: #3498db; color: white; }
         .badge-success { background: #27ae60; color: white; }
         .badge-muted { background: #95a5a6; color: white; }
+$matrixStyle
         .disabled-row { opacity: 0.6; }
         .disabled-row td { font-style: italic; }
         .back-to-top { text-align: right; margin-top: 10px; font-size: 13px; }
@@ -1858,6 +2268,7 @@ function Export-HTMLReport {
             <p>Generated by GPO Drive Map Audit Tool v$ScriptVersion on $(Escape-Html $AuditResults.AuditDate)</p>
         </div>
     </div>
+$matrixScript
 </body>
 </html>
 "@
