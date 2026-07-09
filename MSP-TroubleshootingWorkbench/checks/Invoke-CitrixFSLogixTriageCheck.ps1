@@ -171,6 +171,77 @@ function Get-FSLogixCloudCacheProviderField {
     return ""
 }
 
+function ConvertTo-RedactedFSLogixCloudCacheProviderEntry {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProviderString
+    )
+
+    $providerType = (Get-FSLogixCloudCacheProviderField -ProviderString $ProviderString -FieldName "type").ToLowerInvariant()
+    $providerName = Get-FSLogixCloudCacheProviderField -ProviderString $ProviderString -FieldName "name"
+    $connectionString = Get-FSLogixCloudCacheProviderField -ProviderString $ProviderString -FieldName "connectionString"
+    $parts = @()
+
+    if (-not [string]::IsNullOrWhiteSpace($providerType)) {
+        $parts += "type=$providerType"
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($providerName)) {
+        $parts += "name=$($providerName.Trim())"
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($connectionString)) {
+        $trimmedConnectionString = $connectionString.Trim()
+        if ($providerType -eq "smb" -and $trimmedConnectionString.StartsWith("\\")) {
+            $parts += "connectionString=$trimmedConnectionString"
+        }
+        else {
+            $parts += "connectionString=[REDACTED]"
+        }
+    }
+
+    if ($parts.Count -gt 0) {
+        return ($parts -join ",")
+    }
+
+    return "[REDACTED]"
+}
+
+function ConvertTo-RedactedFSLogixRegistryValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ValueName,
+
+        [AllowNull()]
+        [object]$Value
+    )
+
+    if ($ValueName -eq "CCDLocations") {
+        $redactedProviders = @()
+        foreach ($entry in @(Split-FSLogixCloudCacheProviderEntries -Value $Value)) {
+            $redactedProviders += ConvertTo-RedactedFSLogixCloudCacheProviderEntry -ProviderString $entry
+        }
+
+        return @($redactedProviders)
+    }
+
+    if ($ValueName -match "(?i)key|token|password|secret|sas") {
+        return "[REDACTED]"
+    }
+
+    if ($Value -is [System.Array]) {
+        return @(ConvertTo-StringArray -Value $Value)
+    }
+
+    if ($null -eq $Value) {
+        return ""
+    }
+
+    return [string]$Value
+}
+
 function Resolve-FSLogixProfileStorageLocations {
     [CmdletBinding()]
     param(
@@ -201,6 +272,7 @@ function Resolve-FSLogixProfileStorageLocations {
     foreach ($entry in @(Split-FSLogixCloudCacheProviderEntries -Value $Value)) {
         $providerType = (Get-FSLogixCloudCacheProviderField -ProviderString $entry -FieldName "type").ToLowerInvariant()
         $connectionString = Get-FSLogixCloudCacheProviderField -ProviderString $entry -FieldName "connectionString"
+        $redactedSourceValue = ConvertTo-RedactedFSLogixCloudCacheProviderEntry -ProviderString $entry
         if ([string]::IsNullOrWhiteSpace($providerType)) {
             $providerType = "unknown"
         }
@@ -222,7 +294,7 @@ function Resolve-FSLogixProfileStorageLocations {
 
         $locations += [PSCustomObject]@{
             ValueName      = $ValueName
-            SourceValue    = $entry
+            SourceValue    = $redactedSourceValue
             ProviderType   = $providerType
             TestPath       = $testPath
             ShouldTestPath = $shouldTestPath
@@ -231,6 +303,20 @@ function Resolve-FSLogixProfileStorageLocations {
     }
 
     return @($locations)
+}
+
+function Test-WinEventNoEventsFoundError {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [string]$Message
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        return $false
+    }
+
+    return ($Message -match "(?i)No events were found that match the specified selection criteria")
 }
 
 function Test-IsLocalComputerTarget {
@@ -321,7 +407,11 @@ function Get-RegistryValueText {
         [string]$ValueName
     )
 
-    foreach ($registryKey in @($RegistryKeys)) {
+    $orderedKeys = @()
+    $orderedKeys += @($RegistryKeys | Where-Object { $_.Label -eq "Policy profile configuration" })
+    $orderedKeys += @($RegistryKeys | Where-Object { $_.Label -ne "Policy profile configuration" })
+
+    foreach ($registryKey in @($orderedKeys)) {
         if ($registryKey.Found -and $registryKey.PSObject.Properties.Name -contains "Values") {
             if ($registryKey.Values.PSObject.Properties.Name -contains $ValueName) {
                 return $registryKey.Values.$ValueName
@@ -478,7 +568,7 @@ try {
         if ($_.Found -and $_.PSObject.Properties.Name -contains "Values") {
             $pairs = @()
             foreach ($property in @($_.Values.PSObject.Properties)) {
-                $propertyValue = $property.Value
+                $propertyValue = ConvertTo-RedactedFSLogixRegistryValue -ValueName $property.Name -Value $property.Value
                 if ($propertyValue -is [System.Array]) {
                     $propertyValue = ((ConvertTo-StringArray -Value $propertyValue) -join "; ")
                 }
@@ -580,7 +670,31 @@ foreach ($logName in $eventLogs) {
         }
     }
     catch {
-        $errors += "Events ${logName}: $($_.Exception.Message)"
+        $eventErrorMessage = $_.Exception.Message
+        if (Test-WinEventNoEventsFoundError -Message $eventErrorMessage) {
+            $rawOutput.Events += [PSCustomObject]@{
+                LogName      = $logName
+                TimeCreated  = ""
+                Id           = 0
+                Level        = ""
+                ProviderName = ""
+                Message      = "No events found during the selected lookback window."
+                Error        = ""
+            }
+
+            $friendlyName = $logName
+            if ($logName -like "Microsoft-FSLogix-*") {
+                $friendlyName = "Recent FSLogix events"
+            }
+            else {
+                $friendlyName = "Recent Terminal Services events"
+            }
+
+            $evidence += New-EvidenceItem -Name $friendlyName -Status "Pass" -Detail ("No events found in {0} during the last {1} hour(s)." -f $logName, $EventLookbackHours)
+            continue
+        }
+
+        $errors += "Events ${logName}: $eventErrorMessage"
         $rawOutput.Events += [PSCustomObject]@{
             LogName      = $logName
             TimeCreated  = ""
@@ -588,9 +702,9 @@ foreach ($logName in $eventLogs) {
             Level        = ""
             ProviderName = ""
             Message      = ""
-            Error        = $_.Exception.Message
+            Error        = $eventErrorMessage
         }
-        $evidence += New-EvidenceItem -Name "Event log access" -Status "Warn" -Detail "Could not read $logName on ${AffectedDevice}: $($_.Exception.Message)"
+        $evidence += New-EvidenceItem -Name "Event log access" -Status "Warn" -Detail "Could not read $logName on ${AffectedDevice}: $eventErrorMessage"
     }
 }
 
