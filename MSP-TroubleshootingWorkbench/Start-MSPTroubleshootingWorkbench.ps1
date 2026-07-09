@@ -59,6 +59,25 @@ function Send-Json {
     $Context.Response.Close()
 }
 
+function Send-JsonError {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [System.Net.HttpListenerContext]$Context,
+
+        [Parameter(Mandatory)]
+        [string]$Message,
+
+        [int]$StatusCode = 400
+    )
+
+    $body = [PSCustomObject]@{
+        error = $Message
+    }
+
+    Send-Json -Context $Context -Body $body -StatusCode $StatusCode
+}
+
 function Send-Html {
     [CmdletBinding()]
     param(
@@ -115,6 +134,21 @@ function Read-RequestBody {
     }
 }
 
+function Read-JsonRequestBody {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [System.Net.HttpListenerRequest]$Request
+    )
+
+    $rawBody = Read-RequestBody -Request $Request
+    if ([string]::IsNullOrWhiteSpace($rawBody)) {
+        throw "Request body is required."
+    }
+
+    return ($rawBody | ConvertFrom-Json -ErrorAction Stop)
+}
+
 function Write-WorkbenchLog {
     [CmdletBinding()]
     param(
@@ -148,7 +182,204 @@ function Write-WorkbenchLog {
     }
 }
 
+function New-CaseId {
+    "CASE-{0}" -f (Get-Date -Format 'yyyyMMdd-HHmmss')
+}
+
+function Get-CasePath {
+    param([string]$CaseId)
+    Join-Path (Join-Path $OutputPath 'cases') "$CaseId.json"
+}
+
+function Get-ResolvedPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    return [System.IO.Path]::GetFullPath($Path)
+}
+
+function Ensure-CaseStore {
+    [CmdletBinding()]
+    param()
+
+    $caseRoot = Join-Path $OutputPath 'cases'
+    if (-not (Test-Path -LiteralPath $caseRoot)) {
+        New-Item -ItemType Directory -Path $caseRoot -Force -ErrorAction Stop | Out-Null
+    }
+
+    return $caseRoot
+}
+
+function Test-WorkbenchCaseId {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [string]$CaseId
+    )
+
+    return ($CaseId -and ($CaseId -match '^CASE-\d{8}-\d{6}$'))
+}
+
+function Get-WorkbenchCasePath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$CaseId
+    )
+
+    if (-not (Test-WorkbenchCaseId -CaseId $CaseId)) {
+        throw "Invalid case id."
+    }
+
+    $caseRoot = Ensure-CaseStore
+    $casePath = Get-CasePath -CaseId $CaseId
+    $trimChars = @([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    $resolvedCaseRoot = (Get-ResolvedPath -Path $caseRoot).TrimEnd($trimChars)
+    $resolvedCasePath = Get-ResolvedPath -Path $casePath
+    $requiredPrefix = $resolvedCaseRoot + [System.IO.Path]::DirectorySeparatorChar
+
+    if (-not $resolvedCasePath.StartsWith($requiredPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Case path must stay inside the case store."
+    }
+
+    return $resolvedCasePath
+}
+
+function Assert-NewWorkbenchCaseRequest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Body
+    )
+
+    $requiredFields = @('clientName', 'ticketNumber', 'issueType')
+    foreach ($field in $requiredFields) {
+        if (-not ($Body.PSObject.Properties.Name -contains $field)) {
+            throw "clientName, ticketNumber, and issueType are required."
+        }
+
+        $value = [string]$Body.$field
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            throw "clientName, ticketNumber, and issueType are required."
+        }
+    }
+}
+
+function Save-WorkbenchCase {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Case,
+
+        [string]$ExpectedCaseId
+    )
+
+    if (-not ($Case.PSObject.Properties.Name -contains 'CaseId')) {
+        throw "Case id is required."
+    }
+
+    $caseId = [string]$Case.CaseId
+    if (-not (Test-WorkbenchCaseId -CaseId $caseId)) {
+        throw "Invalid case id."
+    }
+
+    if ($ExpectedCaseId -and ($caseId -ne $ExpectedCaseId)) {
+        throw "Case file does not match requested case id."
+    }
+
+    $casePath = Get-WorkbenchCasePath -CaseId $caseId
+    $json = $Case | ConvertTo-Json -Depth 10 -ErrorAction Stop
+    Set-Content -LiteralPath $casePath -Value $json -Encoding UTF8 -ErrorAction Stop
+    return $Case
+}
+
+function Get-WorkbenchCase {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$CaseId
+    )
+
+    if (-not (Test-WorkbenchCaseId -CaseId $CaseId)) {
+        return $null
+    }
+
+    $casePath = Get-WorkbenchCasePath -CaseId $CaseId
+    if (-not (Test-Path -LiteralPath $casePath)) {
+        return $null
+    }
+
+    $case = Get-Content -LiteralPath $casePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    if (-not ($case.PSObject.Properties.Name -contains 'CaseId')) {
+        throw "Case id is required."
+    }
+
+    if ([string]$case.CaseId -ne $CaseId) {
+        throw "Case file does not match requested case id."
+    }
+
+    return $case
+}
+
+function Get-WorkbenchCases {
+    [CmdletBinding()]
+    param()
+
+    $caseRoot = Ensure-CaseStore
+    $cases = @()
+
+    Get-ChildItem -LiteralPath $caseRoot -Filter 'CASE-*.json' -File -ErrorAction Stop | ForEach-Object {
+        try {
+            $cases += (Get-Content -LiteralPath $_.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop)
+        }
+        catch {
+            Write-Warning "Unable to read case file '$($_.FullName)': $($_.Exception.Message)"
+        }
+    }
+
+    return @($cases | Sort-Object -Property CreatedAt -Descending)
+}
+
+function New-WorkbenchCase {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Body
+    )
+
+    Assert-NewWorkbenchCaseRequest -Body $Body
+
+    $caseId = New-CaseId
+    while (Test-Path -LiteralPath (Get-WorkbenchCasePath -CaseId $caseId)) {
+        Start-Sleep -Seconds 1
+        $caseId = New-CaseId
+    }
+
+    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $case = [PSCustomObject]@{
+        CaseId           = $caseId
+        ClientName       = $Body.clientName
+        TicketNumber     = $Body.ticketNumber
+        IssueType        = $Body.issueType
+        AffectedUser     = $Body.affectedUser
+        AffectedDevice   = $Body.affectedDevice
+        TargetPath       = $Body.targetPath
+        TargetAddress    = $Body.targetAddress
+        CreatedAt        = $timestamp
+        UpdatedAt        = $timestamp
+        Checks           = @()
+        Notes            = @()
+        GeneratedSummary = ''
+    }
+
+    Save-WorkbenchCase -Case $case
+}
+
 $resolvedOutputPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputPath)
+$OutputPath = $resolvedOutputPath
 $appPath = Join-Path $PSScriptRoot "app"
 $indexPath = Join-Path $appPath "index.html"
 $logRoot = Join-Path $resolvedOutputPath "logs"
@@ -227,8 +458,126 @@ try {
                 Send-Json -Context $context -Body $status
             }
             elseif ($method -ieq "GET" -and $path -eq "/api/cases") {
-                $cases = @()
-                Send-Json -Context $context -Body $cases
+                try {
+                    $cases = @(Get-WorkbenchCases)
+                    Send-Json -Context $context -Body $cases
+                }
+                catch {
+                    Send-JsonError -Context $context -Message $_.Exception.Message -StatusCode 500
+                }
+            }
+            elseif ($method -ieq "POST" -and $path -eq "/api/cases") {
+                $requestIsValid = $false
+                $body = $null
+                try {
+                    $body = Read-JsonRequestBody -Request $request
+                    Assert-NewWorkbenchCaseRequest -Body $body
+                    $requestIsValid = $true
+                }
+                catch {
+                    Send-JsonError -Context $context -Message $_.Exception.Message -StatusCode 400
+                }
+
+                if ($requestIsValid) {
+                    try {
+                        $case = New-WorkbenchCase -Body $body
+                        Send-Json -Context $context -Body $case -StatusCode 201
+                    }
+                    catch {
+                        Send-JsonError -Context $context -Message $_.Exception.Message -StatusCode 500
+                    }
+                }
+            }
+            elseif ($method -ieq "GET" -and $path -match '^/api/cases/([^/]+)$') {
+                $caseId = [System.Uri]::UnescapeDataString($Matches[1])
+                if (-not (Test-WorkbenchCaseId -CaseId $caseId)) {
+                    Send-JsonError -Context $context -Message "Invalid case id." -StatusCode 400
+                }
+                else {
+                    try {
+                        $case = Get-WorkbenchCase -CaseId $caseId
+                        if ($null -eq $case) {
+                            Send-JsonError -Context $context -Message "Case not found." -StatusCode 404
+                        }
+                        else {
+                            Send-Json -Context $context -Body $case
+                        }
+                    }
+                    catch {
+                        Send-JsonError -Context $context -Message $_.Exception.Message -StatusCode 500
+                    }
+                }
+            }
+            elseif ($method -ieq "POST" -and $path -match '^/api/cases/([^/]+)/notes$') {
+                $caseId = [System.Uri]::UnescapeDataString($Matches[1])
+                if (-not (Test-WorkbenchCaseId -CaseId $caseId)) {
+                    Send-JsonError -Context $context -Message "Invalid case id." -StatusCode 400
+                }
+                else {
+                    $caseLoadFailed = $false
+                    try {
+                        $case = Get-WorkbenchCase -CaseId $caseId
+                    }
+                    catch {
+                        Send-JsonError -Context $context -Message $_.Exception.Message -StatusCode 500
+                        $caseLoadFailed = $true
+                    }
+
+                    if (-not $caseLoadFailed) {
+                        if ($null -eq $case) {
+                            Send-JsonError -Context $context -Message "Case not found." -StatusCode 404
+                        }
+                        else {
+                            $requestIsValid = $false
+                            $note = $null
+                            $timestamp = $null
+
+                            try {
+                                $body = Read-JsonRequestBody -Request $request
+                                $noteText = $null
+                                if ($body.PSObject.Properties.Name -contains "note") {
+                                    $noteText = [string]$body.note
+                                }
+                                elseif ($body.PSObject.Properties.Name -contains "text") {
+                                    $noteText = [string]$body.text
+                                }
+
+                                if ([string]::IsNullOrWhiteSpace($noteText)) {
+                                    throw "Note text is required."
+                                }
+
+                                $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+                                $note = [PSCustomObject]@{
+                                    CreatedAt = $timestamp
+                                    Text      = $noteText.Trim()
+                                }
+                                $requestIsValid = $true
+                            }
+                            catch {
+                                Send-JsonError -Context $context -Message $_.Exception.Message -StatusCode 400
+                            }
+
+                            if ($requestIsValid) {
+                                try {
+                                    $currentNotes = @()
+                                    if ($case.PSObject.Properties.Name -contains "Notes") {
+                                        if ($null -ne $case.Notes) {
+                                            $currentNotes = @($case.Notes)
+                                        }
+                                    }
+
+                                    $case.Notes = @($currentNotes + $note)
+                                    $case.UpdatedAt = $timestamp
+                                    Save-WorkbenchCase -Case $case -ExpectedCaseId $caseId | Out-Null
+                                    Send-Json -Context $context -Body $case
+                                }
+                                catch {
+                                    Send-JsonError -Context $context -Message $_.Exception.Message -StatusCode 500
+                                }
+                            }
+                        }
+                    }
+                }
             }
             else {
                 Send-Text -Context $context -Text "Not found." -StatusCode 404
