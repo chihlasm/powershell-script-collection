@@ -89,7 +89,10 @@ param(
     [switch]$SkipBrowserOpen,
 
     [Parameter()]
-    [switch]$SkipPathValidation
+    [switch]$SkipPathValidation,
+
+    [Parameter()]
+    [switch]$LoadFunctionsOnly
 )
 
 #region Script Configuration
@@ -1426,5 +1429,7 @@ function Start-DriveMapAudit {
 }
 
 # Run the audit
-$results = Start-DriveMapAudit
+if (-not $LoadFunctionsOnly) {
+    $results = Start-DriveMapAudit
+}
 #endregion
