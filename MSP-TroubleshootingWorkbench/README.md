@@ -23,3 +23,14 @@ Run from an elevated PowerShell session when checks require admin rights:
 The wrapper writes the underlying HTML report to `output\checks\ad.lockout\<timestamp>` under the workbench folder and includes the report path in `RawOutput.ReportPath` and the evidence list when the diagnostic completes.
 
 Local preflight checks return `Status = "Warn"` instead of crashing when the diagnostics script is missing or the RSAT `ActiveDirectory` module cannot load. A real AD run still requires a domain-connected workstation or server, RSAT Active Directory tools, and permissions to read domain controller Security logs.
+
+### Citrix/FSLogix Triage
+
+`citrix.fslogix.triage` runs read-only profile triage against an affected Citrix, RDS, or Windows session host. It accepts:
+
+- `affectedDevice`: server or workstation to inspect. The standalone script defaults to the local computer, but API/manifest runs should pass this value.
+- `affectedUser`: optional user name for context and simple profile path token replacement.
+
+The check collects server reachability, FSLogix service status, FSLogix profile registry settings, recent FSLogix events, recent Terminal Services events, fixed disk free space, and configured `VHDLocations` or `CCDLocations` path reachability. Remote service, event, and CIM queries use `-ComputerName`; registry reads use a remote HKLM base key. If remote registry, event logs, or CIM are blocked, the check records Warn evidence and continues.
+
+Profile path reachability is tested from the operator machine with `Test-Path`, so a failed path test means the operator workstation could not reach the path. Confirm from the affected host before treating it as definitive. Local development runs do not require an actual Citrix host; final validation should be performed against a real Citrix/RDS host with FSLogix installed and permissions to read the target event logs and registry.
