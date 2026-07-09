@@ -248,6 +248,62 @@ function Get-WorkbenchCasePath {
     return $resolvedCasePath
 }
 
+function Get-WorkbenchExportDirectory {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$CaseId
+    )
+
+    if (-not (Test-WorkbenchCaseId -CaseId $CaseId)) {
+        throw "Invalid case id."
+    }
+
+    $exportRoot = Join-Path $OutputPath 'exports'
+    if (-not (Test-Path -LiteralPath $exportRoot)) {
+        New-Item -ItemType Directory -Path $exportRoot -Force -ErrorAction Stop | Out-Null
+    }
+
+    $trimChars = @([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    $resolvedExportRoot = (Get-ResolvedPath -Path $exportRoot).TrimEnd($trimChars)
+    $exportDirectory = Get-ResolvedPath -Path (Join-Path $resolvedExportRoot $CaseId)
+    $requiredPrefix = $resolvedExportRoot + [System.IO.Path]::DirectorySeparatorChar
+
+    if (-not $exportDirectory.StartsWith($requiredPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Export path must stay inside the export store."
+    }
+
+    if (-not (Test-Path -LiteralPath $exportDirectory)) {
+        New-Item -ItemType Directory -Path $exportDirectory -Force -ErrorAction Stop | Out-Null
+    }
+
+    return $exportDirectory
+}
+
+function Get-WorkbenchExportFilePath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$CaseId,
+
+        [Parameter(Mandatory)]
+        [ValidateSet("ticket-notes.md", "report.html", "evidence.json")]
+        [string]$FileName
+    )
+
+    $exportDirectory = Get-WorkbenchExportDirectory -CaseId $CaseId
+    $trimChars = @([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    $resolvedExportDirectory = (Get-ResolvedPath -Path $exportDirectory).TrimEnd($trimChars)
+    $filePath = Get-ResolvedPath -Path (Join-Path $resolvedExportDirectory $FileName)
+    $requiredPrefix = $resolvedExportDirectory + [System.IO.Path]::DirectorySeparatorChar
+
+    if (-not $filePath.StartsWith($requiredPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Export file path must stay inside the case export folder."
+    }
+
+    return $filePath
+}
+
 function Assert-NewWorkbenchCaseRequest {
     [CmdletBinding()]
     param(
@@ -600,6 +656,248 @@ function Invoke-WorkbenchCheck {
     return (ConvertTo-WorkbenchPlainValue -Value $result)
 }
 
+function Add-TicketNotesLine {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [System.Text.StringBuilder]$Builder,
+
+        [AllowNull()]
+        [string]$Line = ""
+    )
+
+    [void]$Builder.AppendLine($Line)
+}
+
+function Add-TicketNotesBullet {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [System.Text.StringBuilder]$Builder,
+
+        [AllowNull()]
+        [string]$Text
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($Text)) {
+        Add-TicketNotesLine -Builder $Builder -Line ("- {0}" -f $Text.Trim())
+    }
+}
+
+function New-TicketNotesMarkdown {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Case
+    )
+
+    $builder = New-Object System.Text.StringBuilder
+    $checks = @()
+    $notes = @()
+
+    if ($Case.PSObject.Properties.Name -contains "Checks" -and $null -ne $Case.Checks) {
+        $checks = @($Case.Checks)
+    }
+
+    if ($Case.PSObject.Properties.Name -contains "Notes" -and $null -ne $Case.Notes) {
+        $notes = @($Case.Notes)
+    }
+
+    Add-TicketNotesLine -Builder $builder -Line "Issue:"
+    Add-TicketNotesBullet -Builder $builder -Text ("Client: {0}" -f $Case.ClientName)
+    Add-TicketNotesBullet -Builder $builder -Text ("Ticket: {0}" -f $Case.TicketNumber)
+    Add-TicketNotesBullet -Builder $builder -Text ("Issue type: {0}" -f $Case.IssueType)
+    Add-TicketNotesBullet -Builder $builder -Text ("Affected user: {0}" -f $Case.AffectedUser)
+    Add-TicketNotesBullet -Builder $builder -Text ("Affected device: {0}" -f $Case.AffectedDevice)
+    Add-TicketNotesBullet -Builder $builder -Text ("Target path: {0}" -f $Case.TargetPath)
+    Add-TicketNotesBullet -Builder $builder -Text ("Target address: {0}" -f $Case.TargetAddress)
+    if ($notes.Count -gt 0) {
+        Add-TicketNotesBullet -Builder $builder -Text ("Reported detail: {0}" -f [string]$notes[0].Text)
+    }
+    Add-TicketNotesLine -Builder $builder
+
+    Add-TicketNotesLine -Builder $builder -Line "Actions Taken:"
+    if ($checks.Count -gt 0) {
+        foreach ($check in $checks) {
+            $finishedAt = ""
+            if ($check.PSObject.Properties.Name -contains "FinishedAt") {
+                $finishedAt = [string]$check.FinishedAt
+            }
+
+            $action = "Ran {0}" -f $check.Name
+            if (-not [string]::IsNullOrWhiteSpace($finishedAt)) {
+                $action = "$action at $finishedAt"
+            }
+
+            Add-TicketNotesBullet -Builder $builder -Text $action
+        }
+    }
+    else {
+        Add-TicketNotesBullet -Builder $builder -Text "No automated checks have been run yet."
+    }
+
+    foreach ($note in $notes) {
+        $noteLine = [string]$note.Text
+        if ($note.PSObject.Properties.Name -contains "CreatedAt" -and -not [string]::IsNullOrWhiteSpace([string]$note.CreatedAt)) {
+            $noteLine = "{0}: {1}" -f $note.CreatedAt, $note.Text
+        }
+
+        Add-TicketNotesBullet -Builder $builder -Text $noteLine
+    }
+    Add-TicketNotesLine -Builder $builder
+
+    Add-TicketNotesLine -Builder $builder -Line "Findings:"
+    if ($checks.Count -gt 0) {
+        foreach ($check in $checks) {
+            Add-TicketNotesBullet -Builder $builder -Text ("{0} [{1}]: {2}" -f $check.Name, $check.Status, $check.Summary)
+        }
+    }
+    else {
+        Add-TicketNotesBullet -Builder $builder -Text "Findings are pending additional checks."
+    }
+    Add-TicketNotesLine -Builder $builder
+
+    Add-TicketNotesLine -Builder $builder -Line "Evidence:"
+    $evidenceCount = 0
+    foreach ($check in $checks) {
+        if ($check.PSObject.Properties.Name -contains "Evidence" -and $null -ne $check.Evidence) {
+            foreach ($evidence in @($check.Evidence)) {
+                $evidenceCount++
+                Add-TicketNotesBullet -Builder $builder -Text ("{0} - {1}: {2}" -f $evidence.Name, $evidence.Status, $evidence.Detail)
+            }
+        }
+    }
+
+    if ($evidenceCount -eq 0) {
+        Add-TicketNotesBullet -Builder $builder -Text "No evidence has been captured yet."
+    }
+    Add-TicketNotesLine -Builder $builder
+
+    Add-TicketNotesLine -Builder $builder -Line "Likely Cause:"
+    $problemChecks = @($checks | Where-Object { ([string]$_.Status) -in @("Warn", "Fail") })
+    if ($problemChecks.Count -gt 0) {
+        Add-TicketNotesBullet -Builder $builder -Text ("Likely related to: {0}" -f (($problemChecks | ForEach-Object { $_.Summary }) -join "; "))
+    }
+    elseif ($checks.Count -gt 0) {
+        Add-TicketNotesBullet -Builder $builder -Text "No failing automated check has identified a likely cause yet."
+    }
+    else {
+        Add-TicketNotesBullet -Builder $builder -Text "Likely cause is pending diagnostic evidence."
+    }
+    Add-TicketNotesLine -Builder $builder
+
+    Add-TicketNotesLine -Builder $builder -Line "Next Steps:"
+    $nextSteps = @()
+    foreach ($check in $checks) {
+        if ($check.PSObject.Properties.Name -contains "RecommendedNextSteps" -and $null -ne $check.RecommendedNextSteps) {
+            $nextSteps += @($check.RecommendedNextSteps)
+        }
+    }
+
+    $nextSteps = @($nextSteps | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+    if ($nextSteps.Count -gt 0) {
+        foreach ($step in $nextSteps) {
+            Add-TicketNotesBullet -Builder $builder -Text ([string]$step)
+        }
+    }
+    else {
+        Add-TicketNotesBullet -Builder $builder -Text "Run the relevant troubleshooting checks and document the result."
+    }
+    Add-TicketNotesLine -Builder $builder
+
+    Add-TicketNotesLine -Builder $builder -Line "Customer-Facing Summary:"
+    if ($problemChecks.Count -gt 0) {
+        $customerNextAction = "continue troubleshooting with the captured evidence."
+        if ($nextSteps.Count -gt 0) {
+            $customerNextAction = [string]$nextSteps[0]
+        }
+
+        Add-TicketNotesBullet -Builder $builder -Text ("We reviewed the reported {0} issue and found evidence requiring follow-up. Next action: {1}" -f $Case.IssueType, $customerNextAction)
+    }
+    elseif ($checks.Count -gt 0) {
+        Add-TicketNotesBullet -Builder $builder -Text ("We reviewed the reported {0} issue and the completed checks did not identify a current failure." -f $Case.IssueType)
+    }
+    else {
+        Add-TicketNotesBullet -Builder $builder -Text ("We opened the {0} troubleshooting case and are gathering diagnostic evidence." -f $Case.IssueType)
+    }
+
+    return $builder.ToString().TrimEnd()
+}
+
+function ConvertTo-WorkbenchReportHtml {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Case,
+
+        [Parameter(Mandatory)]
+        [string]$Markdown
+    )
+
+    $title = "MSP Troubleshooting Report - {0}" -f $Case.CaseId
+    $encodedTitle = [System.Net.WebUtility]::HtmlEncode($title)
+    $encodedMarkdown = [System.Net.WebUtility]::HtmlEncode($Markdown)
+
+    return @"
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>$encodedTitle</title>
+  <style>
+    body { background: #10151c; color: #edf3f8; font-family: Segoe UI, Arial, sans-serif; margin: 32px; line-height: 1.5; }
+    main { max-width: 980px; margin: 0 auto; }
+    h1 { font-size: 24px; margin: 0 0 16px; }
+    pre { white-space: pre-wrap; background: #171f29; border: 1px solid #2a3746; border-radius: 6px; padding: 18px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>$encodedTitle</h1>
+    <pre>$encodedMarkdown</pre>
+  </main>
+</body>
+</html>
+"@
+}
+
+function Export-WorkbenchCaseEvidence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Case
+    )
+
+    $caseId = [string]$Case.CaseId
+    if (-not (Test-WorkbenchCaseId -CaseId $caseId)) {
+        throw "Invalid case id."
+    }
+
+    $markdown = New-TicketNotesMarkdown -Case $Case
+    $markdownPath = Get-WorkbenchExportFilePath -CaseId $caseId -FileName "ticket-notes.md"
+    $reportPath = Get-WorkbenchExportFilePath -CaseId $caseId -FileName "report.html"
+    $evidencePath = Get-WorkbenchExportFilePath -CaseId $caseId -FileName "evidence.json"
+    $reportHtml = ConvertTo-WorkbenchReportHtml -Case $Case -Markdown $markdown
+    $evidence = [PSCustomObject]@{
+        CaseId     = $caseId
+        ExportedAt = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        Case       = $Case
+        Checks     = @($Case.Checks)
+        Notes      = @($Case.Notes)
+    }
+
+    Set-Content -LiteralPath $markdownPath -Value $markdown -Encoding UTF8 -NoNewline -ErrorAction Stop
+    Set-Content -LiteralPath $reportPath -Value $reportHtml -Encoding UTF8 -ErrorAction Stop
+    Set-Content -LiteralPath $evidencePath -Value ($evidence | ConvertTo-Json -Depth 10 -ErrorAction Stop) -Encoding UTF8 -ErrorAction Stop
+
+    [PSCustomObject]@{
+        CaseId       = $caseId
+        MarkdownPath = $markdownPath
+        ReportPath   = $reportPath
+        EvidencePath = $evidencePath
+    }
+}
+
 function New-WorkbenchCase {
     [CmdletBinding()]
     param(
@@ -904,6 +1202,91 @@ try {
                                 catch {
                                     Send-JsonError -Context $context -Message $_.Exception.Message -StatusCode 500
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+            elseif ($method -ieq "POST" -and $path -match '^/api/cases/([^/]+)/generate-notes$') {
+                $caseId = [System.Uri]::UnescapeDataString($Matches[1])
+                if (-not (Test-WorkbenchCaseId -CaseId $caseId)) {
+                    Send-JsonError -Context $context -Message "Invalid case id." -StatusCode 400
+                }
+                else {
+                    $caseLoadFailed = $false
+                    try {
+                        $case = Get-WorkbenchCase -CaseId $caseId
+                    }
+                    catch {
+                        Send-JsonError -Context $context -Message $_.Exception.Message -StatusCode 500
+                        $caseLoadFailed = $true
+                    }
+
+                    if (-not $caseLoadFailed) {
+                        if ($null -eq $case) {
+                            Send-JsonError -Context $context -Message "Case not found." -StatusCode 404
+                        }
+                        else {
+                            try {
+                                $markdown = New-TicketNotesMarkdown -Case $case
+                                if ($case.PSObject.Properties.Name -contains "GeneratedSummary") {
+                                    $case.GeneratedSummary = $markdown
+                                }
+                                else {
+                                    Add-Member -InputObject $case -MemberType NoteProperty -Name "GeneratedSummary" -Value $markdown
+                                }
+
+                                $case.UpdatedAt = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+                                Save-WorkbenchCase -Case $case -ExpectedCaseId $caseId | Out-Null
+                                Send-Json -Context $context -Body ([PSCustomObject]@{
+                                    caseId   = $caseId
+                                    markdown = $markdown
+                                    case     = $case
+                                })
+                            }
+                            catch {
+                                Send-JsonError -Context $context -Message $_.Exception.Message -StatusCode 500
+                            }
+                        }
+                    }
+                }
+            }
+            elseif ($method -ieq "POST" -and $path -match '^/api/cases/([^/]+)/export$') {
+                $caseId = [System.Uri]::UnescapeDataString($Matches[1])
+                if (-not (Test-WorkbenchCaseId -CaseId $caseId)) {
+                    Send-JsonError -Context $context -Message "Invalid case id." -StatusCode 400
+                }
+                else {
+                    $caseLoadFailed = $false
+                    try {
+                        $case = Get-WorkbenchCase -CaseId $caseId
+                    }
+                    catch {
+                        Send-JsonError -Context $context -Message $_.Exception.Message -StatusCode 500
+                        $caseLoadFailed = $true
+                    }
+
+                    if (-not $caseLoadFailed) {
+                        if ($null -eq $case) {
+                            Send-JsonError -Context $context -Message "Case not found." -StatusCode 404
+                        }
+                        else {
+                            try {
+                                $markdown = New-TicketNotesMarkdown -Case $case
+                                if ($case.PSObject.Properties.Name -contains "GeneratedSummary") {
+                                    $case.GeneratedSummary = $markdown
+                                }
+                                else {
+                                    Add-Member -InputObject $case -MemberType NoteProperty -Name "GeneratedSummary" -Value $markdown
+                                }
+
+                                $case.UpdatedAt = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+                                Save-WorkbenchCase -Case $case -ExpectedCaseId $caseId | Out-Null
+                                $export = Export-WorkbenchCaseEvidence -Case $case
+                                Send-Json -Context $context -Body $export
+                            }
+                            catch {
+                                Send-JsonError -Context $context -Message $_.Exception.Message -StatusCode 500
                             }
                         }
                     }
