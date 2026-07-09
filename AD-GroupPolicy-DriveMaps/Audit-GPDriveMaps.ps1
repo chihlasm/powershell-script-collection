@@ -1,4 +1,4 @@
-#Requires -Modules GroupPolicy, ActiveDirectory
+#Requires -Version 5.1
 
 <#
 .SYNOPSIS
