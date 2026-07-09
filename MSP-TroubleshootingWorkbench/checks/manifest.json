@@ -12,6 +12,19 @@
         "targetAddress",
         "port"
       ]
+    },
+    {
+      "checkId": "ad.lockout",
+      "name": "AD Lockout Diagnostics",
+      "category": "Active Directory",
+      "script": "Invoke-ADLockoutCheck.ps1",
+      "description": "Wraps the AD account lockout diagnostics report for a user.",
+      "readOnly": true,
+      "inputs": [
+        "affectedUser",
+        "daysBack",
+        "domainController"
+      ]
     }
   ]
 }
