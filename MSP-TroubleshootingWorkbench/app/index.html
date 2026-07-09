@@ -13,6 +13,9 @@
       --text: #edf3f8;
       --muted: #9fb0bf;
       --accent: #5dade2;
+      --accent-strong: #2f8ed2;
+      --field-bg: #0f151d;
+      --danger: #ffb4a8;
     }
 
     * {
@@ -80,6 +83,109 @@
       color: var(--accent);
     }
 
+    .case-form {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .field {
+      display: grid;
+      gap: 5px;
+    }
+
+    .field-wide {
+      grid-column: span 2;
+    }
+
+    label {
+      color: var(--muted);
+      font-size: 0.82rem;
+      font-weight: 600;
+    }
+
+    input,
+    select {
+      width: 100%;
+      min-height: 38px;
+      border: 1px solid var(--panel-border);
+      border-radius: 4px;
+      background: var(--field-bg);
+      color: var(--text);
+      font: inherit;
+      padding: 8px 10px;
+    }
+
+    input:focus,
+    select:focus {
+      outline: 2px solid var(--accent);
+      outline-offset: 1px;
+    }
+
+    .form-actions {
+      grid-column: 1 / -1;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-height: 38px;
+    }
+
+    button {
+      min-height: 38px;
+      border: 1px solid var(--accent-strong);
+      border-radius: 4px;
+      background: var(--accent-strong);
+      color: #ffffff;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 700;
+      padding: 8px 14px;
+    }
+
+    button:hover {
+      filter: brightness(1.08);
+    }
+
+    button:disabled {
+      cursor: wait;
+      opacity: 0.72;
+    }
+
+    .form-message {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .form-message.error {
+      color: var(--danger);
+    }
+
+    .case-list {
+      display: grid;
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .case-item {
+      display: grid;
+      grid-template-columns: minmax(160px, 1fr) repeat(3, minmax(100px, max-content));
+      gap: 8px 16px;
+      padding: 12px 0;
+      border-top: 1px solid var(--panel-border);
+    }
+
+    .case-id {
+      color: var(--accent);
+      font-weight: 700;
+    }
+
+    .case-meta {
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
     @media (prefers-color-scheme: light) {
       :root {
         --bg: #f5f7fa;
@@ -87,6 +193,26 @@
         --panel-border: #cfd8e3;
         --text: #16202a;
         --muted: #526273;
+        --field-bg: #ffffff;
+      }
+    }
+
+    @media (max-width: 760px) {
+      main {
+        width: min(100% - 20px, 960px);
+        padding: 24px 0;
+      }
+
+      .case-form {
+        grid-template-columns: 1fr;
+      }
+
+      .field-wide {
+        grid-column: span 1;
+      }
+
+      .case-item {
+        grid-template-columns: 1fr;
       }
     }
   </style>
@@ -110,9 +236,54 @@
       </dl>
     </section>
 
+    <section aria-labelledby="case-form-title">
+      <h2 id="case-form-title">New case</h2>
+      <form id="case-form" class="case-form">
+        <div class="field">
+          <label for="client-name">Client</label>
+          <input id="client-name" name="clientName" autocomplete="organization" required>
+        </div>
+        <div class="field">
+          <label for="ticket-number">Ticket</label>
+          <input id="ticket-number" name="ticketNumber" autocomplete="off" required>
+        </div>
+        <div class="field">
+          <label for="issue-type">Issue type</label>
+          <select id="issue-type" name="issueType" required>
+            <option value="Network">Network</option>
+            <option value="Permissions">Permissions</option>
+            <option value="Device">Device</option>
+            <option value="Application">Application</option>
+            <option value="Other">Other</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="affected-user">User</label>
+          <input id="affected-user" name="affectedUser" autocomplete="off">
+        </div>
+        <div class="field">
+          <label for="affected-device">Device</label>
+          <input id="affected-device" name="affectedDevice" autocomplete="off">
+        </div>
+        <div class="field field-wide">
+          <label for="target-path">Path</label>
+          <input id="target-path" name="targetPath" autocomplete="off">
+        </div>
+        <div class="field">
+          <label for="target-address">Address</label>
+          <input id="target-address" name="targetAddress" autocomplete="off">
+        </div>
+        <div class="form-actions">
+          <button type="submit" id="create-case-button">+ Create case</button>
+          <p id="case-form-message" class="form-message" aria-live="polite"></p>
+        </div>
+      </form>
+    </section>
+
     <section aria-labelledby="case-list-title">
       <h2 id="case-list-title">Cases</h2>
       <p id="cases-empty" class="empty">No cases yet.</p>
+      <ul id="case-list" class="case-list"></ul>
     </section>
   </main>
 
@@ -142,6 +313,8 @@
 
     async function loadCases() {
       const empty = document.getElementById("cases-empty");
+      const list = document.getElementById("case-list");
+      list.innerHTML = "";
 
       try {
         const response = await fetch("/api/cases");
@@ -151,12 +324,77 @@
 
         const cases = await response.json();
         empty.textContent = cases.length === 0 ? "No cases yet." : "";
+
+        cases.forEach((workbenchCase) => {
+          const item = document.createElement("li");
+          item.className = "case-item";
+
+          const title = document.createElement("span");
+          title.className = "case-id";
+          title.textContent = workbenchCase.CaseId || "";
+
+          const client = document.createElement("span");
+          client.className = "case-meta";
+          client.textContent = workbenchCase.ClientName || "No client";
+
+          const issue = document.createElement("span");
+          issue.className = "case-meta";
+          issue.textContent = workbenchCase.IssueType || "No issue type";
+
+          const ticket = document.createElement("span");
+          ticket.className = "case-meta";
+          ticket.textContent = workbenchCase.TicketNumber || "No ticket";
+
+          item.append(title, client, issue, ticket);
+          list.appendChild(item);
+        });
       }
       catch (error) {
         empty.textContent = "Case list unavailable.";
       }
     }
 
+    async function createCase(event) {
+      event.preventDefault();
+
+      const form = event.currentTarget;
+      const button = document.getElementById("create-case-button");
+      const message = document.getElementById("case-form-message");
+      const formData = new FormData(form);
+      const body = Object.fromEntries(formData.entries());
+
+      button.disabled = true;
+      message.className = "form-message";
+      message.textContent = "Creating case...";
+
+      try {
+        const response = await fetch("/api/cases", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(body)
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || "Case creation failed");
+        }
+
+        form.reset();
+        message.textContent = "Created " + data.CaseId + ".";
+        await loadCases();
+      }
+      catch (error) {
+        message.className = "form-message error";
+        message.textContent = error.message;
+      }
+      finally {
+        button.disabled = false;
+      }
+    }
+
+    document.getElementById("case-form").addEventListener("submit", createCase);
     loadStatus();
     loadCases();
   </script>
