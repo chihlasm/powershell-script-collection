@@ -941,6 +941,61 @@ function Find-GroupMembershipOverlap {
 }
 #endregion
 
+#region Matrix
+function Build-DriveMapMatrix {
+    param(
+        [System.Collections.Generic.List[object]]$DriveMaps,
+        [array]$PathValidation = @(),
+        [array]$GroupOverlap = @()
+    )
+
+    # Column axis: distinct real drive letters, sorted.
+    $letters = @($DriveMaps | Where-Object {
+        $_.DriveLetter -and $_.DriveLetter.Trim() -ne '' -and $_.DriveLetter -ne 'NOCHANGE'
+    } | Select-Object -ExpandProperty DriveLetter -Unique | Sort-Object)
+
+    # Extract positive (non-NOT) ILT group names from a mapping; empty => (all users).
+    $groupsForMap = {
+        param($m)
+        $g = @($m.ILTFilters | Where-Object { $_.Type -eq 'FilterGroup' -and -not $_.Not } |
+            ForEach-Object { if ($_.Detail -match "'(.+)'") { $Matches[1] } }) | Where-Object { $_ }
+        if ($g.Count -eq 0) { @('(all users)') } else { $g }
+    }
+
+    # rowName -> ( letter -> list of cell entries )
+    $rows = @{}
+    foreach ($map in $DriveMaps) {
+        if (-not $map.DriveLetter -or $map.DriveLetter.Trim() -eq '' -or $map.DriveLetter -eq 'NOCHANGE') { continue }
+        foreach ($gName in (& $groupsForMap $map)) {
+            if (-not $rows.ContainsKey($gName)) { $rows[$gName] = @{} }
+            $letter = $map.DriveLetter
+            if (-not $rows[$gName].ContainsKey($letter)) {
+                $rows[$gName][$letter] = [System.Collections.Generic.List[object]]::new()
+            }
+            $rows[$gName][$letter].Add([PSCustomObject]@{
+                path   = $map.UNCPath
+                gpo    = $map.GPOName
+                action = $map.ActionName
+                status = 'ok'   # refined in Task 2
+            })
+        }
+    }
+
+    $groupObjs = foreach ($name in ($rows.Keys | Sort-Object)) {
+        [PSCustomObject]@{
+            name  = $name
+            cells = $rows[$name]
+        }
+    }
+
+    return [PSCustomObject]@{
+        letters     = $letters
+        groups      = @($groupObjs)
+        hasUserData = $false
+    }
+}
+#endregion
+
 #region Loopback Processing Detection
 function Get-LoopbackMode {
     <#
