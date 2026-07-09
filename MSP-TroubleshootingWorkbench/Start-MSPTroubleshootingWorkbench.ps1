@@ -343,6 +343,118 @@ function Get-WorkbenchCases {
     return @($cases | Sort-Object -Property CreatedAt -Descending)
 }
 
+function Get-CheckCatalog {
+    [CmdletBinding()]
+    param()
+
+    $checksRoot = Join-Path $PSScriptRoot 'checks'
+    $manifestPath = Join-Path $checksRoot 'manifest.json'
+
+    if (-not (Test-Path -LiteralPath $manifestPath)) {
+        throw "Check manifest was not found."
+    }
+
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    if ($manifest.schemaVersion -ne 1) {
+        throw "Unsupported check manifest schema version."
+    }
+
+    $trimChars = @([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    $resolvedChecksRoot = (Get-ResolvedPath -Path $checksRoot).TrimEnd($trimChars)
+    $requiredPrefix = $resolvedChecksRoot + [System.IO.Path]::DirectorySeparatorChar
+    $catalog = @()
+
+    foreach ($check in @($manifest.checks)) {
+        foreach ($field in @('checkId', 'name', 'category', 'script')) {
+            if (-not ($check.PSObject.Properties.Name -contains $field)) {
+                throw "Check manifest entry is missing '$field'."
+            }
+
+            if ([string]::IsNullOrWhiteSpace([string]$check.$field)) {
+                throw "Check manifest entry field '$field' is blank."
+            }
+        }
+
+        $scriptName = [string]$check.script
+        if ([System.IO.Path]::IsPathRooted($scriptName)) {
+            throw "Check script path must be relative to the checks folder."
+        }
+
+        $scriptPath = Get-ResolvedPath -Path (Join-Path $resolvedChecksRoot $scriptName)
+        if (-not $scriptPath.StartsWith($requiredPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Check script path must stay inside the checks folder."
+        }
+
+        if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
+            throw "Check script '$scriptName' was not found."
+        }
+
+        $catalog += [PSCustomObject]@{
+            CheckId     = [string]$check.checkId
+            Name        = [string]$check.name
+            Category    = [string]$check.category
+            Script      = $scriptName
+            Description = [string]$check.description
+            ReadOnly    = [bool]$check.readOnly
+            Inputs      = @($check.inputs)
+            ScriptPath  = $scriptPath
+        }
+    }
+
+    return @($catalog)
+}
+
+function Invoke-WorkbenchCheck {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$CheckId,
+
+        [Parameter(Mandatory)]
+        [object]$Body
+    )
+
+    $check = @(Get-CheckCatalog | Where-Object { $_.CheckId -eq $CheckId } | Select-Object -First 1)
+    if ($check.Count -eq 0) {
+        throw "Check not found."
+    }
+
+    $invokeParams = @{}
+    if ($Body.PSObject.Properties.Name -contains 'targetAddress') {
+        $targetAddress = [string]$Body.targetAddress
+        if (-not [string]::IsNullOrWhiteSpace($targetAddress)) {
+            $invokeParams.TargetAddress = $targetAddress
+        }
+    }
+
+    if ($Body.PSObject.Properties.Name -contains 'port') {
+        $portText = [string]$Body.port
+        if (-not [string]::IsNullOrWhiteSpace($portText)) {
+            $port = 0
+            if (-not [int]::TryParse($portText, [ref]$port)) {
+                throw "Port must be a number."
+            }
+
+            if ($port -lt 1 -or $port -gt 65535) {
+                throw "Port must be between 1 and 65535."
+            }
+
+            $invokeParams.Port = $port
+        }
+    }
+
+    $result = & $check[0].ScriptPath @invokeParams
+    if ($null -eq $result) {
+        throw "Check did not return a result."
+    }
+
+    if ($result -is [array]) {
+        $result = @($result | Select-Object -Last 1)[0]
+    }
+
+    return $result
+}
+
 function New-WorkbenchCase {
     [CmdletBinding()]
     param(
@@ -466,6 +578,15 @@ try {
                     Send-JsonError -Context $context -Message $_.Exception.Message -StatusCode 500
                 }
             }
+            elseif ($method -ieq "GET" -and $path -eq "/api/checks") {
+                try {
+                    $checks = @(Get-CheckCatalog | Select-Object CheckId, Name, Category, Script, Description, ReadOnly, Inputs)
+                    Send-Json -Context $context -Body $checks
+                }
+                catch {
+                    Send-JsonError -Context $context -Message $_.Exception.Message -StatusCode 500
+                }
+            }
             elseif ($method -ieq "POST" -and $path -eq "/api/cases") {
                 $requestIsValid = $false
                 $body = $null
@@ -505,6 +626,70 @@ try {
                     }
                     catch {
                         Send-JsonError -Context $context -Message $_.Exception.Message -StatusCode 500
+                    }
+                }
+            }
+            elseif ($method -ieq "POST" -and $path -match '^/api/cases/([^/]+)/checks/([^/]+)/run$') {
+                $caseId = [System.Uri]::UnescapeDataString($Matches[1])
+                $checkId = [System.Uri]::UnescapeDataString($Matches[2])
+
+                if (-not (Test-WorkbenchCaseId -CaseId $caseId)) {
+                    Send-JsonError -Context $context -Message "Invalid case id." -StatusCode 400
+                }
+                else {
+                    $caseLoadFailed = $false
+                    try {
+                        $case = Get-WorkbenchCase -CaseId $caseId
+                    }
+                    catch {
+                        Send-JsonError -Context $context -Message $_.Exception.Message -StatusCode 500
+                        $caseLoadFailed = $true
+                    }
+
+                    if (-not $caseLoadFailed) {
+                        if ($null -eq $case) {
+                            Send-JsonError -Context $context -Message "Case not found." -StatusCode 404
+                        }
+                        else {
+                            $requestIsValid = $false
+                            $body = $null
+
+                            try {
+                                $body = Read-JsonRequestBody -Request $request
+                                $requestIsValid = $true
+                            }
+                            catch {
+                                Send-JsonError -Context $context -Message $_.Exception.Message -StatusCode 400
+                            }
+
+                            if ($requestIsValid) {
+                                try {
+                                    $checkResult = Invoke-WorkbenchCheck -CheckId $checkId -Body $body
+                                    $currentChecks = @()
+                                    if ($case.PSObject.Properties.Name -contains "Checks") {
+                                        if ($null -ne $case.Checks) {
+                                            $currentChecks = @($case.Checks)
+                                        }
+                                    }
+                                    else {
+                                        Add-Member -InputObject $case -MemberType NoteProperty -Name "Checks" -Value @()
+                                    }
+
+                                    $case.Checks = @($currentChecks + $checkResult)
+                                    $case.UpdatedAt = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+                                    Save-WorkbenchCase -Case $case -ExpectedCaseId $caseId | Out-Null
+                                    Send-Json -Context $context -Body $case
+                                }
+                                catch {
+                                    $statusCode = 500
+                                    if ($_.Exception.Message -eq "Check not found.") {
+                                        $statusCode = 404
+                                    }
+
+                                    Send-JsonError -Context $context -Message $_.Exception.Message -StatusCode $statusCode
+                                }
+                            }
+                        }
                     }
                 }
             }
