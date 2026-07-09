@@ -18,7 +18,8 @@
 
 .PARAMETER AffectedUser
     Optional user name involved in the reported profile issue. Used only for
-    context and simple profile path token replacement in operator-side tests.
+    context and simple profile path token replacement before path reachability
+    is checked from the affected device context.
 
 .PARAMETER EventLookbackHours
     Number of hours of FSLogix and Terminal Services events to collect.
@@ -109,6 +110,23 @@ function ConvertTo-ProfilePathForTest {
     }
 
     return $resolvedPath
+}
+
+function Test-IsLocalComputerTarget {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ComputerName
+    )
+
+    $normalized = $ComputerName.Trim()
+    return (
+        $normalized -eq "." -or
+        $normalized -eq "localhost" -or
+        $normalized -eq "127.0.0.1" -or
+        $normalized -eq "::1" -or
+        $normalized -ieq $env:COMPUTERNAME
+    )
 }
 
 function Read-FSLogixProfileRegistryKey {
@@ -506,33 +524,58 @@ foreach ($valueName in @("VHDLocations", "CCDLocations")) {
 }
 
 if ($configuredPaths.Count -gt 0) {
+    $isLocalTarget = Test-IsLocalComputerTarget -ComputerName $AffectedDevice
     foreach ($profilePath in @($configuredPaths | Select-Object -Unique)) {
         $pathToTest = ConvertTo-ProfilePathForTest -Path $profilePath -UserName $AffectedUser
         try {
-            $pathReachable = Test-Path -LiteralPath $pathToTest -ErrorAction Stop
+            if ($isLocalTarget) {
+                $pathReachable = Test-Path -LiteralPath $pathToTest -ErrorAction Stop
+                $testContext = "Local target"
+            }
+            else {
+                $pathReachable = Invoke-Command -ComputerName $AffectedDevice -ScriptBlock {
+                    param(
+                        [Parameter(Mandatory)]
+                        [string]$LiteralPath
+                    )
+
+                    Test-Path -LiteralPath $LiteralPath -ErrorAction Stop
+                } -ArgumentList $pathToTest -ErrorAction Stop
+                $testContext = "Remote target $AffectedDevice"
+            }
+
             $rawOutput.ProfilePaths += [PSCustomObject]@{
                 ConfiguredPath = [string]$profilePath
                 TestedPath     = [string]$pathToTest
+                Context        = $testContext
                 Reachable      = [bool]$pathReachable
                 Error          = ""
             }
 
             if ($pathReachable) {
-                $evidence += New-EvidenceItem -Name "Profile path reachability" -Status "Pass" -Detail "Operator-side Test-Path reached $pathToTest."
+                $evidence += New-EvidenceItem -Name "Profile path reachability" -Status "Pass" -Detail "$testContext Test-Path reached $pathToTest."
             }
             else {
-                $evidence += New-EvidenceItem -Name "Profile path reachability" -Status "Warn" -Detail "Operator-side Test-Path could not reach $pathToTest."
+                $evidence += New-EvidenceItem -Name "Profile path reachability" -Status "Warn" -Detail "$testContext Test-Path could not reach $pathToTest."
             }
         }
         catch {
             $errors += "Profile path ${profilePath}: $($_.Exception.Message)"
+            if ($isLocalTarget) {
+                $testContext = "Local target"
+            }
+            else {
+                $testContext = "Remote target $AffectedDevice"
+            }
+
             $rawOutput.ProfilePaths += [PSCustomObject]@{
                 ConfiguredPath = [string]$profilePath
                 TestedPath     = [string]$pathToTest
+                Context        = $testContext
                 Reachable      = $false
                 Error          = $_.Exception.Message
             }
-            $evidence += New-EvidenceItem -Name "Profile path reachability" -Status "Warn" -Detail "Operator-side Test-Path failed for ${pathToTest}: $($_.Exception.Message)"
+            $evidence += New-EvidenceItem -Name "Profile path reachability" -Status "Warn" -Detail "$testContext Test-Path failed for ${pathToTest}: $($_.Exception.Message)"
         }
     }
 }

@@ -101,6 +101,7 @@ $checksRoot = Join-Path $workbenchRoot "checks"
 $manifestPath = Join-Path $checksRoot "manifest.json"
 $citrixCheckPath = Join-Path $checksRoot "Invoke-CitrixFSLogixTriageCheck.ps1"
 $serverPath = Join-Path $workbenchRoot "Start-MSPTroubleshootingWorkbench.ps1"
+$readmePath = Join-Path $workbenchRoot "README.md"
 
 $manifest = Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
 $citrixEntry = @($manifest.checks | Where-Object { $_.checkId -eq "citrix.fslogix.triage" }) | Select-Object -First 1
@@ -123,7 +124,12 @@ Assert-True -Condition ($source -match 'Get-Service\s+-ComputerName\s+\$Affected
 Assert-True -Condition ($source -match "OpenRemoteBaseKey") -Message "Registry checks use a remote registry base key."
 Assert-True -Condition ($source -match 'Get-WinEvent\s+-ComputerName\s+\$AffectedDevice') -Message "Event log queries use -ComputerName AffectedDevice."
 Assert-True -Condition ($source -match 'Get-CimInstance\s+-ComputerName\s+\$AffectedDevice') -Message "Disk queries use -ComputerName AffectedDevice."
+Assert-True -Condition ($source -match 'Invoke-Command\s+-ComputerName\s+\$AffectedDevice') -Message "Profile path reachability uses Invoke-Command against AffectedDevice."
+Assert-True -Condition ($source -notmatch "Operator-side Test-Path") -Message "Profile path evidence does not describe operator-side Test-Path."
 Assert-True -Condition ($source -notmatch "Win32_Product") -Message "Check does not use Win32_Product."
+
+$readme = Get-Content -LiteralPath $readmePath -Raw -ErrorAction Stop
+Assert-True -Condition ($readme -notmatch "operator machine|operator workstation|Operator-side") -Message "README no longer documents operator-side profile path checks."
 
 $result = & $citrixCheckPath -AffectedDevice $env:COMPUTERNAME -AffectedUser "jdoe"
 $expectedFields = @(
