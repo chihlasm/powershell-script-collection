@@ -946,7 +946,8 @@ function Build-DriveMapMatrix {
     param(
         [System.Collections.Generic.List[object]]$DriveMaps,
         [array]$PathValidation = @(),
-        [array]$GroupOverlap = @()
+        [array]$GroupOverlap = @(),
+        [hashtable]$GroupMembers = @{}
     )
 
     # Column axis: distinct real drive letters, sorted.
@@ -1005,17 +1006,28 @@ function Build-DriveMapMatrix {
         }
     }
 
+    $hasUserData = $GroupMembers.Count -gt 0
+
     $groupObjs = foreach ($name in ($rows.Keys | Sort-Object)) {
-        [PSCustomObject]@{
+        $groupObj = [PSCustomObject]@{
             name  = $name
             cells = $rows[$name]
         }
+        if ($hasUserData) {
+            $memberList = if ($name -ne '(all users)' -and $GroupMembers.ContainsKey($name)) {
+                @($GroupMembers[$name])
+            } else {
+                @()
+            }
+            $groupObj | Add-Member -MemberType NoteProperty -Name 'users' -Value $memberList
+        }
+        $groupObj
     }
 
     return [PSCustomObject]@{
         letters     = $letters
         groups      = @($groupObjs)
-        hasUserData = $false
+        hasUserData = $hasUserData
     }
 }
 #endregion
