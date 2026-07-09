@@ -962,21 +962,45 @@ function Build-DriveMapMatrix {
         if ($g.Count -eq 0) { @('(all users)') } else { $g }
     }
 
+    # Build a case-insensitive UNC-path -> reachable? lookup from validation results,
+    # matching the Find-DriveMapConflicts pattern.
+    $reachableByPath = @{}
+    foreach ($pv in $PathValidation) {
+        if ($pv.UNCPath) { $reachableByPath["$($pv.UNCPath)".ToLower()] = [bool]$pv.Reachable }
+    }
+
+    # Letters that are "shared" - letters whose distinct competing (non-Delete) UNC paths
+    # number > 1 across ALL groups. Covers both cross-group and same-group multi-path.
+    $sharedLetters = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $nonDeleteMaps = $DriveMaps | Where-Object {
+        $_.DriveLetter -and $_.DriveLetter.Trim() -ne '' -and $_.DriveLetter -ne 'NOCHANGE' -and
+        "$($_.ActionName)" -ne 'Delete'
+    }
+    foreach ($group in ($nonDeleteMaps | Group-Object -Property DriveLetter)) {
+        $distinctPaths = @($group.Group | Select-Object -ExpandProperty UNCPath -Unique)
+        if ($distinctPaths.Count -gt 1) { [void]$sharedLetters.Add($group.Name) }
+    }
+
     # rowName -> ( letter -> list of cell entries )
     $rows = @{}
     foreach ($map in $DriveMaps) {
         if (-not $map.DriveLetter -or $map.DriveLetter.Trim() -eq '' -or $map.DriveLetter -eq 'NOCHANGE') { continue }
+        $letter = $map.DriveLetter
+        $path = $map.UNCPath
+        $status = if ("$($map.ActionName)" -eq 'Delete') { 'remove' }
+                  elseif ($path -and $reachableByPath.ContainsKey("$path".ToLower()) -and -not $reachableByPath["$path".ToLower()]) { 'unreachable' }
+                  elseif ($sharedLetters.Contains($letter)) { 'overlap' }
+                  else { 'ok' }
         foreach ($gName in (& $groupsForMap $map)) {
             if (-not $rows.ContainsKey($gName)) { $rows[$gName] = @{} }
-            $letter = $map.DriveLetter
             if (-not $rows[$gName].ContainsKey($letter)) {
                 $rows[$gName][$letter] = [System.Collections.Generic.List[object]]::new()
             }
             $rows[$gName][$letter].Add([PSCustomObject]@{
-                path   = $map.UNCPath
+                path   = $path
                 gpo    = $map.GPOName
                 action = $map.ActionName
-                status = 'ok'   # refined in Task 2
+                status = $status
             })
         }
     }
