@@ -131,6 +131,27 @@ Assert-True -Condition ($source -notmatch "Win32_Product") -Message "Check does 
 $readme = Get-Content -LiteralPath $readmePath -Raw -ErrorAction Stop
 Assert-True -Condition ($readme -notmatch "operator machine|operator workstation|Operator-side") -Message "README no longer documents operator-side profile path checks."
 
+Import-WorkbenchFunctions -Path $citrixCheckPath
+
+$trimmedLocations = @(Split-FSLogixRegistryLocationEntries -Value "\\fs01\profiles; \\fs02\profiles ")
+Assert-True -Condition ($trimmedLocations.Count -eq 2) -Message "Registry location splitter returns each semicolon-separated path."
+Assert-True -Condition ($trimmedLocations[0] -eq "\\fs01\profiles") -Message "Registry location splitter preserves the first path."
+Assert-True -Condition ($trimmedLocations[1] -eq "\\fs02\profiles") -Message "Registry location splitter trims leading spaces from later paths."
+
+$smbCloudCacheLocations = @(Resolve-FSLogixProfileStorageLocations -ValueName "CCDLocations" -Value "type=smb,name=primary,connectionString=\\fs03\profiles")
+Assert-True -Condition ($smbCloudCacheLocations.Count -eq 1) -Message "Cloud Cache SMB provider returns one profile storage location."
+Assert-True -Condition ($smbCloudCacheLocations[0].ShouldTestPath -eq $true) -Message "Cloud Cache SMB provider is marked for SMB path reachability testing."
+Assert-True -Condition ($smbCloudCacheLocations[0].TestPath -eq "\\fs03\profiles") -Message "Cloud Cache SMB provider extracts the connectionString SMB path."
+
+$azureCloudCacheLocations = @(Resolve-FSLogixProfileStorageLocations -ValueName "CCDLocations" -Value "type=azure,name=cloud,connectionString=DefaultEndpointsProtocol=https")
+Assert-True -Condition ($azureCloudCacheLocations.Count -eq 1) -Message "Cloud Cache Azure provider returns one profile storage location."
+Assert-True -Condition ($azureCloudCacheLocations[0].ShouldTestPath -eq $false) -Message "Cloud Cache Azure provider is not marked for SMB path reachability testing."
+Assert-True -Condition ($azureCloudCacheLocations[0].ProviderType -eq "azure") -Message "Cloud Cache Azure provider type is preserved for evidence."
+
+$multiProviderCloudCacheLocations = @(Resolve-FSLogixProfileStorageLocations -ValueName "CCDLocations" -Value @("type=azure,name=cloud,connectionString=DefaultEndpointsProtocol=https;AccountName=profiles", "type=smb,name=secondary,connectionString=\\fs04\profiles "))
+Assert-True -Condition ($multiProviderCloudCacheLocations.Count -eq 2) -Message "Cloud Cache parser preserves array provider entries with semicolons inside connection strings."
+Assert-True -Condition ($multiProviderCloudCacheLocations[1].TestPath -eq "\\fs04\profiles") -Message "Cloud Cache parser trims SMB connectionString values from multi-value registry data."
+
 $result = & $citrixCheckPath -AffectedDevice $env:COMPUTERNAME -AffectedUser "jdoe"
 $expectedFields = @(
     "CheckId",
