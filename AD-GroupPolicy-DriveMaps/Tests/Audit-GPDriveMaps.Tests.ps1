@@ -116,3 +116,107 @@ Describe 'Build-DriveMapMatrix - user rows' {
         $fireRow.users | Should -Contain 'jsmith'
     }
 }
+
+Describe 'Matrix renders into self-contained HTML' {
+    BeforeAll {
+        function New-M { param($GPO,$Action,$Letter,$Path,$Groups)
+            $ilt = @($Groups | ForEach-Object { [PSCustomObject]@{ Type='FilterGroup'; Not=$false; Bool='AND'; Detail="Group IS '$_'" } })
+            $an = switch ($Action) { 'C'{'Create'} 'D'{'Delete'} default{$Action} }
+            $iltSummary = if ($Groups -and $Groups.Count -gt 0) { ($Groups -join '; ') } else { 'No targeting (applies to all)' }
+            [PSCustomObject]@{
+                GPOName      = $GPO
+                GPOId        = [guid]::NewGuid().ToString()
+                GPOStatus    = 'AllSettingsEnabled'
+                Configuration = 'User'
+                Action       = $Action
+                ActionName   = $an
+                DriveLetter  = $Letter
+                UNCPath      = $Path
+                Label        = "$Letter drive"
+                Reconnect    = 'True'
+                ILTSummary   = $iltSummary
+                ILTFilters   = $ilt
+                GPOLinksText = 'Default Domain Policy'
+            }
+        }
+
+        # Build a realistic set of drive maps: two groups sharing letter Z (overlap),
+        # and one group pointing at an unreachable target on letter O.
+        $driveMaps = [System.Collections.Generic.List[object]]::new()
+        $driveMaps.Add((New-M 'GPO-Finance' 'C' 'F' '\\srv1\finance' @('Finance')))
+        $driveMaps.Add((New-M 'GPO-HR' 'C' 'Z' '\\srv1\hr-archive' @('HR')))
+        $driveMaps.Add((New-M 'GPO-Finance' 'C' 'Z' '\\srv2\fin-archive' @('Finance')))
+        $driveMaps.Add((New-M 'GPO-Ops' 'C' 'O' '\\deadsrv\ops' @('Operations')))
+
+        $pathValidation = @(
+            [PSCustomObject]@{
+                UNCPath      = '\\srv1\finance'
+                Reachable    = $true
+                DriveLetters = 'F'
+                AffectedGPOs = 'GPO-Finance'
+                Recommendation = ''
+            },
+            [PSCustomObject]@{
+                UNCPath      = '\\srv1\hr-archive'
+                Reachable    = $true
+                DriveLetters = 'Z'
+                AffectedGPOs = 'GPO-HR'
+                Recommendation = ''
+            },
+            [PSCustomObject]@{
+                UNCPath      = '\\srv2\fin-archive'
+                Reachable    = $true
+                DriveLetters = 'Z'
+                AffectedGPOs = 'GPO-Finance'
+                Recommendation = ''
+            },
+            [PSCustomObject]@{
+                UNCPath      = '\\deadsrv\ops'
+                Reachable    = $false
+                DriveLetters = 'O'
+                AffectedGPOs = 'GPO-Ops'
+                Recommendation = 'Verify the target server is online and reachable.'
+            }
+        )
+
+        $groupOverlap = @(
+            [PSCustomObject]@{
+                DriveLetter      = 'Z'
+                OverlapUserCount = 1
+                CompetingGroups  = 'HR, Finance'
+                UserDetails      = @(
+                    [PSCustomObject]@{ User = 'jsmith'; Groups = 'HR, Finance'; Paths = '\\srv1\hr-archive, \\srv2\fin-archive' }
+                )
+                Recommendation   = 'Review group membership overlap for drive Z.'
+            }
+        )
+
+        $matrix = Build-DriveMapMatrix -DriveMaps $driveMaps -PathValidation $pathValidation -GroupOverlap $groupOverlap
+
+        $script:auditResults = @{
+            Domain          = 'contoso.com'
+            AuditDate       = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+            TotalGPOs       = 3
+            AllDriveMaps    = $driveMaps
+            Issues          = @{ Conflicts = @(); Duplicates = @() }
+            PathValidation  = $pathValidation
+            StaleHosts      = @()
+            GroupOverlap    = $groupOverlap
+            Precedence      = $null
+            Matrix          = $matrix
+        }
+    }
+
+    It 'embeds parseable JSON and references no external hosts' {
+        $out = Join-Path $TestDrive 'r.html'
+        Export-HTMLReport -AuditResults $script:auditResults -OutputFile $out
+        $html = Get-Content $out -Raw
+
+        $html | Should -Match "id='matrix-data'"
+        $html | Should -Not -Match 'https?://(?!www\.w3\.org)'
+
+        $json = [regex]::Match($html, "(?s)matrix-data[^>]*>(.*?)</script>").Groups[1].Value
+        $json | Should -Not -BeNullOrEmpty
+        { $json | ConvertFrom-Json } | Should -Not -Throw
+    }
+}
