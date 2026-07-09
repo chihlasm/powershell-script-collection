@@ -148,9 +148,41 @@ Assert-True -Condition ($azureCloudCacheLocations.Count -eq 1) -Message "Cloud C
 Assert-True -Condition ($azureCloudCacheLocations[0].ShouldTestPath -eq $false) -Message "Cloud Cache Azure provider is not marked for SMB path reachability testing."
 Assert-True -Condition ($azureCloudCacheLocations[0].ProviderType -eq "azure") -Message "Cloud Cache Azure provider type is preserved for evidence."
 
+$sensitiveAzureCcd = "type=azure,name=cloud,connectionString=DefaultEndpointsProtocol=https;AccountName=profiles;AccountKey=abc123;SharedAccessSignature=sv=2024&sig=secret"
+$redactedAzureCloudCacheLocations = @(Resolve-FSLogixProfileStorageLocations -ValueName "CCDLocations" -Value $sensitiveAzureCcd)
+Assert-True -Condition ($redactedAzureCloudCacheLocations[0].SourceValue -notmatch "abc123|sig=secret|AccountKey=|SharedAccessSignature=") -Message "Cloud Cache Azure SourceValue redacts credential-bearing connection strings."
+Assert-True -Condition ($redactedAzureCloudCacheLocations[0].SourceValue -match "type=azure") -Message "Cloud Cache Azure SourceValue preserves provider type for troubleshooting."
+Assert-True -Condition ($redactedAzureCloudCacheLocations[0].SourceValue -match "\[REDACTED\]") -Message "Cloud Cache Azure SourceValue records that sensitive connection data was redacted."
+$redactedRegistryCcd = (ConvertTo-RedactedFSLogixRegistryValue -ValueName "CCDLocations" -Value $sensitiveAzureCcd) -join "; "
+Assert-True -Condition ($redactedRegistryCcd -notmatch "abc123|sig=secret|AccountKey=|SharedAccessSignature=") -Message "Raw registry CCDLocations redaction removes credential-bearing fields."
+
 $multiProviderCloudCacheLocations = @(Resolve-FSLogixProfileStorageLocations -ValueName "CCDLocations" -Value @("type=azure,name=cloud,connectionString=DefaultEndpointsProtocol=https;AccountName=profiles", "type=smb,name=secondary,connectionString=\\fs04\profiles "))
 Assert-True -Condition ($multiProviderCloudCacheLocations.Count -eq 2) -Message "Cloud Cache parser preserves array provider entries with semicolons inside connection strings."
 Assert-True -Condition ($multiProviderCloudCacheLocations[1].TestPath -eq "\\fs04\profiles") -Message "Cloud Cache parser trims SMB connectionString values from multi-value registry data."
+
+$policyFirstKeys = @(
+    [PSCustomObject]@{
+        Label = "Local profile configuration"
+        Found = $true
+        Values = [PSCustomObject]@{
+            Enabled = "0"
+            VHDLocations = "\\local\profiles"
+        }
+    },
+    [PSCustomObject]@{
+        Label = "Policy profile configuration"
+        Found = $true
+        Values = [PSCustomObject]@{
+            Enabled = "1"
+            VHDLocations = "\\policy\profiles"
+        }
+    }
+)
+Assert-True -Condition ((Get-RegistryValueText -RegistryKeys $policyFirstKeys -ValueName "Enabled") -eq "1") -Message "Effective registry value lookup prefers policy Enabled over local Enabled."
+Assert-True -Condition ((Get-RegistryValueText -RegistryKeys $policyFirstKeys -ValueName "VHDLocations") -eq "\\policy\profiles") -Message "Effective registry value lookup prefers policy VHDLocations over local VHDLocations."
+
+Assert-True -Condition (Test-WinEventNoEventsFoundError -Message "No events were found that match the specified selection criteria.") -Message "WinEvent no-match errors are identified as quiet event logs."
+Assert-True -Condition (-not (Test-WinEventNoEventsFoundError -Message "Access is denied.")) -Message "WinEvent access errors are not treated as quiet event logs."
 
 $result = & $citrixCheckPath -AffectedDevice $env:COMPUTERNAME -AffectedUser "jdoe"
 $expectedFields = @(
