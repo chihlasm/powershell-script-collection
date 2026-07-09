@@ -14,6 +14,8 @@
     - Shows GPO link context (where each GPO is linked)
     - Simulates GPO precedence for a specific user/computer to show
       which mapping "wins" per drive letter
+    - Detects User Group Policy Loopback Processing (Merge/Replace) on the
+      target computer's OU chain and factors it into the precedence simulation
 
 .PARAMETER OutputPath
     Directory where reports will be saved. Defaults to script directory.
@@ -42,9 +44,22 @@
 .PARAMETER SkipPathValidation
     Skip UNC path reachability checks (faster, no network probes).
 
+.PARAMETER CheckGroupOverlap
+    Query Active Directory to resolve the members of each security group used in
+    item-level targeting, then flag any user who belongs to 2+ groups that map the
+    SAME drive letter. This surfaces the real ambiguity that ILT-based "no conflict"
+    verdicts assume away. Requires the ActiveDirectory module and read access to
+    group membership. Off by default (adds AD queries).
+
 .EXAMPLE
     .\Audit-GPDriveMaps.ps1
     Runs full drive map audit with default settings.
+
+.EXAMPLE
+    .\Audit-GPDriveMaps.ps1 -CheckGroupOverlap
+    Also verifies ILT security groups are actually mutually exclusive by resolving
+    real AD membership, flagging users who would receive competing mappings for the
+    same drive letter.
 
 .EXAMPLE
     .\Audit-GPDriveMaps.ps1 -TargetUser "jsmith" -TargetComputer "WS01"
@@ -90,6 +105,9 @@ param(
 
     [Parameter()]
     [switch]$SkipPathValidation,
+
+    [Parameter()]
+    [switch]$CheckGroupOverlap,
 
     [Parameter()]
     [switch]$LoadFunctionsOnly
@@ -278,7 +296,7 @@ function Get-ItemLevelTargeting {
                 "Run Once (apply only on first processing)"
             }
             'FilterCollection' {
-                # Nested collection — recurse
+                # Nested collection - recurse
                 $nested = Get-FilterCollectionSummary -CollectionNode $child
                 "Collection: ($nested)"
             }
@@ -417,20 +435,41 @@ function Get-DriveMapItems {
                 }
             }
 
-            # Resolve the actual drive letter
-            # thisDrive can be a letter (e.g. "H:") or "NOCHANGE"
-            # When NOCHANGE, check the 'letter' or 'useLetter' attribute for the real letter
-            $driveLetter = $props.thisDrive
-            if ($driveLetter -eq 'NOCHANGE' -or [string]::IsNullOrWhiteSpace($driveLetter)) {
-                if ($props.letter) { $driveLetter = $props.letter }
-                elseif ($props.useLetter) { $driveLetter = $props.useLetter }
-                elseif ($drive.letter) { $driveLetter = $drive.letter }
+            # Resolve the actual drive letter.
+            # Per MS-GPPREF, the 'letter' attribute is the authoritative drive letter
+            # (a single letter when useLetter=1, or the start of a range when useLetter=0).
+            # 'thisDrive' is NOT a drive letter - it is the Explorer visibility flag with
+            # values NOCHANGE / HIDE / SHOW, and must never be read as the letter (doing so
+            # produced bogus "SHOW"/"HIDE" drive letters on Home Drive items).
+            $driveLetter = $props.letter
+            if ([string]::IsNullOrWhiteSpace($driveLetter)) {
+                # Fall back to the <Drive> element's name/status (e.g. "H:") only when the
+                # Properties element carries no letter at all.
+                if ($drive.name)        { $driveLetter = $drive.name }
+                elseif ($drive.status)  { $driveLetter = $drive.status }
             }
+            # For a letter range (useLetter=0), note it spans from the letter to Z.
+            $isLetterRange = ("$($props.useLetter)" -eq '0')
             # Normalize: strip trailing colon for display consistency
-            $driveLetterDisplay = if ($driveLetter -and $driveLetter -ne 'NOCHANGE') {
+            $driveLetterDisplay = if ($driveLetter) {
                 $driveLetter.TrimEnd(':')
             } else {
                 $driveLetter
+            }
+            if ($isLetterRange -and $driveLetterDisplay) {
+                $driveLetterDisplay = "$driveLetterDisplay-Z (first free)"
+            }
+
+            # Explorer visibility flag (NOCHANGE / HIDE / SHOW) - kept for reporting only.
+            $visibility = $props.thisDrive
+
+            # Normalize the GPP action code (C/R/U/D) to a readable name.
+            $actionName = switch ("$($props.action)".ToUpper()) {
+                'C'     { 'Create' }
+                'R'     { 'Replace' }
+                'U'     { 'Update' }
+                'D'     { 'Delete' }
+                default { "$($props.action)" }
             }
 
             $Results.Add([PSCustomObject]@{
@@ -439,7 +478,9 @@ function Get-DriveMapItems {
                 GPOStatus     = $GPO.GpoStatus
                 Configuration = $Scope
                 Action        = $props.action
+                ActionName    = $actionName
                 DriveLetter   = $driveLetterDisplay
+                Visibility    = $visibility
                 UNCPath       = $props.path
                 Label         = $props.label
                 Reconnect     = $props.persistent
@@ -510,7 +551,7 @@ function Test-UNCPaths {
             Recommendation = if ($reachable) {
                 'Path is accessible'
             } else {
-                "Path is UNREACHABLE — verify server is online and share exists. Error: $errorMsg"
+                "Path is UNREACHABLE - verify server is online and share exists. Error: $errorMsg"
             }
         })
     }
@@ -527,7 +568,10 @@ function Test-UNCPaths {
 #region Conflict & Duplicate Detection
 function Find-DriveMapConflicts {
     param(
-        [System.Collections.Generic.List[object]]$DriveMaps
+        [System.Collections.Generic.List[object]]$DriveMaps,
+        # Optional path-validation results (from Test-UNCPaths) used to distinguish a
+        # genuine targeting conflict from a case where every target is simply offline.
+        [array]$PathValidation = @()
     )
 
     Write-AuditLog "Analyzing for drive map conflicts and duplicates..." -Level Info
@@ -540,37 +584,68 @@ function Find-DriveMapConflicts {
         return @{ Conflicts = $conflicts; Duplicates = $duplicates }
     }
 
-    # Same drive letter mapped to different UNC paths
-    # Exclude NOCHANGE (not a real letter assignment) and blank letters
+    # Build a case-insensitive UNC-path -> reachable? lookup from validation results.
+    $reachableByPath = @{}
+    foreach ($pv in $PathValidation) {
+        if ($pv.UNCPath) { $reachableByPath["$($pv.UNCPath)".ToLower()] = [bool]$pv.Reachable }
+    }
+    # Returns $true only when we KNOW the path is unreachable; unknown paths are not
+    # assumed unreachable (so skipping path validation never fabricates a false finding).
+    $isKnownUnreachable = {
+        param($path)
+        if (-not $path) { return $false }
+        $key = "$path".ToLower()
+        return $reachableByPath.ContainsKey($key) -and (-not $reachableByPath[$key])
+    }
+
+    # Same drive letter mapped to different UNC paths.
+    # Exclude blank letters and letter-range placeholders from letter-conflict grouping.
     $realLetterMaps = $DriveMaps | Where-Object {
         $_.DriveLetter -and
         $_.DriveLetter -ne 'NOCHANGE' -and
         $_.DriveLetter.Trim() -ne ''
     }
 
-    $byLetter = $realLetterMaps |
-        Group-Object -Property DriveLetter |
-        Where-Object {
-            ($_.Group | Select-Object -ExpandProperty UNCPath -Unique).Count -gt 1
-        }
+    # Only Create/Replace/Update items actually TARGET a path and compete for the letter.
+    # Delete items remove a mapping (e.g. the "delete for everyone, then create for the
+    # Fire group" restrict-to-department pattern) and must not count as a competing target.
+    $isCompeting = { param($m) @('Create', 'Replace', 'Update') -contains "$($m.ActionName)" }
+
+    $byLetter = $realLetterMaps | Group-Object -Property DriveLetter
 
     foreach ($group in $byLetter) {
-        $maps = $group.Group
-        $letter = $maps[0].DriveLetter
+        $allMaps = $group.Group
+        $letter = $allMaps[0].DriveLetter
 
-        # Build per-mapping detail: which GPO maps which path with which ILT
+        # Competing = non-Delete items only. Conflict analysis runs over these.
+        $maps = @($allMaps | Where-Object { & $isCompeting $_ })
+
+        # Need at least two DISTINCT competing paths for there to be anything to analyze.
+        $competingPaths = @($maps | Select-Object -ExpandProperty UNCPath -Unique)
+        if ($competingPaths.Count -le 1) { continue }
+
+        # Build per-mapping detail: which GPO maps which path with which ILT/action.
+        # Include Delete items too so the report shows the full picture for the letter.
         $mappingDetails = [System.Collections.Generic.List[object]]::new()
-        foreach ($map in $maps) {
+        foreach ($map in $allMaps) {
             $mappingDetails.Add([PSCustomObject]@{
                 GPOName    = $map.GPOName
                 UNCPath    = $map.UNCPath
                 ILTSummary = $map.ILTSummary
-                Action     = $map.Action
+                Action     = $map.ActionName
                 Label      = $map.Label
+                Reachable  = if (& $isKnownUnreachable $map.UNCPath) { $false }
+                             elseif ($reachableByPath.ContainsKey("$($map.UNCPath)".ToLower())) { $true }
+                             else { $null }
             })
         }
 
-        # Check ILT overlap between mappings with different paths
+        # Issue #2: if every competing target for this letter is KNOWN unreachable, the
+        # root cause is dead endpoints, not ambiguous targeting - classify accordingly.
+        $reachableCompetingPaths = @($competingPaths | Where-Object { -not (& $isKnownUnreachable $_) })
+        $allUnreachable = ($PathValidation.Count -gt 0) -and ($reachableCompetingPaths.Count -eq 0)
+
+        # Check ILT overlap between competing mappings with different paths.
         $hasRealConflict = $false
         $uniquePathMaps = @($maps | Sort-Object UNCPath | Group-Object UNCPath | ForEach-Object { $_.Group[0] })
         for ($i = 0; $i -lt $uniquePathMaps.Count; $i++) {
@@ -587,7 +662,7 @@ function Find-DriveMapConflicts {
                     break
                 }
 
-                # Both have ILT — check if group filters overlap
+                # Both have ILT - check if group filters overlap
                 $g1 = @($m1.ILTFilters | Where-Object { $_.Type -eq 'FilterGroup' -and -not $_.Not } |
                     ForEach-Object { if ($_.Detail -match "'(.+)'") { $Matches[1] } }) | Where-Object { $_ }
                 $g2 = @($m2.ILTFilters | Where-Object { $_.Type -eq 'FilterGroup' -and -not $_.Not } |
@@ -596,7 +671,7 @@ function Find-DriveMapConflicts {
                 if ($g1.Count -gt 0 -and $g2.Count -gt 0) {
                     $overlap = $g1 | Where-Object { $_ -in $g2 }
                     if ($overlap.Count -gt 0) { $hasRealConflict = $true; break }
-                    # Different groups — no overlap for this pair, continue checking
+                    # Different groups - no overlap for this pair, continue checking
                 } else {
                     # Can't determine from groups alone, assume potential conflict
                     $hasRealConflict = $true
@@ -606,19 +681,28 @@ function Find-DriveMapConflicts {
             if ($hasRealConflict) { break }
         }
 
-        $severity = if ($hasRealConflict) { 'High' } else { 'Info' }
-        $recommendation = if ($hasRealConflict) {
-            "REAL CONFLICT: Drive ${letter}: has overlapping or no targeting — users may get unexpected mappings based on GPO precedence"
+        if ($allUnreachable) {
+            $findingType = 'AllEndpointsUnreachable'
+            $severity = 'High'
+            $recommendation = "Drive ${letter}: every target share is UNREACHABLE ($($competingPaths -join ', ')) - this is a dead-endpoint problem, not a targeting conflict. Verify the servers/shares exist and repoint the mappings."
+        } elseif ($hasRealConflict) {
+            $findingType = 'TargetingConflict'
+            $severity = 'High'
+            $recommendation = "REAL CONFLICT: Drive ${letter}: has overlapping or no targeting - users may get unexpected mappings based on GPO precedence"
         } else {
-            "Drive ${letter}: mapped to different shares but item-level targeting does NOT overlap — different users receive different mappings (no real conflict)"
+            $findingType = 'ResolvedByTargeting'
+            $severity = 'Info'
+            $recommendation = "Drive ${letter}: mapped to different shares but item-level targeting does NOT overlap - different users receive different mappings (no real conflict)"
         }
 
         $conflicts.Add([PSCustomObject]@{
             DriveLetter     = $letter
             MappingDetails  = $mappingDetails
-            HasRealConflict = $hasRealConflict
+            FindingType     = $findingType
+            HasRealConflict = ($findingType -eq 'TargetingConflict')
+            AllUnreachable  = $allUnreachable
             GPOCount        = ($maps | Select-Object -ExpandProperty GPOName -Unique).Count
-            PathCount       = ($maps | Select-Object -ExpandProperty UNCPath -Unique).Count
+            PathCount       = $competingPaths.Count
             Severity        = $severity
             Recommendation  = $recommendation
         })
@@ -642,21 +726,271 @@ function Find-DriveMapConflicts {
             IsSameLetter   = ($maps | Select-Object -ExpandProperty DriveLetter -Unique).Count -eq 1
             Severity       = if (($maps | Select-Object -ExpandProperty DriveLetter -Unique).Count -gt 1) { 'Warning' } else { 'Info' }
             Recommendation = if (($maps | Select-Object -ExpandProperty DriveLetter -Unique).Count -gt 1) {
-                "Same share mapped to different drive letters across GPOs — review for conflicts"
+                "Same share mapped to different drive letters across GPOs - review for conflicts"
             } else {
-                "Same share mapped identically in multiple GPOs — consider consolidating"
+                "Same share mapped identically in multiple GPOs - consider consolidating"
             }
         })
     }
 
-    $realConflicts = ($conflicts | Where-Object { $_.HasRealConflict }).Count
-    $iltResolved = ($conflicts | Where-Object { -not $_.HasRealConflict }).Count
-    Write-AuditLog "Found $($conflicts.Count) letter conflicts ($realConflicts real, $iltResolved resolved by ILT) and $($duplicates.Count) duplicate paths" -Level $(if ($realConflicts -gt 0) { 'Warning' } else { 'Info' })
+    $realConflicts = @($conflicts | Where-Object { $_.FindingType -eq 'TargetingConflict' }).Count
+    $iltResolved   = @($conflicts | Where-Object { $_.FindingType -eq 'ResolvedByTargeting' }).Count
+    $unreachable   = @($conflicts | Where-Object { $_.FindingType -eq 'AllEndpointsUnreachable' }).Count
+    Write-AuditLog "Found $($conflicts.Count) multi-path drive letters ($realConflicts real conflicts, $iltResolved resolved by targeting, $unreachable all-endpoints-unreachable) and $($duplicates.Count) duplicate paths" -Level $(if ($realConflicts -gt 0 -or $unreachable -gt 0) { 'Warning' } else { 'Info' })
 
     return @{
         Conflicts  = $conflicts
         Duplicates = $duplicates
     }
+}
+
+function Get-UNCHost {
+    <#
+    .SYNOPSIS
+        Extracts the server/host component from a UNC path (\\host\share\... -> host).
+        Returns $null for non-UNC or empty values.
+    #>
+    param([string]$UNCPath)
+    if ([string]::IsNullOrWhiteSpace($UNCPath)) { return $null }
+    # Match the host in \\host\share (also tolerates forward slashes just in case).
+    if ($UNCPath -match '^[\\/]{2}([^\\/]+)') { return $Matches[1] }
+    return $null
+}
+
+function Find-StaleHosts {
+    <#
+    .SYNOPSIS
+        Cross-letter staleness check (issue #4). Any UNC host with at least one
+        unreachable path is treated as suspect, then EVERY drive mapping still pointing
+        at that host is flagged - regardless of drive letter. This catches the case where
+        one letter was migrated off a dead server but another letter still references it.
+    #>
+    param(
+        [System.Collections.Generic.List[object]]$DriveMaps,
+        [array]$PathValidation = @()
+    )
+
+    $staleHostFindings = [System.Collections.Generic.List[object]]::new()
+    if (-not $PathValidation -or $PathValidation.Count -eq 0) { return $staleHostFindings }
+
+    # Determine which hosts have any unreachable path.
+    $unreachableHosts = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($pv in $PathValidation) {
+        if (-not $pv.Reachable) {
+            $h = Get-UNCHost -UNCPath $pv.UNCPath
+            if ($h) { [void]$unreachableHosts.Add($h) }
+        }
+    }
+    if ($unreachableHosts.Count -eq 0) { return $staleHostFindings }
+
+    # Group every mapping by its host; report those whose host is known-unreachable.
+    $byHost = $DriveMaps | Where-Object { $_.UNCPath } |
+        Group-Object -Property { Get-UNCHost -UNCPath $_.UNCPath }
+
+    foreach ($group in $byHost) {
+        $hostName = $group.Name
+        if (-not $hostName -or -not $unreachableHosts.Contains($hostName)) { continue }
+
+        $maps = $group.Group
+        $letters = ($maps | Select-Object -ExpandProperty DriveLetter -Unique |
+            Where-Object { $_ }) -join ', '
+        $gpos = ($maps | Select-Object -ExpandProperty GPOName -Unique) -join ', '
+        $paths = ($maps | Select-Object -ExpandProperty UNCPath -Unique) -join ', '
+
+        $staleHostFindings.Add([PSCustomObject]@{
+            StaleHost      = $hostName
+            DriveLetters   = $letters
+            AffectedGPOs   = $gpos
+            UNCPaths       = $paths
+            MappingCount   = $maps.Count
+            Severity       = 'High'
+            Recommendation = "Host '$hostName' is UNREACHABLE but is still referenced by drive letter(s) $letters in GPO(s): $gpos. Repoint or remove these mappings - a stale server referenced by any letter can break logons/drive delivery."
+        })
+    }
+
+    $staleCount = $staleHostFindings.Count
+    if ($staleCount -gt 0) {
+        Write-AuditLog "Found $staleCount unreachable host(s) still referenced by drive mappings" -Level Warning
+    }
+
+    return $staleHostFindings
+}
+
+function Find-GroupMembershipOverlap {
+    <#
+    .SYNOPSIS
+        Verifies ILT security groups are actually mutually exclusive (issue #5).
+    .DESCRIPTION
+        A "resolved by targeting" verdict assumes the groups mapping the same drive
+        letter to different paths never share members. This resolves each group's real
+        membership from AD (recursively) and flags any user who belongs to 2+ groups
+        competing for the same letter - the actual risk (e.g. drive Z: shared by 5
+        department groups). Requires the ActiveDirectory module.
+    #>
+    param(
+        [System.Collections.Generic.List[object]]$DriveMaps,
+        [hashtable]$ADParams = @{}
+    )
+
+    $overlapFindings = [System.Collections.Generic.List[object]]::new()
+
+    if (-not (Get-Module -ListAvailable -Name ActiveDirectory)) {
+        Write-AuditLog "CheckGroupOverlap requested but ActiveDirectory module is unavailable - skipping" -Level Warning
+        return $overlapFindings
+    }
+    Import-Module ActiveDirectory -ErrorAction SilentlyContinue
+
+    # Only Create/Replace/Update items compete for a letter (Delete removes).
+    $competingActions = @('Create', 'Replace', 'Update')
+
+    # Extract the security-group names from a mapping's positive (non-NOT) group filters.
+    $getGroupsForMap = {
+        param($m)
+        @($m.ILTFilters | Where-Object { $_.Type -eq 'FilterGroup' -and -not $_.Not } |
+            ForEach-Object { if ($_.Detail -match "'(.+)'") { $Matches[1] } }) | Where-Object { $_ }
+    }
+
+    # Cache group membership lookups so a group shared across letters is resolved once.
+    $memberCache = @{}
+    $resolveMembers = {
+        param($groupName)
+        if ($memberCache.ContainsKey($groupName)) { return $memberCache[$groupName] }
+        $members = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        try {
+            # Recursive membership; -Recursive returns only user/computer leaf objects.
+            $result = Get-ADGroupMember -Identity $groupName -Recursive @ADParams -ErrorAction Stop
+            foreach ($u in $result) {
+                if ($u.objectClass -eq 'user' -and $u.SamAccountName) {
+                    [void]$members.Add($u.SamAccountName)
+                }
+            }
+        }
+        catch {
+            Write-AuditLog "Could not resolve members of group '$groupName': $_" -Level Warning
+        }
+        $memberCache[$groupName] = $members
+        return $members
+    }
+
+    $realLetterMaps = $DriveMaps | Where-Object {
+        $_.DriveLetter -and $_.DriveLetter.Trim() -ne '' -and $_.DriveLetter -ne 'NOCHANGE'
+    }
+
+    foreach ($group in ($realLetterMaps | Group-Object -Property DriveLetter)) {
+        $letter = $group.Name
+        $competing = @($group.Group | Where-Object { $competingActions -contains "$($_.ActionName)" })
+
+        # Map each competing group -> the set of distinct UNC paths it would deliver.
+        $groupToPaths = @{}
+        foreach ($map in $competing) {
+            foreach ($g in (& $getGroupsForMap $map)) {
+                if (-not $groupToPaths.ContainsKey($g)) {
+                    $groupToPaths[$g] = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+                }
+                if ($map.UNCPath) { [void]$groupToPaths[$g].Add($map.UNCPath) }
+            }
+        }
+
+        # Only meaningful when 2+ distinct groups compete for this letter.
+        $groupNames = @($groupToPaths.Keys)
+        if ($groupNames.Count -lt 2) { continue }
+
+        # Resolve membership and find users present in 2+ of the competing groups.
+        $userToGroups = @{}
+        foreach ($gName in $groupNames) {
+            $members = & $resolveMembers $gName
+            foreach ($user in $members) {
+                if (-not $userToGroups.ContainsKey($user)) {
+                    $userToGroups[$user] = [System.Collections.Generic.List[string]]::new()
+                }
+                $userToGroups[$user].Add($gName)
+            }
+        }
+
+        $overlappingUsers = @($userToGroups.GetEnumerator() | Where-Object { $_.Value.Count -ge 2 })
+        if ($overlappingUsers.Count -eq 0) { continue }
+
+        # Build a readable per-user detail list (user -> which groups -> which paths).
+        $userDetails = [System.Collections.Generic.List[object]]::new()
+        foreach ($entry in $overlappingUsers) {
+            $paths = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+            foreach ($gName in $entry.Value) {
+                foreach ($p in $groupToPaths[$gName]) { [void]$paths.Add($p) }
+            }
+            $userDetails.Add([PSCustomObject]@{
+                User   = $entry.Key
+                Groups = ($entry.Value | Sort-Object) -join ', '
+                Paths  = (@($paths) | Sort-Object) -join ', '
+            })
+        }
+
+        $overlapFindings.Add([PSCustomObject]@{
+            DriveLetter    = $letter
+            CompetingGroups = ($groupNames | Sort-Object) -join ', '
+            OverlapUserCount = $overlappingUsers.Count
+            UserDetails    = $userDetails
+            Severity       = 'High'
+            Recommendation = "Drive ${letter}: $($overlappingUsers.Count) user(s) belong to 2+ groups that map this letter to different shares. Their effective mapping is decided by GPP processing order, not intent - make the targeting groups mutually exclusive or consolidate the mappings."
+        })
+    }
+
+    $overlapCount = $overlapFindings.Count
+    Write-AuditLog "Group-overlap check complete: $overlapCount drive letter(s) with real membership overlap" -Level $(if ($overlapCount -gt 0) { 'Warning' } else { 'Success' })
+
+    return $overlapFindings
+}
+#endregion
+
+#region Loopback Processing Detection
+function Get-LoopbackMode {
+    <#
+    .SYNOPSIS
+        Detects whether a GPO enables User Group Policy Loopback Processing,
+        and if so, in which mode (Merge or Replace).
+    .DESCRIPTION
+        Loopback is the built-in Administrative Template policy "Configure user Group
+        Policy loopback processing mode" (System/Group Policy category). It appears in
+        the GPO XML report as a <Policy> entry under Computer/ExtensionData with that
+        exact Name (this is Microsoft's fixed ADML display string, not anything
+        environment-specific) and a <State>Enabled</State>. The selected mode is a
+        nested <DropDownList><Value><Name> of "Merge" or "Replace" - confirmed against
+        a real Get-GPOReport sample, not assumed.
+    #>
+    param(
+        [System.Xml.XmlDocument]$GPOReportXml
+    )
+
+    $computerExtensions = $GPOReportXml.GPO.Computer.ExtensionData
+    if (-not $computerExtensions) {
+        return @{ Enabled = $false; Mode = $null }
+    }
+
+    foreach ($ext in $computerExtensions) {
+        $policies = $ext.Extension.Policy
+        if (-not $policies) { continue }
+
+        foreach ($policy in $policies) {
+            if ($policy.Name -ne 'Configure user Group Policy loopback processing mode') { continue }
+
+            if ($policy.State -ne 'Enabled') {
+                return @{ Enabled = $false; Mode = $null }
+            }
+
+            # Mode is the "Mode:" dropdown's selected value, e.g.:
+            # <Policy><DropDownList><Name>Mode:</Name><Value><Name>Merge</Name></Value></DropDownList></Policy>
+            $modeValue = $policy.DropDownList.Value.Name
+
+            if ($modeValue -eq 'Merge' -or $modeValue -eq 'Replace') {
+                return @{ Enabled = $true; Mode = $modeValue }
+            }
+
+            # Policy is enabled but the mode value wasn't in the expected shape -
+            # flag as unknown rather than silently guessing.
+            return @{ Enabled = $true; Mode = 'Unknown' }
+        }
+    }
+
+    return @{ Enabled = $false; Mode = $null }
 }
 #endregion
 
@@ -669,9 +1003,13 @@ function Get-EffectiveDriveMaps {
     .DESCRIPTION
         1. Resolves the user's DN, OU path, and all group memberships (recursive)
         2. Optionally resolves the computer's DN, OU, and group memberships
-        3. Builds the ordered list of GPOs that apply (domain → site → OU chain)
-        4. Evaluates item-level targeting filters per mapping
-        5. Returns the effective (winning) mapping per drive letter
+        3. Builds the ordered list of GPOs that apply (domain -> site -> OU chain)
+        4. Detects User Group Policy Loopback Processing on GPOs linked to the
+           computer's OU chain. If enabled, folds the computer-linked GPOs' User-scope
+           settings into the evaluation per Merge (appended after user GPOs) or
+           Replace (user GPOs discarded) semantics
+        5. Evaluates item-level targeting filters per mapping
+        6. Returns the effective (winning) mapping per drive letter
     #>
     param(
         [string]$UserName,
@@ -745,98 +1083,180 @@ function Get-EffectiveDriveMaps {
         }
     }
 
-    # --- Build OU chain for user (child → parent → domain) ---
-    $userDN = $user.DistinguishedName
-    $ouChain = [System.Collections.Generic.List[string]]::new()
-    $parts = $userDN -split ',(?=(?:OU|DC)=)'
-    # Skip the CN=user part, accumulate OU chain from innermost to domain
-    for ($i = 1; $i -lt $parts.Count; $i++) {
-        $ouDN = ($parts[$i..($parts.Count - 1)]) -join ','
-        $ouChain.Add($ouDN)
+    # --- Build OU chain helper (child -> parent -> domain) ---
+    function Get-OUChain {
+        param([string]$DN)
+        $chain = [System.Collections.Generic.List[string]]::new()
+        $parts = $DN -split ',(?=(?:OU|DC)=)'
+        for ($i = 1; $i -lt $parts.Count; $i++) {
+            $chain.Add(($parts[$i..($parts.Count - 1)]) -join ',')
+        }
+        return $chain
     }
 
-    # Get domain DN (the DC= components)
-    $domainDN = ($parts | Where-Object { $_ -match '^DC=' }) -join ','
-
-    # --- Determine ordered GPO list ---
-    # GP processing order: Domain GPOs → OU GPOs (outermost OU first → innermost OU last)
+    # --- Determine the ordered GPO list applicable to a given OU chain ---
+    # GP processing order: Domain GPOs -> OU GPOs (outermost OU first -> innermost OU last)
     # Last processed wins for GP Preferences (unless Replace action)
     # Enforced GPOs always win regardless of position
+    function Get-OrderedGPOsForChain {
+        param(
+            [System.Collections.Generic.List[string]]$OUChain,
+            [array]$GPOs,
+            [hashtable]$Cache,
+            [hashtable]$ADParams
+        )
 
-    $orderedGPOs = [System.Collections.Generic.List[object]]::new()
+        $ordered = [System.Collections.Generic.List[object]]::new()
 
-    # Reverse ouChain so domain-level is first, innermost OU is last
-    $ouChainReversed = [System.Collections.Generic.List[string]]::new($ouChain)
-    $ouChainReversed.Reverse()
+        $chainReversed = [System.Collections.Generic.List[string]]::new($OUChain)
+        $chainReversed.Reverse()
 
-    foreach ($gpo in $AllGPOs) {
-        $guid = $gpo.Id.ToString()
-        if (-not $GPOCache.ContainsKey($guid)) { continue }
+        $domainDNSRoot = (Get-ADDomain @ADParams).DNSRoot
 
-        $report = $GPOCache[$guid].XmlDoc
-        $links = $report.GPO.LinksTo
-        if (-not $links) { continue }
+        foreach ($gpo in $GPOs) {
+            $guid = $gpo.Id.ToString()
+            if (-not $Cache.ContainsKey($guid)) { continue }
 
-        foreach ($link in $links) {
-            $somPath = $link.SOMPath
-            $linkEnabled = $link.Enabled -eq 'true'
-            $enforced = $link.NoOverride -eq 'true'
+            $report = $Cache[$guid].XmlDoc
+            $links = $report.GPO.LinksTo
+            if (-not $links) { continue }
 
-            if (-not $linkEnabled) { continue }
+            foreach ($link in $links) {
+                $somPath = $link.SOMPath
+                $linkEnabled = $link.Enabled -eq 'true'
+                $enforced = $link.NoOverride -eq 'true'
 
-            # Determine precedence order (lower = processed earlier = lower priority)
-            $order = -1
+                if (-not $linkEnabled) { continue }
 
-            # Check if linked to domain
-            if ($somPath -eq (Get-ADDomain @adParams).DNSRoot -or
-                $somPath -match "^$([regex]::Escape((Get-ADDomain @adParams).DNSRoot))$") {
-                $order = 0
-            }
+                # Determine precedence order (lower = processed earlier = lower priority)
+                $order = -1
 
-            # Check if linked to an OU in the user's chain
-            for ($i = 0; $i -lt $ouChainReversed.Count; $i++) {
-                $ouDN = $ouChainReversed[$i]
-                # SOMPath in GPO XML uses the full LDAP path or friendly OU path
-                if ($somPath -match [regex]::Escape($ouDN) -or
-                    $ouDN -match [regex]::Escape($somPath)) {
-                    $order = $i + 1
-                    break
+                # Check if linked to domain
+                if ($somPath -eq $domainDNSRoot -or
+                    $somPath -match "^$([regex]::Escape($domainDNSRoot))$") {
+                    $order = 0
+                }
+
+                # Check if linked to an OU in the chain
+                for ($i = 0; $i -lt $chainReversed.Count; $i++) {
+                    $ouDN = $chainReversed[$i]
+                    # SOMPath in GPO XML uses the full LDAP path or friendly OU path
+                    if ($somPath -match [regex]::Escape($ouDN) -or
+                        $ouDN -match [regex]::Escape($somPath)) {
+                        $order = $i + 1
+                        break
+                    }
+                }
+
+                if ($order -ge 0) {
+                    $ordered.Add([PSCustomObject]@{
+                        GPO       = $gpo
+                        GPOName   = $gpo.DisplayName
+                        GPOId     = $gpo.Id
+                        SOMPath   = $somPath
+                        Order     = $order
+                        LinkOrder = [int]$link.LinkOrder
+                        Enforced  = $enforced
+                    })
                 }
             }
+        }
 
-            if ($order -ge 0) {
-                $orderedGPOs.Add([PSCustomObject]@{
-                    GPO       = $gpo
-                    GPOName   = $gpo.DisplayName
-                    GPOId     = $gpo.Id
-                    SOMPath   = $somPath
-                    Order     = $order
-                    LinkOrder = [int]$link.LinkOrder
-                    Enforced  = $enforced
-                })
+        # Sort: by Order (domain=0, outermost OU=1, ...innermost OU=N), then by LinkOrder descending
+        # Higher Order + lower LinkOrder = higher priority (processed later = wins)
+        $ordered = $ordered | Sort-Object -Property Order, @{Expression={$_.LinkOrder}; Descending=$true}
+
+        # Move enforced GPOs to the end (they always win)
+        $normal = $ordered | Where-Object { -not $_.Enforced }
+        $enforced = $ordered | Where-Object { $_.Enforced }
+        return @(@($normal) + @($enforced))
+    }
+
+    $userDN = $user.DistinguishedName
+    $ouChain = Get-OUChain -DN $userDN
+    $domainDN = (($userDN -split ',(?=(?:OU|DC)=)') | Where-Object { $_ -match '^DC=' }) -join ','
+
+    $userOrderedGPOs = Get-OrderedGPOsForChain -OUChain $ouChain -GPOs $AllGPOs -Cache $GPOCache -ADParams $adParams
+
+    # --- Loopback processing detection ---
+    # Loopback is a Computer-scope policy; check GPOs linked to the computer's OU chain.
+    # The last (highest-precedence) GPO that enables loopback determines the mode,
+    # matching how GP actually resolves this Administrative Template setting.
+    $loopbackMode = $null
+    $loopbackSourceGPO = $null
+    $computerOrderedGPOs = @()
+
+    if ($computerDN) {
+        $computerOUChain = Get-OUChain -DN $computerDN
+        $computerOrderedGPOs = Get-OrderedGPOsForChain -OUChain $computerOUChain -GPOs $AllGPOs -Cache $GPOCache -ADParams $adParams
+
+        foreach ($gpoEntry in $computerOrderedGPOs) {
+            $guid = $gpoEntry.GPOId.ToString()
+            if (-not $GPOCache.ContainsKey($guid)) { continue }
+
+            # Loopback is a Computer-scope setting; a GPO whose computer settings are
+            # disabled can't actually enable it, so don't let it trigger loopback here.
+            $status = "$($gpoEntry.GPO.GpoStatus)"
+            if ($status -eq 'AllSettingsDisabled' -or $status -eq 'ComputerSettingsDisabled') { continue }
+
+            $lb = Get-LoopbackMode -GPOReportXml $GPOCache[$guid].XmlDoc
+            if ($lb.Enabled) {
+                # Last one wins (processed later in the chain), same as normal precedence
+                $loopbackMode = $lb.Mode
+                $loopbackSourceGPO = $gpoEntry.GPOName
             }
+        }
+
+        if ($loopbackMode) {
+            Write-AuditLog "Loopback processing detected: '$loopbackMode' mode via GPO '$loopbackSourceGPO' on computer '$ComputerName'" -Level Warning
         }
     }
 
-    # Sort: by Order (domain=0, outermost OU=1, ...innermost OU=N), then by LinkOrder descending
-    # Higher Order + lower LinkOrder = higher priority (processed later = wins)
-    $orderedGPOs = $orderedGPOs | Sort-Object -Property Order, @{Expression={$_.LinkOrder}; Descending=$true}
+    # --- Build final GPO evaluation order per loopback mode ---
+    # None:    user-linked GPOs only (standard processing)
+    # Merge:   user-linked GPOs, then computer-linked GPOs' User settings (computer wins ties)
+    # Replace: computer-linked GPOs' User settings only (user-linked GPOs discarded)
+    $finalOrder = switch ($loopbackMode) {
+        'Replace' { @($computerOrderedGPOs) }
+        'Merge'   { @($userOrderedGPOs) + @($computerOrderedGPOs) }
+        default   { @($userOrderedGPOs) }
+    }
 
-    # Move enforced GPOs to the end (they always win)
-    $normalGPOs = $orderedGPOs | Where-Object { -not $_.Enforced }
-    $enforcedGPOs = $orderedGPOs | Where-Object { $_.Enforced }
-    $finalOrder = @($normalGPOs) + @($enforcedGPOs)
+    # When loopback applies, only User-scope (not Computer-scope) drive maps from
+    # computer-linked GPOs are re-targeted to the user - Computer-scope maps apply regardless.
+    $computerGpoIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($g in $computerOrderedGPOs) { [void]$computerGpoIds.Add($g.GPOId.ToString()) }
 
     # --- Evaluate each drive mapping ---
     # For each drive letter, the last GPO in processing order that has a mapping wins
-    $effectiveMaps = @{}  # DriveLetter → winning mapping info
+    $effectiveMaps = @{}  # DriveLetter -> winning mapping info
+
+    # A drive map is "active" for the simulation only if its GPO's status doesn't
+    # disable the relevant configuration section. Disabled GPOs still appear in the
+    # audit inventory, but they must not win a drive letter here (they wouldn't in reality).
+    #   AllSettingsDisabled      -> GPO delivers nothing
+    #   UserSettingsDisabled     -> User-scope drive maps don't apply
+    #   ComputerSettingsDisabled -> Computer-scope drive maps don't apply
+    function Test-MapConfigActive {
+        param([object]$Map)
+        switch ("$($Map.GPOStatus)") {
+            'AllSettingsDisabled'      { return $false }
+            'UserSettingsDisabled'     { return $Map.Configuration -ne 'User' }
+            'ComputerSettingsDisabled' { return $Map.Configuration -ne 'Computer' }
+            default                    { return $true }  # AllSettingsEnabled / unknown -> active
+        }
+    }
 
     foreach ($gpoEntry in $finalOrder) {
         $gpoId = $gpoEntry.GPOId.ToString()
-        $relevantMaps = $AllDriveMaps | Where-Object { $_.GPOId.ToString() -eq $gpoId }
+        $relevantMaps = $AllDriveMaps | Where-Object {
+            $_.GPOId.ToString() -eq $gpoId -and
+            (Test-MapConfigActive -Map $_) -and
+            (-not $computerGpoIds.Contains($gpoId) -or $_.Configuration -eq 'User')
+        }
 
         foreach ($map in $relevantMaps) {
-            # Evaluate ILT filters (simplified — check group membership)
+            # Evaluate ILT filters (simplified - check group membership)
             $iltMatch = Test-ILTMatch -Mapping $map -UserGroups $userGroups `
                 -UserName $UserName -ComputerName $ComputerName `
                 -ComputerGroups $computerGroups
@@ -851,6 +1271,7 @@ function Get-EffectiveDriveMaps {
                 # Delete action removes the mapping
                 $effectiveMaps.Remove($letter)
             } else {
+                $viaLoopback = $computerGpoIds.Contains($gpoId)
                 $effectiveMaps[$letter] = [PSCustomObject]@{
                     DriveLetter   = $letter
                     UNCPath       = $map.UNCPath
@@ -863,6 +1284,8 @@ function Get-EffectiveDriveMaps {
                     ILTSummary    = $map.ILTSummary
                     Reason        = if ($gpoEntry.Enforced) {
                         "Enforced GPO linked to '$($gpoEntry.SOMPath)'"
+                    } elseif ($viaLoopback) {
+                        "Applied via loopback ($loopbackMode) from GPO linked to computer OU '$($gpoEntry.SOMPath)'"
                     } else {
                         "GPO linked to '$($gpoEntry.SOMPath)' (closest applicable scope)"
                     }
@@ -878,12 +1301,14 @@ function Get-EffectiveDriveMaps {
     Write-AuditLog "Precedence simulation complete: $($effective.Count) effective drive mappings for '$UserName'" -Level Success
 
     return @{
-        TargetUser      = $UserName
-        TargetComputer  = $ComputerName
-        UserDN          = $userDN
-        UserGroups      = $userGroups
-        EffectiveMaps   = $effective
-        GPOsEvaluated   = $finalOrder.Count
+        TargetUser        = $UserName
+        TargetComputer    = $ComputerName
+        LoopbackMode      = $loopbackMode
+        LoopbackSourceGPO = $loopbackSourceGPO
+        UserDN            = $userDN
+        UserGroups        = $userGroups
+        EffectiveMaps     = $effective
+        GPOsEvaluated     = $finalOrder.Count
     }
 }
 
@@ -938,7 +1363,7 @@ function Test-ILTMatch {
                 }
             }
             'FilterOrgUnit' {
-                # OU filter — match if user's DN contains the OU
+                # OU filter - match if user's DN contains the OU
                 $ouName = $filter.Detail -replace "^OU\s+(IS|IS NOT)\s+'(.+)'$", '$2'
                 if ($ouName -and $Mapping) {
                     $match = $Mapping.GPOLinksText -match [regex]::Escape($ouName)
@@ -1023,6 +1448,9 @@ function Export-HTMLReport {
         .badge-warning { background: #f39c12; color: white; }
         .badge-info { background: #3498db; color: white; }
         .badge-success { background: #27ae60; color: white; }
+        .badge-muted { background: #95a5a6; color: white; }
+        .disabled-row { opacity: 0.6; }
+        .disabled-row td { font-style: italic; }
         .back-to-top { text-align: right; margin-top: 10px; font-size: 13px; }
         .back-to-top a { color: #3498db; text-decoration: none; }
         .back-to-top a:hover { text-decoration: underline; }
@@ -1067,6 +1495,11 @@ function Export-HTMLReport {
             $(if ($AuditResults.Precedence) {
                 "<p><strong>Target User:</strong> $(Escape-Html $AuditResults.Precedence.TargetUser)$(if ($AuditResults.Precedence.TargetComputer) { " | <strong>Target Computer:</strong> $(Escape-Html $AuditResults.Precedence.TargetComputer)" })</p>"
             })
+            $(if ($AuditResults.Precedence -and $AuditResults.Precedence.LoopbackMode) {
+                "<p><span class='badge badge-warning'>Loopback: $(Escape-Html $AuditResults.Precedence.LoopbackMode)</span>
+                   User-side policy on '$(Escape-Html $AuditResults.Precedence.TargetComputer)' is being resolved via computer-linked GPOs
+                   (source: '$(Escape-Html $AuditResults.Precedence.LoopbackSourceGPO)')$(if ($AuditResults.Precedence.LoopbackMode -eq 'Replace') { ' - user-linked GPO drive maps are ignored.' } else { ' - computer-linked GPO drive maps take precedence over user-linked ones.' })</p>"
+            })
         </div>
 
         <div class="toc">
@@ -1076,6 +1509,8 @@ function Export-HTMLReport {
                 <li><a href="#conflicts">Drive Letter Conflicts</a></li>
                 <li><a href="#duplicates">Duplicate Share Paths</a></li>
                 $(if (-not $SkipPathValidation) { '<li><a href="#pathvalidation">UNC Path Validation</a></li>' })
+                $(if ($AuditResults.StaleHosts -and $AuditResults.StaleHosts.Count -gt 0) { '<li><a href="#stalehosts">Stale Hosts (Unreachable Servers)</a></li>' })
+                $(if ($AuditResults.GroupOverlap -and $AuditResults.GroupOverlap.Count -gt 0) { '<li><a href="#groupoverlap">Security Group Membership Overlap</a></li>' })
                 <li><a href="#allmappings">All Drive Mappings</a></li>
             </ul>
         </div>
@@ -1113,25 +1548,32 @@ function Export-HTMLReport {
         <div class="section" id="conflicts">
             <h2>Drive Letter Conflicts</h2>
             $(if ($AuditResults.Issues.Conflicts.Count -gt 0) {
-                "<p>Same drive letter mapped to different UNC paths across GPOs. Item-level targeting (ILT) is checked to determine if conflicts are real.</p>
-                $($AuditResults.Issues.Conflicts | Sort-Object @{Expression={$_.HasRealConflict}; Descending=$true} | ForEach-Object {
+                "<p>Same drive letter mapped to different UNC paths across GPOs. Delete-action items are excluded from the competing-path comparison, item-level targeting (ILT) is checked to determine if conflicts are real, and reachability is used to separate dead-endpoint problems from targeting conflicts.</p>
+                $($AuditResults.Issues.Conflicts | Sort-Object @{Expression={ switch ($_.FindingType) { 'TargetingConflict' {0} 'AllEndpointsUnreachable' {1} default {2} } }} | ForEach-Object {
                     $conflict = $_
-                    $borderColor = if ($conflict.HasRealConflict) { '#e74c3c' } else { '#27ae60' }
-                    $statusBadge = if ($conflict.HasRealConflict) { "<span class='badge badge-danger'>Real Conflict</span>" } else { "<span class='badge badge-success'>ILT Resolved</span>" }
+                    switch ($conflict.FindingType) {
+                        'TargetingConflict'       { $borderColor = '#e74c3c'; $statusBadge = \"<span class='badge badge-danger'>Real Conflict</span>\" }
+                        'AllEndpointsUnreachable' { $borderColor = '#f39c12'; $statusBadge = \"<span class='badge badge-warning'>All Endpoints Unreachable</span>\" }
+                        default                   { $borderColor = '#27ae60'; $statusBadge = \"<span class='badge badge-success'>ILT Resolved</span>\" }
+                    }
                     "<div style='border-left: 4px solid $borderColor; padding: 12px; margin: 10px 0; background: #fff; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.08);'>
                         <h3 style='margin-top:0;'>Drive $(Escape-Html $conflict.DriveLetter): $statusBadge</h3>
                         <table>
-                            <tr><th>GPO Name</th><th>UNC Path</th><th>Action</th><th>Label</th><th>Item-Level Targeting</th></tr>
+                            <tr><th>GPO Name</th><th>UNC Path</th><th>Action</th><th>Reachable</th><th>Label</th><th>Item-Level Targeting</th></tr>
                             $($conflict.MappingDetails | ForEach-Object {
                                 $iltDisplay = if ($_.ILTSummary -eq 'No targeting (applies to all)') {
                                     "<span class='ilt-tag'>All users</span>"
                                 } else {
                                     ($_.ILTSummary -split '; ' | ForEach-Object { "<span class='ilt-tag'>$(Escape-Html $_)</span>" }) -join ' '
                                 }
+                                $reachDisplay = if ($_.Reachable -eq $true) { \"<span class='severity-ok'>Yes</span>\" }
+                                                elseif ($_.Reachable -eq $false) { \"<span class='severity-high'>No</span>\" }
+                                                else { '<span style=\"color:#95a5a6;\">-</span>' }
                                 "<tr>
                                     <td><strong>$(Escape-Html $_.GPOName)</strong></td>
                                     <td>$(Escape-Html $_.UNCPath)</td>
                                     <td>$(Escape-Html $_.Action)</td>
+                                    <td>$reachDisplay</td>
                                     <td>$(Escape-Html $_.Label)</td>
                                     <td>$iltDisplay</td>
                                 </tr>"
@@ -1200,6 +1642,53 @@ function Export-HTMLReport {
             </div>"
         })
 
+        $(if ($AuditResults.StaleHosts -and $AuditResults.StaleHosts.Count -gt 0) {
+            "<div class='section' id='stalehosts'>
+                <h2>Stale Hosts (Unreachable Servers Still Referenced)</h2>
+                <p>These servers are unreachable but are still referenced by one or more drive mappings - anywhere in the export, regardless of drive letter. A dead server referenced by any letter can break drive delivery even if another letter was already migrated off it.</p>
+                <table>
+                    <tr><th>Stale Host</th><th>Drive Letters</th><th>UNC Paths</th><th>Affected GPOs</th><th>Severity</th><th>Recommendation</th></tr>
+                    $($AuditResults.StaleHosts | ForEach-Object {
+                        "<tr class='unreachable'>
+                            <td><strong>$(Escape-Html $_.StaleHost)</strong></td>
+                            <td>$(Escape-Html $_.DriveLetters)</td>
+                            <td>$(($_.UNCPaths -split ', ' | ForEach-Object { \"<span class='multi-value'>$(Escape-Html $_)</span>\" }) -join '')</td>
+                            <td>$(($_.AffectedGPOs -split ', ' | ForEach-Object { \"<span class='multi-value'>$(Escape-Html $_)</span>\" }) -join '')</td>
+                            <td class='severity-high'>$(Escape-Html $_.Severity)</td>
+                            <td>$(Escape-Html $_.Recommendation)</td>
+                        </tr>"
+                    })
+                </table>
+                <div class='back-to-top'><a href='#top'>Back to top</a></div>
+            </div>"
+        })
+
+        $(if ($AuditResults.GroupOverlap -and $AuditResults.GroupOverlap.Count -gt 0) {
+            "<div class='section' id='groupoverlap'>
+                <h2>Security Group Membership Overlap</h2>
+                <p>For these drive letters, the item-level-targeting groups are NOT mutually exclusive: real AD membership shows users belonging to 2+ groups that map the same letter to different shares. Their effective mapping is decided by GPP processing order, not intent.</p>
+                $($AuditResults.GroupOverlap | ForEach-Object {
+                    $ov = $_
+                    "<div style='border-left: 4px solid #e74c3c; padding: 12px; margin: 10px 0; background: #fff; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.08);'>
+                        <h3 style='margin-top:0;'>Drive $(Escape-Html $ov.DriveLetter): <span class='badge badge-danger'>$($ov.OverlapUserCount) overlapping user(s)</span></h3>
+                        <p><strong>Competing groups:</strong> $(Escape-Html $ov.CompetingGroups)</p>
+                        <table>
+                            <tr><th>User</th><th>Member Of (competing groups)</th><th>Possible Paths</th></tr>
+                            $($ov.UserDetails | ForEach-Object {
+                                "<tr>
+                                    <td><strong>$(Escape-Html $_.User)</strong></td>
+                                    <td>$(Escape-Html $_.Groups)</td>
+                                    <td>$(Escape-Html $_.Paths)</td>
+                                </tr>"
+                            })
+                        </table>
+                        <div class='recommendation'>$(Escape-Html $ov.Recommendation)</div>
+                    </div>"
+                })
+                <div class='back-to-top'><a href='#top'>Back to top</a></div>
+            </div>"
+        })
+
         <div class="section" id="allmappings">
             <h2>All Drive Mappings ($($AuditResults.AllDriveMaps.Count))</h2>
             $(if ($AuditResults.AllDriveMaps.Count -gt 0) {
@@ -1216,16 +1705,24 @@ function Export-HTMLReport {
                         } elseif ($_.DriveLetter -eq 'NOCHANGE') {
                             "<em style='color:#7f8c8d;'>Auto</em>"
                         } else {
-                            "<em style='color:#7f8c8d;'>—</em>"
+                            "<em style='color:#7f8c8d;'>-</em>"
                         }
                         # Compact GPO links display
                         $linksDisplay = if ($_.GPOLinksText) {
                             ($_.GPOLinksText -split '; ' | ForEach-Object { "<span class='multi-value'>$(Escape-Html $_)</span>" }) -join ''
                         } else { '' }
-                        "<tr>
-                            <td>$(Escape-Html $_.GPOName)</td>
+                        # Flag maps whose GPO status disables the relevant scope - these appear
+                        # in the inventory but are excluded from the precedence simulation.
+                        $status = "$($_.GPOStatus)"
+                        $isInactive = ($status -eq 'AllSettingsDisabled') -or
+                                      ($status -eq 'UserSettingsDisabled' -and $_.Configuration -eq 'User') -or
+                                      ($status -eq 'ComputerSettingsDisabled' -and $_.Configuration -eq 'Computer')
+                        $rowClass = if ($isInactive) { " class='disabled-row'" } else { '' }
+                        $statusBadge = if ($isInactive) { " <span class='badge badge-muted'>Disabled</span>" } else { '' }
+                        "<tr$rowClass>
+                            <td>$(Escape-Html $_.GPOName)$statusBadge</td>
                             <td>$(Escape-Html $_.Configuration)</td>
-                            <td>$(Escape-Html $_.Action)</td>
+                            <td>$(Escape-Html $_.ActionName)</td>
                             <td>$driveDisplay</td>
                             <td>$(Escape-Html $_.UNCPath)</td>
                             <td>$(Escape-Html $_.Label)</td>
@@ -1263,14 +1760,26 @@ function Export-CSVReports {
     Write-AuditLog "Generating CSV reports..." -Level Info
 
     if ($AuditResults.AllDriveMaps.Count -gt 0) {
-        $AuditResults.AllDriveMaps | Select-Object GPOName, GPOId, Configuration, Action,
-            DriveLetter, UNCPath, Label, Reconnect, ILTSummary, GPOLinksText |
+        $AuditResults.AllDriveMaps | Select-Object GPOName, GPOId, GPOStatus, Configuration, Action, ActionName,
+            DriveLetter, Visibility, UNCPath, Label, Reconnect, ILTSummary, GPOLinksText |
             Export-Csv -Path "$OutputPath\$ReportName-AllMappings.csv" -NoTypeInformation -Encoding UTF8
     }
 
     if ($AuditResults.Issues.Conflicts.Count -gt 0) {
-        $AuditResults.Issues.Conflicts |
-            Export-Csv -Path "$OutputPath\$ReportName-Conflicts.csv" -NoTypeInformation -Encoding UTF8
+        # Flatten to scalar columns (MappingDetails is a nested object list; join it to text).
+        $AuditResults.Issues.Conflicts | ForEach-Object {
+            [PSCustomObject]@{
+                DriveLetter    = $_.DriveLetter
+                FindingType    = $_.FindingType
+                Severity       = $_.Severity
+                GPOCount       = $_.GPOCount
+                PathCount      = $_.PathCount
+                Mappings       = ($_.MappingDetails | ForEach-Object {
+                    "$($_.GPOName) [$($_.Action)] -> $($_.UNCPath)$(if ($_.Reachable -eq $false) { ' (UNREACHABLE)' })"
+                }) -join ' | '
+                Recommendation = $_.Recommendation
+            }
+        } | Export-Csv -Path "$OutputPath\$ReportName-Conflicts.csv" -NoTypeInformation -Encoding UTF8
     }
 
     if ($AuditResults.Issues.Duplicates.Count -gt 0) {
@@ -1281,6 +1790,29 @@ function Export-CSVReports {
     if (-not $SkipPathValidation -and $AuditResults.PathValidation.Count -gt 0) {
         $AuditResults.PathValidation |
             Export-Csv -Path "$OutputPath\$ReportName-PathValidation.csv" -NoTypeInformation -Encoding UTF8
+    }
+
+    if ($AuditResults.StaleHosts -and $AuditResults.StaleHosts.Count -gt 0) {
+        $AuditResults.StaleHosts |
+            Select-Object StaleHost, DriveLetters, UNCPaths, AffectedGPOs, MappingCount, Severity, Recommendation |
+            Export-Csv -Path "$OutputPath\$ReportName-StaleHosts.csv" -NoTypeInformation -Encoding UTF8
+    }
+
+    if ($AuditResults.GroupOverlap -and $AuditResults.GroupOverlap.Count -gt 0) {
+        # One row per (drive letter, overlapping user) so it's usable as a work list.
+        $AuditResults.GroupOverlap | ForEach-Object {
+            $letter = $_.DriveLetter
+            $competing = $_.CompetingGroups
+            foreach ($u in $_.UserDetails) {
+                [PSCustomObject]@{
+                    DriveLetter     = $letter
+                    User            = $u.User
+                    MemberOfGroups  = $u.Groups
+                    PossiblePaths   = $u.Paths
+                    CompetingGroups = $competing
+                }
+            }
+        } | Export-Csv -Path "$OutputPath\$ReportName-GroupOverlap.csv" -NoTypeInformation -Encoding UTF8
     }
 
     if ($AuditResults.Precedence -and $AuditResults.Precedence.EffectiveMaps.Count -gt 0) {
@@ -1321,6 +1853,8 @@ function Start-DriveMapAudit {
         AllDriveMaps    = [System.Collections.Generic.List[object]]::new()
         Issues          = @{ Conflicts = @(); Duplicates = @() }
         PathValidation  = @()
+        StaleHosts      = @()
+        GroupOverlap    = @()
         Precedence      = $null
     }
 
@@ -1335,7 +1869,7 @@ function Start-DriveMapAudit {
     # Cache all GPO reports once
     $gpoCache = Get-CachedGPOReports -GPOs $allGPOs
 
-    # Filter to only linked GPOs — unlinked GPOs won't apply to anyone
+    # Filter to only linked GPOs - unlinked GPOs won't apply to anyone
     $linkedGPOs = @($allGPOs | Where-Object {
         $guid = $_.Id.ToString()
         if (-not $gpoCache.ContainsKey($guid)) { return $false }
@@ -1352,13 +1886,34 @@ function Start-DriveMapAudit {
     # Extract all drive mappings (from linked GPOs only)
     $auditResults.AllDriveMaps = Get-AllDriveMaps -GPOs $linkedGPOs -GPOCache $gpoCache
 
-    # Conflict and duplicate detection
-    $issues = Find-DriveMapConflicts -DriveMaps $auditResults.AllDriveMaps
-    $auditResults.Issues = $issues
-
-    # UNC path validation
+    # UNC path validation FIRST - conflict detection consumes reachability results to
+    # distinguish a genuine targeting conflict from a set of dead endpoints (issue #2),
+    # and to power the cross-letter stale-host check (issue #4).
     if (-not $SkipPathValidation) {
         $auditResults.PathValidation = Test-UNCPaths -DriveMaps $auditResults.AllDriveMaps
+    }
+
+    # Conflict and duplicate detection (fed with path-validation results when available)
+    $issues = Find-DriveMapConflicts -DriveMaps $auditResults.AllDriveMaps `
+        -PathValidation @($auditResults.PathValidation)
+    $auditResults.Issues = $issues
+
+    # Cross-letter stale-host check (issue #4): flag any UNC host that is unreachable
+    # anywhere in the export, so a dead server referenced by one letter surfaces even if
+    # a different letter was already migrated off it.
+    if (-not $SkipPathValidation) {
+        $auditResults.StaleHosts = Find-StaleHosts -DriveMaps $auditResults.AllDriveMaps `
+            -PathValidation @($auditResults.PathValidation)
+    }
+
+    # AD group-membership overlap check (issue #5): verify ILT groups sharing a drive
+    # letter are actually mutually exclusive against real membership. Opt-in.
+    if ($CheckGroupOverlap) {
+        $overlapADParams = @{}
+        if ($Domain)     { $overlapADParams['Server'] = $Domain }
+        if ($Credential) { $overlapADParams['Credential'] = $Credential }
+        $auditResults.GroupOverlap = Find-GroupMembershipOverlap -DriveMaps $auditResults.AllDriveMaps `
+            -ADParams $overlapADParams
     }
 
     # GPO precedence simulation (if target user specified)
@@ -1392,7 +1947,9 @@ function Start-DriveMapAudit {
     Write-Host "Summary:" -ForegroundColor Cyan
     Write-Host "  GPOs Scanned: $($auditResults.TotalGPOs)"
     Write-Host "  Total Drive Mappings: $($auditResults.AllDriveMaps.Count)"
-    Write-Host "  Drive Letter Conflicts: $($auditResults.Issues.Conflicts.Count)"
+    $realConflictCount = @($auditResults.Issues.Conflicts | Where-Object { $_.FindingType -eq 'TargetingConflict' }).Count
+    $unreachableLetterCount = @($auditResults.Issues.Conflicts | Where-Object { $_.FindingType -eq 'AllEndpointsUnreachable' }).Count
+    Write-Host "  Drive Letter Conflicts: $realConflictCount real$(if ($unreachableLetterCount -gt 0) { ", $unreachableLetterCount all-endpoints-unreachable" })" -ForegroundColor $(if ($realConflictCount -gt 0 -or $unreachableLetterCount -gt 0) { 'Yellow' } else { 'Gray' })
     Write-Host "  Duplicate Paths: $($auditResults.Issues.Duplicates.Count)"
 
     if (-not $SkipPathValidation) {
@@ -1402,6 +1959,16 @@ function Start-DriveMapAudit {
         Write-Host "  Paths Checked: $($auditResults.PathValidation.Count)"
         Write-Host "  Reachable: $(($auditResults.PathValidation | Where-Object { $_.Reachable }).Count)"
         Write-Host "  Unreachable: $unreachable" -ForegroundColor $(if ($unreachable -gt 0) { 'Red' } else { 'Green' })
+        if ($auditResults.StaleHosts -and $auditResults.StaleHosts.Count -gt 0) {
+            Write-Host "  Stale Hosts (still referenced): $($auditResults.StaleHosts.Count)" -ForegroundColor Red
+        }
+    }
+
+    if ($CheckGroupOverlap) {
+        Write-Host ""
+        Write-Host "Group Membership Overlap:" -ForegroundColor Cyan
+        $ovCount = @($auditResults.GroupOverlap).Count
+        Write-Host "  Drive letters with overlapping group membership: $ovCount" -ForegroundColor $(if ($ovCount -gt 0) { 'Red' } else { 'Green' })
     }
 
     if ($auditResults.Precedence) {
@@ -1413,6 +1980,9 @@ function Start-DriveMapAudit {
         }
         Write-Host "  GPOs Evaluated: $($auditResults.Precedence.GPOsEvaluated)"
         Write-Host "  Effective Drive Maps: $($auditResults.Precedence.EffectiveMaps.Count)"
+        if ($auditResults.Precedence.LoopbackMode) {
+            Write-Host "  Loopback Processing: $($auditResults.Precedence.LoopbackMode) (via '$($auditResults.Precedence.LoopbackSourceGPO)')" -ForegroundColor Yellow
+        }
     }
 
     Write-Host ""
