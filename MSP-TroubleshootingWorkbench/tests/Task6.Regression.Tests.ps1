@@ -24,11 +24,36 @@ function Assert-True {
     }
 }
 
+function Import-WorkbenchFunctions {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$parseErrors)
+
+    if ($parseErrors.Count -gt 0) {
+        throw "Unable to parse workbench script: $($parseErrors[0].Message)"
+    }
+
+    $functions = $ast.FindAll({
+        param($Node)
+        $Node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+    }, $true)
+
+    foreach ($function in $functions) {
+        Invoke-Expression ("function global:{0} {1}" -f $function.Name, $function.Body.Extent.Text)
+    }
+}
+
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $workbenchRoot = Join-Path $repoRoot "MSP-TroubleshootingWorkbench"
 $checksRoot = Join-Path $workbenchRoot "checks"
 $manifestPath = Join-Path $checksRoot "manifest.json"
 $lockoutCheckPath = Join-Path $checksRoot "Invoke-ADLockoutCheck.ps1"
+$serverPath = Join-Path $workbenchRoot "Start-MSPTroubleshootingWorkbench.ps1"
 
 $manifest = Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
 $lockoutEntry = @($manifest.checks | Where-Object { $_.checkId -eq "ad.lockout" }) | Select-Object -First 1
@@ -76,6 +101,77 @@ $expectedFields = @(
 
 foreach ($field in $expectedFields) {
     Assert-True -Condition ($result.PSObject.Properties.Name -contains $field) -Message "Wrapper result includes $field."
+}
+
+Import-WorkbenchFunctions -Path $serverPath
+
+$runnerTempRoot = Join-Path $env:TEMP ("WorkbenchTask6RunnerTests_{0}" -f ([guid]::NewGuid().ToString("N")))
+$runnerChecksRoot = Join-Path $runnerTempRoot "checks"
+New-Item -ItemType Directory -Path $runnerChecksRoot -Force | Out-Null
+
+try {
+    $captureScript = Join-Path $runnerChecksRoot "Invoke-CaptureADLikeCheck.ps1"
+    @'
+#Requires -Version 5.1
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory)]
+    [string]$AffectedUser,
+
+    [Parameter(Mandatory)]
+    [int]$DaysBack,
+
+    [string[]]$DomainController
+)
+
+[PSCustomObject]@{
+    CheckId = "test.adlike"
+    Name = "AD-like Capture Check"
+    Category = "Test"
+    Status = "Pass"
+    Summary = "Captured runner parameters."
+    Evidence = @()
+    RecommendedNextSteps = @()
+    RawOutput = [PSCustomObject]@{
+        AffectedUser = $AffectedUser
+        DaysBack = $DaysBack
+        DomainController = @($DomainController)
+    }
+    StartedAt = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    FinishedAt = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Error = ""
+}
+'@ | Set-Content -LiteralPath $captureScript -Encoding UTF8
+
+    function Get-CheckCatalog {
+        [PSCustomObject]@{
+            CheckId     = "test.adlike"
+            Name        = "AD-like Capture Check"
+            Category    = "Test"
+            Script      = "Invoke-CaptureADLikeCheck.ps1"
+            Description = "Captures generic manifest input parameter forwarding."
+            ReadOnly    = $true
+            Inputs      = @("affectedUser", "daysBack", "domainController")
+            ScriptPath  = $captureScript
+        }
+    }
+
+    $runnerBody = [PSCustomObject]@{
+        affectedUser     = "jdoe"
+        daysBack         = 14
+        domainController = "DC01, DC02"
+    }
+
+    $runnerResult = Invoke-WorkbenchCheck -CheckId "test.adlike" -Body $runnerBody -TimeoutSeconds 10
+    Assert-True -Condition ($runnerResult.Status -eq "Pass") -Message "Runner executes AD-like check with manifest-defined inputs."
+    Assert-True -Condition ($runnerResult.RawOutput.AffectedUser -eq "jdoe") -Message "Runner maps affectedUser to AffectedUser."
+    Assert-True -Condition ($runnerResult.RawOutput.DaysBack -eq 14) -Message "Runner maps daysBack to DaysBack."
+    Assert-True -Condition ((@($runnerResult.RawOutput.DomainController) -join "|") -eq "DC01|DC02") -Message "Runner maps comma-separated domainController to DomainController array."
+}
+finally {
+    if (Test-Path -LiteralPath $runnerTempRoot) {
+        Remove-Item -LiteralPath $runnerTempRoot -Recurse -Force
+    }
 }
 
 if ($script:Failures.Count -gt 0) {
