@@ -567,6 +567,138 @@ function ConvertTo-WorkbenchPlainValue {
     return [PSCustomObject]$convertedObject
 }
 
+function ConvertTo-WorkbenchScriptParameterName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$InputName
+    )
+
+    if ($InputName.Length -eq 1) {
+        return $InputName.ToUpperInvariant()
+    }
+
+    return ("{0}{1}" -f $InputName.Substring(0, 1).ToUpperInvariant(), $InputName.Substring(1))
+}
+
+function ConvertTo-WorkbenchCheckInputValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$InputName,
+
+        [AllowNull()]
+        [object]$Value
+    )
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    $inputKey = $InputName.ToLowerInvariant()
+    if ($inputKey -eq "port") {
+        $portText = [string]$Value
+        if ([string]::IsNullOrWhiteSpace($portText)) {
+            return $null
+        }
+
+        $port = 0
+        if (-not [int]::TryParse($portText, [ref]$port)) {
+            throw "Port must be a number."
+        }
+
+        if ($port -lt 1 -or $port -gt 65535) {
+            throw "Port must be between 1 and 65535."
+        }
+
+        return $port
+    }
+
+    if ($inputKey -eq "daysback") {
+        $daysBackText = [string]$Value
+        if ([string]::IsNullOrWhiteSpace($daysBackText)) {
+            return $null
+        }
+
+        $daysBack = 0
+        if (-not [int]::TryParse($daysBackText, [ref]$daysBack)) {
+            throw "DaysBack must be a number."
+        }
+
+        if ($daysBack -lt 1 -or $daysBack -gt 90) {
+            throw "DaysBack must be between 1 and 90."
+        }
+
+        return $daysBack
+    }
+
+    if ($inputKey -eq "domaincontroller") {
+        $domainControllers = @()
+        foreach ($item in @($Value)) {
+            $itemText = [string]$item
+            if ([string]::IsNullOrWhiteSpace($itemText)) {
+                continue
+            }
+
+            $domainControllers += @($itemText -split "," | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        }
+
+        if ($domainControllers.Count -eq 0) {
+            return $null
+        }
+
+        return ,@($domainControllers)
+    }
+
+    if ($Value -is [string]) {
+        if ([string]::IsNullOrWhiteSpace($Value)) {
+            return $null
+        }
+
+        return [string]$Value
+    }
+
+    return $Value
+}
+
+function New-WorkbenchCheckParameters {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Check,
+
+        [Parameter(Mandatory)]
+        [object]$Body
+    )
+
+    $parameters = @{}
+    $bodyPropertyNames = @($Body.PSObject.Properties.Name)
+
+    foreach ($inputName in @($Check.Inputs)) {
+        if ([string]::IsNullOrWhiteSpace([string]$inputName)) {
+            continue
+        }
+
+        $inputText = [string]$inputName
+        $bodyProperty = @($bodyPropertyNames | Where-Object { $_ -ieq $inputText } | Select-Object -First 1)
+        if ($bodyProperty.Count -eq 0) {
+            continue
+        }
+
+        $convertedValue = ConvertTo-WorkbenchCheckInputValue -InputName $inputText -Value $Body.($bodyProperty[0])
+        if ($null -eq $convertedValue) {
+            continue
+        }
+
+        $parameterName = ConvertTo-WorkbenchScriptParameterName -InputName $inputText
+        $parameters[$parameterName] = $convertedValue
+    }
+
+    return $parameters
+}
+
 function Invoke-WorkbenchCheck {
     [CmdletBinding()]
     param(
@@ -585,31 +717,8 @@ function Invoke-WorkbenchCheck {
         throw "Check not found."
     }
 
-    $invokeParams = @{}
-    if ($Body.PSObject.Properties.Name -contains 'targetAddress') {
-        $targetAddress = [string]$Body.targetAddress
-        if (-not [string]::IsNullOrWhiteSpace($targetAddress)) {
-            $invokeParams.TargetAddress = $targetAddress
-        }
-    }
-
-    if ($Body.PSObject.Properties.Name -contains 'port') {
-        $portText = [string]$Body.port
-        if (-not [string]::IsNullOrWhiteSpace($portText)) {
-            $port = 0
-            if (-not [int]::TryParse($portText, [ref]$port)) {
-                throw "Port must be a number."
-            }
-
-            if ($port -lt 1 -or $port -gt 65535) {
-                throw "Port must be between 1 and 65535."
-            }
-
-            $invokeParams.Port = $port
-        }
-    }
-
     $selectedCheck = $check[0]
+    $invokeParams = New-WorkbenchCheckParameters -Check $selectedCheck -Body $Body
     $job = $null
 
     try {
