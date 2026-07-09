@@ -28,10 +28,14 @@ param(
     [ValidateRange(1024, 65535)]
     [int]$Port = 8275,
 
-    [string]$OutputPath = $PSScriptRoot,
+    [string]$OutputPath = "",
 
     [switch]$NoBrowserOpen
 )
+
+if ([string]::IsNullOrWhiteSpace($OutputPath)) {
+    $OutputPath = $PSScriptRoot
+}
 
 function Send-Json {
     [CmdletBinding()]
