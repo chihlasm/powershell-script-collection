@@ -120,6 +120,13 @@ $WarningPreference = 'Continue'
 $ScriptVersion = "1.0"
 $AuditDate = Get-Date
 $ReportName = "DriveMap-Audit-$($AuditDate.ToString('yyyy-MM-dd-HHmmss'))"
+
+# Script-scoped cache of resolved AD group membership (groupName -> array of sam names).
+# Populated by Find-GroupMembershipOverlap (when -CheckGroupOverlap is used) so the drive
+# map matrix can reuse the SAME AD resolution instead of querying AD a second time.
+# Initialized here (empty) so referencing it is always safe even when the overlap check
+# never runs.
+$script:__groupMemberCache = @{}
 #endregion
 
 #region Helper Functions
@@ -851,6 +858,10 @@ function Find-GroupMembershipOverlap {
     }
 
     # Cache group membership lookups so a group shared across letters is resolved once.
+    # Exposed script-scoped as $script:__groupMemberCache (groupName -> array of sam names)
+    # so downstream consumers (e.g. Build-DriveMapMatrix) can reuse this SAME AD
+    # resolution instead of querying AD a second time.
+    $script:__groupMemberCache = @{}
     $memberCache = @{}
     $resolveMembers = {
         param($groupName)
@@ -869,6 +880,7 @@ function Find-GroupMembershipOverlap {
             Write-AuditLog "Could not resolve members of group '$groupName': $_" -Level Warning
         }
         $memberCache[$groupName] = $members
+        $script:__groupMemberCache[$groupName] = @($members)
         return $members
     }
 
@@ -1602,6 +1614,7 @@ function Export-HTMLReport {
                 $(if (-not $SkipPathValidation) { '<li><a href="#pathvalidation">UNC Path Validation</a></li>' })
                 $(if ($AuditResults.StaleHosts -and $AuditResults.StaleHosts.Count -gt 0) { '<li><a href="#stalehosts">Stale Hosts (Unreachable Servers)</a></li>' })
                 $(if ($AuditResults.GroupOverlap -and $AuditResults.GroupOverlap.Count -gt 0) { '<li><a href="#groupoverlap">Security Group Membership Overlap</a></li>' })
+                <li><a href="#matrix">Who Gets What (Matrix)</a></li>
                 <li><a href="#allmappings">All Drive Mappings</a></li>
             </ul>
         </div>
@@ -1780,6 +1793,18 @@ function Export-HTMLReport {
             </div>"
         })
 
+        <div class="section" id="matrix">
+            <h2>Who Gets What - Drive Map Matrix</h2>
+            $(if ($AuditResults.Matrix -and $AuditResults.Matrix.groups -and @($AuditResults.Matrix.groups).Count -gt 0) {
+                "<div id='matrix-toolbar'></div>
+                <div id='matrix-grid'></div>
+                <script id='matrix-data' type='application/json'>$($AuditResults.Matrix | ConvertTo-Json -Depth 8 -Compress)</script>"
+            } else {
+                "<p class='badge badge-info'>No drive mappings available to build a matrix view</p>"
+            })
+            <div class="back-to-top"><a href="#top">Back to top</a></div>
+        </div>
+
         <div class="section" id="allmappings">
             <h2>All Drive Mappings ($($AuditResults.AllDriveMaps.Count))</h2>
             $(if ($AuditResults.AllDriveMaps.Count -gt 0) {
@@ -1947,6 +1972,7 @@ function Start-DriveMapAudit {
         StaleHosts      = @()
         GroupOverlap    = @()
         Precedence      = $null
+        Matrix          = $null
     }
 
     # Get all GPOs
@@ -2006,6 +2032,15 @@ function Start-DriveMapAudit {
         $auditResults.GroupOverlap = Find-GroupMembershipOverlap -DriveMaps $auditResults.AllDriveMaps `
             -ADParams $overlapADParams
     }
+
+    # Build the "who gets what" drive map matrix. When -CheckGroupOverlap ran, reuse its
+    # AD group-membership resolution (cached in $script:__groupMemberCache) so members are
+    # resolved from AD only once; otherwise pass an empty hashtable (matrix renders without
+    # per-user membership data).
+    $matrixMembers = if ($CheckGroupOverlap) { $script:__groupMemberCache } else { @{} }
+    $auditResults.Matrix = Build-DriveMapMatrix -DriveMaps $auditResults.AllDriveMaps `
+        -PathValidation @($auditResults.PathValidation) -GroupOverlap @($auditResults.GroupOverlap) `
+        -GroupMembers $matrixMembers
 
     # GPO precedence simulation (if target user specified)
     if ($TargetUser) {
