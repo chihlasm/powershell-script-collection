@@ -25,6 +25,18 @@
         "daysBack",
         "domainController"
       ]
+    },
+    {
+      "checkId": "citrix.fslogix.triage",
+      "name": "Citrix/FSLogix Triage",
+      "category": "Citrix",
+      "script": "Invoke-CitrixFSLogixTriageCheck.ps1",
+      "description": "Read-only Citrix and FSLogix profile triage for a target device.",
+      "readOnly": true,
+      "inputs": [
+        "affectedDevice",
+        "affectedUser"
+      ]
     }
   ]
 }
