@@ -2347,6 +2347,27 @@ function Export-CSVReports {
             Export-Csv -Path "$OutputPath\$ReportName-EffectiveMaps.csv" -NoTypeInformation -Encoding UTF8
     }
 
+    # Matrix companion export: rows = groups, columns = drive letters, cell = the
+    # UNC path(s) that group gets for that letter (joined with ' | ' when a group has
+    # more than one competing path on the same letter), blank when the group has no
+    # mapping for that letter. Guard on both a null Matrix and an empty groups list so
+    # this mirrors how the other exports above skip cleanly when there is no data.
+    if ($AuditResults.Matrix -and $AuditResults.Matrix.groups -and $AuditResults.Matrix.groups.Count -gt 0) {
+        $matrixLetters = @($AuditResults.Matrix.letters)
+        $AuditResults.Matrix.groups | ForEach-Object {
+            $group = $_
+            $row = [ordered]@{ Group = $group.name }
+            foreach ($letter in $matrixLetters) {
+                $cellText = ''
+                if ($group.cells.ContainsKey($letter)) {
+                    $cellText = (@($group.cells[$letter] | ForEach-Object { $_.path }) -join ' | ')
+                }
+                $row[$letter] = $cellText
+            }
+            [PSCustomObject]$row
+        } | Export-Csv -Path "$OutputPath\$ReportName-Matrix.csv" -NoTypeInformation -Encoding UTF8
+    }
+
     Write-AuditLog "CSV reports saved to: $OutputPath" -Level Success
 }
 #endregion
