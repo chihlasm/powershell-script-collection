@@ -51,13 +51,15 @@ namespace MSPTroubleshootingWorkbench.Launcher
 
         private static string ResolveEntryPointPath(string exeDirectory)
         {
-            string sameFolderPath = Path.GetFullPath(Path.Combine(exeDirectory, EntryPointScript));
+            DirectoryInfo exeDirectoryInfo = new DirectoryInfo(exeDirectory);
+
+            string sameFolderPath = Path.GetFullPath(Path.Combine(exeDirectoryInfo.FullName, EntryPointScript));
             if (File.Exists(sameFolderPath))
             {
                 return sameFolderPath;
             }
 
-            DirectoryInfo parentDirectory = Directory.GetParent(exeDirectory);
+            DirectoryInfo parentDirectory = exeDirectoryInfo.Parent;
             if (parentDirectory == null)
             {
                 return String.Empty;
