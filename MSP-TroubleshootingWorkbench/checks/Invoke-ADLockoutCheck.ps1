@@ -19,6 +19,10 @@
 .PARAMETER DomainController
     Optional domain controller name or names to query instead of auto-discovery.
 
+.PARAMETER ChildProcessTimeoutSeconds
+    Maximum seconds to allow the wrapped diagnostics PowerShell process to run.
+    Defaults to 120 seconds.
+
 .EXAMPLE
     .\Invoke-ADLockoutCheck.ps1 -AffectedUser jdoe -DaysBack 14
 
@@ -38,7 +42,10 @@ param(
     [ValidateRange(1, 90)]
     [int]$DaysBack = 7,
 
-    [string[]]$DomainController
+    [string[]]$DomainController,
+
+    [ValidateRange(1, 3600)]
+    [int]$ChildProcessTimeoutSeconds = 120
 )
 
 function New-EvidenceItem {
@@ -127,6 +134,8 @@ $rawOutput = [ordered]@{
     OutputPath           = $outputPath
     ReportPath           = $null
     ExitCode             = $null
+    ChildProcessTimeoutSeconds = $ChildProcessTimeoutSeconds
+    TimedOut             = $false
     ConsoleOutput        = @()
 }
 
@@ -193,12 +202,59 @@ try {
 
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $startInfo
-    [void]$process.Start()
-    $standardOutput = $process.StandardOutput.ReadToEnd()
-    $standardError = $process.StandardError.ReadToEnd()
-    $process.WaitForExit()
+    $processTimedOut = $false
+    $standardOutputTask = $null
+    $standardErrorTask = $null
+    $captureWarnings = @()
 
-    $consoleLines = @()
+    [void]$process.Start()
+    $standardOutputTask = $process.StandardOutput.ReadToEndAsync()
+    $standardErrorTask = $process.StandardError.ReadToEndAsync()
+
+    $timeoutMilliseconds = $ChildProcessTimeoutSeconds * 1000
+    if ($process.WaitForExit($timeoutMilliseconds)) {
+        $process.WaitForExit()
+    }
+    else {
+        $processTimedOut = $true
+        $rawOutput.TimedOut = $true
+        try {
+            $process.Kill()
+        }
+        catch {
+            $captureWarnings += "Failed to stop timed-out diagnostics process: $($_.Exception.Message)"
+        }
+
+        try {
+            [void]$process.WaitForExit(5000)
+        }
+        catch {
+        }
+    }
+
+    if ($null -ne $standardOutputTask) {
+        if (-not $standardOutputTask.Wait(5000)) {
+            $captureWarnings += "Timed out while collecting diagnostics stdout."
+        }
+    }
+
+    if ($null -ne $standardErrorTask) {
+        if (-not $standardErrorTask.Wait(5000)) {
+            $captureWarnings += "Timed out while collecting diagnostics stderr."
+        }
+    }
+
+    $standardOutput = ""
+    $standardError = ""
+    if ($null -ne $standardOutputTask -and $standardOutputTask.IsCompleted) {
+        $standardOutput = $standardOutputTask.Result
+    }
+
+    if ($null -ne $standardErrorTask -and $standardErrorTask.IsCompleted) {
+        $standardError = $standardErrorTask.Result
+    }
+
+    $consoleLines = @($captureWarnings)
     if (-not [string]::IsNullOrWhiteSpace($standardOutput)) {
         $consoleLines += @($standardOutput -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     }
@@ -207,8 +263,19 @@ try {
         $consoleLines += @($standardError -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     }
 
-    $rawOutput.ExitCode = [int]$process.ExitCode
+    if (-not $processTimedOut) {
+        $rawOutput.ExitCode = [int]$process.ExitCode
+    }
     $rawOutput.ConsoleOutput = @($consoleLines)
+
+    if ($processTimedOut) {
+        $timeoutSummary = "AD lockout diagnostics timed out after $ChildProcessTimeoutSeconds seconds for $AffectedUser."
+        return New-ADLockoutResult -Status "Fail" `
+            -Summary $timeoutSummary `
+            -Evidence @(New-EvidenceItem -Name "Diagnostics timeout" -Status "Fail" -Detail "The child diagnostics PowerShell process exceeded the wrapper timeout and was stopped.") `
+            -RecommendedNextSteps @("Review console output, reduce the query scope, specify a domain controller, or rerun with a longer wrapper timeout after confirming the environment is responsive.") `
+            -RawOutput ([PSCustomObject]$rawOutput) -StartedAt $startedAt -ErrorText $timeoutSummary
+    }
 
     $report = @(Get-ChildItem -LiteralPath $outputPath -Filter "ADLockout_*.html" -File -ErrorAction SilentlyContinue |
         Sort-Object -Property LastWriteTime -Descending |

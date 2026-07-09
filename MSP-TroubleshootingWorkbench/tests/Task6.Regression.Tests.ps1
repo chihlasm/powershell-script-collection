@@ -103,6 +103,66 @@ foreach ($field in $expectedFields) {
     Assert-True -Condition ($result.PSObject.Properties.Name -contains $field) -Message "Wrapper result includes $field."
 }
 
+$timeoutTempRoot = Join-Path $env:TEMP ("WorkbenchTask6TimeoutTests_{0}" -f ([guid]::NewGuid().ToString("N")))
+$timeoutChecksRoot = Join-Path $timeoutTempRoot "MSP-TroubleshootingWorkbench\checks"
+$timeoutDiagnosticsRoot = Join-Path $timeoutTempRoot "AD-LockoutDiagnostics"
+$timeoutModuleRoot = Join-Path $timeoutTempRoot "Modules\ActiveDirectory"
+New-Item -ItemType Directory -Path $timeoutChecksRoot -Force | Out-Null
+New-Item -ItemType Directory -Path $timeoutDiagnosticsRoot -Force | Out-Null
+New-Item -ItemType Directory -Path $timeoutModuleRoot -Force | Out-Null
+
+try {
+    $timeoutWrapperPath = Join-Path $timeoutChecksRoot "Invoke-ADLockoutCheck.ps1"
+    $timeoutDiagnosticsPath = Join-Path $timeoutDiagnosticsRoot "Diagnose-ADAccountLockout.ps1"
+    $timeoutModulePath = Join-Path $timeoutModuleRoot "ActiveDirectory.psm1"
+    $timeoutMarker = "Task6TimeoutMarker_$([guid]::NewGuid().ToString("N"))"
+
+    Copy-Item -LiteralPath $lockoutCheckPath -Destination $timeoutWrapperPath -Force
+
+    @"
+#Requires -Version 5.1
+[CmdletBinding()]
+param(
+    [string]`$Identity,
+    [int]`$DaysBack,
+    [string]`$OutputPath
+)
+
+`$host.UI.RawUI.WindowTitle = "$timeoutMarker"
+Write-Output "started $timeoutMarker"
+for (`$index = 0; `$index -lt 5000; `$index++) {
+    [Console]::Error.WriteLine("stderr noise $timeoutMarker `$index")
+}
+Start-Sleep -Seconds 30
+"@ | Set-Content -LiteralPath $timeoutDiagnosticsPath -Encoding UTF8
+
+    "function Get-ADDomain { [PSCustomObject]@{ DNSRoot = 'example.test' } }" |
+        Set-Content -LiteralPath $timeoutModulePath -Encoding UTF8
+
+    $previousModulePath = $env:PSModulePath
+    $env:PSModulePath = "{0};{1}" -f (Join-Path $timeoutTempRoot "Modules"), $previousModulePath
+
+    $timeoutResult = & $timeoutWrapperPath -AffectedUser "jdoe" -DaysBack 3 -ChildProcessTimeoutSeconds 1
+    $matchingChildren = @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -like "*$timeoutMarker*" })
+
+    Assert-True -Condition ($timeoutResult.Status -eq "Fail") -Message "Wrapper returns Fail when the diagnostics child process times out."
+    Assert-True -Condition ($timeoutResult.Summary -match "timed out") -Message "Wrapper timeout summary clearly names the timeout."
+    Assert-True -Condition ($timeoutResult.Error -match "timed out") -Message "Wrapper timeout error is populated."
+    Assert-True -Condition ($timeoutResult.RawOutput.ChildProcessTimeoutSeconds -eq 1) -Message "Wrapper records child process timeout seconds in RawOutput."
+    Assert-True -Condition ($timeoutResult.RawOutput.TimedOut -eq $true) -Message "Wrapper records TimedOut in RawOutput."
+    Assert-True -Condition ($matchingChildren.Count -eq 0) -Message "Wrapper kills the timed-out diagnostics child process."
+}
+finally {
+    if ($null -ne $previousModulePath) {
+        $env:PSModulePath = $previousModulePath
+    }
+
+    if (Test-Path -LiteralPath $timeoutTempRoot) {
+        Remove-Item -LiteralPath $timeoutTempRoot -Recurse -Force
+    }
+}
+
 Import-WorkbenchFunctions -Path $serverPath
 
 $runnerTempRoot = Join-Path $env:TEMP ("WorkbenchTask6RunnerTests_{0}" -f ([guid]::NewGuid().ToString("N")))
