@@ -160,6 +160,34 @@
       color: var(--danger);
     }
 
+    .check-panel {
+      display: grid;
+      grid-template-columns: minmax(180px, 1fr) minmax(140px, 0.7fr) minmax(92px, 0.35fr) max-content;
+      gap: 12px;
+      align-items: end;
+    }
+
+    .check-list {
+      display: grid;
+      gap: 10px;
+      margin: 0 0 14px;
+      padding: 0;
+      list-style: none;
+    }
+
+    .check-item {
+      display: grid;
+      grid-template-columns: minmax(160px, 1fr) minmax(110px, max-content) minmax(220px, 2fr);
+      gap: 8px 16px;
+      padding: 10px 0;
+      border-top: 1px solid var(--panel-border);
+    }
+
+    .check-name {
+      color: var(--accent);
+      font-weight: 700;
+    }
+
     .case-list {
       display: grid;
       gap: 10px;
@@ -209,6 +237,11 @@
 
       .field-wide {
         grid-column: span 1;
+      }
+
+      .check-panel,
+      .check-item {
+        grid-template-columns: 1fr;
       }
 
       .case-item {
@@ -285,9 +318,33 @@
       <p id="cases-empty" class="empty">No cases yet.</p>
       <ul id="case-list" class="case-list"></ul>
     </section>
+
+    <section aria-labelledby="checks-title">
+      <h2 id="checks-title">Checks</h2>
+      <p id="checks-empty" class="empty">Loading checks...</p>
+      <ul id="check-list" class="check-list"></ul>
+      <form id="check-form" class="check-panel">
+        <div class="field">
+          <label for="check-case-id">Case ID</label>
+          <input id="check-case-id" name="caseId" autocomplete="off" required>
+        </div>
+        <div class="field">
+          <label for="check-target-address">Address</label>
+          <input id="check-target-address" name="targetAddress" autocomplete="off" value="localhost" required>
+        </div>
+        <div class="field">
+          <label for="check-port">Port</label>
+          <input id="check-port" name="port" type="number" min="1" max="65535" value="443">
+        </div>
+        <button type="submit" id="run-check-button">Run check</button>
+      </form>
+      <p id="check-form-message" class="form-message" aria-live="polite"></p>
+    </section>
   </main>
 
   <script>
+    let checkCatalog = [];
+
     async function loadStatus() {
       const loading = document.getElementById("status-loading");
       const status = document.getElementById("backend-status");
@@ -332,6 +389,7 @@
           const title = document.createElement("span");
           title.className = "case-id";
           title.textContent = workbenchCase.CaseId || "";
+          title.title = "Use this case ID to run checks";
 
           const client = document.createElement("span");
           client.className = "case-meta";
@@ -347,10 +405,54 @@
 
           item.append(title, client, issue, ticket);
           list.appendChild(item);
+
+          item.addEventListener("click", () => {
+            document.getElementById("check-case-id").value = workbenchCase.CaseId || "";
+            document.getElementById("check-target-address").value = workbenchCase.TargetAddress || "localhost";
+          });
         });
       }
       catch (error) {
         empty.textContent = "Case list unavailable.";
+      }
+    }
+
+    async function loadChecks() {
+      const empty = document.getElementById("checks-empty");
+      const list = document.getElementById("check-list");
+      list.innerHTML = "";
+
+      try {
+        const response = await fetch("/api/checks");
+        if (!response.ok) {
+          throw new Error("Checks request failed");
+        }
+
+        checkCatalog = await response.json();
+        empty.textContent = checkCatalog.length === 0 ? "No checks available." : "";
+
+        checkCatalog.forEach((check) => {
+          const item = document.createElement("li");
+          item.className = "check-item";
+
+          const name = document.createElement("span");
+          name.className = "check-name";
+          name.textContent = check.Name || check.CheckId || "";
+
+          const category = document.createElement("span");
+          category.className = "case-meta";
+          category.textContent = check.Category || "No category";
+
+          const description = document.createElement("span");
+          description.className = "case-meta";
+          description.textContent = check.Description || "";
+
+          item.append(name, category, description);
+          list.appendChild(item);
+        });
+      }
+      catch (error) {
+        empty.textContent = "Check catalog unavailable.";
       }
     }
 
@@ -383,6 +485,56 @@
 
         form.reset();
         message.textContent = "Created " + data.CaseId + ".";
+        document.getElementById("check-case-id").value = data.CaseId || "";
+        document.getElementById("check-target-address").value = data.TargetAddress || "localhost";
+        await loadCases();
+      }
+      catch (error) {
+        message.className = "form-message error";
+        message.textContent = error.message;
+      }
+      finally {
+        button.disabled = false;
+      }
+    }
+
+    async function runCheck(event) {
+      event.preventDefault();
+
+      const form = event.currentTarget;
+      const button = document.getElementById("run-check-button");
+      const message = document.getElementById("check-form-message");
+      const formData = new FormData(form);
+      const body = Object.fromEntries(formData.entries());
+      const caseId = body.caseId || "";
+      const checkId = checkCatalog[0] ? checkCatalog[0].CheckId : "network.quick";
+
+      delete body.caseId;
+      if (!body.port) {
+        delete body.port;
+      }
+
+      button.disabled = true;
+      message.className = "form-message";
+      message.textContent = "Running check...";
+
+      try {
+        const response = await fetch("/api/cases/" + encodeURIComponent(caseId) + "/checks/" + encodeURIComponent(checkId) + "/run", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(body)
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || "Check run failed");
+        }
+
+        const checks = data.Checks || [];
+        const latest = checks[checks.length - 1] || {};
+        message.textContent = (latest.Status || "Done") + ": " + (latest.Summary || "Check completed.");
         await loadCases();
       }
       catch (error) {
@@ -395,7 +547,9 @@
     }
 
     document.getElementById("case-form").addEventListener("submit", createCase);
+    document.getElementById("check-form").addEventListener("submit", runCheck);
     loadStatus();
+    loadChecks();
     loadCases();
   </script>
 </body>

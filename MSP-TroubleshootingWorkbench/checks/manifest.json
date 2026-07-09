@@ -1,4 +1,17 @@
 {
   "schemaVersion": 1,
-  "checks": []
+  "checks": [
+    {
+      "checkId": "network.quick",
+      "name": "Network Quick Check",
+      "category": "Network",
+      "script": "Invoke-NetworkQuickCheck.ps1",
+      "description": "Ping, DNS, TCP port, and local route snapshot.",
+      "readOnly": true,
+      "inputs": [
+        "targetAddress",
+        "port"
+      ]
+    }
+  ]
 }
