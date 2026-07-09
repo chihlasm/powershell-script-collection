@@ -112,6 +112,127 @@ function ConvertTo-ProfilePathForTest {
     return $resolvedPath
 }
 
+function Split-FSLogixRegistryLocationEntries {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [object]$Value
+    )
+
+    $entries = @()
+    foreach ($item in @(ConvertTo-StringArray -Value $Value)) {
+        foreach ($entry in ([string]$item -split ";")) {
+            $trimmedEntry = $entry.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($trimmedEntry)) {
+                $entries += $trimmedEntry
+            }
+        }
+    }
+
+    return @($entries)
+}
+
+function Split-FSLogixCloudCacheProviderEntries {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [object]$Value
+    )
+
+    $entries = @()
+    foreach ($item in @(ConvertTo-StringArray -Value $Value)) {
+        foreach ($entry in ([regex]::Split([string]$item, "\s*;\s*(?=type\s*=)", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase))) {
+            $trimmedEntry = $entry.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($trimmedEntry)) {
+                $entries += $trimmedEntry
+            }
+        }
+    }
+
+    return @($entries)
+}
+
+function Get-FSLogixCloudCacheProviderField {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProviderString,
+
+        [Parameter(Mandatory)]
+        [string]$FieldName
+    )
+
+    $pattern = "(?i)(?:^|,)\s*{0}\s*=\s*(.*?)(?=,\s*\w+\s*=|$)" -f [regex]::Escape($FieldName)
+    $match = [regex]::Match($ProviderString, $pattern)
+    if ($match.Success) {
+        return $match.Groups[1].Value.Trim()
+    }
+
+    return ""
+}
+
+function Resolve-FSLogixProfileStorageLocations {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet("VHDLocations", "CCDLocations")]
+        [string]$ValueName,
+
+        [AllowNull()]
+        [object]$Value
+    )
+
+    $locations = @()
+    if ($ValueName -eq "VHDLocations") {
+        foreach ($entry in @(Split-FSLogixRegistryLocationEntries -Value $Value)) {
+            $locations += [PSCustomObject]@{
+                ValueName      = $ValueName
+                SourceValue    = $entry
+                ProviderType   = "direct"
+                TestPath       = $entry
+                ShouldTestPath = $true
+                Detail         = "Direct VHDLocations path."
+            }
+        }
+
+        return @($locations)
+    }
+
+    foreach ($entry in @(Split-FSLogixCloudCacheProviderEntries -Value $Value)) {
+        $providerType = (Get-FSLogixCloudCacheProviderField -ProviderString $entry -FieldName "type").ToLowerInvariant()
+        $connectionString = Get-FSLogixCloudCacheProviderField -ProviderString $entry -FieldName "connectionString"
+        if ([string]::IsNullOrWhiteSpace($providerType)) {
+            $providerType = "unknown"
+        }
+
+        $shouldTestPath = $false
+        $testPath = ""
+        $detail = "CCDLocations provider type $providerType was not tested as a simple SMB path."
+
+        if ($providerType -eq "smb") {
+            if (-not [string]::IsNullOrWhiteSpace($connectionString)) {
+                $testPath = $connectionString.Trim()
+                $shouldTestPath = $true
+                $detail = "CCDLocations SMB connectionString path."
+            }
+            else {
+                $detail = "CCDLocations SMB provider did not include a connectionString path to test."
+            }
+        }
+
+        $locations += [PSCustomObject]@{
+            ValueName      = $ValueName
+            SourceValue    = $entry
+            ProviderType   = $providerType
+            TestPath       = $testPath
+            ShouldTestPath = $shouldTestPath
+            Detail         = $detail
+        }
+    }
+
+    return @($locations)
+}
+
 function Test-IsLocalComputerTarget {
     [CmdletBinding()]
     param(
@@ -158,7 +279,7 @@ function Read-FSLogixProfileRegistryKey {
         foreach ($valueName in @($key.GetValueNames())) {
             $value = $key.GetValue($valueName)
             if ($value -is [System.Array]) {
-                $values[$valueName] = ((ConvertTo-StringArray -Value $value) -join "; ")
+                $values[$valueName] = @(ConvertTo-StringArray -Value $value)
             }
             elseif ($null -eq $value) {
                 $values[$valueName] = ""
@@ -203,7 +324,7 @@ function Get-RegistryValueText {
     foreach ($registryKey in @($RegistryKeys)) {
         if ($registryKey.Found -and $registryKey.PSObject.Properties.Name -contains "Values") {
             if ($registryKey.Values.PSObject.Properties.Name -contains $ValueName) {
-                return [string]$registryKey.Values.$ValueName
+                return $registryKey.Values.$ValueName
             }
         }
     }
@@ -357,7 +478,12 @@ try {
         if ($_.Found -and $_.PSObject.Properties.Name -contains "Values") {
             $pairs = @()
             foreach ($property in @($_.Values.PSObject.Properties)) {
-                $pairs += ("{0}={1}" -f $property.Name, $property.Value)
+                $propertyValue = $property.Value
+                if ($propertyValue -is [System.Array]) {
+                    $propertyValue = ((ConvertTo-StringArray -Value $propertyValue) -join "; ")
+                }
+
+                $pairs += ("{0}={1}" -f $property.Name, $propertyValue)
             }
             $valueSummary = $pairs -join "; "
         }
@@ -515,17 +641,38 @@ catch {
     $evidence += New-EvidenceItem -Name "Local disk free space" -Status "Warn" -Detail "Disk free space could not be queried: $($_.Exception.Message)"
 }
 
-$configuredPaths = @()
+$configuredLocations = @()
 foreach ($valueName in @("VHDLocations", "CCDLocations")) {
-    $text = Get-RegistryValueText -RegistryKeys $registryKeys -ValueName $valueName
-    if (-not [string]::IsNullOrWhiteSpace($text)) {
-        $configuredPaths += @($text -split ";" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $registryValue = Get-RegistryValueText -RegistryKeys $registryKeys -ValueName $valueName
+    if (@(ConvertTo-StringArray -Value $registryValue).Count -gt 0) {
+        $configuredLocations += @(Resolve-FSLogixProfileStorageLocations -ValueName $valueName -Value $registryValue)
     }
 }
 
-if ($configuredPaths.Count -gt 0) {
+if ($configuredLocations.Count -gt 0) {
     $isLocalTarget = Test-IsLocalComputerTarget -ComputerName $AffectedDevice
-    foreach ($profilePath in @($configuredPaths | Select-Object -Unique)) {
+    $testedLocationKeys = @{}
+    foreach ($profileLocation in @($configuredLocations)) {
+        $locationKey = "{0}|{1}|{2}" -f $profileLocation.ValueName, $profileLocation.SourceValue, $profileLocation.TestPath
+        if ($testedLocationKeys.ContainsKey($locationKey)) {
+            continue
+        }
+
+        $testedLocationKeys[$locationKey] = $true
+
+        if (-not $profileLocation.ShouldTestPath) {
+            $rawOutput.ProfilePaths += [PSCustomObject]@{
+                ConfiguredPath = [string]$profileLocation.SourceValue
+                TestedPath     = ""
+                Context        = "Cloud Cache provider"
+                Reachable      = $false
+                Error          = [string]$profileLocation.Detail
+            }
+            $evidence += New-EvidenceItem -Name "Cloud Cache provider reachability" -Status "Warn" -Detail ([string]$profileLocation.Detail)
+            continue
+        }
+
+        $profilePath = [string]$profileLocation.TestPath
         $pathToTest = ConvertTo-ProfilePathForTest -Path $profilePath -UserName $AffectedUser
         try {
             if ($isLocalTarget) {
@@ -545,7 +692,7 @@ if ($configuredPaths.Count -gt 0) {
             }
 
             $rawOutput.ProfilePaths += [PSCustomObject]@{
-                ConfiguredPath = [string]$profilePath
+                ConfiguredPath = [string]$profileLocation.SourceValue
                 TestedPath     = [string]$pathToTest
                 Context        = $testContext
                 Reachable      = [bool]$pathReachable
@@ -569,7 +716,7 @@ if ($configuredPaths.Count -gt 0) {
             }
 
             $rawOutput.ProfilePaths += [PSCustomObject]@{
-                ConfiguredPath = [string]$profilePath
+                ConfiguredPath = [string]$profileLocation.SourceValue
                 TestedPath     = [string]$pathToTest
                 Context        = $testContext
                 Reachable      = $false
