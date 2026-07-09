@@ -96,4 +96,23 @@ Describe 'Build-DriveMapMatrix - user rows' {
         $maps.Add((New-M 'G1' 'C' 'M' '\\srv\fire' @('Fire')))
         (Build-DriveMapMatrix -DriveMaps $maps -PathValidation @() -GroupOverlap @()).hasUserData | Should -BeFalse
     }
+    It 'gives (all users) and groups absent from GroupMembers an empty array, never null' {
+        $maps = [System.Collections.Generic.List[object]]::new()
+        $maps.Add((New-M 'G1' 'C' 'M' '\\srv\fire' @('Fire')))
+        $maps.Add((New-M 'G2' 'C' 'N' '\\srv\hr' @('HR')))
+        $maps.Add((New-M 'G3' 'C' 'S' '\\srv\scratch' @()))
+        $members = @{ 'Fire' = @('jsmith','adoe') }
+        $m = Build-DriveMapMatrix -DriveMaps $maps -PathValidation @() -GroupOverlap @() -GroupMembers $members
+
+        $allUsersRow = $m.groups | Where-Object name -eq '(all users)'
+        $allUsersRow.users.Count | Should -Be 0
+        ($null -eq $allUsersRow.users) | Should -BeFalse
+
+        $hrRow = $m.groups | Where-Object name -eq 'HR'
+        $hrRow.users.Count | Should -Be 0
+        ($null -eq $hrRow.users) | Should -BeFalse
+
+        $fireRow = $m.groups | Where-Object name -eq 'Fire'
+        $fireRow.users | Should -Contain 'jsmith'
+    }
 }
