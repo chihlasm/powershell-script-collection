@@ -124,7 +124,30 @@ catch {
 
 try {
     $tcpResult = Test-NetConnection -ComputerName $TargetAddress -Port $Port -InformationLevel Detailed -WarningAction SilentlyContinue -ErrorAction Stop
-    $rawOutput.Tcp = $tcpResult | Select-Object ComputerName, RemoteAddress, RemotePort, InterfaceAlias, SourceAddress, PingSucceeded, TcpTestSucceeded
+    $sourceAddress = $null
+    if ($null -ne $tcpResult.SourceAddress) {
+        if ($tcpResult.SourceAddress.PSObject.Properties.Name -contains "IPAddress") {
+            $sourceAddress = [string]$tcpResult.SourceAddress.IPAddress
+        }
+        else {
+            $sourceAddress = [string]$tcpResult.SourceAddress
+        }
+    }
+
+    $remoteAddress = $null
+    if ($null -ne $tcpResult.RemoteAddress) {
+        $remoteAddress = [string]$tcpResult.RemoteAddress
+    }
+
+    $rawOutput.Tcp = [PSCustomObject]@{
+        ComputerName      = [string]$tcpResult.ComputerName
+        RemoteAddress    = $remoteAddress
+        RemotePort       = [int]$tcpResult.RemotePort
+        InterfaceAlias   = [string]$tcpResult.InterfaceAlias
+        SourceAddress    = $sourceAddress
+        PingSucceeded    = [bool]$tcpResult.PingSucceeded
+        TcpTestSucceeded = [bool]$tcpResult.TcpTestSucceeded
+    }
 
     if ($tcpResult.TcpTestSucceeded) {
         $evidence += New-EvidenceItem -Name "TCP port" -Status "Pass" -Detail ("TCP port {0} is reachable." -f $Port)
