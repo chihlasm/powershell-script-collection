@@ -40,8 +40,43 @@ if (Test-Path -LiteralPath $launcherSourcePath -PathType Leaf) {
     Assert-True -Condition ($launcherSource -match "-NoProfile -ExecutionPolicy Bypass -File") -Message "Launcher uses the supported PowerShell startup flags."
     Assert-True -Condition ($launcherSource -match "Start-MSPTroubleshootingWorkbench\.ps1") -Message "Launcher targets the workbench PowerShell entry point."
     Assert-True -Condition ($launcherSource -match "AppDomain\.CurrentDomain\.BaseDirectory") -Message "Launcher resolves paths from the executable directory."
-    Assert-True -Condition ($launcherSource -match "Directory\.GetParent") -Message "Launcher can also locate the entry point from a launcher subfolder build."
     Assert-True -Condition ($launcherSource -match "WorkingDirectory\s*=\s*exeDirectory") -Message "Launcher starts PowerShell with the executable directory as the working directory."
+
+    $resolverTempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("MSPWorkbenchLauncherResolverTest_{0}" -f ([guid]::NewGuid().ToString("N")))
+    try {
+        $resolverWorkbenchRoot = New-Item -ItemType Directory -Path $resolverTempRoot -Force -ErrorAction Stop
+        $resolverLauncherRoot = New-Item -ItemType Directory -Path (Join-Path $resolverWorkbenchRoot.FullName "launcher") -Force -ErrorAction Stop
+        $resolverEntryPointPath = Join-Path $resolverWorkbenchRoot.FullName "Start-MSPTroubleshootingWorkbench.ps1"
+        Set-Content -LiteralPath $resolverEntryPointPath -Value "# resolver regression test" -Encoding ASCII -ErrorAction Stop
+
+        $resolverNamespace = "MSPTroubleshootingWorkbench.Launcher.Task8Regression{0}" -f ([guid]::NewGuid().ToString("N"))
+        $resolverSource = $launcherSource -replace "namespace\s+MSPTroubleshootingWorkbench\.Launcher", "namespace $resolverNamespace"
+
+        Add-Type -AssemblyName "System.Windows.Forms" -ErrorAction Stop
+        $referenceAssemblyPaths = [AppDomain]::CurrentDomain.GetAssemblies() |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_.Location) } |
+            Select-Object -ExpandProperty Location -Unique
+        $launcherTypes = Add-Type -TypeDefinition $resolverSource -ReferencedAssemblies $referenceAssemblyPaths -PassThru -ErrorAction Stop
+        $launcherType = $launcherTypes | Where-Object { $_.FullName -eq "$resolverNamespace.MSPWorkbenchLauncher" } | Select-Object -First 1
+        Assert-True -Condition ($null -ne $launcherType) -Message "Launcher resolver type compiles for behavior testing."
+
+        if ($null -ne $launcherType) {
+            $bindingFlags = [System.Reflection.BindingFlags]::NonPublic -bor [System.Reflection.BindingFlags]::Static
+            $resolverMethod = $launcherType.GetMethod("ResolveEntryPointPath", $bindingFlags)
+            Assert-True -Condition ($null -ne $resolverMethod) -Message "Launcher resolver method is available for behavior testing."
+
+            if ($null -ne $resolverMethod) {
+                $launcherDirectoryWithTrailingSeparator = $resolverLauncherRoot.FullName.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+                $resolvedEntryPointPath = $resolverMethod.Invoke($null, @($launcherDirectoryWithTrailingSeparator))
+                Assert-True -Condition ($resolvedEntryPointPath -eq $resolverEntryPointPath) -Message "Launcher resolves parent entry point when exe directory has a trailing separator."
+            }
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $resolverTempRoot) {
+            Remove-Item -LiteralPath $resolverTempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 if (Test-Path -LiteralPath $buildScriptPath -PathType Leaf) {
