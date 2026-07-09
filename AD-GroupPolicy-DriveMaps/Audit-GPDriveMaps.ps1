@@ -1014,10 +1014,10 @@ function Build-DriveMapMatrix {
             cells = $rows[$name]
         }
         if ($hasUserData) {
-            $memberList = if ($name -ne '(all users)' -and $GroupMembers.ContainsKey($name)) {
-                @($GroupMembers[$name])
+            if ($name -ne '(all users)' -and $GroupMembers.ContainsKey($name)) {
+                $memberList = @($GroupMembers[$name])
             } else {
-                @()
+                $memberList = @()
             }
             $groupObj | Add-Member -MemberType NoteProperty -Name 'users' -Value $memberList
         }
