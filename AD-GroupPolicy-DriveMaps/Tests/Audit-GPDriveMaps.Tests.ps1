@@ -74,3 +74,26 @@ Describe 'Build-DriveMapMatrix - cell status' {
         ($m.groups | Where-Object name -eq 'Finance').cells.Z[0].status | Should -Be 'overlap'
     }
 }
+
+Describe 'Build-DriveMapMatrix - user rows' {
+    BeforeAll {
+        function New-M { param($GPO,$Action,$Letter,$Path,$Groups)
+            $ilt = @($Groups | ForEach-Object { [PSCustomObject]@{ Type='FilterGroup'; Not=$false; Bool='AND'; Detail="Group IS '$_'" } })
+            $an = switch ($Action) { 'C'{'Create'} 'D'{'Delete'} default{$Action} }
+            [PSCustomObject]@{ GPOName=$GPO; ActionName=$an; DriveLetter=$Letter; UNCPath=$Path
+                ILTSummary='x'; ILTFilters=$ilt; Configuration='User' } }
+    }
+    It 'attaches members and sets hasUserData when membership provided' {
+        $maps = [System.Collections.Generic.List[object]]::new()
+        $maps.Add((New-M 'G1' 'C' 'M' '\\srv\fire' @('Fire')))
+        $members = @{ 'Fire' = @('jsmith','adoe') }
+        $m = Build-DriveMapMatrix -DriveMaps $maps -PathValidation @() -GroupOverlap @() -GroupMembers $members
+        $m.hasUserData | Should -BeTrue
+        ($m.groups | Where-Object name -eq 'Fire').users | Should -Contain 'jsmith'
+    }
+    It 'leaves hasUserData false when no membership provided' {
+        $maps = [System.Collections.Generic.List[object]]::new()
+        $maps.Add((New-M 'G1' 'C' 'M' '\\srv\fire' @('Fire')))
+        (Build-DriveMapMatrix -DriveMaps $maps -PathValidation @() -GroupOverlap @()).hasUserData | Should -BeFalse
+    }
+}
