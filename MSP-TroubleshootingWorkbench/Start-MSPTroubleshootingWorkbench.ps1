@@ -404,6 +404,113 @@ function Get-CheckCatalog {
     return @($catalog)
 }
 
+function New-WorkbenchCheckFailureResult {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Check,
+
+        [Parameter(Mandatory)]
+        [string]$Message,
+
+        [bool]$TimedOut = $false,
+
+        [int]$TimeoutSeconds = 0,
+
+        [string]$JobState = ""
+    )
+
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+
+    [PSCustomObject]@{
+        CheckId              = [string]$Check.CheckId
+        Name                 = [string]$Check.Name
+        Category             = [string]$Check.Category
+        Status               = "Fail"
+        Summary              = "Check could not complete: $Message"
+        Evidence             = @([PSCustomObject]@{
+            Name   = "Check execution"
+            Status = "Fail"
+            Detail = $Message
+        })
+        RecommendedNextSteps = @("Review the check error, confirm the inputs, and run the check again.")
+        RawOutput            = [PSCustomObject]@{
+            Error          = $Message
+            TimedOut       = [bool]$TimedOut
+            TimeoutSeconds = [int]$TimeoutSeconds
+            JobState       = [string]$JobState
+        }
+        StartedAt            = $timestamp
+        FinishedAt           = $timestamp
+        Error                = $Message
+    }
+}
+
+function ConvertTo-WorkbenchPlainValue {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [object]$Value
+    )
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    if (
+        ($Value -is [string]) -or
+        ($Value -is [bool]) -or
+        ($Value -is [int]) -or
+        ($Value -is [long]) -or
+        ($Value -is [double]) -or
+        ($Value -is [decimal])
+    ) {
+        return $Value
+    }
+
+    if ($Value -is [datetime]) {
+        return $Value.ToString("yyyy-MM-dd HH:mm:ss")
+    }
+
+    if ($Value -is [System.Collections.IDictionary]) {
+        $convertedDictionary = [ordered]@{}
+        foreach ($key in $Value.Keys) {
+            $convertedDictionary[[string]$key] = ConvertTo-WorkbenchPlainValue -Value $Value[$key]
+        }
+
+        return [PSCustomObject]$convertedDictionary
+    }
+
+    if (($Value -is [System.Collections.IEnumerable]) -and (-not ($Value -is [string]))) {
+        $convertedItems = @()
+        foreach ($item in @($Value)) {
+            $convertedItems += ConvertTo-WorkbenchPlainValue -Value $item
+        }
+
+        return ,@($convertedItems)
+    }
+
+    $properties = @($Value.PSObject.Properties | Where-Object {
+        $_.Name -notin @("PSComputerName", "RunspaceId", "PSShowComputerName")
+    })
+
+    if ($properties.Count -eq 0) {
+        return [string]$Value
+    }
+
+    $duplicateCaseNames = @($properties.Name | Group-Object { $_.ToLowerInvariant() } | Where-Object { $_.Count -gt 1 })
+    if ($duplicateCaseNames.Count -gt 0) {
+        return [string]$Value
+    }
+
+    $convertedObject = [ordered]@{}
+    foreach ($property in $properties) {
+        $convertedObject[$property.Name] = ConvertTo-WorkbenchPlainValue -Value $property.Value
+    }
+
+    return [PSCustomObject]$convertedObject
+}
+
 function Invoke-WorkbenchCheck {
     [CmdletBinding()]
     param(
@@ -411,7 +518,10 @@ function Invoke-WorkbenchCheck {
         [string]$CheckId,
 
         [Parameter(Mandatory)]
-        [object]$Body
+        [object]$Body,
+
+        [ValidateRange(1, 3600)]
+        [int]$TimeoutSeconds = 60
     )
 
     $check = @(Get-CheckCatalog | Where-Object { $_.CheckId -eq $CheckId } | Select-Object -First 1)
@@ -443,16 +553,51 @@ function Invoke-WorkbenchCheck {
         }
     }
 
-    $result = & $check[0].ScriptPath @invokeParams
+    $selectedCheck = $check[0]
+    $job = $null
+
+    try {
+        $job = Start-Job -ScriptBlock {
+            param(
+                [string]$ScriptPath,
+                [hashtable]$Parameters
+            )
+
+            & $ScriptPath @Parameters
+        } -ArgumentList $selectedCheck.ScriptPath, $invokeParams -ErrorAction Stop
+
+        $completedJob = Wait-Job -Job $job -Timeout $TimeoutSeconds -ErrorAction Stop
+        if ($null -eq $completedJob) {
+            Stop-Job -Job $job -ErrorAction SilentlyContinue
+            $message = "Check timed out after $TimeoutSeconds second(s)."
+            return (New-WorkbenchCheckFailureResult -Check $selectedCheck -Message $message -TimedOut $true -TimeoutSeconds $TimeoutSeconds -JobState "TimedOut")
+        }
+
+        $result = Receive-Job -Job $job -ErrorAction Stop
+    }
+    catch {
+        $jobState = ""
+        if ($job) {
+            $jobState = [string]$job.State
+        }
+
+        return (New-WorkbenchCheckFailureResult -Check $selectedCheck -Message $_.Exception.Message -TimedOut $false -TimeoutSeconds $TimeoutSeconds -JobState $jobState)
+    }
+    finally {
+        if ($job) {
+            Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+        }
+    }
+
     if ($null -eq $result) {
-        throw "Check did not return a result."
+        return (New-WorkbenchCheckFailureResult -Check $selectedCheck -Message "Check did not return a result." -TimedOut $false -TimeoutSeconds $TimeoutSeconds -JobState "Completed")
     }
 
     if ($result -is [array]) {
         $result = @($result | Select-Object -Last 1)[0]
     }
 
-    return $result
+    return (ConvertTo-WorkbenchPlainValue -Value $result)
 }
 
 function New-WorkbenchCase {
