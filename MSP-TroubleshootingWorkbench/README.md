@@ -4,11 +4,25 @@ Portable local troubleshooting case workbench for MSP Windows infrastructure sup
 
 ## Quick Start
 
+If `MSPWorkbench.exe` is present in this folder, launch the workbench with:
+
+```powershell
+.\MSPWorkbench.exe
+```
+
+The executable is a small launcher for the supported PowerShell entry point. To rebuild it on a workstation with a .NET Framework C# compiler available, run:
+
+```powershell
+.\launcher\build.ps1
+```
+
 Run from an elevated PowerShell session when checks require admin rights:
 
 ```powershell
 .\Start-MSPTroubleshootingWorkbench.ps1
 ```
+
+If a compiler is not available, continue using `Start-MSPTroubleshootingWorkbench.ps1` directly.
 
 ## Checks
 
