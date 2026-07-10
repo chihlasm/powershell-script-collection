@@ -526,6 +526,33 @@ function New-WorkbenchCheckFailureResult {
     }
 }
 
+function Add-WorkbenchCheckInputsUsed {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Result,
+
+        [Parameter(Mandatory)]
+        [hashtable]$Parameters
+    )
+
+    # ConvertTo-WorkbenchPlainValue returns a string for a zero-property object,
+    # so an empty parameter set must not be stamped at all.
+    if ($Parameters.Count -eq 0) {
+        return $Result
+    }
+
+    $inputsUsed = ConvertTo-WorkbenchPlainValue -Value $Parameters
+    if ($Result.PSObject.Properties.Name -contains "InputsUsed") {
+        $Result.InputsUsed = $inputsUsed
+    }
+    else {
+        Add-Member -InputObject $Result -MemberType NoteProperty -Name "InputsUsed" -Value $inputsUsed
+    }
+
+    return $Result
+}
+
 function ConvertTo-WorkbenchPlainValue {
     [CmdletBinding()]
     param(
@@ -764,7 +791,7 @@ function Invoke-WorkbenchCheck {
         if ($null -eq $completedJob) {
             Stop-Job -Job $job -ErrorAction SilentlyContinue
             $message = "Check timed out after $TimeoutSeconds second(s)."
-            return (New-WorkbenchCheckFailureResult -Check $selectedCheck -Message $message -TimedOut $true -TimeoutSeconds $TimeoutSeconds -JobState "TimedOut")
+            return (Add-WorkbenchCheckInputsUsed -Result (New-WorkbenchCheckFailureResult -Check $selectedCheck -Message $message -TimedOut $true -TimeoutSeconds $TimeoutSeconds -JobState "TimedOut") -Parameters $invokeParams)
         }
 
         $result = Receive-Job -Job $job -ErrorAction Stop
@@ -775,7 +802,7 @@ function Invoke-WorkbenchCheck {
             $jobState = [string]$job.State
         }
 
-        return (New-WorkbenchCheckFailureResult -Check $selectedCheck -Message $_.Exception.Message -TimedOut $false -TimeoutSeconds $TimeoutSeconds -JobState $jobState)
+        return (Add-WorkbenchCheckInputsUsed -Result (New-WorkbenchCheckFailureResult -Check $selectedCheck -Message $_.Exception.Message -TimedOut $false -TimeoutSeconds $TimeoutSeconds -JobState $jobState) -Parameters $invokeParams)
     }
     finally {
         if ($job) {
@@ -784,14 +811,14 @@ function Invoke-WorkbenchCheck {
     }
 
     if ($null -eq $result) {
-        return (New-WorkbenchCheckFailureResult -Check $selectedCheck -Message "Check did not return a result." -TimedOut $false -TimeoutSeconds $TimeoutSeconds -JobState "Completed")
+        return (Add-WorkbenchCheckInputsUsed -Result (New-WorkbenchCheckFailureResult -Check $selectedCheck -Message "Check did not return a result." -TimedOut $false -TimeoutSeconds $TimeoutSeconds -JobState "Completed") -Parameters $invokeParams)
     }
 
     if ($result -is [array]) {
         $result = @($result | Select-Object -Last 1)[0]
     }
 
-    return (ConvertTo-WorkbenchPlainValue -Value $result)
+    return (Add-WorkbenchCheckInputsUsed -Result (ConvertTo-WorkbenchPlainValue -Value $result) -Parameters $invokeParams)
 }
 
 function Add-TicketNotesLine {
@@ -822,6 +849,53 @@ function Add-TicketNotesBullet {
     }
 }
 
+function Get-WorkbenchInputDisplayName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ParameterName
+    )
+
+    switch ($ParameterName.ToLowerInvariant()) {
+        "targetaddress"    { return "target" }
+        "port"             { return "port" }
+        "affecteduser"     { return "user" }
+        "affecteddevice"   { return "device" }
+        "daysback"         { return "days back" }
+        "domaincontroller" { return "domain controller" }
+        default            { return $ParameterName.ToLowerInvariant() }
+    }
+}
+
+function Get-WorkbenchCheckInputsText {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [object]$Check
+    )
+
+    if ($null -eq $Check -or -not ($Check.PSObject.Properties.Name -contains "InputsUsed") -or $null -eq $Check.InputsUsed) {
+        return ""
+    }
+
+    $parts = @()
+    foreach ($property in @($Check.InputsUsed.PSObject.Properties)) {
+        $valueText = ""
+        if ($property.Value -is [System.Collections.IEnumerable] -and -not ($property.Value -is [string])) {
+            $valueText = (@($property.Value) -join ", ")
+        }
+        else {
+            $valueText = [string]$property.Value
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($valueText)) {
+            $parts += ("{0}: {1}" -f (Get-WorkbenchInputDisplayName -ParameterName $property.Name), $valueText)
+        }
+    }
+
+    return ($parts -join ", ")
+}
+
 function New-TicketNotesMarkdown {
     [CmdletBinding()]
     param(
@@ -845,10 +919,20 @@ function New-TicketNotesMarkdown {
     Add-TicketNotesBullet -Builder $builder -Text ("Client: {0}" -f $Case.ClientName)
     Add-TicketNotesBullet -Builder $builder -Text ("Ticket: {0}" -f $Case.TicketNumber)
     Add-TicketNotesBullet -Builder $builder -Text ("Issue type: {0}" -f $Case.IssueType)
-    Add-TicketNotesBullet -Builder $builder -Text ("Affected user: {0}" -f $Case.AffectedUser)
-    Add-TicketNotesBullet -Builder $builder -Text ("Affected device: {0}" -f $Case.AffectedDevice)
-    Add-TicketNotesBullet -Builder $builder -Text ("Target path: {0}" -f $Case.TargetPath)
-    Add-TicketNotesBullet -Builder $builder -Text ("Target address: {0}" -f $Case.TargetAddress)
+
+    $optionalFields = @(
+        @{ Label = "Affected user"; Value = [string]$Case.AffectedUser },
+        @{ Label = "Affected device"; Value = [string]$Case.AffectedDevice },
+        @{ Label = "Target path"; Value = [string]$Case.TargetPath },
+        @{ Label = "Target address"; Value = [string]$Case.TargetAddress }
+    )
+
+    foreach ($field in $optionalFields) {
+        if (-not [string]::IsNullOrWhiteSpace($field.Value)) {
+            Add-TicketNotesBullet -Builder $builder -Text ("{0}: {1}" -f $field.Label, $field.Value)
+        }
+    }
+
     if ($notes.Count -gt 0) {
         Add-TicketNotesBullet -Builder $builder -Text ("Reported detail: {0}" -f [string]$notes[0].Text)
     }
@@ -857,12 +941,17 @@ function New-TicketNotesMarkdown {
     Add-TicketNotesLine -Builder $builder -Line "Actions Taken:"
     if ($checks.Count -gt 0) {
         foreach ($check in $checks) {
+            $action = "Ran {0}" -f $check.Name
+            $inputsText = Get-WorkbenchCheckInputsText -Check $check
+            if (-not [string]::IsNullOrWhiteSpace($inputsText)) {
+                $action = "{0} ({1})" -f $action, $inputsText
+            }
+
             $finishedAt = ""
             if ($check.PSObject.Properties.Name -contains "FinishedAt") {
                 $finishedAt = [string]$check.FinishedAt
             }
 
-            $action = "Ran {0}" -f $check.Name
             if (-not [string]::IsNullOrWhiteSpace($finishedAt)) {
                 $action = "$action at $finishedAt"
             }
@@ -913,14 +1002,35 @@ function New-TicketNotesMarkdown {
 
     Add-TicketNotesLine -Builder $builder -Line "Likely Cause:"
     $problemChecks = @($checks | Where-Object { ([string]$_.Status) -in @("Warn", "Fail") })
-    if ($problemChecks.Count -gt 0) {
-        Add-TicketNotesBullet -Builder $builder -Text ("Likely related to: {0}" -f (($problemChecks | ForEach-Object { $_.Summary }) -join "; "))
+    $likelyCauseCount = 0
+    foreach ($problemCheck in $problemChecks) {
+        $problemEvidence = @()
+        if ($problemCheck.PSObject.Properties.Name -contains "Evidence" -and $null -ne $problemCheck.Evidence) {
+            $problemEvidence = @($problemCheck.Evidence | Where-Object { ([string]$_.Status) -eq "Fail" })
+            if ($problemEvidence.Count -eq 0) {
+                $problemEvidence = @($problemCheck.Evidence | Where-Object { ([string]$_.Status) -eq "Warn" })
+            }
+        }
+
+        if ($problemEvidence.Count -gt 0) {
+            foreach ($evidence in $problemEvidence) {
+                $likelyCauseCount++
+                Add-TicketNotesBullet -Builder $builder -Text ("{0}: {1}" -f $problemCheck.Name, $evidence.Detail)
+            }
+        }
+        else {
+            $likelyCauseCount++
+            Add-TicketNotesBullet -Builder $builder -Text ("{0}: {1}" -f $problemCheck.Name, $problemCheck.Summary)
+        }
     }
-    elseif ($checks.Count -gt 0) {
-        Add-TicketNotesBullet -Builder $builder -Text "No failing automated check has identified a likely cause yet."
-    }
-    else {
-        Add-TicketNotesBullet -Builder $builder -Text "Likely cause is pending diagnostic evidence."
+
+    if ($likelyCauseCount -eq 0) {
+        if ($checks.Count -gt 0) {
+            Add-TicketNotesBullet -Builder $builder -Text "No failing automated check has identified a likely cause yet."
+        }
+        else {
+            Add-TicketNotesBullet -Builder $builder -Text "Likely cause is pending diagnostic evidence."
+        }
     }
     Add-TicketNotesLine -Builder $builder
 
