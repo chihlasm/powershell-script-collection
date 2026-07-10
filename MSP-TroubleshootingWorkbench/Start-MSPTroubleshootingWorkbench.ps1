@@ -1211,16 +1211,12 @@ if (-not (Test-Path -LiteralPath $logRoot)) {
 $listener = New-Object System.Net.HttpListener
 $listener.Prefixes.Add($url)
 $script:StopRequested = $false
-$script:WorkbenchListener = $listener
 $cancelHandler = [ConsoleCancelEventHandler]{
     param($Sender, $EventArgs)
 
+    # The accept loop polls StopRequested, so the handler only has to set the flag.
     $EventArgs.Cancel = $true
     $script:StopRequested = $true
-
-    if ($script:WorkbenchListener -and $script:WorkbenchListener.IsListening) {
-        $script:WorkbenchListener.Stop()
-    }
 }
 
 [Console]::add_CancelKeyPress($cancelHandler)
@@ -1244,7 +1240,20 @@ try {
         $context = $null
 
         try {
-            $context = $listener.GetContext()
+            # Poll the async accept so Ctrl+C is honored without waiting for the next
+            # request. A blocking GetContext() would sit here until traffic arrives.
+            $contextTask = $listener.GetContextAsync()
+            while (-not $contextTask.AsyncWaitHandle.WaitOne(250)) {
+                if ($script:StopRequested) {
+                    break
+                }
+            }
+
+            if ($script:StopRequested) {
+                break
+            }
+
+            $context = $contextTask.GetAwaiter().GetResult()
             $request = $context.Request
             $path = $request.Url.AbsolutePath
             $method = $request.HttpMethod
