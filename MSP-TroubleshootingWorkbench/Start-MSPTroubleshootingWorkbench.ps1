@@ -456,15 +456,28 @@ function Get-CheckCatalog {
             throw "Check script '$scriptName' was not found."
         }
 
+        $timeoutSeconds = 60
+        if ($check.PSObject.Properties.Name -contains "timeoutSeconds" -and $null -ne $check.timeoutSeconds) {
+            $timeoutSeconds = 0
+            if (-not [int]::TryParse([string]$check.timeoutSeconds, [ref]$timeoutSeconds)) {
+                throw "Check manifest entry 'timeoutSeconds' must be a number."
+            }
+
+            if ($timeoutSeconds -lt 1 -or $timeoutSeconds -gt 3600) {
+                throw "Check manifest entry 'timeoutSeconds' must be between 1 and 3600."
+            }
+        }
+
         $catalog += [PSCustomObject]@{
-            CheckId     = [string]$check.checkId
-            Name        = [string]$check.name
-            Category    = [string]$check.category
-            Script      = $scriptName
-            Description = [string]$check.description
-            ReadOnly    = [bool]$check.readOnly
-            Inputs      = @($check.inputs)
-            ScriptPath  = $scriptPath
+            CheckId        = [string]$check.checkId
+            Name           = [string]$check.name
+            Category       = [string]$check.category
+            Script         = $scriptName
+            Description    = [string]$check.description
+            ReadOnly       = [bool]$check.readOnly
+            Inputs         = @($check.inputs)
+            TimeoutSeconds = $timeoutSeconds
+            ScriptPath     = $scriptPath
         }
     }
 
@@ -719,8 +732,8 @@ function Invoke-WorkbenchCheck {
         [Parameter(Mandatory)]
         [object]$Body,
 
-        [ValidateRange(1, 3600)]
-        [int]$TimeoutSeconds = 60
+        [ValidateRange(0, 3600)]
+        [int]$TimeoutSeconds = 0
     )
 
     $check = @(Get-CheckCatalog | Where-Object { $_.CheckId -eq $CheckId } | Select-Object -First 1)
@@ -729,6 +742,11 @@ function Invoke-WorkbenchCheck {
     }
 
     $selectedCheck = $check[0]
+
+    if ($TimeoutSeconds -le 0) {
+        $TimeoutSeconds = [int]$selectedCheck.TimeoutSeconds
+    }
+
     $invokeParams = New-WorkbenchCheckParameters -Check $selectedCheck -Body $Body
     $job = $null
 
@@ -1148,7 +1166,7 @@ try {
             }
             elseif ($method -ieq "GET" -and $path -eq "/api/checks") {
                 try {
-                    $checks = @(Get-CheckCatalog | Select-Object CheckId, Name, Category, Script, Description, ReadOnly, Inputs)
+                    $checks = @(Get-CheckCatalog | Select-Object CheckId, Name, Category, Script, Description, ReadOnly, Inputs, TimeoutSeconds)
                     Send-Json -Context $context -Body $checks
                 }
                 catch {
