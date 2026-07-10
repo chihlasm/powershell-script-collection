@@ -229,6 +229,64 @@
       font-size: 0.9rem;
     }
 
+    .workspace-subtitle {
+      margin: 18px 0 8px;
+      font-size: 0.95rem;
+      font-weight: 650;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .note-list {
+      display: grid;
+      gap: 6px;
+      margin: 0 0 10px;
+      padding: 0;
+      list-style: none;
+    }
+
+    .note-form {
+      display: flex;
+      gap: 10px;
+    }
+
+    .note-form input {
+      flex: 1;
+    }
+
+    .generated-notes {
+      white-space: pre-wrap;
+      background: var(--field-bg);
+      border: 1px solid var(--panel-border);
+      border-radius: 4px;
+      padding: 14px;
+      margin: 0 0 12px;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 0.85rem;
+    }
+
+    .status-pill {
+      display: inline-block;
+      min-width: 44px;
+      padding: 1px 8px;
+      border-radius: 3px;
+      font-size: 0.78rem;
+      font-weight: 700;
+      text-align: center;
+    }
+
+    .status-pass { background: #1f4d2e; color: #9be3ae; }
+    .status-warn { background: #4d3f1f; color: #e3cf9b; }
+    .status-fail { background: #4d1f1f; color: #e39b9b; }
+
+    .evidence-list {
+      margin: 6px 0 0;
+      padding-left: 18px;
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+
     @media (prefers-color-scheme: light) {
       :root {
         --bg: #f5f7fa;
@@ -339,6 +397,32 @@
       <ul id="case-list" class="case-list"></ul>
     </section>
 
+    <section id="workspace-section" aria-labelledby="workspace-title" hidden>
+      <h2 id="workspace-title">Case workspace</h2>
+      <dl id="workspace-meta"></dl>
+
+      <h3 class="workspace-subtitle">Check results</h3>
+      <p id="workspace-checks-empty" class="empty">No checks have been run for this case yet.</p>
+      <ul id="workspace-checks" class="check-list"></ul>
+
+      <h3 class="workspace-subtitle">Notes</h3>
+      <p id="workspace-notes-empty" class="empty">No notes yet.</p>
+      <ul id="workspace-notes" class="note-list"></ul>
+      <div class="note-form">
+        <input id="note-text" placeholder="Add a note about what you observed or did..." autocomplete="off">
+        <button type="button" id="add-note-button">Add note</button>
+      </div>
+
+      <h3 class="workspace-subtitle">Ticket notes</h3>
+      <pre id="generated-notes" class="generated-notes" hidden></pre>
+      <div class="workspace-actions" aria-label="Case workspace actions">
+        <button type="button" id="generate-notes-button">Generate Notes</button>
+        <button type="button" id="copy-notes-button" hidden>Copy to clipboard</button>
+        <button type="button" id="export-evidence-button">Export Evidence</button>
+        <p id="workspace-action-message" class="form-message" aria-live="polite"></p>
+      </div>
+    </section>
+
     <section aria-labelledby="checks-title">
       <h2 id="checks-title">Checks</h2>
       <p id="checks-empty" class="empty">Loading checks...</p>
@@ -354,11 +438,6 @@
           <p id="check-form-message" class="form-message" aria-live="polite"></p>
         </div>
       </form>
-      <div class="workspace-actions" aria-label="Case workspace actions">
-        <button type="button" id="generate-notes-button">Generate Notes</button>
-        <button type="button" id="export-evidence-button">Export Evidence</button>
-        <p id="workspace-action-message" class="form-message" aria-live="polite"></p>
-      </div>
     </section>
   </main>
 
@@ -409,6 +488,113 @@
         field.append(label, input);
         container.appendChild(field);
       });
+    }
+
+    async function selectCase(caseId) {
+      const message = document.getElementById("workspace-action-message");
+      try {
+        const response = await fetch("/api/cases/" + encodeURIComponent(caseId));
+        if (!response.ok) {
+          throw new Error("Could not load case " + caseId);
+        }
+
+        selectedCase = await response.json();
+        renderWorkspace();
+        renderCheckInputs();
+      }
+      catch (error) {
+        message.className = "form-message error";
+        message.textContent = error.message;
+      }
+    }
+
+    function statusPill(status) {
+      const pill = document.createElement("span");
+      const value = (status || "").toLowerCase();
+      pill.className = "status-pill status-" + (["pass", "warn", "fail"].includes(value) ? value : "warn");
+      pill.textContent = status || "?";
+      return pill;
+    }
+
+    function renderWorkspace() {
+      const section = document.getElementById("workspace-section");
+      if (!selectedCase) {
+        section.hidden = true;
+        return;
+      }
+
+      section.hidden = false;
+      document.getElementById("workspace-title").textContent = "Case workspace — " + selectedCase.CaseId;
+
+      const meta = document.getElementById("workspace-meta");
+      meta.innerHTML = "";
+      [
+        ["Client", selectedCase.ClientName],
+        ["Ticket", selectedCase.TicketNumber],
+        ["Issue type", selectedCase.IssueType],
+        ["User", selectedCase.AffectedUser],
+        ["Device", selectedCase.AffectedDevice]
+      ].forEach(([label, value]) => {
+        if (!value) { return; }
+        const dt = document.createElement("dt");
+        dt.textContent = label;
+        const dd = document.createElement("dd");
+        dd.textContent = value;
+        meta.append(dt, dd);
+      });
+
+      const checks = selectedCase.Checks || [];
+      const checksList = document.getElementById("workspace-checks");
+      document.getElementById("workspace-checks-empty").hidden = checks.length > 0;
+      checksList.innerHTML = "";
+      checks.forEach((check) => {
+        const item = document.createElement("li");
+        item.className = "check-item";
+
+        const header = document.createElement("div");
+        const name = document.createElement("span");
+        name.className = "check-name";
+        name.textContent = check.Name || check.CheckId;
+        header.append(name, document.createTextNode(" "), statusPill(check.Status));
+
+        const summary = document.createElement("div");
+        summary.className = "case-meta";
+        summary.textContent = (check.Summary || "") + (check.FinishedAt ? " (" + check.FinishedAt + ")" : "");
+
+        const evidenceList = document.createElement("ul");
+        evidenceList.className = "evidence-list";
+        (check.Evidence || []).forEach((evidence) => {
+          const evidenceItem = document.createElement("li");
+          evidenceItem.textContent = evidence.Name + " [" + evidence.Status + "]: " + evidence.Detail;
+          evidenceList.appendChild(evidenceItem);
+        });
+
+        item.append(header, summary, evidenceList);
+        checksList.appendChild(item);
+      });
+
+      const notes = selectedCase.Notes || [];
+      const notesList = document.getElementById("workspace-notes");
+      document.getElementById("workspace-notes-empty").hidden = notes.length > 0;
+      notesList.innerHTML = "";
+      notes.forEach((note) => {
+        const item = document.createElement("li");
+        item.className = "case-meta";
+        item.textContent = (note.CreatedAt ? note.CreatedAt + " — " : "") + note.Text;
+        notesList.appendChild(item);
+      });
+
+      const generated = document.getElementById("generated-notes");
+      const copyButton = document.getElementById("copy-notes-button");
+      if (selectedCase.GeneratedSummary) {
+        generated.textContent = selectedCase.GeneratedSummary;
+        generated.hidden = false;
+        copyButton.hidden = false;
+      }
+      else {
+        generated.hidden = true;
+        copyButton.hidden = true;
+      }
     }
 
     const workbenchToken = document.querySelector('meta[name="workbench-token"]').content;
@@ -486,8 +672,7 @@
           list.appendChild(item);
 
           item.addEventListener("click", () => {
-            selectedCase = workbenchCase;
-            renderCheckInputs();
+            selectCase(workbenchCase.CaseId);
           });
         });
       }
@@ -568,8 +753,7 @@
 
         form.reset();
         message.textContent = "Created " + data.CaseId + ".";
-        selectedCase = data;
-        renderCheckInputs();
+        await selectCase(data.CaseId);
         await loadCases();
       }
       catch (error) {
@@ -618,6 +802,7 @@
         const checks = data.Checks || [];
         const latest = checks[checks.length - 1] || {};
         message.textContent = (latest.Status || "Done") + ": " + (latest.Summary || "Check completed.");
+        await selectCase(caseId);
         await loadCases();
       }
       catch (error) {
@@ -626,6 +811,44 @@
       }
       finally {
         button.disabled = false;
+      }
+    }
+
+    async function addNote() {
+      const input = document.getElementById("note-text");
+      const message = document.getElementById("workspace-action-message");
+      if (!selectedCase || input.value.trim() === "") {
+        return;
+      }
+
+      try {
+        const response = await postJson("/api/cases/" + encodeURIComponent(selectedCase.CaseId) + "/notes", { note: input.value.trim() });
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || "Adding the note failed");
+        }
+
+        input.value = "";
+        selectedCase = data;
+        renderWorkspace();
+      }
+      catch (error) {
+        message.className = "form-message error";
+        message.textContent = error.message;
+      }
+    }
+
+    async function copyGeneratedNotes() {
+      const message = document.getElementById("workspace-action-message");
+      const text = document.getElementById("generated-notes").textContent;
+      try {
+        await navigator.clipboard.writeText(text);
+        message.className = "form-message";
+        message.textContent = "Ticket notes copied to clipboard.";
+      }
+      catch (error) {
+        message.className = "form-message error";
+        message.textContent = "Copy failed — select the text and copy manually.";
       }
     }
 
@@ -660,7 +883,7 @@
           message.textContent = successText + ".";
         }
 
-        await loadCases();
+        await selectCase(caseId);
       }
       catch (error) {
         message.className = "form-message error";
@@ -676,6 +899,11 @@
     document.getElementById("check-select").addEventListener("change", renderCheckInputs);
     document.getElementById("generate-notes-button").addEventListener("click", () => postCaseAction("generate-notes", "generate-notes-button", "Generating notes...", "Generated notes"));
     document.getElementById("export-evidence-button").addEventListener("click", () => postCaseAction("export", "export-evidence-button", "Exporting evidence...", "Exported evidence"));
+    document.getElementById("add-note-button").addEventListener("click", addNote);
+    document.getElementById("copy-notes-button").addEventListener("click", copyGeneratedNotes);
+    document.getElementById("note-text").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") { event.preventDefault(); addNote(); }
+    });
     loadStatus();
     loadChecks();
     loadCases();
