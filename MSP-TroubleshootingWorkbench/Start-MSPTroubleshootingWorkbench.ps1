@@ -1195,6 +1195,11 @@ $logFileName = "workbench_{0}.log" -f (Get-Date -Format "yyyy-MM-dd_HHmmss")
 $logPath = Join-Path $logRoot $logFileName
 $url = "http://localhost:$Port/"
 
+# Per-session secret injected into the served page. Cross-origin pages cannot set a
+# custom header without a CORS preflight, which this server never approves, so this
+# stops other sites in the tech's browser from driving the API.
+$script:WorkbenchToken = [guid]::NewGuid().ToString("N")
+
 if (-not (Test-Path -LiteralPath $resolvedOutputPath)) {
     New-Item -ItemType Directory -Path $resolvedOutputPath -Force | Out-Null
 }
@@ -1246,9 +1251,15 @@ try {
 
             Write-WorkbenchLog -Message "$method $path" -Level "INFO" -LogPath $logPath
 
+            if ($method -ieq "POST" -and ([string]$request.Headers["X-Workbench-Token"]) -ne $script:WorkbenchToken) {
+                Send-JsonError -Context $context -Message "Missing or invalid workbench token. Reload the page and try again." -StatusCode 403
+                continue
+            }
+
             if ($method -ieq "GET" -and $path -eq "/") {
                 if (Test-Path -LiteralPath $indexPath) {
                     $html = Get-Content -LiteralPath $indexPath -Raw
+                    $html = $html.Replace("__WORKBENCH_TOKEN__", $script:WorkbenchToken)
                     Send-Html -Context $context -Html $html
                 }
                 else {
