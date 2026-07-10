@@ -17,6 +17,11 @@
 .PARAMETER NoBrowserOpen
     Do not automatically open the browser.
 
+.PARAMETER LibraryMode
+    Define the workbench functions and resolve OutputPath, then return without
+    starting the HTTP listener. Used by the test suite to load this script as a
+    function library via dot-sourcing.
+
 .EXAMPLE
     .\Start-MSPTroubleshootingWorkbench.ps1
 
@@ -30,7 +35,9 @@ param(
 
     [string]$OutputPath = "",
 
-    [switch]$NoBrowserOpen
+    [switch]$NoBrowserOpen,
+
+    [switch]$LibraryMode
 )
 
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
@@ -1048,6 +1055,11 @@ function New-WorkbenchCase {
 
 $resolvedOutputPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputPath)
 $OutputPath = $resolvedOutputPath
+
+if ($LibraryMode) {
+    return
+}
+
 $appPath = Join-Path $PSScriptRoot "app"
 $indexPath = Join-Path $appPath "index.html"
 $logRoot = Join-Path $resolvedOutputPath "logs"
