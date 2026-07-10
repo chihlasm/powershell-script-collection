@@ -1,0 +1,619 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MSP Troubleshooting Workbench</title>
+  <style>
+    :root {
+      color-scheme: dark light;
+      --bg: #10151c;
+      --panel: #171f29;
+      --panel-border: #2a3746;
+      --text: #edf3f8;
+      --muted: #9fb0bf;
+      --accent: #5dade2;
+      --accent-strong: #2f8ed2;
+      --field-bg: #0f151d;
+      --danger: #ffb4a8;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Segoe UI", Arial, sans-serif;
+      line-height: 1.5;
+    }
+
+    main {
+      width: min(960px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 40px 0;
+    }
+
+    h1 {
+      margin: 0 0 24px;
+      font-size: 2rem;
+      font-weight: 700;
+    }
+
+    h2 {
+      margin: 0 0 12px;
+      font-size: 1.05rem;
+      font-weight: 650;
+    }
+
+    section {
+      margin-bottom: 18px;
+      padding: 18px;
+      border: 1px solid var(--panel-border);
+      border-radius: 6px;
+      background: var(--panel);
+    }
+
+    dl {
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      gap: 8px 16px;
+      margin: 0;
+    }
+
+    dt {
+      color: var(--muted);
+    }
+
+    dd {
+      margin: 0;
+      word-break: break-word;
+    }
+
+    .empty {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .status-line {
+      margin: 0;
+      color: var(--accent);
+    }
+
+    .case-form {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .field {
+      display: grid;
+      gap: 5px;
+    }
+
+    .field-wide {
+      grid-column: span 2;
+    }
+
+    label {
+      color: var(--muted);
+      font-size: 0.82rem;
+      font-weight: 600;
+    }
+
+    input,
+    select {
+      width: 100%;
+      min-height: 38px;
+      border: 1px solid var(--panel-border);
+      border-radius: 4px;
+      background: var(--field-bg);
+      color: var(--text);
+      font: inherit;
+      padding: 8px 10px;
+    }
+
+    input:focus,
+    select:focus {
+      outline: 2px solid var(--accent);
+      outline-offset: 1px;
+    }
+
+    .form-actions {
+      grid-column: 1 / -1;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-height: 38px;
+    }
+
+    button {
+      min-height: 38px;
+      border: 1px solid var(--accent-strong);
+      border-radius: 4px;
+      background: var(--accent-strong);
+      color: #ffffff;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 700;
+      padding: 8px 14px;
+    }
+
+    button:hover {
+      filter: brightness(1.08);
+    }
+
+    button:disabled {
+      cursor: wait;
+      opacity: 0.72;
+    }
+
+    .form-message {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .workspace-actions {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 14px;
+      padding-top: 14px;
+      border-top: 1px solid var(--panel-border);
+    }
+
+    .form-message.error {
+      color: var(--danger);
+    }
+
+    .check-panel {
+      display: grid;
+      grid-template-columns: minmax(180px, 1fr) minmax(140px, 0.7fr) minmax(92px, 0.35fr) max-content;
+      gap: 12px;
+      align-items: end;
+    }
+
+    .check-list {
+      display: grid;
+      gap: 10px;
+      margin: 0 0 14px;
+      padding: 0;
+      list-style: none;
+    }
+
+    .check-item {
+      display: grid;
+      grid-template-columns: minmax(160px, 1fr) minmax(110px, max-content) minmax(220px, 2fr);
+      gap: 8px 16px;
+      padding: 10px 0;
+      border-top: 1px solid var(--panel-border);
+    }
+
+    .check-name {
+      color: var(--accent);
+      font-weight: 700;
+    }
+
+    .case-list {
+      display: grid;
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .case-item {
+      display: grid;
+      grid-template-columns: minmax(160px, 1fr) repeat(3, minmax(100px, max-content));
+      gap: 8px 16px;
+      padding: 12px 0;
+      border-top: 1px solid var(--panel-border);
+    }
+
+    .case-id {
+      color: var(--accent);
+      font-weight: 700;
+    }
+
+    .case-meta {
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f5f7fa;
+        --panel: #ffffff;
+        --panel-border: #cfd8e3;
+        --text: #16202a;
+        --muted: #526273;
+        --field-bg: #ffffff;
+      }
+    }
+
+    @media (max-width: 760px) {
+      main {
+        width: min(100% - 20px, 960px);
+        padding: 24px 0;
+      }
+
+      .case-form {
+        grid-template-columns: 1fr;
+      }
+
+      .field-wide {
+        grid-column: span 1;
+      }
+
+      .check-panel,
+      .check-item {
+        grid-template-columns: 1fr;
+      }
+
+      .case-item {
+        grid-template-columns: 1fr;
+      }
+
+      .workspace-actions {
+        align-items: stretch;
+        flex-direction: column;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>MSP Troubleshooting Workbench</h1>
+
+    <section aria-labelledby="backend-status-title">
+      <h2 id="backend-status-title">Backend status</h2>
+      <p id="status-loading" class="status-line">Loading backend status...</p>
+      <dl id="backend-status" hidden>
+        <dt>App</dt>
+        <dd id="status-app-name"></dd>
+        <dt>Version</dt>
+        <dd id="status-version"></dd>
+        <dt>Port</dt>
+        <dd id="status-port"></dd>
+        <dt>Output path</dt>
+        <dd id="status-output-path"></dd>
+      </dl>
+    </section>
+
+    <section aria-labelledby="case-form-title">
+      <h2 id="case-form-title">New case</h2>
+      <form id="case-form" class="case-form">
+        <div class="field">
+          <label for="client-name">Client</label>
+          <input id="client-name" name="clientName" autocomplete="organization" required>
+        </div>
+        <div class="field">
+          <label for="ticket-number">Ticket</label>
+          <input id="ticket-number" name="ticketNumber" autocomplete="off" required>
+        </div>
+        <div class="field">
+          <label for="issue-type">Issue type</label>
+          <select id="issue-type" name="issueType" required>
+            <option value="Network">Network</option>
+            <option value="Permissions">Permissions</option>
+            <option value="Device">Device</option>
+            <option value="Application">Application</option>
+            <option value="Other">Other</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="affected-user">User</label>
+          <input id="affected-user" name="affectedUser" autocomplete="off">
+        </div>
+        <div class="field">
+          <label for="affected-device">Device</label>
+          <input id="affected-device" name="affectedDevice" autocomplete="off">
+        </div>
+        <div class="field field-wide">
+          <label for="target-path">Path</label>
+          <input id="target-path" name="targetPath" autocomplete="off">
+        </div>
+        <div class="field">
+          <label for="target-address">Address</label>
+          <input id="target-address" name="targetAddress" autocomplete="off">
+        </div>
+        <div class="form-actions">
+          <button type="submit" id="create-case-button">+ Create case</button>
+          <p id="case-form-message" class="form-message" aria-live="polite"></p>
+        </div>
+      </form>
+    </section>
+
+    <section aria-labelledby="case-list-title">
+      <h2 id="case-list-title">Cases</h2>
+      <p id="cases-empty" class="empty">No cases yet.</p>
+      <ul id="case-list" class="case-list"></ul>
+    </section>
+
+    <section aria-labelledby="checks-title">
+      <h2 id="checks-title">Checks</h2>
+      <p id="checks-empty" class="empty">Loading checks...</p>
+      <ul id="check-list" class="check-list"></ul>
+      <form id="check-form" class="check-panel">
+        <div class="field">
+          <label for="check-case-id">Case ID</label>
+          <input id="check-case-id" name="caseId" autocomplete="off" required>
+        </div>
+        <div class="field">
+          <label for="check-target-address">Address</label>
+          <input id="check-target-address" name="targetAddress" autocomplete="off" value="localhost" required>
+        </div>
+        <div class="field">
+          <label for="check-port">Port</label>
+          <input id="check-port" name="port" type="number" min="1" max="65535" value="443">
+        </div>
+        <button type="submit" id="run-check-button">Run check</button>
+      </form>
+      <div class="workspace-actions" aria-label="Case workspace actions">
+        <button type="button" id="generate-notes-button">Generate Notes</button>
+        <button type="button" id="export-evidence-button">Export Evidence</button>
+        <p id="workspace-action-message" class="form-message" aria-live="polite"></p>
+      </div>
+      <p id="check-form-message" class="form-message" aria-live="polite"></p>
+    </section>
+  </main>
+
+  <script>
+    let checkCatalog = [];
+
+    async function loadStatus() {
+      const loading = document.getElementById("status-loading");
+      const status = document.getElementById("backend-status");
+
+      try {
+        const response = await fetch("/api/status");
+        if (!response.ok) {
+          throw new Error("Status request failed");
+        }
+
+        const data = await response.json();
+        document.getElementById("status-app-name").textContent = data.appName || "";
+        document.getElementById("status-version").textContent = data.version || "";
+        document.getElementById("status-port").textContent = data.port || "";
+        document.getElementById("status-output-path").textContent = data.outputPath || "";
+        loading.hidden = true;
+        status.hidden = false;
+      }
+      catch (error) {
+        loading.textContent = "Backend status unavailable.";
+      }
+    }
+
+    async function loadCases() {
+      const empty = document.getElementById("cases-empty");
+      const list = document.getElementById("case-list");
+      list.innerHTML = "";
+
+      try {
+        const response = await fetch("/api/cases");
+        if (!response.ok) {
+          throw new Error("Cases request failed");
+        }
+
+        const cases = await response.json();
+        empty.textContent = cases.length === 0 ? "No cases yet." : "";
+
+        cases.forEach((workbenchCase) => {
+          const item = document.createElement("li");
+          item.className = "case-item";
+
+          const title = document.createElement("span");
+          title.className = "case-id";
+          title.textContent = workbenchCase.CaseId || "";
+          title.title = "Use this case ID to run checks";
+
+          const client = document.createElement("span");
+          client.className = "case-meta";
+          client.textContent = workbenchCase.ClientName || "No client";
+
+          const issue = document.createElement("span");
+          issue.className = "case-meta";
+          issue.textContent = workbenchCase.IssueType || "No issue type";
+
+          const ticket = document.createElement("span");
+          ticket.className = "case-meta";
+          ticket.textContent = workbenchCase.TicketNumber || "No ticket";
+
+          item.append(title, client, issue, ticket);
+          list.appendChild(item);
+
+          item.addEventListener("click", () => {
+            document.getElementById("check-case-id").value = workbenchCase.CaseId || "";
+            document.getElementById("check-target-address").value = workbenchCase.TargetAddress || "localhost";
+          });
+        });
+      }
+      catch (error) {
+        empty.textContent = "Case list unavailable.";
+      }
+    }
+
+    async function loadChecks() {
+      const empty = document.getElementById("checks-empty");
+      const list = document.getElementById("check-list");
+      list.innerHTML = "";
+
+      try {
+        const response = await fetch("/api/checks");
+        if (!response.ok) {
+          throw new Error("Checks request failed");
+        }
+
+        checkCatalog = await response.json();
+        empty.textContent = checkCatalog.length === 0 ? "No checks available." : "";
+
+        checkCatalog.forEach((check) => {
+          const item = document.createElement("li");
+          item.className = "check-item";
+
+          const name = document.createElement("span");
+          name.className = "check-name";
+          name.textContent = check.Name || check.CheckId || "";
+
+          const category = document.createElement("span");
+          category.className = "case-meta";
+          category.textContent = check.Category || "No category";
+
+          const description = document.createElement("span");
+          description.className = "case-meta";
+          description.textContent = check.Description || "";
+
+          item.append(name, category, description);
+          list.appendChild(item);
+        });
+      }
+      catch (error) {
+        empty.textContent = "Check catalog unavailable.";
+      }
+    }
+
+    async function createCase(event) {
+      event.preventDefault();
+
+      const form = event.currentTarget;
+      const button = document.getElementById("create-case-button");
+      const message = document.getElementById("case-form-message");
+      const formData = new FormData(form);
+      const body = Object.fromEntries(formData.entries());
+
+      button.disabled = true;
+      message.className = "form-message";
+      message.textContent = "Creating case...";
+
+      try {
+        const response = await fetch("/api/cases", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(body)
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || "Case creation failed");
+        }
+
+        form.reset();
+        message.textContent = "Created " + data.CaseId + ".";
+        document.getElementById("check-case-id").value = data.CaseId || "";
+        document.getElementById("check-target-address").value = data.TargetAddress || "localhost";
+        await loadCases();
+      }
+      catch (error) {
+        message.className = "form-message error";
+        message.textContent = error.message;
+      }
+      finally {
+        button.disabled = false;
+      }
+    }
+
+    async function runCheck(event) {
+      event.preventDefault();
+
+      const form = event.currentTarget;
+      const button = document.getElementById("run-check-button");
+      const message = document.getElementById("check-form-message");
+      const formData = new FormData(form);
+      const body = Object.fromEntries(formData.entries());
+      const caseId = body.caseId || "";
+      const checkId = checkCatalog[0] ? checkCatalog[0].CheckId : "network.quick";
+
+      delete body.caseId;
+      if (!body.port) {
+        delete body.port;
+      }
+
+      button.disabled = true;
+      message.className = "form-message";
+      message.textContent = "Running check...";
+
+      try {
+        const response = await fetch("/api/cases/" + encodeURIComponent(caseId) + "/checks/" + encodeURIComponent(checkId) + "/run", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(body)
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || "Check run failed");
+        }
+
+        const checks = data.Checks || [];
+        const latest = checks[checks.length - 1] || {};
+        message.textContent = (latest.Status || "Done") + ": " + (latest.Summary || "Check completed.");
+        await loadCases();
+      }
+      catch (error) {
+        message.className = "form-message error";
+        message.textContent = error.message;
+      }
+      finally {
+        button.disabled = false;
+      }
+    }
+
+    async function postCaseAction(action, buttonId, pendingText, successText) {
+      const caseId = document.getElementById("check-case-id").value || "";
+      const button = document.getElementById(buttonId);
+      const message = document.getElementById("workspace-action-message");
+
+      button.disabled = true;
+      message.className = "form-message";
+      message.textContent = pendingText;
+
+      try {
+        const response = await fetch("/api/cases/" + encodeURIComponent(caseId) + "/" + action, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: "{}"
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || successText + " failed");
+        }
+
+        if (action === "export") {
+          message.textContent = successText + ": " + (data.MarkdownPath || data.markdownPath || "");
+        }
+        else {
+          message.textContent = successText + ".";
+        }
+
+        await loadCases();
+      }
+      catch (error) {
+        message.className = "form-message error";
+        message.textContent = error.message;
+      }
+      finally {
+        button.disabled = false;
+      }
+    }
+
+    document.getElementById("case-form").addEventListener("submit", createCase);
+    document.getElementById("check-form").addEventListener("submit", runCheck);
+    document.getElementById("generate-notes-button").addEventListener("click", () => postCaseAction("generate-notes", "generate-notes-button", "Generating notes...", "Generated notes"));
+    document.getElementById("export-evidence-button").addEventListener("click", () => postCaseAction("export", "export-evidence-button", "Exporting evidence...", "Exported evidence"));
+    loadStatus();
+    loadChecks();
+    loadCases();
+  </script>
+</body>
+</html>
