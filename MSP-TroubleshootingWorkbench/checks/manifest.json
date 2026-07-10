@@ -8,6 +8,7 @@
       "script": "Invoke-NetworkQuickCheck.ps1",
       "description": "Ping, DNS, TCP port, and local route snapshot.",
       "readOnly": true,
+      "timeoutSeconds": 60,
       "inputs": [
         "targetAddress",
         "port"
@@ -20,6 +21,7 @@
       "script": "Invoke-ADLockoutCheck.ps1",
       "description": "Wraps the AD account lockout diagnostics report for a user.",
       "readOnly": true,
+      "timeoutSeconds": 240,
       "inputs": [
         "affectedUser",
         "daysBack",
@@ -33,6 +35,7 @@
       "script": "Invoke-CitrixFSLogixTriageCheck.ps1",
       "description": "Read-only Citrix and FSLogix profile triage for a target device.",
       "readOnly": true,
+      "timeoutSeconds": 180,
       "inputs": [
         "affectedDevice",
         "affectedUser"
