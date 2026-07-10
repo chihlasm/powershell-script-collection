@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="workbench-token" content="__WORKBENCH_TOKEN__">
   <title>MSP Troubleshooting Workbench</title>
   <style>
     :root {
@@ -365,6 +366,19 @@
   <script>
     let checkCatalog = [];
 
+    const workbenchToken = document.querySelector('meta[name="workbench-token"]').content;
+
+    async function postJson(url, body) {
+      return fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Workbench-Token": workbenchToken
+        },
+        body: JSON.stringify(body === undefined ? {} : body)
+      });
+    }
+
     async function loadStatus() {
       const loading = document.getElementById("status-loading");
       const status = document.getElementById("backend-status");
@@ -490,13 +504,7 @@
       message.textContent = "Creating case...";
 
       try {
-        const response = await fetch("/api/cases", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify(body)
-        });
+        const response = await postJson("/api/cases", body);
 
         const data = await response.json();
         if (!response.ok) {
@@ -539,13 +547,7 @@
       message.textContent = "Running check...";
 
       try {
-        const response = await fetch("/api/cases/" + encodeURIComponent(caseId) + "/checks/" + encodeURIComponent(checkId) + "/run", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify(body)
-        });
+        const response = await postJson("/api/cases/" + encodeURIComponent(caseId) + "/checks/" + encodeURIComponent(checkId) + "/run", body);
 
         const data = await response.json();
         if (!response.ok) {
@@ -576,13 +578,7 @@
       message.textContent = pendingText;
 
       try {
-        const response = await fetch("/api/cases/" + encodeURIComponent(caseId) + "/" + action, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: "{}"
-        });
+        const response = await postJson("/api/cases/" + encodeURIComponent(caseId) + "/" + action);
 
         const data = await response.json();
         if (!response.ok) {
