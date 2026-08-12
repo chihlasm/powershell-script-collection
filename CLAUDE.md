@@ -6,6 +6,43 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A collection of standalone PowerShell scripts for Windows Server and Active Directory administration in MSP/enterprise environments. Each folder is a self-contained tool — there are no shared modules, build systems, or test frameworks. Scripts are deployed directly to target machines.
 
+## Verify Against Microsoft Documentation
+
+**Before writing or changing code that depends on a documented Microsoft fact, consult the official documentation and cite it in a code comment.** Do not rely on recalled knowledge for these — they change between OS versions and are the source of the most damaging bugs, because a wrong constant produces a confident, plausible, wrong answer rather than an error.
+
+This applies to:
+
+- **Event IDs and their field/schema layouts** (e.g. 4740's `CallerComputerName`, 4625's `SubStatus` vs `Status`)
+- **Status and error codes** (e.g. 4776 `0x0` = *success*, not failure; Kerberos `0x18` = bad password)
+- **Whether an event is logged for success, failure, or both** — several security events are written for both outcomes, and the status code is the only discriminator
+- **Audit policy subcategory GUIDs** (locale-independent; display names are localized)
+- **AD attribute semantics** — especially which attributes replicate (`badPwdCount`, `badPasswordTime`, and `lockoutTime` are per-DC and do **not** replicate) and sentinel values (`0` / `Int64.MaxValue` mean "never", not 1601-01-01)
+- **Cmdlet parameters and behavior**, including deprecations and PS 5.1 vs 7.x differences
+- **Graph API endpoints, permission scopes, and Entra ID / Entra Connect behavior**
+- **Registry paths and Group Policy setting names**
+
+### How to look it up
+
+1. **Microsoft Learn MCP server** — preferred when available. It requires authentication; if it is not authorized in the session, say so rather than guessing, and fall back to:
+2. **`WebFetch` against `learn.microsoft.com`** — works without authentication and returns the full page. Confirmed working for `/windows/security/threat-protection/auditing/event-NNNN` pages.
+3. **`WebSearch` scoped with `allowed_domains: ["learn.microsoft.com"]`** when the exact URL is unknown.
+
+### Recording what was verified
+
+Cite the source next to the code it justifies, so the next person can re-verify without repeating the research:
+
+```powershell
+# Event 4776 is written for BOTH successful and failed NTLM validation. Error Code 0x0
+# means success - treating every 4776 as a failure misreports healthy machines as
+# attackers.
+# https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4776
+'0x0' = 'Success'
+```
+
+Add a `REFERENCES` block to the script's `.NOTES` listing the pages consulted.
+
+**When documentation contradicts an assumption in existing code, fix the code** — and add a regression test capturing the corrected behavior, so the wrong version cannot silently return.
+
 ## Script Conventions
 
 ### Parameter and CmdletBinding Style
