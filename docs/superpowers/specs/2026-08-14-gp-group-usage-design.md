@@ -1,7 +1,7 @@
 # AD-GroupPolicy-GroupUsage — Design
 
 **Date:** 2026-08-14
-**Status:** Approved, pending sample-XML verification
+**Status:** Approved. XML shape verified against a real sample (see Verified XML Shape).
 **Tool folder:** `AD-GroupPolicy-GroupUsage/`
 
 ## Problem
@@ -71,11 +71,12 @@ can drift.
 
 ### Low risk — reuse proven machinery
 
-**SecurityFilter** and **Delegation** — one `Get-GPPermission -All` call per GPO
-serves both. `GpoApply` trustees are security filtering (who the GPO hits);
-`GpoEdit` and `GpoEditDeleteModifySecurity` are delegation (who can change
-policy). The trustee object exposes `.Sid` and `.SidType` directly, so principal
-normalization is free.
+**SecurityFilter** — `Get-GPPermission -All` per GPO, filtered to `GpoApply`
+trustees. This is who the GPO actually hits.
+
+**Delegation** — read from the cached XML at
+`SecurityDescriptor/Permissions/TrusteePermissions`, using the friendly
+`<GPOGroupedAccessEnum>` value. No extra cmdlet call (see Verified XML Shape).
 
 Delegation matters because it is the only source answering "who can *change*
 Group Policy" — the highest-privilege group relationship in the system, and a
@@ -122,26 +123,85 @@ and [User Rights Assignment](https://learn.microsoft.com/en-us/previous-versions
 but gates whether a GPO applies at all, so it is attached as context on the
 GPO-centric view rather than emitted as group rows.
 
-## Principal normalization
+## Verified XML shape
 
-Sources disagree on principal format:
+Verified against a real `Get-GPOReport -ReportType Xml` sample (Default Domain
+Controllers Policy, `contoso.local`, 36 `UserRightsAssignment` elements /
+119 `Member` elements). The findings below **supersede** assumptions made before
+the sample was available.
 
-| Source | Format |
+### Principals arrive pre-resolved
+
+`Get-GPOReport` emits each principal as a `<SID>` + `<Name>` pair:
+
+```xml
+<q1:UserRightsAssignment>
+  <q1:Name>SeAssignPrimaryTokenPrivilege</q1:Name>
+  <q1:Member>
+    <SID xmlns="...Types">S-1-5-20</SID>
+    <Name xmlns="...Types">NT AUTHORITY\NETWORK SERVICE</Name>
+  </q1:Member>
+</q1:UserRightsAssignment>
+```
+
+The `*S-1-5-...` prefix and bare-name forms specified in MS-GPSB are the on-disk
+`GptTmpl.inf` format; `Get-GPOReport` has already normalized them and they never
+appear at this layer. **The planned principal normalizer is therefore dropped** —
+index on the `<SID>` directly, carry `<Name>` for display.
+
+### Orphan SIDs present as a missing `<Name>` child
+
+8 of 119 members in the sample have a `<SID>` but **no `<Name>` element** (all
+`S-1-5-82-*`, the IIS AppPool virtual-account authority):
+
+```xml
+<q1:Member><SID xmlns="...Types">S-1-5-82-1036420768-...</SID></q1:Member>
+```
+
+Detection MUST test for the absence of the `<Name>` **child node**. Reading
+`$member.Name` in PowerShell returns the *element's own tag name* ("Member"),
+which is always truthy — a naive check silently drops every orphan. This exact
+mistake was made and caught during sample analysis; it is a required regression
+test.
+
+### Namespaces are mandatory
+
+Three namespaces are in play, and children sit in a *different* namespace than
+their parents:
+
+| Namespace | Used by |
 |---|---|
-| `Get-GPPermission` | Resolved name + SID + SidType |
-| Security template | `*S-1-5-32-544` **or** a bare name |
-| ILT filters | Name, plus a `sid` XML attribute |
+| `.../GroupPolicy/Settings` | root `<GPO>` |
+| `.../GroupPolicy/Settings/Security` | `q1:UserRightsAssignment`, `q1:Member`, `q1:Name` |
+| `.../GroupPolicy/Types` | the `<SID>` / `<Name>` children inside `q1:Member` |
 
-Per MS-GPSB, the `*` prefix (ABNF `%d42`) marks a SID string; without it the
-value is a literal principal name.
+All `SelectNodes` / `SelectSingleNode` calls require a populated
+`XmlNamespaceManager`. Dot-notation traversal works for simple paths but not for
+the cross-namespace child lookups.
 
-All principals pass through one normalizer returning `{Name, Sid, Resolved}`,
-with a translation cache so each unique SID resolves once. Index grouping keys on
-SID when available, falling back to name — otherwise `BUILTIN\Administrators` and
-`Administrators` split into two entries for the same group.
+### Encoding trap
 
-Unresolvable SIDs are reported as their own finding: a GPO referencing a deleted
-group is dead configuration, and sometimes evidence of a restore gone wrong.
+The file declares `encoding="utf-16"` but is written **without a BOM**. Strict
+parsers reject it (Python's `utf-16` codec raises `UnicodeError`). PowerShell's
+`Get-Content -Raw` piped into `[xml]` handles it correctly. Do not "fix" the read
+path to an explicit encoding.
+
+### Delegation is available in-XML
+
+`SecurityDescriptor/Permissions/TrusteePermissions` carries each trustee with a
+friendly `<GPOGroupedAccessEnum>` value ("Edit, delete, modify security",
+"Read"). Delegation is therefore read from the **already-cached XML** rather than
+a separate `Get-GPPermission` call — one fewer round-trip per GPO.
+
+Security filtering still requires `Get-GPPermission`, because `GpoApply` is a
+distinct ACE and must not be inferred from the delegation entries.
+
+### Still unverified
+
+The sample contains **no Restricted Groups** (its single `<Group>` element is a
+delegation trustee, not a Group Membership entry) and no Local Users and Groups
+preference. Those two collectors remain written against the MS-GPSB spec and are
+sequenced last; they need a second sample from a GPO that configures them.
 
 ## Membership resolution
 
@@ -167,29 +227,31 @@ LDAP traffic is unwelcome.
 Pester, following the existing pattern: a `-LoadFunctionsOnly` switch guards the
 main run so tests dot-source without needing a domain.
 
-Each parser is tested against inline XML fixtures. Regression tests lock in the
-failure modes that would otherwise produce silent wrong answers:
+Each parser is tested against inline XML fixtures derived from the verified
+sample. Regression tests lock in the failure modes that would otherwise produce
+silent wrong answers:
 
-1. `__Members` vs `__Memberof` direction is not inverted.
-2. SID-and-name references to the same group collapse to one index entry.
-3. `*`-prefixed SIDs are parsed as SIDs; bare names are not.
+1. A `<Member>` with no `<Name>` child is reported as an orphan SID, not dropped
+   — the naive `$member.Name` truthiness check must not return.
+2. Cross-namespace `<SID>` / `<Name>` children resolve correctly via
+   `XmlNamespaceManager`.
+3. `__Members` vs `__Memberof` direction is not inverted.
 4. `SeDeny*` rights are classified higher severity than grant rights.
-5. Unresolvable SIDs produce a finding rather than being dropped.
+5. A BOM-less utf-16 report parses without error.
 
 ## Open risk
 
-The `Get-GPOReport` XML element shape for `SecuritySettings` is not documented on
-Microsoft Learn — only the underlying `GptTmpl.inf` format is (MS-GPSB, verified
-above). The four security-settings collectors will be written against a real
-sample supplied by the user:
+The sample verified User Rights Assignment and delegation. **Restricted Groups
+and Local Users and Groups remain unverified** — the sample GPO configures
+neither. Those two collectors are sequenced last, written against the MS-GPSB
+spec, and need a second sample from a GPO that configures them:
 
 ```powershell
-Get-GPOReport -Name "Default Domain Controllers Policy" -ReportType Xml |
-    Out-File "$env:TEMP\gpo-sample.xml" -Encoding UTF8
+Get-GPOReport -Name "<a GPO with Restricted Groups>" -ReportType Xml |
+    Out-File "$env:TEMP\gpo-restricted-sample.xml" -Encoding UTF8
 ```
 
-Implementation of those four is blocked on that sample. The three low-risk
-collectors, the normalizer, the index, and the report can proceed in parallel.
+Everything else can proceed now.
 
 ## References
 
