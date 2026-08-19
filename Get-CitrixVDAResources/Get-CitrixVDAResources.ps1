@@ -710,8 +710,14 @@ th { background:#1e2127; text-align:left; padding:10px 12px; font-size:11px;
 td { padding:9px 12px; border-bottom:1px solid #23262c; vertical-align:middle; }
 tr:last-child td { border-bottom:none; }
 tr:hover td { background:#1c1f25; }
+/* Row-level severity accent. Individual metric bars keep their own true colour - a
+   machine can fail on memory while its CPU is genuinely fine - so the row edge carries
+   the overall verdict without misrepresenting any single number. */
+tr.row-FAIL td:first-child { box-shadow: inset 3px 0 0 #c8503f; }
+tr.row-WARN td:first-child { box-shadow: inset 3px 0 0 #d1a144; }
+tr.row-UNKNOWN td:first-child { box-shadow: inset 3px 0 0 #4a5058; }
 .mono { font-variant-numeric:tabular-nums; }
-.name { font-weight:600; }
+.name { font-weight:600; white-space:nowrap; }
 .bar { width:88px; height:12px; border-radius:2px; display:block; }
 .metric { display:flex; align-items:center; gap:9px; }
 .pill { display:inline-block; padding:2px 8px; border-radius:3px; font-size:11px;
@@ -722,6 +728,7 @@ tr:hover td { background:#1c1f25; }
 .pill.UNKNOWN { background:#2a2e35; color:#9aa3ad; }
 .err { color:#f0918a; font-size:12px; }
 .muted { color:#6b7280; }
+.note { color:#9aa3ad; font-size:12px; }
 .legend { color:#9aa3ad; font-size:12px; margin:10px 0 0; }
 </style>
 '@)
@@ -757,11 +764,19 @@ tr:hover td { background:#1c1f25; }
         $diskText = if ($null -eq $r.MaxDiskUsedPercent) { '<span class="muted">n/a</span>' } else { ('{0}%' -f $r.MaxDiskUsedPercent) }
         $upText   = if ($null -eq $r.UptimeDays)         { '<span class="muted">n/a</span>' } else { $r.UptimeDays }
 
-        $note = if ($r.ErrorMessage) { '<span class="err">' + (ConvertTo-HtmlSafe -Text $r.ErrorMessage) + '</span>' }
+        # A skip is an expected condition (powered off, not registered), so it reads as a
+        # neutral note. Only a real collection failure is styled as an error - colouring
+        # routine states red trains the reader to ignore red.
+        $note = if ($r.ErrorMessage -and $r.CollectionStatus -eq 'Unreachable') {
+                    '<span class="err">' + (ConvertTo-HtmlSafe -Text $r.ErrorMessage) + '</span>'
+                }
+                elseif ($r.ErrorMessage) {
+                    '<span class="note">' + (ConvertTo-HtmlSafe -Text $r.ErrorMessage) + '</span>'
+                }
                 elseif ($r.InMaintenanceMode) { '<span class="muted">In maintenance mode</span>' }
                 else { '' }
 
-        [void]$sb.AppendLine('<tr>')
+        [void]$sb.AppendLine(('<tr class="row-{0}">' -f $r.OverallStatus))
         [void]$sb.AppendLine(('<td class="name">{0}</td>' -f (ConvertTo-HtmlSafe -Text $r.MachineName)))
         [void]$sb.AppendLine(('<td>{0}</td>' -f (ConvertTo-HtmlSafe -Text $r.DeliveryGroup)))
         [void]$sb.AppendLine(('<td><span class="pill {0}">{0}</span></td>' -f $r.OverallStatus))
@@ -786,3 +801,161 @@ tr:hover td { background:#1c1f25; }
 # Functions are defined above this line. When dot-sourced by the test suite we stop here
 # so that no discovery or collection is attempted.
 if ($LoadFunctionsOnly) { return }
+
+#region Main
+
+$script:StartTime = Get-Date
+
+# Resolve output directory before doing any work, so a bad path fails fast.
+if (-not (Test-Path -LiteralPath $OutputPath)) {
+    try {
+        New-Item -Path $OutputPath -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    }
+    catch {
+        Write-Error "Could not create output directory '$OutputPath': $_"
+        exit 1
+    }
+}
+
+if (-not (Import-CitrixBrokerSdk)) {
+    Write-Error "Citrix Broker SDK not found. Run this from a Delivery Controller or a machine with Citrix Studio / the Citrix PowerShell SDK installed."
+    exit 1
+}
+
+Write-StatusLine -Status INFO -Message "Connecting to Delivery Controller: $DeliveryController"
+
+$scopeLabel = if ($MachineName)          { "Machines: $($MachineName -join ', ')" }
+              elseif ($DesktopGroupName) { "Delivery group: $DesktopGroupName" }
+              elseif ($CatalogName)      { "Catalog: $CatalogName" }
+              else                       { 'All delivery groups' }
+
+try {
+    $inventoryArgs = @{
+        DeliveryController = $DeliveryController
+        MaxRecordCount     = $MaxRecordCount
+    }
+    if ($DesktopGroupName) { $inventoryArgs['DesktopGroupName'] = $DesktopGroupName }
+    if ($CatalogName)      { $inventoryArgs['CatalogName']      = $CatalogName }
+    if ($MachineName)      { $inventoryArgs['MachineName']      = $MachineName }
+
+    $inventory = @(Get-VDAInventory @inventoryArgs)
+}
+catch {
+    Write-Error "Failed to query the Delivery Controller '$DeliveryController': $_"
+    exit 1
+}
+
+if ($inventory.Count -eq 0) {
+    Write-StatusLine -Status WARN -Message "No VDAs found ($scopeLabel). Nothing to report."
+    exit 0
+}
+
+Write-StatusLine -Status INFO -Message ("Discovered {0} VDAs ({1})" -f $inventory.Count, $scopeLabel)
+Write-StatusLine -Status INFO -Message 'Collecting resources (sequential)...'
+
+$thresholds = @{
+    CpuWarn        = $CpuWarnPercent
+    CpuCritical    = $CpuCriticalPercent
+    MemoryWarn     = $MemoryWarnPercent
+    MemoryCritical = $MemoryCriticalPercent
+    DiskWarn       = $DiskWarnPercent
+    DiskCritical   = $DiskCriticalPercent
+}
+
+$results = @()
+$index   = 0
+
+foreach ($machine in $inventory) {
+    $index++
+    $target = if ($machine.DnsName) { $machine.DnsName } else { $machine.MachineName }
+
+    Write-Progress -Activity 'Collecting VDA resources' `
+                   -Status ("{0} ({1} of {2})" -f $target, $index, $inventory.Count) `
+                   -PercentComplete (($index / $inventory.Count) * 100)
+
+    # Skip machines that are off or unregistered - a failed connection to a powered-down
+    # VDA is expected, not a finding worth alarming on.
+    $skipReason = $null
+    if ($machine.PowerState -eq 'Off') {
+        $skipReason = 'Powered off'
+    }
+    elseif (-not $IncludeUnregistered -and $machine.RegistrationState -ne 'Registered') {
+        $skipReason = "Not registered ($($machine.RegistrationState))"
+    }
+
+    if ($skipReason) {
+        $snapshot = [PSCustomObject]@{
+            CpuPercent = $null; MemoryTotalGB = $null; MemoryUsedGB = $null; MemoryFreeGB = $null
+            MemoryUsedPercent = $null; DiskSummary = $null; MaxDiskUsedPercent = $null
+            UptimeDays = $null; CollectionStatus = 'Skipped'; ErrorMessage = $skipReason
+        }
+    }
+    else {
+        $snapArgs = @{
+            ComputerName   = $target
+            TimeoutSeconds = $ConnectionTimeoutSeconds
+        }
+        if ($Credential) { $snapArgs['Credential'] = $Credential }
+
+        $snapshot = Get-VDAResourceSnapshot @snapArgs
+    }
+
+    $row = New-VDAResultRow -Inventory $machine -Snapshot $snapshot -Thresholds $thresholds
+    $results += $row
+
+    switch ($row.CollectionStatus) {
+        'Success' {
+            $line = "{0,-20} CPU {1,4}%  MEM {2,4}%  DISK {3,4}%  up {4}d" -f `
+                    $row.MachineName, $row.CpuPercent, $row.MemoryUsedPercent, $row.MaxDiskUsedPercent, $row.UptimeDays
+            $status = if ($row.OverallStatus -eq 'UNKNOWN') { 'INFO' } else { $row.OverallStatus }
+            Write-StatusLine -Status $status -Message $line
+        }
+        'Unreachable' {
+            Write-StatusLine -Status WARN -Message ("{0,-20} Unreachable - {1}" -f $row.MachineName, $row.ErrorMessage)
+        }
+        'Skipped' {
+            Write-StatusLine -Status INFO -Message ("{0,-20} Skipped - {1}" -f $row.MachineName, $row.ErrorMessage)
+        }
+    }
+}
+
+Write-Progress -Activity 'Collecting VDA resources' -Completed
+
+$collected = @($results | Where-Object { $_.CollectionStatus -eq 'Success' }).Count
+$failed    = @($results | Where-Object { $_.CollectionStatus -eq 'Unreachable' }).Count
+
+Write-StatusLine -Status INFO -Message ("Collected {0} of {1} ({2} unreachable)" -f $collected, $inventory.Count, $failed)
+
+# Write outputs.
+$stamp    = Get-Date -Format 'yyyy-MM-dd_HHmmss'
+$csvPath  = Join-Path $OutputPath "CitrixVDAResources_$stamp.csv"
+$htmlPath = Join-Path $OutputPath "CitrixVDAResources_$stamp.html"
+
+try {
+    $results | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8 -ErrorAction Stop
+    Write-StatusLine -Status PASS -Message "CSV:  $csvPath"
+}
+catch {
+    Write-Error "Failed to write the CSV to '$csvPath': $_"
+    exit 1
+}
+
+try {
+    $html = New-VDAHtmlReport -Rows $results -Scope $scopeLabel -GeneratedAt $script:StartTime -Thresholds $thresholds
+    Set-Content -Path $htmlPath -Value $html -Encoding UTF8 -ErrorAction Stop
+    Write-StatusLine -Status PASS -Message "HTML: $htmlPath"
+}
+catch {
+    Write-Error "Failed to write the HTML report to '$htmlPath': $_"
+    exit 1
+}
+
+if (-not $NoOpen) {
+    try { Start-Process $htmlPath -ErrorAction Stop }
+    catch { Write-Verbose "Could not open the report automatically: $_" }
+}
+
+# Emit the rows so the script composes in a pipeline.
+$results
+
+#endregion
