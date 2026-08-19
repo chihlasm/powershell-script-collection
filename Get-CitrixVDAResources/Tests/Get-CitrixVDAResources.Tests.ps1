@@ -197,3 +197,116 @@ Describe 'Get-UptimeDays' {
         Get-UptimeDays -LastBootUpTime $boot -Now $now | Should -Be 0
     }
 }
+
+Describe 'Get-VDAResourceSnapshot' {
+    BeforeAll {
+        # Get-CimInstance -CimSession is strongly typed to CimSession[], so a PSCustomObject
+        # stub fails parameter binding before the mock is ever consulted. CimSession::Create
+        # builds a correctly typed object without opening a connection, and since
+        # Get-CimInstance is itself mocked no traffic is ever attempted.
+        function New-FakeCimSession {
+            [Microsoft.Management.Infrastructure.CimSession]::Create('pester-fake-host')
+        }
+    }
+
+    It 'returns Success with populated metrics when every query works' {
+        Mock New-CimSession { New-FakeCimSession }
+        Mock Remove-CimSession { }
+        Mock Get-CimInstance {
+            switch ($ClassName) {
+                'Win32_OperatingSystem' {
+                    [PSCustomObject]@{
+                        TotalVisibleMemorySize = 16 * 1024 * 1024
+                        FreePhysicalMemory     = 4 * 1024 * 1024
+                        LastBootUpTime         = (Get-Date).AddDays(-5)
+                    }
+                }
+                'Win32_LogicalDisk' {
+                    [PSCustomObject]@{ DeviceID = 'C:'; Size = 100GB; FreeSpace = 40GB }
+                }
+                'Win32_PerfFormattedData_PerfOS_Processor' {
+                    [PSCustomObject]@{ Name = '_Total'; PercentProcessorTime = 42 }
+                }
+            }
+        }
+
+        $snap = Get-VDAResourceSnapshot -ComputerName 'VDA-0001' -TimeoutSeconds 15
+
+        $snap.CollectionStatus   | Should -Be 'Success'
+        $snap.CpuPercent         | Should -Be 42
+        $snap.MemoryUsedPercent  | Should -Be 75
+        $snap.MaxDiskUsedPercent | Should -Be 60
+        $snap.UptimeDays         | Should -BeGreaterThan 4
+    }
+
+    It 'returns Unreachable with the error message when the session cannot be created' {
+        Mock New-CimSession { throw 'WinRM cannot complete the operation' }
+        Mock Remove-CimSession { }
+
+        $snap = Get-VDAResourceSnapshot -ComputerName 'VDA-DEAD' -TimeoutSeconds 15
+
+        $snap.CollectionStatus | Should -Be 'Unreachable'
+        $snap.ErrorMessage     | Should -Match 'WinRM'
+        $snap.CpuPercent       | Should -BeNullOrEmpty
+    }
+
+    It 'still returns other metrics when only the CPU query fails' {
+        Mock New-CimSession { New-FakeCimSession }
+        Mock Remove-CimSession { }
+        Mock Get-CimInstance {
+            switch ($ClassName) {
+                'Win32_OperatingSystem' {
+                    [PSCustomObject]@{
+                        TotalVisibleMemorySize = 8 * 1024 * 1024
+                        FreePhysicalMemory     = 2 * 1024 * 1024
+                        LastBootUpTime         = (Get-Date).AddDays(-1)
+                    }
+                }
+                'Win32_LogicalDisk' {
+                    [PSCustomObject]@{ DeviceID = 'C:'; Size = 50GB; FreeSpace = 25GB }
+                }
+                'Win32_PerfFormattedData_PerfOS_Processor' { throw 'perf counters unavailable' }
+            }
+        }
+
+        $snap = Get-VDAResourceSnapshot -ComputerName 'VDA-0002' -TimeoutSeconds 15
+
+        $snap.CollectionStatus  | Should -Be 'Success'
+        $snap.CpuPercent        | Should -BeNullOrEmpty
+        $snap.MemoryUsedPercent | Should -Be 75
+    }
+
+    It 'always removes the CIM session even when a query throws' {
+        Mock New-CimSession { New-FakeCimSession }
+        Mock Remove-CimSession { }
+        Mock Get-CimInstance { throw 'boom' }
+
+        Get-VDAResourceSnapshot -ComputerName 'VDA-0003' -TimeoutSeconds 15 | Out-Null
+
+        Should -Invoke Remove-CimSession -Times 1
+    }
+
+    It 'filters to fixed disks only using DriveType 3' {
+        Mock New-CimSession { New-FakeCimSession }
+        Mock Remove-CimSession { }
+        Mock Get-CimInstance {
+            switch ($ClassName) {
+                'Win32_OperatingSystem' {
+                    [PSCustomObject]@{
+                        TotalVisibleMemorySize = 8 * 1024 * 1024
+                        FreePhysicalMemory     = 4 * 1024 * 1024
+                        LastBootUpTime         = (Get-Date).AddDays(-1)
+                    }
+                }
+                'Win32_LogicalDisk' { [PSCustomObject]@{ DeviceID = 'C:'; Size = 50GB; FreeSpace = 25GB } }
+                'Win32_PerfFormattedData_PerfOS_Processor' { [PSCustomObject]@{ Name = '_Total'; PercentProcessorTime = 10 } }
+            }
+        }
+
+        Get-VDAResourceSnapshot -ComputerName 'VDA-0004' -TimeoutSeconds 15 | Out-Null
+
+        Should -Invoke Get-CimInstance -Times 1 -ParameterFilter {
+            $ClassName -eq 'Win32_LogicalDisk' -and $Filter -match 'DriveType\s*=\s*3'
+        }
+    }
+}
