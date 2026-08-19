@@ -187,6 +187,56 @@ function Write-StatusLine {
 
 #endregion
 
+#region Analysis
+
+function Get-ResourceStatus {
+    <#
+    .SYNOPSIS
+        Classifies a percentage against warn and critical thresholds.
+    .DESCRIPTION
+        Thresholds are inclusive: a value exactly at WarnAt is a warning, and exactly at
+        CriticalAt is a failure. A null value means the metric could not be collected and
+        returns UNKNOWN rather than a misleading PASS.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [System.Nullable[double]]$Value,
+
+        [Parameter(Mandatory = $true)]
+        [int]$WarnAt,
+
+        [Parameter(Mandatory = $true)]
+        [int]$CriticalAt
+    )
+
+    if ($null -eq $Value) { return 'UNKNOWN' }
+    if ($Value -ge $CriticalAt) { return 'FAIL' }
+    if ($Value -ge $WarnAt) { return 'WARN' }
+    return 'PASS'
+}
+
+function Get-WorstStatus {
+    <#
+    .SYNOPSIS
+        Returns the most severe status from a set, so one bad metric drives the row.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]]$Statuses
+    )
+
+    if ($Statuses -contains 'FAIL') { return 'FAIL' }
+    if ($Statuses -contains 'WARN') { return 'WARN' }
+    if ($Statuses -contains 'PASS') { return 'PASS' }
+    return 'UNKNOWN'
+}
+
+#endregion
+
 # Functions are defined above this line. When dot-sourced by the test suite we stop here
 # so that no discovery or collection is attempted.
 if ($LoadFunctionsOnly) { return }
