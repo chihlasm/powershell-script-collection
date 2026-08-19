@@ -333,6 +333,100 @@ function Get-VDAInventory {
 
 #endregion
 
+#region Metrics
+
+function ConvertTo-MemoryMetrics {
+    <#
+    .SYNOPSIS
+        Converts Win32_OperatingSystem memory values into GB and a used percentage.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [double]$TotalKb,
+
+        [Parameter(Mandatory = $true)]
+        [double]$FreeKb
+    )
+
+    # TotalVisibleMemorySize and FreePhysicalMemory carry a Units qualifier of "kilobytes",
+    # NOT bytes. Win32_LogicalDisk in the same script reports bytes - the two are different
+    # and must not share a conversion.
+    # https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-operatingsystem
+    $totalGB = [math]::Round(($TotalKb * 1KB) / 1GB, 2)
+    $freeGB  = [math]::Round(($FreeKb * 1KB) / 1GB, 2)
+    $usedGB  = [math]::Round($totalGB - $freeGB, 2)
+
+    $usedPercent = $null
+    if ($TotalKb -gt 0) {
+        $usedPercent = [math]::Round((($TotalKb - $FreeKb) / $TotalKb) * 100, 1)
+    }
+
+    [PSCustomObject]@{
+        TotalGB     = $totalGB
+        UsedGB      = $usedGB
+        FreeGB      = $freeGB
+        UsedPercent = $usedPercent
+    }
+}
+
+function ConvertTo-DiskMetrics {
+    <#
+    .SYNOPSIS
+        Summarizes fixed disks and returns the worst used percentage across them.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$Disks
+    )
+
+    $parts    = @()
+    $maxUsed  = $null
+
+    foreach ($disk in $Disks) {
+        # Size and FreeSpace carry a units qualifier of "bytes".
+        # https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-logicaldisk
+        if (-not $disk.Size -or $disk.Size -le 0) { continue }
+
+        $totalGB = [math]::Round($disk.Size / 1GB, 1)
+        $freeGB  = [math]::Round($disk.FreeSpace / 1GB, 1)
+        $usedGB  = [math]::Round($totalGB - $freeGB, 1)
+        $pct     = [math]::Round((($disk.Size - $disk.FreeSpace) / $disk.Size) * 100, 1)
+
+        $parts += "{0} {1}/{2}GB ({3}%)" -f $disk.DeviceID, $usedGB, $totalGB, $pct
+
+        if ($null -eq $maxUsed -or $pct -gt $maxUsed) { $maxUsed = $pct }
+    }
+
+    [PSCustomObject]@{
+        Summary        = ($parts -join '; ')
+        MaxUsedPercent = $maxUsed
+    }
+}
+
+function Get-UptimeDays {
+    <#
+    .SYNOPSIS
+        Days since last boot, floored at zero so clock skew never yields a negative.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [datetime]$LastBootUpTime,
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$Now
+    )
+
+    $days = ($Now - $LastBootUpTime).TotalDays
+    if ($days -lt 0) { return 0 }
+    return [math]::Round($days, 1)
+}
+
+#endregion
+
 # Functions are defined above this line. When dot-sourced by the test suite we stop here
 # so that no discovery or collection is attempted.
 if ($LoadFunctionsOnly) { return }
