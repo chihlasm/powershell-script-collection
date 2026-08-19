@@ -582,6 +582,207 @@ function New-VDAResultRow {
 
 #endregion
 
+#region Reporting
+
+function ConvertTo-HtmlSafe {
+    <#
+    .SYNOPSIS
+        Escapes text for safe inclusion in HTML. Machine names come from AD and can
+        contain characters that would otherwise corrupt the document.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Text
+    )
+
+    if ([string]::IsNullOrEmpty($Text)) { return '' }
+
+    # Ampersand first, or it would double-escape the entities added after it.
+    return $Text.Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;').Replace('"', '&quot;')
+}
+
+function New-VDABarSvg {
+    <#
+    .SYNOPSIS
+        Builds one inline SVG horizontal bar for a single metric.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [System.Nullable[double]]$Percent,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Status
+    )
+
+    $fill = switch ($Status) {
+        'PASS'    { '#4a9d5f' }
+        'WARN'    { '#d1a144' }
+        'FAIL'    { '#c8503f' }
+        default   { '#4a5058' }
+    }
+
+    if ($null -eq $Percent) {
+        return '<svg class="bar" viewBox="0 0 100 12" preserveAspectRatio="none"><rect x="0" y="0" width="100" height="12" fill="#2a2e35"/></svg>'
+    }
+
+    $width = [math]::Min([math]::Max($Percent, 0), 100)
+
+    return ('<svg class="bar" viewBox="0 0 100 12" preserveAspectRatio="none">' +
+            '<rect x="0" y="0" width="100" height="12" fill="#2a2e35"/>' +
+            ('<rect x="0" y="0" width="{0}" height="12" fill="{1}"/>' -f $width, $fill) +
+            '</svg>')
+}
+
+function New-VDAHtmlReport {
+    <#
+    .SYNOPSIS
+        Builds the complete self-contained HTML report as a string.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$Rows,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Scope,
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$GeneratedAt,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Thresholds
+    )
+
+    $total       = $Rows.Count
+    $unreachable = @($Rows | Where-Object { $_.CollectionStatus -eq 'Unreachable' }).Count
+    $skipped     = @($Rows | Where-Object { $_.CollectionStatus -eq 'Skipped' }).Count
+    $critical    = @($Rows | Where-Object { $_.OverallStatus -eq 'FAIL' }).Count
+    $warning     = @($Rows | Where-Object { $_.OverallStatus -eq 'WARN' }).Count
+    $healthy     = @($Rows | Where-Object { $_.OverallStatus -eq 'PASS' }).Count
+
+    $cpuValues = @($Rows | Where-Object { $null -ne $_.CpuPercent } | ForEach-Object { $_.CpuPercent })
+    $memValues = @($Rows | Where-Object { $null -ne $_.MemoryUsedPercent } | ForEach-Object { $_.MemoryUsedPercent })
+
+    $avgCpu = if ($cpuValues.Count -gt 0) { [math]::Round(($cpuValues | Measure-Object -Average).Average, 1) } else { 0 }
+    $avgMem = if ($memValues.Count -gt 0) { [math]::Round(($memValues | Measure-Object -Average).Average, 1) } else { 0 }
+
+    # Worst machines first - the ones that need attention lead the report.
+    $statusRank = @{ 'FAIL' = 0; 'WARN' = 1; 'UNKNOWN' = 2; 'PASS' = 3 }
+    $sorted = $Rows | Sort-Object -Property @{ Expression = { $statusRank[$_.OverallStatus] } },
+                                            @{ Expression = { if ($null -eq $_.MemoryUsedPercent) { -1 } else { $_.MemoryUsedPercent } }; Descending = $true }
+
+    $sb = New-Object System.Text.StringBuilder
+
+    [void]$sb.AppendLine('<!DOCTYPE html>')
+    [void]$sb.AppendLine('<html lang="en"><head><meta charset="utf-8">')
+    [void]$sb.AppendLine('<meta name="viewport" content="width=device-width, initial-scale=1">')
+    [void]$sb.AppendLine('<title>Citrix VDA Resource Report</title>')
+    [void]$sb.AppendLine(@'
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin:0; padding:32px; background:#16181d; color:#e6e8eb;
+       font-family:"Segoe UI",system-ui,-apple-system,sans-serif; font-size:14px; line-height:1.5; }
+h1 { margin:0 0 4px; font-size:26px; font-weight:650; letter-spacing:-0.02em; }
+h2 { margin:36px 0 12px; font-size:15px; font-weight:650; text-transform:uppercase;
+     letter-spacing:0.08em; color:#9aa3ad; }
+.sub { color:#9aa3ad; font-size:13px; margin-bottom:28px; }
+.cards { display:flex; flex-wrap:wrap; gap:12px; margin-bottom:8px; }
+.card { background:#1e2127; border:1px solid #2a2e35; border-left:3px solid #5dade2;
+        border-radius:4px; padding:14px 18px; min-width:130px; }
+.card .n { font-size:26px; font-weight:650; letter-spacing:-0.02em; }
+.card .l { font-size:11px; text-transform:uppercase; letter-spacing:0.07em; color:#9aa3ad; margin-top:2px; }
+.card.fail { border-left-color:#c8503f; }
+.card.warn { border-left-color:#d1a144; }
+.card.pass { border-left-color:#4a9d5f; }
+.card.unkn { border-left-color:#6b7280; }
+.wrap { overflow-x:auto; border:1px solid #2a2e35; border-radius:4px; }
+table { border-collapse:collapse; width:100%; min-width:900px; }
+th { background:#1e2127; text-align:left; padding:10px 12px; font-size:11px;
+     text-transform:uppercase; letter-spacing:0.07em; color:#9aa3ad;
+     border-bottom:1px solid #2a2e35; white-space:nowrap; }
+td { padding:9px 12px; border-bottom:1px solid #23262c; vertical-align:middle; }
+tr:last-child td { border-bottom:none; }
+tr:hover td { background:#1c1f25; }
+.mono { font-variant-numeric:tabular-nums; }
+.name { font-weight:600; }
+.bar { width:88px; height:12px; border-radius:2px; display:block; }
+.metric { display:flex; align-items:center; gap:9px; }
+.pill { display:inline-block; padding:2px 8px; border-radius:3px; font-size:11px;
+        font-weight:650; letter-spacing:0.04em; }
+.pill.PASS { background:#1c3b26; color:#7ed99a; }
+.pill.WARN { background:#3d3218; color:#e8c37a; }
+.pill.FAIL { background:#3d1f1a; color:#f0918a; }
+.pill.UNKNOWN { background:#2a2e35; color:#9aa3ad; }
+.err { color:#f0918a; font-size:12px; }
+.muted { color:#6b7280; }
+.legend { color:#9aa3ad; font-size:12px; margin:10px 0 0; }
+</style>
+'@)
+    [void]$sb.AppendLine('</head><body>')
+
+    [void]$sb.AppendLine('<h1>Citrix VDA Resource Report</h1>')
+    [void]$sb.AppendLine(('<div class="sub">{0} &middot; generated {1}</div>' -f
+        (ConvertTo-HtmlSafe -Text $Scope), $GeneratedAt.ToString('yyyy-MM-dd HH:mm:ss')))
+
+    # Fleet summary.
+    [void]$sb.AppendLine('<div class="cards">')
+    [void]$sb.AppendLine(('<div class="card"><div class="n">{0}</div><div class="l">VDAs found</div></div>' -f $total))
+    [void]$sb.AppendLine(('<div class="card pass"><div class="n">{0}</div><div class="l">Healthy</div></div>' -f $healthy))
+    [void]$sb.AppendLine(('<div class="card warn"><div class="n">{0}</div><div class="l">Needs attention</div></div>' -f $warning))
+    [void]$sb.AppendLine(('<div class="card fail"><div class="n">{0}</div><div class="l">Critical</div></div>' -f $critical))
+    [void]$sb.AppendLine(('<div class="card unkn"><div class="n">{0}</div><div class="l">Unreachable</div></div>' -f $unreachable))
+    [void]$sb.AppendLine(('<div class="card"><div class="n">{0}%</div><div class="l">Average CPU</div></div>' -f $avgCpu))
+    [void]$sb.AppendLine(('<div class="card"><div class="n">{0}%</div><div class="l">Average memory</div></div>' -f $avgMem))
+    [void]$sb.AppendLine('</div>')
+
+    if ($unreachable -gt 0 -or $skipped -gt 0) {
+        [void]$sb.AppendLine(('<p class="legend">{0} machine(s) could not be contacted and {1} were skipped. They are listed below with no resource figures - treat them as unknown, not healthy.</p>' -f $unreachable, $skipped))
+    }
+
+    # Detail table.
+    [void]$sb.AppendLine('<h2>Machines &mdash; most in need of attention first</h2>')
+    [void]$sb.AppendLine('<div class="wrap"><table>')
+    [void]$sb.AppendLine('<thead><tr><th>Machine</th><th>Delivery group</th><th>Status</th><th>CPU in use</th><th>Memory in use</th><th>Disk in use</th><th>Sessions</th><th>Up (days)</th><th>Notes</th></tr></thead><tbody>')
+
+    foreach ($r in $sorted) {
+        $cpuText  = if ($null -eq $r.CpuPercent)         { '<span class="muted">n/a</span>' } else { ('{0}%' -f $r.CpuPercent) }
+        $memText  = if ($null -eq $r.MemoryUsedPercent)  { '<span class="muted">n/a</span>' } else { ('{0}% of {1} GB' -f $r.MemoryUsedPercent, $r.MemoryTotalGB) }
+        $diskText = if ($null -eq $r.MaxDiskUsedPercent) { '<span class="muted">n/a</span>' } else { ('{0}%' -f $r.MaxDiskUsedPercent) }
+        $upText   = if ($null -eq $r.UptimeDays)         { '<span class="muted">n/a</span>' } else { $r.UptimeDays }
+
+        $note = if ($r.ErrorMessage) { '<span class="err">' + (ConvertTo-HtmlSafe -Text $r.ErrorMessage) + '</span>' }
+                elseif ($r.InMaintenanceMode) { '<span class="muted">In maintenance mode</span>' }
+                else { '' }
+
+        [void]$sb.AppendLine('<tr>')
+        [void]$sb.AppendLine(('<td class="name">{0}</td>' -f (ConvertTo-HtmlSafe -Text $r.MachineName)))
+        [void]$sb.AppendLine(('<td>{0}</td>' -f (ConvertTo-HtmlSafe -Text $r.DeliveryGroup)))
+        [void]$sb.AppendLine(('<td><span class="pill {0}">{0}</span></td>' -f $r.OverallStatus))
+        [void]$sb.AppendLine(('<td><div class="metric">{0}<span class="mono">{1}</span></div></td>' -f (New-VDABarSvg -Percent $r.CpuPercent -Status $r.CpuStatus), $cpuText))
+        [void]$sb.AppendLine(('<td><div class="metric">{0}<span class="mono">{1}</span></div></td>' -f (New-VDABarSvg -Percent $r.MemoryUsedPercent -Status $r.MemoryStatus), $memText))
+        [void]$sb.AppendLine(('<td><div class="metric">{0}<span class="mono">{1}</span></div></td>' -f (New-VDABarSvg -Percent $r.MaxDiskUsedPercent -Status $r.DiskStatus), $diskText))
+        [void]$sb.AppendLine(('<td class="mono">{0}</td>' -f $r.SessionCount))
+        [void]$sb.AppendLine(('<td class="mono">{0}</td>' -f $upText))
+        [void]$sb.AppendLine(('<td>{0}</td>' -f $note))
+        [void]$sb.AppendLine('</tr>')
+    }
+
+    [void]$sb.AppendLine('</tbody></table></div>')
+    [void]$sb.AppendLine(('<p class="legend">Amber from {0}% in use, red from {1}% in use.</p>' -f $Thresholds.MemoryWarn, $Thresholds.MemoryCritical))
+    [void]$sb.AppendLine('</body></html>')
+
+    return $sb.ToString()
+}
+
+#endregion
+
 # Functions are defined above this line. When dot-sourced by the test suite we stop here
 # so that no discovery or collection is attempted.
 if ($LoadFunctionsOnly) { return }
