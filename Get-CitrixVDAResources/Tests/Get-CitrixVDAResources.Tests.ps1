@@ -310,3 +310,80 @@ Describe 'Get-VDAResourceSnapshot' {
         }
     }
 }
+
+Describe 'New-VDAResultRow' {
+    BeforeAll {
+        $script:Thresholds = @{
+            CpuWarn = 80; CpuCritical = 90
+            MemoryWarn = 80; MemoryCritical = 90
+            DiskWarn = 80; DiskCritical = 90
+        }
+
+        $script:Inv = [PSCustomObject]@{
+            MachineName       = 'CONTOSO\VDA-0001'
+            DnsName           = 'vda-0001.contoso.local'
+            CatalogName       = 'Win2019'
+            DeliveryGroup     = 'Finance'
+            RegistrationState = 'Registered'
+            InMaintenanceMode = $false
+            LoadIndex         = 3200
+            SessionCount      = 7
+            PowerState        = 'On'
+        }
+    }
+
+    It 'carries broker fields onto the row' {
+        $snap = [PSCustomObject]@{
+            CpuPercent = 10; MemoryTotalGB = 16; MemoryUsedGB = 4; MemoryFreeGB = 12
+            MemoryUsedPercent = 25; DiskSummary = 'C: 30/100GB (30%)'; MaxDiskUsedPercent = 30
+            UptimeDays = 5; CollectionStatus = 'Success'; ErrorMessage = $null
+        }
+
+        $row = New-VDAResultRow -Inventory $script:Inv -Snapshot $snap -Thresholds $script:Thresholds
+
+        $row.MachineName   | Should -Be 'CONTOSO\VDA-0001'
+        $row.DeliveryGroup | Should -Be 'Finance'
+        $row.SessionCount  | Should -Be 7
+        $row.OverallStatus | Should -Be 'PASS'
+    }
+
+    It 'escalates OverallStatus to FAIL when memory is critical' {
+        $snap = [PSCustomObject]@{
+            CpuPercent = 10; MemoryTotalGB = 16; MemoryUsedGB = 15; MemoryFreeGB = 1
+            MemoryUsedPercent = 94; DiskSummary = 'C: 30/100GB (30%)'; MaxDiskUsedPercent = 30
+            UptimeDays = 5; CollectionStatus = 'Success'; ErrorMessage = $null
+        }
+
+        $row = New-VDAResultRow -Inventory $script:Inv -Snapshot $snap -Thresholds $script:Thresholds
+
+        $row.MemoryStatus  | Should -Be 'FAIL'
+        $row.OverallStatus | Should -Be 'FAIL'
+    }
+
+    It 'produces a row for an unreachable machine rather than dropping it' {
+        $snap = [PSCustomObject]@{
+            CpuPercent = $null; MemoryTotalGB = $null; MemoryUsedGB = $null; MemoryFreeGB = $null
+            MemoryUsedPercent = $null; DiskSummary = $null; MaxDiskUsedPercent = $null
+            UptimeDays = $null; CollectionStatus = 'Unreachable'; ErrorMessage = 'WinRM timed out'
+        }
+
+        $row = New-VDAResultRow -Inventory $script:Inv -Snapshot $snap -Thresholds $script:Thresholds
+
+        $row.MachineName      | Should -Be 'CONTOSO\VDA-0001'
+        $row.CollectionStatus | Should -Be 'Unreachable'
+        $row.ErrorMessage     | Should -Be 'WinRM timed out'
+        $row.OverallStatus    | Should -Be 'UNKNOWN'
+    }
+
+    It 'marks a skipped machine as UNKNOWN overall' {
+        $snap = [PSCustomObject]@{
+            CpuPercent = $null; MemoryTotalGB = $null; MemoryUsedGB = $null; MemoryFreeGB = $null
+            MemoryUsedPercent = $null; DiskSummary = $null; MaxDiskUsedPercent = $null
+            UptimeDays = $null; CollectionStatus = 'Skipped'; ErrorMessage = 'Not registered'
+        }
+
+        $row = New-VDAResultRow -Inventory $script:Inv -Snapshot $snap -Thresholds $script:Thresholds
+
+        $row.OverallStatus | Should -Be 'UNKNOWN'
+    }
+}
