@@ -133,3 +133,67 @@ Describe 'Get-VDAInventory' {
         $result.Count | Should -Be 0
     }
 }
+
+Describe 'ConvertTo-MemoryMetrics' {
+    It 'treats input as kilobytes per Win32_OperatingSystem' {
+        # 16 GB total, 4 GB free, expressed in KB as WMI reports it.
+        $m = ConvertTo-MemoryMetrics -TotalKb (16 * 1024 * 1024) -FreeKb (4 * 1024 * 1024)
+
+        $m.TotalGB     | Should -Be 16
+        $m.FreeGB      | Should -Be 4
+        $m.UsedGB      | Should -Be 12
+        $m.UsedPercent | Should -Be 75
+    }
+
+    It 'returns null percent when total is zero rather than dividing by zero' {
+        $m = ConvertTo-MemoryMetrics -TotalKb 0 -FreeKb 0
+        $m.UsedPercent | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'ConvertTo-DiskMetrics' {
+    It 'treats input as bytes per Win32_LogicalDisk and reports the worst drive' {
+        $disks = @(
+            [PSCustomObject]@{ DeviceID = 'C:'; Size = 100GB; FreeSpace = 40GB }  # 60% used
+            [PSCustomObject]@{ DeviceID = 'D:'; Size = 200GB; FreeSpace = 20GB }  # 90% used
+        )
+
+        $d = ConvertTo-DiskMetrics -Disks $disks
+
+        $d.MaxUsedPercent | Should -Be 90
+        $d.Summary        | Should -Match 'C:'
+        $d.Summary        | Should -Match 'D:'
+    }
+
+    It 'ignores a zero-size disk without dividing by zero' {
+        $disks = @(
+            [PSCustomObject]@{ DeviceID = 'C:'; Size = 100GB; FreeSpace = 50GB }
+            [PSCustomObject]@{ DeviceID = 'E:'; Size = 0;     FreeSpace = 0 }
+        )
+
+        $d = ConvertTo-DiskMetrics -Disks $disks
+
+        $d.MaxUsedPercent | Should -Be 50
+    }
+
+    It 'returns null max when there are no disks' {
+        $d = ConvertTo-DiskMetrics -Disks @()
+        $d.MaxUsedPercent | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Get-UptimeDays' {
+    It 'computes whole and fractional days between boot and now' {
+        $boot = [datetime]'2026-08-01 00:00:00'
+        $now  = [datetime]'2026-08-11 12:00:00'
+
+        Get-UptimeDays -LastBootUpTime $boot -Now $now | Should -Be 10.5
+    }
+
+    It 'returns 0 when boot time is in the future rather than a negative number' {
+        $boot = [datetime]'2026-08-20 00:00:00'
+        $now  = [datetime]'2026-08-19 00:00:00'
+
+        Get-UptimeDays -LastBootUpTime $boot -Now $now | Should -Be 0
+    }
+}
