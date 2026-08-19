@@ -387,3 +387,124 @@ Describe 'New-VDAResultRow' {
         $row.OverallStatus | Should -Be 'UNKNOWN'
     }
 }
+
+Describe 'ConvertTo-HtmlSafe' {
+    It 'escapes the characters that would break the document' {
+        ConvertTo-HtmlSafe -Text 'A&B<C>D"E' | Should -Be 'A&amp;B&lt;C&gt;D&quot;E'
+    }
+
+    It 'returns an empty string for null input' {
+        ConvertTo-HtmlSafe -Text $null | Should -Be ''
+    }
+}
+
+Describe 'New-VDAHtmlReport' {
+    BeforeAll {
+        $script:Thresholds = @{
+            CpuWarn = 80; CpuCritical = 90
+            MemoryWarn = 80; MemoryCritical = 90
+            DiskWarn = 80; DiskCritical = 90
+        }
+
+        $script:Rows = @(
+            [PSCustomObject]@{
+                MachineName = 'VDA-0001'; DnsName = 'vda-0001.contoso.local'
+                CatalogName = 'Win2019'; DeliveryGroup = 'Finance'
+                RegistrationState = 'Registered'; InMaintenanceMode = $false
+                LoadIndex = 1000; SessionCount = 3; PowerState = 'On'
+                CpuPercent = 12; CpuStatus = 'PASS'
+                MemoryTotalGB = 16; MemoryUsedGB = 6; MemoryFreeGB = 10
+                MemoryUsedPercent = 38; MemoryStatus = 'PASS'
+                DiskSummary = 'C: 45/120GB (37%)'; MaxDiskUsedPercent = 37; DiskStatus = 'PASS'
+                UptimeDays = 6; CollectionStatus = 'Success'; ErrorMessage = $null
+                OverallStatus = 'PASS'
+            },
+            [PSCustomObject]@{
+                MachineName = 'VDA-0012'; DnsName = 'vda-0012.contoso.local'
+                CatalogName = 'Win2019'; DeliveryGroup = 'Finance'
+                RegistrationState = 'Registered'; InMaintenanceMode = $false
+                LoadIndex = 9000; SessionCount = 22; PowerState = 'On'
+                CpuPercent = 71; CpuStatus = 'PASS'
+                MemoryTotalGB = 16; MemoryUsedGB = 15; MemoryFreeGB = 1
+                MemoryUsedPercent = 94; MemoryStatus = 'FAIL'
+                DiskSummary = 'C: 109/120GB (91%)'; MaxDiskUsedPercent = 91; DiskStatus = 'FAIL'
+                UptimeDays = 118; CollectionStatus = 'Success'; ErrorMessage = $null
+                OverallStatus = 'FAIL'
+            },
+            [PSCustomObject]@{
+                MachineName = 'VDA-0019'; DnsName = 'vda-0019.contoso.local'
+                CatalogName = 'Win2019'; DeliveryGroup = 'Finance'
+                RegistrationState = 'Registered'; InMaintenanceMode = $false
+                LoadIndex = 0; SessionCount = 0; PowerState = 'On'
+                CpuPercent = $null; CpuStatus = 'UNKNOWN'
+                MemoryTotalGB = $null; MemoryUsedGB = $null; MemoryFreeGB = $null
+                MemoryUsedPercent = $null; MemoryStatus = 'UNKNOWN'
+                DiskSummary = $null; MaxDiskUsedPercent = $null; DiskStatus = 'UNKNOWN'
+                UptimeDays = $null; CollectionStatus = 'Unreachable'
+                ErrorMessage = 'WinRM connection timed out'
+                OverallStatus = 'UNKNOWN'
+            }
+        )
+    }
+
+    It 'produces a complete standalone HTML document' {
+        $html = New-VDAHtmlReport -Rows $script:Rows -Scope 'All delivery groups' -GeneratedAt ([datetime]'2026-08-19 10:14:02') -Thresholds $script:Thresholds
+
+        $html | Should -Match '<!DOCTYPE html>'
+        $html | Should -Match '</html>\s*$'
+    }
+
+    It 'references no external resources so it survives being emailed' {
+        $html = New-VDAHtmlReport -Rows $script:Rows -Scope 'All' -GeneratedAt (Get-Date) -Thresholds $script:Thresholds
+
+        $html | Should -Not -Match 'src="http'
+        $html | Should -Not -Match 'href="http'
+        $html | Should -Not -Match '<script src'
+    }
+
+    It 'includes every machine, unreachable ones included' {
+        $html = New-VDAHtmlReport -Rows $script:Rows -Scope 'All' -GeneratedAt (Get-Date) -Thresholds $script:Thresholds
+
+        $html | Should -Match 'VDA-0001'
+        $html | Should -Match 'VDA-0012'
+        $html | Should -Match 'VDA-0019'
+    }
+
+    It 'surfaces the unreachable count in the summary' {
+        $html = New-VDAHtmlReport -Rows $script:Rows -Scope 'All' -GeneratedAt (Get-Date) -Thresholds $script:Thresholds
+
+        $html | Should -Match 'Unreachable'
+    }
+
+    It 'escapes machine names so an ampersand cannot corrupt the document' {
+        $rows = @(
+            [PSCustomObject]@{
+                MachineName = 'VDA&<01>'; DnsName = 'x'; CatalogName = 'c'; DeliveryGroup = 'd'
+                RegistrationState = 'Registered'; InMaintenanceMode = $false
+                LoadIndex = 0; SessionCount = 0; PowerState = 'On'
+                CpuPercent = 1; CpuStatus = 'PASS'
+                MemoryTotalGB = 8; MemoryUsedGB = 1; MemoryFreeGB = 7
+                MemoryUsedPercent = 12; MemoryStatus = 'PASS'
+                DiskSummary = 'C: 1/10GB (10%)'; MaxDiskUsedPercent = 10; DiskStatus = 'PASS'
+                UptimeDays = 1; CollectionStatus = 'Success'; ErrorMessage = $null
+                OverallStatus = 'PASS'
+            }
+        )
+
+        $html = New-VDAHtmlReport -Rows $rows -Scope 'All' -GeneratedAt (Get-Date) -Thresholds $script:Thresholds
+
+        $html | Should -Match 'VDA&amp;&lt;01&gt;'
+        $html | Should -Not -Match 'VDA&<01>'
+    }
+
+    It 'sorts the chart worst-first so problem machines lead' {
+        $html = New-VDAHtmlReport -Rows $script:Rows -Scope 'All' -GeneratedAt (Get-Date) -Thresholds $script:Thresholds
+
+        # VDA-0012 is the worst machine and must appear before the healthy VDA-0001.
+        $html.IndexOf('VDA-0012') | Should -BeLessThan $html.IndexOf('VDA-0001')
+    }
+
+    It 'handles an empty row set without throwing' {
+        { New-VDAHtmlReport -Rows @() -Scope 'All' -GeneratedAt (Get-Date) -Thresholds $script:Thresholds } | Should -Not -Throw
+    }
+}
