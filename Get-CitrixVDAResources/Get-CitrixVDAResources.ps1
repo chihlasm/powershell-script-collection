@@ -237,6 +237,102 @@ function Get-WorstStatus {
 
 #endregion
 
+#region Discovery
+
+function Import-CitrixBrokerSdk {
+    <#
+    .SYNOPSIS
+        Loads the Citrix Broker SDK, trying the legacy PSSnapin before the module.
+    .DESCRIPTION
+        Loaded at runtime rather than via #Requires -Modules, because #Requires blocks
+        execution before the script starts on servers where the SDK is present but not
+        formally registered.
+    #>
+    [CmdletBinding()]
+    param()
+
+    if (Get-Command Get-BrokerMachine -ErrorAction SilentlyContinue) {
+        return $true
+    }
+
+    try {
+        Add-PSSnapin Citrix.Broker.Admin.V2 -ErrorAction Stop
+        return $true
+    }
+    catch {
+        Write-Verbose "PSSnapin Citrix.Broker.Admin.V2 unavailable: $_"
+    }
+
+    try {
+        Import-Module Citrix.Broker.Admin.V2 -ErrorAction Stop
+        return $true
+    }
+    catch {
+        Write-Verbose "Module Citrix.Broker.Admin.V2 unavailable: $_"
+    }
+
+    return $false
+}
+
+function Get-VDAInventory {
+    <#
+    .SYNOPSIS
+        Queries the Delivery Controller for VDAs and normalizes the broker fields.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DeliveryController,
+
+        [Parameter(Mandatory = $false)]
+        [string]$DesktopGroupName,
+
+        [Parameter(Mandatory = $false)]
+        [string]$CatalogName,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$MachineName,
+
+        [Parameter(Mandatory = $true)]
+        [int]$MaxRecordCount
+    )
+
+    # Citrix Broker cmdlets return only the first 250 records when -MaxRecordCount is not
+    # supplied; they emit a warning rather than an error. On a fleet larger than 250 VDAs
+    # that silently under-reports while the output still looks complete, so the parameter
+    # is always passed explicitly.
+    # https://developer-docs.citrix.com/en-us/citrix-virtual-apps-desktops-sdk/2511/Broker/about_Broker_Filtering.html
+    $brokerArgs = @{
+        AdminAddress   = $DeliveryController
+        MaxRecordCount = $MaxRecordCount
+        ErrorAction    = 'Stop'
+    }
+
+    if ($MachineName)      { $brokerArgs['MachineName']      = $MachineName }
+    if ($DesktopGroupName) { $brokerArgs['DesktopGroupName'] = $DesktopGroupName }
+    if ($CatalogName)      { $brokerArgs['CatalogName']      = $CatalogName }
+
+    $machines = Get-BrokerMachine @brokerArgs
+
+    foreach ($m in $machines) {
+        # Property names verified against the Citrix SDK reference:
+        # https://developer-docs.citrix.com/en-us/citrix-virtual-apps-desktops-sdk/2407/Broker/Get-BrokerMachine.html
+        [PSCustomObject]@{
+            MachineName       = $m.MachineName
+            DnsName           = $m.DNSName
+            CatalogName       = $m.CatalogName
+            DeliveryGroup     = $m.DesktopGroupName
+            RegistrationState = $m.RegistrationState
+            InMaintenanceMode = $m.InMaintenanceMode
+            LoadIndex         = $m.LoadIndex
+            SessionCount      = $m.SessionCount
+            PowerState        = $m.PowerState
+        }
+    }
+}
+
+#endregion
+
 # Functions are defined above this line. When dot-sourced by the test suite we stop here
 # so that no discovery or collection is attempted.
 if ($LoadFunctionsOnly) { return }

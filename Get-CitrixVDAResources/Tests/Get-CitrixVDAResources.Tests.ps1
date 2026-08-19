@@ -59,3 +59,77 @@ Describe 'Get-WorstStatus' {
         Get-WorstStatus -Statuses @('UNKNOWN', 'UNKNOWN') | Should -Be 'UNKNOWN'
     }
 }
+
+Describe 'Get-VDAInventory' {
+    BeforeAll {
+        # Get-BrokerMachine only exists on a Delivery Controller. Define a stub so Pester
+        # has a command to mock, then mock it.
+        function Get-BrokerMachine { param($AdminAddress, $DesktopGroupName, $CatalogName, $MachineName, $MaxRecordCount) }
+    }
+
+    It 'maps broker properties onto the output schema' {
+        Mock Get-BrokerMachine {
+            [PSCustomObject]@{
+                MachineName       = 'CONTOSO\VDA-0001'
+                DNSName           = 'vda-0001.contoso.local'
+                CatalogName       = 'Win2019 Catalog'
+                DesktopGroupName  = 'Finance Desktops'
+                RegistrationState = 'Registered'
+                InMaintenanceMode = $false
+                LoadIndex         = 3200
+                SessionCount      = 7
+                PowerState        = 'On'
+            }
+        }
+
+        $result = @(Get-VDAInventory -DeliveryController 'DDC01' -MaxRecordCount 1000)
+
+        $result.Count                | Should -Be 1
+        $result[0].MachineName       | Should -Be 'CONTOSO\VDA-0001'
+        $result[0].DnsName           | Should -Be 'vda-0001.contoso.local'
+        $result[0].DeliveryGroup     | Should -Be 'Finance Desktops'
+        $result[0].RegistrationState | Should -Be 'Registered'
+        $result[0].SessionCount      | Should -Be 7
+    }
+
+    It 'always passes MaxRecordCount so the broker does not silently cap at 250' {
+        Mock Get-BrokerMachine { @() }
+
+        Get-VDAInventory -DeliveryController 'DDC01' -MaxRecordCount 5000 | Out-Null
+
+        Should -Invoke Get-BrokerMachine -Times 1 -ParameterFilter {
+            $MaxRecordCount -eq 5000
+        }
+    }
+
+    It 'passes the delivery group filter through when supplied' {
+        Mock Get-BrokerMachine { @() }
+
+        Get-VDAInventory -DeliveryController 'DDC01' -DesktopGroupName 'Finance Desktops' -MaxRecordCount 1000 | Out-Null
+
+        Should -Invoke Get-BrokerMachine -Times 1 -ParameterFilter {
+            $DesktopGroupName -eq 'Finance Desktops'
+        }
+    }
+
+    It 'omits the delivery group filter when not supplied' {
+        # Assert on PSBoundParameters rather than the variable: an unsupplied [string]
+        # parameter binds as an empty string, so a $null check would pass even if the
+        # implementation had wrongly passed the key through.
+        Mock Get-BrokerMachine { @() }
+
+        Get-VDAInventory -DeliveryController 'DDC01' -MaxRecordCount 1000 | Out-Null
+
+        Should -Invoke Get-BrokerMachine -Times 1 -ParameterFilter {
+            -not $PSBoundParameters.ContainsKey('DesktopGroupName')
+        }
+    }
+
+    It 'returns an empty collection when the broker returns nothing' {
+        Mock Get-BrokerMachine { @() }
+
+        $result = @(Get-VDAInventory -DeliveryController 'DDC01' -MaxRecordCount 1000)
+
+        $result.Count | Should -Be 0
+    }
+}
