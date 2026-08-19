@@ -532,6 +532,54 @@ function Get-VDAResourceSnapshot {
     return $result
 }
 
+function New-VDAResultRow {
+    <#
+    .SYNOPSIS
+        Merges an inventory entry with its resource snapshot and applies thresholds.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Inventory,
+
+        [Parameter(Mandatory = $true)]
+        [object]$Snapshot,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Thresholds
+    )
+
+    $cpuStatus  = Get-ResourceStatus -Value $Snapshot.CpuPercent         -WarnAt $Thresholds.CpuWarn    -CriticalAt $Thresholds.CpuCritical
+    $memStatus  = Get-ResourceStatus -Value $Snapshot.MemoryUsedPercent  -WarnAt $Thresholds.MemoryWarn -CriticalAt $Thresholds.MemoryCritical
+    $diskStatus = Get-ResourceStatus -Value $Snapshot.MaxDiskUsedPercent -WarnAt $Thresholds.DiskWarn   -CriticalAt $Thresholds.DiskCritical
+
+    [PSCustomObject]@{
+        MachineName        = $Inventory.MachineName
+        DnsName            = $Inventory.DnsName
+        CatalogName        = $Inventory.CatalogName
+        DeliveryGroup      = $Inventory.DeliveryGroup
+        RegistrationState  = $Inventory.RegistrationState
+        InMaintenanceMode  = $Inventory.InMaintenanceMode
+        LoadIndex          = $Inventory.LoadIndex
+        SessionCount       = $Inventory.SessionCount
+        PowerState         = $Inventory.PowerState
+        CpuPercent         = $Snapshot.CpuPercent
+        CpuStatus          = $cpuStatus
+        MemoryTotalGB      = $Snapshot.MemoryTotalGB
+        MemoryUsedGB       = $Snapshot.MemoryUsedGB
+        MemoryFreeGB       = $Snapshot.MemoryFreeGB
+        MemoryUsedPercent  = $Snapshot.MemoryUsedPercent
+        MemoryStatus       = $memStatus
+        DiskSummary        = $Snapshot.DiskSummary
+        MaxDiskUsedPercent = $Snapshot.MaxDiskUsedPercent
+        DiskStatus         = $diskStatus
+        UptimeDays         = $Snapshot.UptimeDays
+        CollectionStatus   = $Snapshot.CollectionStatus
+        ErrorMessage       = $Snapshot.ErrorMessage
+        OverallStatus      = Get-WorstStatus -Statuses @($cpuStatus, $memStatus, $diskStatus)
+    }
+}
+
 #endregion
 
 # Functions are defined above this line. When dot-sourced by the test suite we stop here
