@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 
 <#
 .SYNOPSIS
@@ -775,7 +775,7 @@ function Get-LockoutVerdict {
         $findings.Add("Found no on-prem lockout or bad-password events in the searched window. Consider widening -DaysBack. If the account is synced with Password Hash Sync (PHS), failed Entra sign-ins may not create matching on-prem bad-password events; investigate Entra ID sign-in logs, Smart Lockout, and SSPR activity.")
         # Still surface an aggressive-policy note if the threshold is low.
         if ($Policy -and $Policy.LockoutThreshold -gt 0 -and $Policy.LockoutThreshold -le 3) {
-            $findings.Add("Lockout policy threshold is $($Policy.LockoutThreshold) — this is an aggressively low threshold; a few stray bad passwords will lock the account.")
+            $findings.Add("Lockout policy threshold is $($Policy.LockoutThreshold) - this is an aggressively low threshold; a few stray bad passwords will lock the account.")
         }
         foreach ($hint in (Get-EntraConnectVerdictHints -Diagnostics $EntraConnectDiagnostics)) {
             $findings.Add($hint)
@@ -791,13 +791,13 @@ function Get-LockoutVerdict {
     if ($callerGroups) {
         $top         = $callerGroups[0]
         $totalCalled = ($callerGroups | Measure-Object -Property Count -Sum).Sum
-        $findings.Add("Most lockouts ($($top.Count) of $totalCalled) originate from caller computer '$($top.Name)' — likely a stale cached credential on that machine (mapped drive, saved password, service, or mobile device).")
+        $findings.Add("Most lockouts ($($top.Count) of $totalCalled) originate from caller computer '$($top.Name)' - likely a stale cached credential on that machine (mapped drive, saved password, service, or mobile device).")
 
         # Varied sources with no clear dominant caller can indicate a credential
         # compromise (a spray/guessing attack) rather than one stale credential.
         if ($callerGroups.Count -ge 4 -and $top.Count -lt ($totalCalled / 2)) {
             $callerNames = (($callerGroups | Select-Object -First 5).Name) -join ', '
-            $findings.Add("Lockouts come from $($callerGroups.Count) different caller computers with no single dominant source ($callerNames ...) — this pattern can indicate a compromised credential or password-guessing attack rather than one stale credential. Consider forcing a password change and reviewing for unexpected sign-ins.")
+            $findings.Add("Lockouts come from $($callerGroups.Count) different caller computers with no single dominant source ($callerNames ...) - this pattern can indicate a compromised credential or password-guessing attack rather than one stale credential. Consider forcing a password change and reviewing for unexpected sign-ins.")
         }
     }
 
@@ -835,7 +835,7 @@ function Get-LockoutVerdict {
                 $plain = if ($logonTypeText.ContainsKey($lt)) { $logonTypeText[$lt] } else { "logon type $lt" }
                 $msg  += " (AD event logon type $lt / $plain)"
             }
-            $msg += " — if the tenant uses Pass-through Authentication (PTA), stale cloud credentials can be validated by the on-prem agent and lock the AD account. Check Entra sign-in logs, PTA agent health, and the clients submitting bad passwords."
+            $msg += " - if the tenant uses Pass-through Authentication (PTA), stale cloud credentials can be validated by the on-prem agent and lock the AD account. Check Entra sign-in logs, PTA agent health, and the clients submitting bad passwords."
         } else {
             $msg = "Most bad-password attempts ($($topSource.Count) of $($BadLogons.Count)) come from '$sourceName'"
             if ($ltGroup) {
@@ -843,14 +843,14 @@ function Get-LockoutVerdict {
                 $plain = if ($logonTypeText.ContainsKey($lt)) { $logonTypeText[$lt] } else { "logon type $lt" }
                 $msg  += " via $plain"
             }
-            $msg += " — check that source for a saved or expired credential."
+            $msg += " - check that source for a saved or expired credential."
         }
         $findings.Add($msg)
     }
 
     # 3) Aggressive policy: low threshold means a few stray bad passwords lock the account.
     if ($Policy -and $Policy.LockoutThreshold -gt 0 -and $Policy.LockoutThreshold -le 3) {
-        $findings.Add("Lockout policy threshold is $($Policy.LockoutThreshold) — this is an aggressively low threshold; a few stray bad passwords will lock the account.")
+        $findings.Add("Lockout policy threshold is $($Policy.LockoutThreshold) - this is an aggressively low threshold; a few stray bad passwords will lock the account.")
     }
 
     foreach ($hint in (Get-EntraConnectVerdictHints -Diagnostics $EntraConnectDiagnostics)) {
@@ -1022,7 +1022,7 @@ function Write-LockoutReport {
         if (($User.pwdLastSet -is [int64] -or $User.pwdLastSet -is [int]) -and [int64]$User.pwdLastSet -gt 0) {
             $pwdLastSet = [datetime]::FromFileTime([int64]$User.pwdLastSet)
         } elseif (($User.pwdLastSet -is [int64] -or $User.pwdLastSet -is [int]) -and [int64]$User.pwdLastSet -eq 0) {
-            # pwdLastSet of 0 means "user must change password at next logon" — directly
+            # pwdLastSet of 0 means "user must change password at next logon" - directly
             # relevant to a reset/lockout investigation, so label it rather than show 1601.
             $pwdLastSet = '0 (user must change password at next logon)'
         } else {

@@ -1,4 +1,4 @@
-BeforeAll {
+﻿BeforeAll {
     . "$PSScriptRoot\..\New-LockoutCaseReport.ps1" -LoadFunctionsOnly
 }
 

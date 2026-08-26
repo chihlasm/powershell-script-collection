@@ -1,4 +1,4 @@
-BeforeAll {
+﻿BeforeAll {
     $script:Orchestrator = "$PSScriptRoot\..\Invoke-ADLockoutInvestigation.ps1"
     $script:Diagnose     = "$PSScriptRoot\..\Diagnose-ADAccountLockout.ps1"
 }

@@ -1,4 +1,4 @@
-BeforeAll {
+﻿BeforeAll {
     . "$PSScriptRoot\..\Set-DCSecurityLogRetention.ps1" -LoadFunctionsOnly
 }
 

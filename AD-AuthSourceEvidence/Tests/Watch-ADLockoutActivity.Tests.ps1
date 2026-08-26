@@ -1,4 +1,4 @@
-BeforeAll {
+﻿BeforeAll {
     . "$PSScriptRoot\..\Watch-ADLockoutActivity.ps1" -LoadFunctionsOnly
 }
 
