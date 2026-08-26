@@ -45,6 +45,10 @@
 param(
     [string]$CaseFolder,
     [string]$OutputPath,
+
+    # The account the investigation focused on, highlighted throughout the combined page.
+    # Optional: a domain-wide survey has no focus account and renders unchanged.
+    [string]$Identity,
     [switch]$PassThru,
     [switch]$LoadFunctionsOnly
 )
@@ -240,6 +244,19 @@ function Get-TabCss {
      combined page's header, so it is suppressed - the tab label already says which
      report this is. */
   .panel .top { display:none; }
+  /* The account under investigation. The domain-wide steps deliberately report on every
+     account, so the focus account needs to be findable at a glance rather than by
+     scanning. Accent-tinted rather than a yellow marker highlight: this is a wayfinding
+     aid, not a warning, and yellow already means "caution" elsewhere in these reports. */
+  .focusbar { display:flex; flex-wrap:wrap; align-items:baseline; gap:6px 14px;
+              background:linear-gradient(90deg, rgba(93,173,226,.14), transparent 70%);
+              border-left:3px solid var(--accent); border-radius:0 8px 8px 0;
+              padding:12px 18px; margin:0 0 26px; font-size:14px; color:var(--ink); }
+  .focusbar strong { color:var(--accent); font-size:15px; letter-spacing:.01em; }
+  .focusbar-note { color:var(--ink-dim); font-size:12.5px; }
+  .focus { background:rgba(93,173,226,.18); color:var(--accent); font-weight:600;
+           border-radius:3px; padding:1px 5px; box-shadow:inset 0 0 0 1px rgba(93,173,226,.35); }
+  @media print { .focus { background:none; box-shadow:none; text-decoration:underline; } }
   .summary-pre { background:var(--surface); border:1px solid var(--line); border-radius:8px;
                  padding:22px 24px; font-family:Consolas,'Cascadia Mono',monospace; font-size:12.5px;
                  line-height:1.65; white-space:pre-wrap; word-break:break-word; color:var(--ink);
@@ -262,6 +279,54 @@ function Get-TabCss {
 '@
 }
 
+function Add-FocusHighlight {
+    # Wraps occurrences of the investigated account in <span class="focus"> so the reader
+    # can find their account in the domain-wide tables without scanning.
+    #
+    # Three constraints make this less trivial than a string replace:
+    #
+    #   1. Only match OUTSIDE tags. Rewriting text inside an attribute (href="/users/jdoe"
+    #      or class="jdoe-row") would corrupt the markup. The split below alternates
+    #      between markup and text, and only text segments are touched.
+    #   2. Only match WHOLE account names. Highlighting 'jdoe' inside 'jdoe2' or
+    #      'bjdoevic' points the technician at the wrong row, which is worse than no
+    #      highlight. The boundary check allows a following '@' so a sAMAccountName still
+    #      matches inside its UPN.
+    #   3. Never throw on odd input. Account names legitimately contain dots and hyphens,
+    #      which are regex metacharacters, so the name is escaped.
+    param(
+        [string]$Html,
+        [string]$Identity
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Html) -or [string]::IsNullOrWhiteSpace($Identity)) {
+        return $Html
+    }
+
+    # An identity may arrive as a UPN or DN; highlight on the leading account name.
+    $name = $Identity.Trim()
+    if ($name -match '^(?<n>[^@\\]+)@') { $name = $Matches['n'] }
+    elseif ($name -match '\\(?<n>[^\\]+)$') { $name = $Matches['n'] }
+    if ([string]::IsNullOrWhiteSpace($name)) { return $Html }
+
+    # (?<![\w.-]) / (?![\w-]) bound the match to a complete name. '@' is deliberately
+    # absent from the trailing class so "jdoe" matches within "jdoe@contoso.com".
+    $pattern = '(?<![\w.-])' + [regex]::Escape($name) + '(?![\w-])'
+    $rx = [regex]::new($pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+
+    # Split into markup and text runs; '<...>' segments keep their original form.
+    $parts = [regex]::Split($Html, '(<[^>]*>)')
+    $sb = [System.Text.StringBuilder]::new()
+    foreach ($part in $parts) {
+        if ($part -like '<*>') {
+            $null = $sb.Append($part)
+        } else {
+            $null = $sb.Append($rx.Replace($part, { param($m) '<span class="focus">' + $m.Value + '</span>' }))
+        }
+    }
+    return $sb.ToString()
+}
+
 function New-CombinedReport {
     <#
     .SYNOPSIS
@@ -277,7 +342,8 @@ function New-CombinedReport {
         [object[]]$Sections,
         [string]$Summary,
         [string]$GeneratedOn,
-        [string]$CaseName
+        [string]$CaseName,
+        [string]$Identity
     )
 
     $ordered = @($Sections | Sort-Object Order, Label)
@@ -298,6 +364,14 @@ function New-CombinedReport {
     $null = $sb.AppendLine('<div class="masthead"><h1>Account Lockout Investigation</h1>')
     $null = $sb.AppendLine(("<div class='facts'><span>{0}</span><span>Generated {1}</span></div></div>" -f `
         (ConvertTo-HtmlSafe $CaseName), (ConvertTo-HtmlSafe $GeneratedOn)))
+
+    # Say plainly which account this is about, and that the surrounding tables are
+    # deliberately domain-wide. Without this the reader sees other accounts in the
+    # results and reasonably wonders whether the filter failed.
+    if (-not [string]::IsNullOrWhiteSpace($Identity)) {
+        $null = $sb.AppendLine(("<div class='focusbar'>Investigating <strong>{0}</strong><span class='focusbar-note'>Highlighted throughout. Other accounts appear because the domain-wide steps are what give this account's evidence meaning.</span></div>" -f `
+            (ConvertTo-HtmlSafe $Identity)))
+    }
 
     $null = $sb.AppendLine('<noscript><p class="ns">JavaScript is disabled, so all sections are shown one after another instead of as tabs. Everything is still here.</p></noscript>')
 
@@ -343,7 +417,7 @@ function New-CombinedReport {
             # SUMMARY.txt is plain text - escaped and preformatted, never parsed as markup.
             $null = $sb.AppendLine(("<pre class='summary-pre'>{0}</pre>" -f (ConvertTo-HtmlSafe $Summary)))
         } else {
-            $null = $sb.AppendLine($t.Body)
+            $null = $sb.AppendLine((Add-FocusHighlight -Html $t.Body -Identity $Identity))
         }
 
         if ($t.Source) {
@@ -446,7 +520,8 @@ if (Test-Path -LiteralPath $summaryPath) {
 $html = New-CombinedReport -Sections @($sections) `
                            -Summary $summary `
                            -GeneratedOn (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') `
-                           -CaseName (Split-Path $CaseFolder -Leaf)
+                           -CaseName (Split-Path $CaseFolder -Leaf) `
+                           -Identity $Identity
 
 if ([string]::IsNullOrWhiteSpace($OutputPath)) { $OutputPath = $CaseFolder }
 if (-not (Test-Path -LiteralPath $OutputPath)) {

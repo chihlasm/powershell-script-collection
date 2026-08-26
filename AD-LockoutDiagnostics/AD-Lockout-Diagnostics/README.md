@@ -1,12 +1,37 @@
-# AD Lockout Diagnostics
+﻿# AD Lockout Diagnostics
 
 ## Start here
+
+```powershell
+.\Start-LockoutWorkbench.ps1
+```
+
+Scans the domain, shows you who is actually locking out, and lets you pick one:
+
+```
+  Accounts locking out (last 7 day(s))
+
+  [ 1]  jdoe                      14 lockouts    12 min ago   LAPTOP-7  << LOCKED NOW
+  [ 2]  asmith                     6 lockouts     5 hr ago    SQLSRV02
+  [ 3]  svc_backup                 4 lockouts     2 days ago  5 different sources
+
+  Enter a number, or type an account name.  [R] rescan   [Q] quit
+```
+
+Pick a number, answer one optional question about Entra Connect, and it runs the full
+investigation. This exists because the toolkit used to require an account name before it
+would tell you anything - and at the start of a ticket, the account name is often exactly
+what you do not have.
+
+If you already know the account, skip the menu:
 
 ```powershell
 .\Invoke-ADLockoutInvestigation.ps1 -Identity jdoe
 ```
 
-One command. It runs the tools below in the right order, **stops if the DCs are not logging lockout events**, and drops everything into a single timestamped case folder with a `SUMMARY.txt` you can attach to a ticket.
+Either route runs the tools below in the right order, **stops if the DCs are not logging lockout events**, and drops everything into a single timestamped case folder with a `SUMMARY.txt` you can attach to a ticket.
+
+When you name an account, the combined report marks it throughout — the domain-wide steps still report on every account, because one account locking out means something different when forty others are too, but you can now see at a glance which rows are yours.
 
 The gate is the point. An empty lockout report and a clean domain look identical — unless something checks whether the events were ever being written. This does that first, and refuses to hand you confident-looking empty reports.
 
@@ -43,6 +68,7 @@ The individual tools remain runnable on their own when you already know what you
 
 | Script                              | Scope                  | Answers                                        |
 |-------------------------------------|------------------------|------------------------------------------------|
+| `Start-LockoutWorkbench.ps1`        | **Menu**               | Scan first, then pick an account. Start here.  |
 | `Invoke-ADLockoutInvestigation.ps1` | **Orchestrator**       | Runs the rest in order; gates on audit policy  |
 | `Test-ADAuditPolicy.ps1`            | Prerequisite check     | Are the DCs even *logging* lockout events?     |
 | `Get-ADLockoutHistory.ps1`          | Domain-wide triage     | *Who* is locking out, and how often?           |
