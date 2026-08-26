@@ -773,7 +773,12 @@ $combinedPath = $null
 $combineScript = Join-Path $scriptRoot 'New-LockoutCaseReport.ps1'
 if (Test-Path -LiteralPath $combineScript) {
     try {
-        $combinedPath = & $combineScript -CaseFolder $caseFolder -PassThru -ErrorAction Stop
+        # -Identity so the combined page marks the account under investigation. The
+        # domain-wide steps report on every account by design, and without this the
+        # reader cannot tell which rows are theirs.
+        $combineArgs = @{ CaseFolder = $caseFolder; PassThru = $true }
+        if ($Identity) { $combineArgs['Identity'] = $Identity }
+        $combinedPath = & $combineScript @combineArgs -ErrorAction Stop
     } catch {
         Write-Status WARN "Could not build the combined report: $($_.Exception.Message)"
     }
