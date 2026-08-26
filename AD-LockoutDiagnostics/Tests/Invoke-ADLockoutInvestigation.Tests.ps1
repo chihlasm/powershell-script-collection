@@ -1,4 +1,4 @@
-BeforeAll {
+﻿BeforeAll {
     . "$PSScriptRoot\..\Invoke-ADLockoutInvestigation.ps1" -LoadFunctionsOnly
     $script:Ref = Import-PowerShellDataFile "$PSScriptRoot\..\LockoutReference.psd1"
 

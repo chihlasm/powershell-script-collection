@@ -1,4 +1,4 @@
-BeforeAll {
+﻿BeforeAll {
     . "$PSScriptRoot\..\Export-ADAuthSourceEvidence.ps1" -LoadFunctionsOnly
 }
 

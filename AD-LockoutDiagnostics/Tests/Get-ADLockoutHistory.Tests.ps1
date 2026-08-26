@@ -1,4 +1,4 @@
-BeforeAll {
+﻿BeforeAll {
     . "$PSScriptRoot\..\Get-ADLockoutHistory.ps1" -LoadFunctionsOnly
 }
 

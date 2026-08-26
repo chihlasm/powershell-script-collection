@@ -1,4 +1,4 @@
-BeforeAll {
+﻿BeforeAll {
     . "$PSScriptRoot\..\Invoke-ADLockoutForensics.ps1" -LoadFunctionsOnly
 }
 

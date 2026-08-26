@@ -1,4 +1,4 @@
-#
+﻿#
 # LockoutReference.psd1
 #
 # Single source of truth for the documented Microsoft facts the lockout tools depend on:

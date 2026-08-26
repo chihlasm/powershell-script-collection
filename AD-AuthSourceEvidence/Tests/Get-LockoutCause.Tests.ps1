@@ -1,4 +1,4 @@
-BeforeAll {
+﻿BeforeAll {
     . "$PSScriptRoot\..\Get-LockoutCause.ps1" -LoadFunctionsOnly
 }
 
