@@ -1,4 +1,5 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
     Runs a complete account lockout investigation in the right order and bundles the
@@ -25,9 +26,23 @@
       3. Get-ADLockoutHistory.ps1        Who is locking out?            (domain-wide)
       4. Diagnose-ADAccountLockout.ps1   Why this account?              (needs -Identity)
       5. Invoke-ADLockoutForensics.ps1   Which DC/forest?               (with -MultiForest)
+      6. Export-ADAuthSourceEvidence.ps1 WHICH MACHINE is sending them? (sibling folder)
+      7. Get-LockoutCause.ps1            WHAT should be fixed?          (analysis only)
 
-    Everything lands in one timestamped case folder with a SUMMARY.txt, ready to attach
-    to a ticket.
+    Steps 6 and 7 close the loop. Steps 1-5 establish that an account is locking out and
+    where the authentication is arriving; step 6 identifies the physical device behind the
+    source address (DHCP lease, MAC vendor, AD computer object); step 7 maps the evidence
+    to Microsoft's documented lockout causes and prints the specific remediation. The top
+    findings are lifted into SUMMARY.txt so the answer is readable without opening a CSV.
+
+    They are found either beside this script (the packaged zip) or in a sibling
+    AD-AuthSourceEvidence folder (the repo), and are skipped with a note if absent.
+
+    Everything lands in one timestamped case folder, and every report is combined into a
+    single tabbed page - "Investigation Report.html" - with the findings on screen when it
+    opens. That is the one file to open; the individual reports remain in numbered
+    subfolders ("1 - Can We Trust This Data", "4 - Which Device", "5 - What To Fix") for
+    anyone who wants a specific one. Ready to attach to a ticket.
 
 .PARAMETER Identity
     Account to investigate. Omit for a domain-wide survey (steps 1-3 only).
@@ -36,8 +51,9 @@
     Search window in days. Default 30.
 
 .PARAMETER OutputPath
-    Parent folder for the case bundle. Defaults to a "Reports" folder beside this script.
-    Each run creates its own timestamped subfolder.
+    Parent folder for the case bundle. Defaults to an "Account Lockout Diagnostics" folder
+    beside this script. Each run creates its own timestamped case subfolder inside it, so
+    repeated investigations accumulate side by side rather than overwriting.
 
 .PARAMETER MultiForest
     Also run Invoke-ADLockoutForensics.ps1, which auto-discovers trusted forests and polls
@@ -50,6 +66,21 @@
 
 .PARAMETER SkipRetentionCheck
     Skip the Security log sizing check.
+
+.PARAMETER EntraConnectServer
+    Optional. Entra Connect / sync server to query for hybrid authentication evidence
+    during the per-account deep dive (step 4). Collects ADSync and Pass-through
+    Authentication agent service state, Password Hash Sync events from the Application
+    log, and PTA agent Admin events.
+
+    Supply this when the locking account is synced to Microsoft Entra ID. Without it,
+    steps 1-7 examine on-premises evidence only, and a lockout driven by a sync server
+    or a PTA agent looks like a lockout with no identifiable source.
+
+.PARAMETER HybridAuthMode
+    Which hybrid sign-in method to weight the Entra Connect evidence toward: Auto
+    (default), PHS, PTA, or Unknown. Auto reports whatever it finds. Only meaningful
+    alongside -EntraConnectServer.
 
 .EXAMPLE
     .\Invoke-ADLockoutInvestigation.ps1
@@ -66,6 +97,11 @@
 .EXAMPLE
     .\Invoke-ADLockoutInvestigation.ps1 -Identity jdoe -Force
     Collects even though auditing is known to be off, to document the gap.
+
+.EXAMPLE
+    .\Invoke-ADLockoutInvestigation.ps1 -Identity jdoe -EntraConnectServer AADCONNECT01
+    Adds hybrid evidence for a Microsoft Entra synced account: sync service state,
+    Password Hash Sync health, and Pass-through Authentication agent activity.
 
 .NOTES
     Read-only. Requires RSAT ActiveDirectory, Security log read rights on the DCs, and
@@ -87,6 +123,11 @@ param(
     [switch]$Force,
 
     [switch]$SkipRetentionCheck,
+
+    [string]$EntraConnectServer,
+
+    [ValidateSet('Auto','PHS','PTA','Unknown')]
+    [string]$HybridAuthMode = 'Auto',
 
     # Internal: dot-source the functions without running the orchestration body.
     [switch]$LoadFunctionsOnly
@@ -174,6 +215,22 @@ function Test-AuditGateResult {
     return $result
 }
 
+function Resolve-CompanionScript {
+    # Finds a companion script whether the tools are laid out as sibling folders (the
+    # repo) or flat in one directory (the distributed zip). Checking beside this script
+    # first means the packaged copy works without any path assumptions.
+    param([Parameter(Mandatory)][string]$FileName, [Parameter(Mandatory)][string]$ScriptRoot)
+
+    foreach ($candidate in @(
+        (Join-Path $ScriptRoot $FileName),
+        (Join-Path $ScriptRoot "AD-AuthSourceEvidence\$FileName"),
+        (Join-Path (Split-Path $ScriptRoot -Parent) "AD-AuthSourceEvidence\$FileName")
+    )) {
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+    return $null
+}
+
 function Invoke-Step {
     # Runs one child script in its own process so a failure inside it cannot terminate the
     # investigation. Returns a step-result row for the summary.
@@ -240,7 +297,8 @@ function New-CaseSummary {
         [object]$Gate,
         [object[]]$Steps,
         [string]$CaseFolder,
-        [string]$GeneratedOn
+        [string]$GeneratedOn,
+        [object[]]$Findings = @()
     )
 
     $sb = New-Object System.Text.StringBuilder
@@ -252,6 +310,34 @@ function New-CaseSummary {
     $null = $sb.AppendLine("Window    : $DaysBack day(s)")
     $null = $sb.AppendLine("Folder    : $CaseFolder")
     $null = $sb.AppendLine()
+
+    # The answer leads. Everything below is the evidence supporting it - a reader who
+    # stops after ten lines should still leave knowing what to go and fix.
+    if (@($Findings).Count -gt 0) {
+        $null = $sb.AppendLine('FINDINGS - MOST LIKELY CAUSES')
+        $null = $sb.AppendLine('-----------------------------')
+        $rank = 0
+        foreach ($f in @($Findings)) {
+            $rank++
+            $null = $sb.AppendLine("  $rank. $($f.Sentence)")
+            if ($f.Confidence) { $null = $sb.AppendLine("     Confidence : $($f.Confidence)") }
+            if ($f.Remediation) {
+                # Wrap the remediation so a long instruction stays readable in Notepad.
+                $text = [string]$f.Remediation
+                $line = '     Fix        : '
+                foreach ($word in ($text -split ' ')) {
+                    if (($line.Length + $word.Length + 1) -gt 96) {
+                        $null = $sb.AppendLine($line)
+                        $line = '                  ' + $word
+                    } else {
+                        $line = if ($line.TrimEnd().EndsWith(':')) { $line + $word } else { $line + ' ' + $word }
+                    }
+                }
+                if ($line.Trim()) { $null = $sb.AppendLine($line) }
+            }
+            $null = $sb.AppendLine()
+        }
+    }
 
     $null = $sb.AppendLine('EVIDENCE QUALITY')
     $null = $sb.AppendLine('----------------')
@@ -293,9 +379,12 @@ function New-CaseSummary {
     $null = $sb.AppendLine('-----------------------------------------')
     $reports = @()
     if ($CaseFolder -and (Test-Path -LiteralPath $CaseFolder)) {
-        $reports = @(Get-ChildItem -LiteralPath $CaseFolder -File -ErrorAction SilentlyContinue |
+        # -Recurse because reports now live in numbered subfolders. Sorting by the
+        # relative path keeps them in investigation order, since the folder names lead
+        # with their step number.
+        $reports = @(Get-ChildItem -LiteralPath $CaseFolder -File -Recurse -ErrorAction SilentlyContinue |
                         Where-Object { $_.Extension -in '.html', '.csv' } |
-                        Sort-Object Name)
+                        Sort-Object FullName)
     }
     if ($reports.Count -eq 0) {
         $null = $sb.AppendLine('  (no reports were produced - see STEPS RUN above)')
@@ -372,8 +461,12 @@ if ($reference) {
 Write-Status INFO "Account: $(if ($Identity) { $Identity } else { '(domain-wide survey)' })  |  Window: $DaysBack day(s)"
 
 # --- Case folder ---
+# Everything from every tool lands under ONE folder, named plainly enough that someone
+# who did not run it can tell what it is. Previously each script wrote to a "Reports"
+# folder beside itself, so a single investigation scattered its output across two
+# directories and a technician had to know which tool wrote what.
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
-    $OutputPath = Join-Path $scriptRoot 'Reports'
+    $OutputPath = Join-Path $scriptRoot 'Account Lockout Diagnostics'
 }
 $stamp = Get-Date -Format 'yyyy-MM-dd_HHmmss'
 $slug  = if ($Identity) { ($Identity -replace '[^a-zA-Z0-9._-]', '_') } else { 'survey' }
@@ -389,7 +482,7 @@ Write-Status INFO "Case folder: $caseFolder"
 $steps = New-Object System.Collections.ArrayList
 
 # --- Step 1: audit policy (the gate) ---
-Write-Status STEP 'STEP 1/5  Audit policy - is anything being logged?'
+Write-Status STEP 'STEP 1/7  Audit policy - is anything being logged?'
 $null = $steps.Add((Invoke-Step -Name 'Audit policy' -CaseFolder $caseFolder `
     -ScriptPath (Join-Path $scriptRoot 'Test-ADAuditPolicy.ps1') `
     -Arguments @{ OutputPath = $caseFolder; Format = 'Both' }))
@@ -435,7 +528,7 @@ if ($gate.Blocking -and -not $Force) {
 
 # --- Step 2: log retention (read-only) ---
 if ($proceed -and -not $SkipRetentionCheck) {
-    Write-Status STEP 'STEP 2/5  Security log retention - how far back can we see?'
+    Write-Status STEP 'STEP 2/7  Security log retention - how far back can we see?'
     $null = $steps.Add((Invoke-Step -Name 'Log retention' -CaseFolder $caseFolder `
         -ScriptPath (Join-Path $scriptRoot 'Set-DCSecurityLogRetention.ps1') `
         -Arguments @{ TargetDays = $DaysBack; OutputPath = $caseFolder }))
@@ -446,7 +539,7 @@ if ($proceed -and -not $SkipRetentionCheck) {
 
 # --- Step 3: domain-wide history ---
 if ($proceed) {
-    Write-Status STEP 'STEP 3/5  Domain-wide lockout history - who is locking out?'
+    Write-Status STEP 'STEP 3/7  Domain-wide lockout history - who is locking out?'
     $null = $steps.Add((Invoke-Step -Name 'Lockout history' -CaseFolder $caseFolder `
         -ScriptPath (Join-Path $scriptRoot 'Get-ADLockoutHistory.ps1') `
         -Arguments @{ DaysBack = $DaysBack; OutputPath = $caseFolder; Format = 'Both' }))
@@ -457,10 +550,23 @@ if ($proceed) {
 
 # --- Step 4: per-account deep dive ---
 if ($proceed -and $Identity) {
-    Write-Status STEP 'STEP 4/5  Per-account deep dive - why this account?'
+    Write-Status STEP 'STEP 4/7  Per-account deep dive - why this account?'
+    $args4 = @{ Identity = $Identity; DaysBack = $DaysBack; OutputPath = $caseFolder }
+
+    # Hybrid evidence is opt-in because it needs a server name we cannot discover
+    # reliably: the Entra Connect server is not marked as such in AD, and guessing wrong
+    # would query an unrelated machine and report its silence as a healthy sync.
+    if ($EntraConnectServer) {
+        Write-Status INFO "Including Entra Connect evidence from $EntraConnectServer (mode: $HybridAuthMode)."
+        $args4['EntraConnectServer'] = $EntraConnectServer
+        $args4['HybridAuthMode']     = $HybridAuthMode
+    } else {
+        Write-Status INFO 'No -EntraConnectServer supplied; hybrid sync evidence will not be collected.'
+    }
+
     $null = $steps.Add((Invoke-Step -Name 'Account diagnostics' -CaseFolder $caseFolder `
         -ScriptPath (Join-Path $scriptRoot 'Diagnose-ADAccountLockout.ps1') `
-        -Arguments @{ Identity = $Identity; DaysBack = $DaysBack; OutputPath = $caseFolder }))
+        -Arguments $args4))
 } else {
     $reason = if (-not $Identity) { 'Skipped - no -Identity supplied' } else { 'Skipped - audit gate' }
     $null = $steps.Add([PSCustomObject]@{ Step='Account diagnostics'; Script='Diagnose-ADAccountLockout.ps1'
@@ -472,7 +578,7 @@ if ($proceed -and $Identity) {
 # which are directory attributes. This is the one step that still produces evidence when
 # auditing is completely disabled.
 if ($MultiForest) {
-    Write-Status STEP 'STEP 5/5  Multi-forest forensics - which DC and forest?'
+    Write-Status STEP 'STEP 5/7  Multi-forest forensics - which DC and forest?'
     if ($gate.Blocking) {
         Write-Status INFO 'Auditing is off, but per-DC counters are directory attributes - this step still works.'
     }
@@ -486,32 +592,172 @@ if ($MultiForest) {
                                           Ran=$false; ExitCode=$null; Error='Skipped - pass -MultiForest to include' })
 }
 
-# --- Put the outputs into reading order ---
-# The child scripts name their own files, so a case folder ends up holding several
-# similarly-named timestamped reports with no indication of which to open first. Prefix
-# them with NN_ so the folder sorts into the order they should be read.
-$order = @(
-    @{ Match = 'ADAuditPolicy';                 Prefix = '01' }
-    @{ Match = 'DCSecurityLogRetention';        Prefix = '02' }
-    @{ Match = 'ADLockoutHistory';              Prefix = '03' }
-    @{ Match = '^ADLockout_';                   Prefix = '04' }   # per-account deep dive
-    @{ Match = 'ADLockoutForensics';            Prefix = '05' }
+# --- Step 6: device identity ---
+# Answers the question the other steps stop short of: WHICH MACHINE is submitting the bad
+# passwords. Lives in a sibling folder because it is an evidence exporter rather than a
+# verdict tool, but it is the step that closes a ticket.
+#
+# Gated on audit policy for the same reason as steps 3 and 4 - it reads 4625/4771/4776/4740.
+$evidenceScript = Resolve-CompanionScript -FileName 'Export-ADAuthSourceEvidence.ps1' -ScriptRoot $scriptRoot
+if (-not $evidenceScript) {
+    $null = $steps.Add([PSCustomObject]@{ Step='Device identity'; Script='Export-ADAuthSourceEvidence.ps1'
+                                          Ran=$false; ExitCode=$null; Error='Skipped - Export-ADAuthSourceEvidence.ps1 not found beside this script or in AD-AuthSourceEvidence' })
+} elseif ($gate.Blocking -and -not $Force) {
+    $null = $steps.Add([PSCustomObject]@{ Step='Device identity'; Script='Export-ADAuthSourceEvidence.ps1'
+                                          Ran=$false; ExitCode=$null; Error='Skipped - audit gate blocking (use -Force to collect anyway)' })
+} else {
+    Write-Status STEP 'STEP 6/7  Device identity - which machine is sending the bad passwords?'
+    # DaysBack is capped at 90 because that is the exporter's documented ceiling; the
+    # investigation default of 30 fits, but a caller may pass more.
+    $args6 = @{ DaysBack = [math]::Min($DaysBack, 90); OutputPath = $caseFolder }
+    $null = $steps.Add((Invoke-Step -Name 'Device identity' -CaseFolder $caseFolder `
+        -ScriptPath $evidenceScript -Arguments $args6))
+}
+
+# --- Step 7: likely cause ---
+# Pure analysis over the CSV step 6 just wrote - no collection, so it cannot fail slowly.
+# This is the step that turns evidence into "here is what to go and fix".
+$causeScript = Resolve-CompanionScript -FileName 'Get-LockoutCause.ps1' -ScriptRoot $scriptRoot
+$sourcesCsv  = Get-ChildItem -Path $caseFolder -Filter 'AuthSources_*.csv' -ErrorAction SilentlyContinue |
+               Sort-Object LastWriteTime -Descending | Select-Object -First 1
+
+if (-not $causeScript) {
+    $null = $steps.Add([PSCustomObject]@{ Step='Likely cause'; Script='Get-LockoutCause.ps1'
+                                          Ran=$false; ExitCode=$null; Error='Skipped - Get-LockoutCause.ps1 not found' })
+} elseif (-not $sourcesCsv) {
+    $null = $steps.Add([PSCustomObject]@{ Step='Likely cause'; Script='Get-LockoutCause.ps1'
+                                          Ran=$false; ExitCode=$null; Error='Skipped - step 6 produced no AuthSources CSV to analyse' })
+} else {
+    Write-Status STEP 'STEP 7/7  Likely cause - what should be fixed?'
+    $null = $steps.Add((Invoke-Step -Name 'Likely cause' -CaseFolder $caseFolder `
+        -ScriptPath $causeScript -Arguments @{ SourcesCsv = $sourcesCsv.FullName; OutputPath = $caseFolder }))
+}
+
+# --- Organize the outputs into a readable case folder ---
+# Child scripts name their own files, so without this a case folder is a flat pile of
+# similarly-named timestamped reports with no indication of what to open first. Files are
+# sorted into numbered subfolders that describe what the step ANSWERED, not which script
+# produced it - a technician opening the folder cold should not need to know the tool
+# names to find their way.
+$layout = @(
+    @{ Match = 'ADAuditPolicy';          Folder = '1 - Can We Trust This Data' }
+    @{ Match = 'DCSecurityLogRetention'; Folder = '1 - Can We Trust This Data' }
+    @{ Match = 'ADLockoutHistory';       Folder = '2 - Who Is Locking Out' }
+    @{ Match = '^ADLockout_';            Folder = '3 - Why This Account' }
+    @{ Match = 'ADLockoutForensics';     Folder = '3 - Why This Account' }
+    @{ Match = 'AuthSources_';           Folder = '4 - Which Device' }
+    @{ Match = 'AuthEvents_';            Folder = '4 - Which Device' }
+    @{ Match = 'LockoutCauses_';         Folder = '5 - What To Fix' }
 )
+
 foreach ($file in @(Get-ChildItem -LiteralPath $caseFolder -File -ErrorAction SilentlyContinue)) {
-    if ($file.Name -match '^\d\d_') { continue }                  # already prefixed
-    if ($file.Extension -notin '.html', '.csv') { continue }      # leave .log and SUMMARY.txt
-    $rule = @($order | Where-Object { $file.Name -match $_.Match }) | Select-Object -First 1
-    if (-not $rule) { continue }
+    # SUMMARY.txt and the per-step .log files stay at the top level: the summary is the
+    # entry point, and the logs are troubleshooting for the run itself rather than
+    # evidence about the lockout.
+    if ($file.Extension -notin '.html', '.csv') { continue }
+
+    $rule = @($layout | Where-Object { $file.Name -match $_.Match }) | Select-Object -First 1
+    $dest = if ($rule) { $rule.Folder } else { 'Other' }
+    $destPath = Join-Path $caseFolder $dest
+
     try {
-        Rename-Item -LiteralPath $file.FullName -NewName ("{0}_{1}" -f $rule.Prefix, $file.Name) -ErrorAction Stop
+        if (-not (Test-Path -LiteralPath $destPath)) {
+            New-Item -ItemType Directory -Path $destPath -Force -ErrorAction Stop | Out-Null
+        }
+        Move-Item -LiteralPath $file.FullName -Destination (Join-Path $destPath $file.Name) -Force -ErrorAction Stop
     } catch {
-        Write-Status WARN "Could not rename $($file.Name): $($_.Exception.Message)"
+        Write-Status WARN "Could not file $($file.Name) into '$dest': $($_.Exception.Message)"
+    }
+}
+
+# A plain-English map of the folder, so the structure explains itself without this README
+# needing to be found elsewhere.
+$readmeLines = @(
+    'ACCOUNT LOCKOUT INVESTIGATION - CASE FOLDER'
+    '==========================================='
+    ''
+    'OPEN "Investigation Report.html" - every report combined into one tabbed page,'
+    'with the findings already on screen. That is the only file you need.'
+    ''
+    'SUMMARY.txt is the same findings as plain text, for pasting into a ticket.'
+    'The folders below hold the individual reports if you want one on its own.'
+    ''
+    'FOLDERS, in the order they answer the investigation:'
+    ''
+    '  1 - Can We Trust This Data'
+    '      Is auditing switched on, and how far back do the logs reach? Read this FIRST'
+    '      if any other report looks empty - an empty report and a clean domain look'
+    '      identical, and this is the only thing that tells them apart.'
+    ''
+    '  2 - Who Is Locking Out'
+    '      Every account that locked out in the window, ranked. Answers "is this one'
+    '      stale service account or a domain-wide problem?"'
+    ''
+    '  3 - Why This Account'
+    '      The per-account deep dive: timeline, source hosts, and which DC/forest saw'
+    '      the bad passwords.'
+    ''
+    '  4 - Which Device'
+    '      The physical machine behind the source addresses - hostname, MAC, hardware'
+    '      vendor, domain membership. AuthSources is the short list to work from;'
+    '      AuthEvents is the raw per-event evidence for pivoting in Excel.'
+    ''
+    '  5 - What To Fix'
+    '      Ranked likely causes with the specific remediation for each. Open the .html'
+    '      first; the .csv is the same data for filtering.'
+    ''
+    '  Other'
+    '      Anything that did not match a known report type.'
+    ''
+    'FILES AT THIS LEVEL:'
+    '  Investigation Report.html   Everything, combined and tabbed. START HERE.'
+    '  SUMMARY.txt                 The findings as plain text, for the ticket.'
+    '  *.log                       Console output per step, for diagnosing the run.'
+    ''
+    'Generated by Invoke-ADLockoutInvestigation.ps1'
+)
+try {
+    Set-Content -Path (Join-Path $caseFolder 'READ ME FIRST.txt') -Value $readmeLines -Encoding UTF8 -ErrorAction Stop
+} catch {
+    Write-Status WARN "Could not write the case folder guide: $($_.Exception.Message)"
+}
+
+# --- Findings for the summary ---
+# Read back the ranked causes step 7 wrote and lift the top few into SUMMARY.txt, so the
+# headline answer is visible without opening a CSV. Best-effort: a missing or unreadable
+# causes file must not cost us the summary.
+$findings = @()
+$causesCsv = Get-ChildItem -Path $caseFolder -Filter '*LockoutCauses_*.csv' -ErrorAction SilentlyContinue |
+             Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if ($causesCsv) {
+    try {
+        $causeRows = @(Import-Csv -LiteralPath $causesCsv.FullName -ErrorAction Stop)
+
+        # One finding per SOURCE (its highest-ranked cause), not one per cause row -
+        # otherwise a single noisy device fills the summary with its own hypotheses.
+        $bySource = $causeRows | Group-Object SourceKey
+        $ranked = foreach ($grp in $bySource) {
+            $top = $grp.Group | Select-Object -First 1
+            [PSCustomObject]@{
+                FailureCount = [int]($top.FailureCount)
+                Sentence     = ('{0} ({1} failures from {2}) - {3}' -f `
+                                 $(if ($top.Accounts) { $top.Accounts } else { 'accounts' }),
+                                 $top.FailureCount,
+                                 $(if ($top.ResolvedName) { "$($top.ResolvedName) [$($top.SourceKey)]" } else { $top.SourceKey }),
+                                 $top.Cause)
+                Confidence   = $top.Confidence
+                Remediation  = $top.Remediation
+            }
+        }
+        $findings = @($ranked | Sort-Object FailureCount -Descending | Select-Object -First 5)
+    } catch {
+        Write-Status WARN "Could not read causes for the summary: $($_.Exception.Message)"
     }
 }
 
 # --- Summary ---
 $summary = New-CaseSummary -Identity $Identity -DaysBack $DaysBack -Gate $gate -Steps $steps `
-    -CaseFolder $caseFolder -GeneratedOn (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+    -CaseFolder $caseFolder -GeneratedOn (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') -Findings $findings
 $summaryPath = Join-Path $caseFolder 'SUMMARY.txt'
 try {
     Set-Content -Path $summaryPath -Value $summary -Encoding UTF8 -ErrorAction Stop
@@ -519,7 +765,29 @@ try {
     Write-Status WARN "Could not write SUMMARY.txt: $($_.Exception.Message)"
 }
 
+# --- Combine everything into one page ---
+# Runs last, after SUMMARY.txt exists, so the findings become the landing tab. This is the
+# file a technician actually opens: the folder of individual reports remains for anyone who
+# wants a specific one, but nobody has to work out which to start with.
+$combinedPath = $null
+$combineScript = Join-Path $scriptRoot 'New-LockoutCaseReport.ps1'
+if (Test-Path -LiteralPath $combineScript) {
+    try {
+        $combinedPath = & $combineScript -CaseFolder $caseFolder -PassThru -ErrorAction Stop
+    } catch {
+        Write-Status WARN "Could not build the combined report: $($_.Exception.Message)"
+    }
+} else {
+    Write-Status WARN 'New-LockoutCaseReport.ps1 not found - individual reports only.'
+}
+
 Write-Host ''
 Write-Host $summary
 Write-Status PASS "Case bundle: $caseFolder"
+if ($combinedPath) {
+    Write-Host ''
+    Write-Host '  OPEN THIS:' -ForegroundColor White
+    Write-Host "  $combinedPath" -ForegroundColor Cyan
+    Write-Host ''
+}
 if ($gate.Blocking -and -not $Force) { exit 2 }

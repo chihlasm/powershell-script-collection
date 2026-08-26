@@ -1,4 +1,5 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
+
 <#
 .SYNOPSIS
     Diagnoses why an Active Directory account keeps locking out and traces the source.
@@ -36,6 +37,28 @@
     Run on a DC or admin box with RSAT. Requires permission to read DC Security logs.
     Optional Entra Connect diagnostics require remote service/CIM and event-log access to
     the sync server.
+
+    REFERENCES
+      Event 4740 (account lockout) - the caller machine is in TargetDomainName; there is
+      no CallerComputerName element despite the Event Viewer label:
+        https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4740
+
+      lockoutTime semantics - a non-zero value does not mean currently locked; AD never
+      clears it on auto-unlock:
+        https://learn.microsoft.com/openspecs/windows_protocols/ms-adts/b80798ae-1f8c-4d30-9d80-a1f3281e96e2
+
+      Password Hash Sync event table (601-668), the "Directory synchronization" source,
+      connectivity events 0/611/652/655, and the three-hour heartbeat check on event 654:
+        https://learn.microsoft.com/entra/identity/hybrid/connect/tshoot-connect-password-hash-synchronization
+
+      Pass-through Authentication agent Admin log channel
+      (Application and Service Logs\Microsoft\AzureAdConnect\AuthenticationAgent\Admin)
+      and the PTA sign-in error codes:
+        https://learn.microsoft.com/entra/identity/hybrid/connect/tshoot-connect-pass-through-authentication
+
+      PTA agent behaviour - agents validate passwords via the Win32 LogonUser API, so
+      failures surface on a DC as ordinary 4625/4771 events sourced from the agent host:
+        https://learn.microsoft.com/entra/identity/hybrid/connect/how-to-connect-pta-quick-start
 #>
 [CmdletBinding()]
 param(
@@ -77,11 +100,25 @@ function ConvertFrom-LockoutEvent {
     $x = [xml]$EventXml
     $d = @{}
     foreach ($node in $x.Event.EventData.Data) { $d[$node.Name] = $node.'#text' }
+    # The caller machine is in TargetDomainName. There is NO CallerComputerName element in
+    # the 4740 event XML, even though Event Viewer displays the value under the label
+    # "Caller Computer Name" - reading that key returns null for every real event, so
+    # every source rendered as "(not recorded)".
+    #
+    # Microsoft's own sample event shows TargetDomainName="WIN81" for an account in the
+    # CONTOSO domain: the field holds the SOURCE WORKSTATION, not the account's domain.
+    # Some producers also emit CallerComputerName, so that key is honored as a fallback
+    # rather than assumed absent.
+    # https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4740
+    $caller = $d['TargetDomainName']
+    if ([string]::IsNullOrWhiteSpace($caller)) { $caller = $d['CallerComputerName'] }
+
     [PSCustomObject]@{
         Time           = [datetime]$x.Event.System.TimeCreated.SystemTime
         User           = $d['TargetUserName']
-        Domain         = $d['TargetDomainName']
-        CallerComputer = $d['CallerComputerName']
+        # The account's own domain is in SubjectDomainName; TargetDomainName is the caller.
+        Domain         = $d['SubjectDomainName']
+        CallerComputer = $caller
         DC             = $DcName
     }
 }
@@ -124,10 +161,62 @@ function ConvertFrom-BadLogonEvent {
         $status     = $d['Status']
     }
 
-    # Normalize loopback / empty source IPs to a readable marker. Leave ::ffff:
-    # mapped addresses untouched.
+    # Normalize the source address for display.
+    #
+    # Windows renders an IPv4 client in IPv4-mapped IPv6 notation, e.g.
+    # "::ffff:192.168.105.128" - Microsoft's own 4771 sample shows this form. The prefix
+    # carries no diagnostic value and makes the address harder to read, copy, or resolve,
+    # so strip it. ::1 and 127.0.0.1 both mean the attempt originated on the DC itself.
+    # https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4771
     if ([string]::IsNullOrEmpty($sourceIp) -or $sourceIp -in @('-', '::1', '127.0.0.1')) {
-        $sourceIp = '(local)'
+        $sourceIp = '(on the DC itself)'
+    } elseif ($sourceIp -match '^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$') {
+        $sourceIp = $Matches[1]
+    }
+
+    # Event 4771 has no workstation field at all - only IpAddress and IpPort. A blank
+    # cell reads as "collection failed"; say plainly that the field does not exist so the
+    # investigator resolves the IP instead of hunting for a missing hostname.
+    if ([string]::IsNullOrWhiteSpace($sourceHost)) {
+        $sourceHost = if ($EventId -eq 4771) { '(4771 records no hostname - resolve the IP)' } else { '(not recorded)' }
+    }
+    if ([string]::IsNullOrWhiteSpace($logonType) -and $EventId -eq 4771) {
+        $logonType = '(n/a for Kerberos)'
+    }
+
+    # Translate the status code. A raw "0x18" tells the reader nothing; the meaning is
+    # what distinguishes a genuine bad password from a clock-skew or policy rejection.
+    # Codes transcribed from the Microsoft Learn tables for 4771 (RFC 4120 KDC errors)
+    # and 4625/4776 (Winlogon errors).
+    $statusText = $status
+    if ($status) {
+        $known = @{
+            '0x0'        = 'Success'
+            '0x6'        = 'Username does not exist'
+            '0xC'        = 'Rejected by KDC policy (logon hours or workstation restriction)'
+            '0x10'       = 'Smart-card / certificate problem'
+            '0x12'       = 'Credentials revoked - disabled, expired, or locked out'
+            '0x17'       = 'Password has expired'
+            '0x18'       = 'Bad password'
+            '0x19'       = 'Additional pre-authentication required'
+            '0x25'       = 'Clock skew too great'
+            '0xC000005E' = 'No logon servers available'
+            '0xC0000064' = 'Username does not exist'
+            '0xC000006A' = 'Bad password'
+            '0xC000006D' = 'Bad username/password, or LAN Manager auth level mismatch'
+            '0xC000006F' = 'Logon outside authorized hours'
+            '0xC0000070' = 'Logon from unauthorized workstation'
+            '0xC0000071' = 'Password expired'
+            '0xC0000072' = 'Account disabled'
+            '0xC000015B' = 'Logon type not granted on that machine'
+            '0xC0000193' = 'Account expired'
+            '0xC0000224' = 'Must change password at next logon'
+            '0xC0000234' = 'Account locked out'
+        }
+        $key = ([string]$status).Trim()
+        $meaning = $known[$key]
+        if (-not $meaning) { $meaning = $known[($key.ToUpper() -replace '^0X', '0x')] }
+        if ($meaning) { $statusText = "$key - $meaning" }
     }
 
     [PSCustomObject]@{
@@ -137,7 +226,7 @@ function ConvertFrom-BadLogonEvent {
         SourceHost = $sourceHost
         SourceIp   = $sourceIp
         LogonType  = $logonType
-        Status     = $status
+        Status     = $statusText
         DC         = $DcName
     }
 }
@@ -158,24 +247,67 @@ function Get-EntraConnectEventClassification {
         }
     }
 
+    # Meanings are quoted from the documented Password Hash Sync event table rather than
+    # paraphrased, so a reader can match a row in the report against the Microsoft page
+    # without translating wording. Two corrections worth naming, because the earlier
+    # paraphrases were confidently wrong:
+    #
+    #   653/654 are "Start of password hash sync ping" and "End of password hash sync
+    #   ping" - NOT "heartbeat observed". 654 is the event the troubleshooting task
+    #   searches for as the heartbeat (logged every 30 minutes while the channel is
+    #   active and no password changes are pending), but that is its role, not its text.
+    #
+    #   650/651 are the start and end of a sync BATCH, not a "cycle".
+    #
+    # Event 0 is not in the table but is named in the manual troubleshooting steps:
+    #   Source: "Directory synchronization"  ID: 0, 611, 652, 655
+    #   "If you see these events, you have a connectivity problem."
+    # It was missing entirely, so the most commonly cited PHS connectivity event fell
+    # through to "Unclassified".
+    # https://learn.microsoft.com/entra/identity/hybrid/connect/tshoot-connect-password-hash-synchronization
     $phsEvents = @{
+        0   = @{ Status = 'Error';   Meaning = 'Password hash sync connectivity problem (documented with 611/652/655 as a connectivity event).' }
         601 = @{ Status = 'Info';    Meaning = 'Password hash sync manager is starting.' }
         602 = @{ Status = 'Info';    Meaning = 'Password hash sync is stopping.' }
-        603 = @{ Status = 'Error';   Meaning = 'Password hash sync encountered an unexpected error.' }
-        604 = @{ Status = 'Error';   Meaning = 'Password hash sync task error occurred.' }
-        605 = @{ Status = 'Warn';    Meaning = 'Password hash sync items were added to the retry queue.' }
-        606 = @{ Status = 'Info';    Meaning = 'Password hash sync items were removed from the retry queue.' }
+        603 = @{ Status = 'Error';   Meaning = 'Password hash sync unexpected error occured.' }
+        604 = @{ Status = 'Error';   Meaning = 'Password hash sync task error occured.' }
+        605 = @{ Status = 'Warn';    Meaning = 'Password hash sync items are added to the retry queue.' }
+        606 = @{ Status = 'Info';    Meaning = 'Password hash sync items are removed from the retry queue.' }
         607 = @{ Status = 'Error';   Meaning = 'Password hash sync is not able to start.' }
         609 = @{ Status = 'Warn';    Meaning = 'Password hash sync has stopped.' }
-        610 = @{ Status = 'Error';   Meaning = 'Password hash sync cannot stop cleanly.' }
+        610 = @{ Status = 'Error';   Meaning = 'Password hash sync cannot stop.' }
         611 = @{ Status = 'Error';   Meaning = 'Error during password hash sync for a domain.' }
         612 = @{ Status = 'Error';   Meaning = 'Error initializing a password hash sync context.' }
-        650 = @{ Status = 'Info';    Meaning = 'Password hash sync cycle started.' }
-        651 = @{ Status = 'Info';    Meaning = 'Password hash sync cycle completed.' }
+        613 = @{ Status = 'Warn';    Meaning = 'Password hash sync agent has paused because directory full sync has not yet completed.' }
+        614 = @{ Status = 'Warn';    Meaning = 'Password hash sync start is called when not shutdown.' }
+        615 = @{ Status = 'Error';   Meaning = 'Password hash sync worker thread exception occured.' }
+        616 = @{ Status = 'Error';   Meaning = 'Password hash sync connection to preferred DC failed.' }
+        617 = @{ Status = 'Info';    Meaning = 'Full password hash sync started for forest.' }
+        618 = @{ Status = 'Info';    Meaning = 'Full password hash sync started for a domain.' }
+        619 = @{ Status = 'Info';    Meaning = 'Shows the progress of password hash sync for a domain.' }
+        620 = @{ Status = 'Warn';    Meaning = 'No-retry password hash sync objects are reported.' }
+        621 = @{ Status = 'Error';   Meaning = 'Full password hash sync attempt failed.' }
+        622 = @{ Status = 'Info';    Meaning = 'Full password hash sync completed for a domain.' }
+        623 = @{ Status = 'Info';    Meaning = 'Full password hash sync completed for a forest.' }
+        650 = @{ Status = 'Info';    Meaning = 'Start of password hash sync batch.' }
+        651 = @{ Status = 'Info';    Meaning = 'End of password hash sync batch.' }
         652 = @{ Status = 'Error';   Meaning = 'Error during password hash sync operation.' }
-        653 = @{ Status = 'Info';    Meaning = 'Password hash sync ping started.' }
-        654 = @{ Status = 'Healthy'; Meaning = 'Password hash sync heartbeat was observed.' }
-        655 = @{ Status = 'Error';   Meaning = 'Error during password hash sync heartbeat/ping.' }
+        653 = @{ Status = 'Info';    Meaning = 'Start of password hash sync ping.' }
+        654 = @{ Status = 'Healthy'; Meaning = 'End of password hash sync ping (the heartbeat event; logged every 30 minutes while the channel is active).' }
+        655 = @{ Status = 'Error';   Meaning = 'Error during password hash sync ping.' }
+        656 = @{ Status = 'Info';    Meaning = 'Password hash sync request message.' }
+        657 = @{ Status = 'Info';    Meaning = 'Password hash sync response message.' }
+        658 = @{ Status = 'Info';    Meaning = 'DCaaS sync event log message.' }
+        659 = @{ Status = 'Info';    Meaning = 'Password policy sync event log message.' }
+        660 = @{ Status = 'Info';    Meaning = 'Start of password hash sync company feature self-healing.' }
+        661 = @{ Status = 'Info';    Meaning = 'End of password hash sync company feature self-healing.' }
+        662 = @{ Status = 'Error';   Meaning = 'Password hash sync health task failed during ping operation.' }
+        663 = @{ Status = 'Healthy'; Meaning = 'Password hash sync manager is alive and running.' }
+        664 = @{ Status = 'Error';   Meaning = 'Single object sync task failed.' }
+        665 = @{ Status = 'Error';   Meaning = 'Storing password hash sync cycle state for a domain failed.' }
+        666 = @{ Status = 'Error';   Meaning = 'Password hash sync failed for a domain due to sql deadlock.' }
+        667 = @{ Status = 'Error';   Meaning = 'Generating MD5 decryption key has failed.' }
+        668 = @{ Status = 'Info';    Meaning = 'Number of objects in password hash sync batch that only have PwdLastSet changed.' }
     }
 
     if ($phsEvents.ContainsKey($EventId)) {
@@ -190,6 +322,100 @@ function Get-EntraConnectEventClassification {
         AuthMode = 'Unknown'
         Status   = 'Info'
         Meaning  = 'Unclassified Entra Connect event.'
+    }
+}
+
+function Get-PhsEnabledState {
+    # Asks the sync server whether password hash sync is ENABLED before judging its
+    # health. Without this, a PTA-only tenant - where PHS is off by design and no
+    # heartbeat is correct - gets warned about a missing heartbeat, which reads as a
+    # broken sync channel and sends someone to fix a healthy server.
+    #
+    # Get-ADSyncAADCompanyFeature exposes the tenant's PasswordHashSync flag, and
+    # Get-ADSyncScheduler exposes StagingModeEnabled (staging suppresses PHS entirely
+    # while everything still looks healthy). Both come from the ADSync module, which
+    # exists only on the sync server, so this runs remotely and degrades to 'Unknown'
+    # whenever it cannot be determined - never to a false 'enabled' or 'disabled'.
+    # https://learn.microsoft.com/entra/identity/hybrid/connect/reference-connect-adsync
+    # https://learn.microsoft.com/entra/identity/hybrid/connect/how-to-connect-sync-feature-scheduler
+    param([string]$Server)
+
+    $state = [PSCustomObject]@{
+        PhsEnabled  = $null      # $true / $false / $null when undetermined
+        StagingMode = $null
+        Determined  = $false
+        Detail      = ''
+    }
+
+    if ([string]::IsNullOrWhiteSpace($Server)) { return $state }
+
+    try {
+        $remote = Invoke-Command -ComputerName $Server -ErrorAction Stop -ScriptBlock {
+            Import-Module ADSync -ErrorAction Stop
+            [PSCustomObject]@{
+                Phs     = [bool](Get-ADSyncAADCompanyFeature -ErrorAction Stop).PasswordHashSync
+                Staging = [bool](Get-ADSyncScheduler -ErrorAction Stop).StagingModeEnabled
+            }
+        }
+        if ($remote) {
+            $state.PhsEnabled  = $remote.Phs
+            $state.StagingMode = $remote.Staging
+            $state.Determined  = $true
+            $state.Detail      = "PasswordHashSync=$($remote.Phs); StagingModeEnabled=$($remote.Staging)"
+        }
+    } catch {
+        $state.Detail = "Could not determine password hash sync configuration on ${Server}: $($_.Exception.Message)"
+    }
+
+    return $state
+}
+
+function Test-PhsHeartbeatFreshness {
+    # Password hash sync logs event 654 every 30 minutes while the channel is active and
+    # no password changes are pending, and the built-in troubleshooting task checks for
+    # one "within the past three hours".
+    #
+    # The original collector searched the whole -DaysBack window and only reported a
+    # problem when the ENTIRE window held no 654. On the default 7-day search that means
+    # PHS could have died yesterday and still be reported healthy - the exact failure the
+    # check exists to catch. Freshness is judged against the documented three-hour
+    # window, independent of how far back the events were gathered.
+    # https://learn.microsoft.com/entra/identity/hybrid/connect/tshoot-connect-password-hash-synchronization
+    param(
+        [datetime[]]$HeartbeatTimes,
+        [datetime]$Now = (Get-Date),
+        [int]$WindowHours = 3
+    )
+
+    $times = @($HeartbeatTimes | Where-Object { $_ })
+    if ($times.Count -eq 0) {
+        return [PSCustomObject]@{
+            Fresh    = $false
+            Newest   = $null
+            AgeHours = $null
+            Message  = "No password hash sync heartbeat (event 654) was found. Verify password hash sync is enabled, the server is not in staging mode, and the AD DS connector account can read password hashes."
+        }
+    }
+
+    # Sort rather than trust collection order: a stale entry appearing first would make a
+    # healthy server look dead.
+    $newest = ($times | Sort-Object -Descending)[0]
+    $age = ($Now - $newest).TotalHours
+
+    if ($age -le $WindowHours) {
+        return [PSCustomObject]@{
+            Fresh    = $true
+            Newest   = $newest
+            AgeHours = [math]::Round($age, 2)
+            Message  = "Password hash sync heartbeat (event 654) is current; newest is $([math]::Round($age, 2)) hour(s) old."
+        }
+    }
+
+    [PSCustomObject]@{
+        Fresh    = $false
+        Newest   = $newest
+        AgeHours = [math]::Round($age, 2)
+        Message  = "Most recent password hash sync heartbeat (event 654) is $([math]::Round($age, 2)) hour(s) old; the documented health check expects one within three hours. Verify password hash sync is enabled, the server is not in staging mode, and the AD DS connector account can read password hashes."
     }
 }
 
@@ -239,30 +465,77 @@ function Get-EntraConnectVerdictHints {
         }
     }
 
+    # "Not Running" covers three states that mean completely different things, and the
+    # earlier code treated them alike:
+    #
+    #   NotFound - the service is not installed. For the PTA agent on a PHS-only server
+    #              that is the CORRECT configuration, not a fault. For ADSync it means the
+    #              server named is not the sync server.
+    #   Error    - the query failed. We do not know the state and must not assert one.
+    #   Stopped  - queried successfully and genuinely not running. This is the finding.
+    #
+    # Reporting the first two as faults sends someone to fix a healthy server, which
+    # during a lockout incident is worse than saying nothing.
     $adSync = $services | Where-Object { $_.Name -eq 'ADSync' } | Select-Object -First 1
-    if ($adSync -and $adSync.Status -ne 'Running') {
-        $hints.Add("Entra Connect ADSync service on $server is $($adSync.Status); password sync and connector status may be stale until the sync service is healthy.")
+    if ($adSync) {
+        switch ($adSync.Status) {
+            'Running'  { }
+            'NotFound' {
+                $hints.Add("The ADSync service is not installed on $server, so this is not an Entra Connect sync server. Re-run with -EntraConnectServer pointed at the actual sync server, or omit it if the account is not synced.")
+            }
+            'Error'    {
+                $hints.Add("ADSync service state on $server could not be determined (the query failed), so sync health is unknown rather than known-bad. Check remote CIM/WinRM access to that server before drawing conclusions from this section.")
+            }
+            default    {
+                $hints.Add("Entra Connect ADSync service on $server is $($adSync.Status); password sync and connector status may be stale until the sync service is healthy.")
+            }
+        }
     }
 
     $phsErrors = @($events | Where-Object { $_.AuthMode -eq 'PHS' -and $_.Status -eq 'Error' })
     if ($phsErrors.Count -gt 0) {
-        $ids = (($phsErrors | Select-Object -ExpandProperty EventId -Unique) -join ', ')
-        $hints.Add("Password Hash Sync (PHS) diagnostics on $server show error event(s) $ids; check the Entra Connect Application log and run the password sync troubleshooting task or Invoke-ADSyncDiagnostics for this synced account.")
+        $ids = @($phsErrors | Select-Object -ExpandProperty EventId -Unique)
+        $idText = ($ids -join ', ')
+        $hints.Add("Password Hash Sync (PHS) diagnostics on $server show error event(s) $idText; check the Entra Connect Application log and run the password sync troubleshooting task or Invoke-ADSyncDiagnostics for this synced account.")
+
+        # Events 0, 611, 652 and 655 are documented together as indicating a connectivity
+        # problem, and the event message names the affected forest. Calling that out
+        # separately matters here: a sync server that cannot reach a DC is NOT the source
+        # of the bad passwords, but it looks like a broken account from the cloud side.
+        # https://learn.microsoft.com/entra/identity/hybrid/connect/tshoot-connect-password-hash-synchronization
+        $connectivityIds = @($ids | Where-Object { $_ -in @(0, 611, 652, 655) })
+        if ($connectivityIds.Count -gt 0) {
+            $hints.Add("PHS event(s) $($connectivityIds -join ', ') on $server indicate a connectivity problem between Entra Connect and Active Directory; the event message names the affected forest. Confirm the AD DS connector account holds Replicate Directory Changes and Replicate Directory Changes All at the root of every domain, and that the preferred domain controllers are reachable.")
+        }
     }
 
-    if ($notes -match 'heartbeat') {
-        $hints.Add("Password Hash Sync (PHS) diagnostics did not find a recent heartbeat event 654 on $server; verify password hash sync is enabled, the server is not in staging mode, and the connector account can read password hashes.")
+    # Matches both the missing-heartbeat and stale-heartbeat notes the collector writes.
+    if (@($notes | Where-Object { $_ -match 'heartbeat' }).Count -gt 0) {
+        $hints.Add("Password Hash Sync (PHS) heartbeat event 654 on $server is missing or stale; the documented health check expects one within three hours. Verify password hash sync is enabled, the server is not in staging mode, and the connector account can read password hashes.")
     }
 
     $ptaService = $services | Where-Object { $_.Name -eq 'AzureADConnectAuthenticationAgent' } | Select-Object -First 1
     $ptaEvents = @($events | Where-Object { $_.AuthMode -eq 'PTA' })
-    if (($Diagnostics.HybridAuthMode -eq 'PTA') -or $ptaService -or $ptaEvents.Count -gt 0) {
-        if ($ptaService -and $ptaService.Status -ne 'Running') {
+    $ptaInstalled = $ptaService -and $ptaService.Status -notin @('NotFound','Error')
+
+    if (($Diagnostics.HybridAuthMode -eq 'PTA') -or $ptaInstalled -or $ptaEvents.Count -gt 0) {
+        if ($ptaInstalled -and $ptaService.Status -ne 'Running') {
             $hints.Add("Pass-through Authentication (PTA) agent service on $server is $($ptaService.Status); cloud sign-ins may fail or shift to another agent.")
         }
         if ($ptaEvents.Count -gt 0 -or ($ptaService -and $ptaService.Status -eq 'Running')) {
             $hints.Add("Pass-through Authentication (PTA) evidence exists on $server; Entra cloud sign-ins can be validated against on-prem AD through this agent, so correlate Entra sign-in timestamps with 4740/4625/4771 events and PTA agent logs.")
         }
+        # Explicitly asked for PTA but the agent is not there: the mode is wrong, or the
+        # agent lives on a different server. PTA runs on standalone agent hosts as often
+        # as on the sync server, and Microsoft recommends at least three of them.
+        # https://learn.microsoft.com/entra/identity/hybrid/connect/how-to-connect-pta-quick-start
+        if (($Diagnostics.HybridAuthMode -eq 'PTA') -and $ptaService -and $ptaService.Status -eq 'NotFound') {
+            $hints.Add("-HybridAuthMode PTA was requested but no Pass-through Authentication agent is installed on $server. PTA agents are commonly installed on standalone servers rather than the sync server, so check the Entra admin center for the agent list and re-run against one of those hosts.")
+        }
+    }
+
+    if ($ptaService -and $ptaService.Status -eq 'Error') {
+        $hints.Add("Pass-through Authentication agent state on $server could not be determined (the query failed); PTA involvement is unknown rather than ruled out.")
     }
 
     return $hints.ToArray()
@@ -285,6 +558,10 @@ function Get-EntraConnectDiagnostics {
         Server         = $EntraConnectServer
         HybridAuthMode = $HybridAuthMode
         Checked        = $false
+        # $true / $false / $null when it could not be determined. Kept distinct from
+        # $false so "PHS is off" is never confused with "we could not tell".
+        PhsEnabled     = $null
+        StagingMode    = $null
         Services       = @()
         Events         = @()
         Notes          = @()
@@ -325,46 +602,151 @@ function Get-EntraConnectDiagnostics {
         }
     }
 
-    $phsEventIds = @(601,602,603,604,605,606,607,609,610,611,612,650,651,652,653,654,655)
+    # Filtered by PROVIDER as well as ID. Event IDs in the 600s are not unique to password
+    # hash sync - they are low numbers in a shared Application log, and other publishers
+    # use them freely. Without the provider filter, an unrelated application logging its
+    # own event 611 would be classified as "Error during password hash sync for a domain"
+    # and reported as a sync failure that never happened.
+    #
+    # The source is "Directory Synchronization", per the manual troubleshooting steps
+    # ("Source: 'Directory synchronization' ID: 0, 611, 652, 655") and the 611 KB article,
+    # which shows the event logged in the Application log under that source.
+    # https://learn.microsoft.com/entra/identity/hybrid/connect/tshoot-connect-password-hash-synchronization
+    # https://learn.microsoft.com/troubleshoot/entra/entra-id/user-prov-sync/pwd-hash-sync-stops-work
+    $phsEventIds = @(0,601,602,603,604,605,606,607,609,610,611,612,613,614,615,616,617,
+                     618,619,620,621,622,623,650,651,652,653,654,655,656,657,658,659,
+                     660,661,662,663,664,665,666,667,668)
+    # $phsQueryUsable tracks whether the query itself was sound. It is NOT the same as
+    # "found events", and conflating the two is dangerous here: if the provider name is
+    # wrong, or the publisher is not registered on this server, the query returns no rows
+    # and looks exactly like a healthy-but-quiet sync channel. The heartbeat check would
+    # then report a stale heartbeat on a perfectly healthy server, which is the same class
+    # of confident-wrong answer this whole section exists to avoid.
+    $phsQueryUsable = $true
     try {
         $phsEvents = @(Get-WinEvent -ComputerName $EntraConnectServer -FilterHashtable @{
-                LogName = 'Application'
-                Id = $phsEventIds
-                StartTime = $startTime
+                LogName      = 'Application'
+                ProviderName = 'Directory Synchronization'
+                Id           = $phsEventIds
+                StartTime    = $startTime
             } -ErrorAction Stop)
         foreach ($e in $phsEvents) {
             $result.Events += ConvertFrom-EntraConnectEvent -EventXml $e.ToXml() -EventId $e.Id `
                 -Server $EntraConnectServer -LogName 'Application' -Message $e.Message
         }
     } catch {
-        if ($_.Exception.Message -match 'No events were found') {
+        $msg = $_.Exception.Message
+        if ($msg -match 'is not an event provider|not an event provider on') {
+            # The publisher is not registered on that machine. Either the server does not
+            # run password hash sync, or the documented source name does not match what
+            # this build registers. Either way we cannot conclude anything about PHS
+            # health from silence.
+            $phsQueryUsable = $false
+            $result.Errors += "The 'Directory Synchronization' event provider is not registered on $EntraConnectServer, so Password Hash Sync events could not be read. Confirm this server runs password hash sync; if it does, check the provider name with: Get-WinEvent -ComputerName $EntraConnectServer -ListProvider *Directory* | Select-Object Name"
+        }
+        elseif ($msg -match 'No events were found') {
             $result.Notes += "No Entra Connect Password Hash Sync Application events were found on $EntraConnectServer in the last $DaysBack day(s)."
-        } else {
-            $result.Errors += "Could not read Entra Connect Password Hash Sync Application events from ${EntraConnectServer}: $($_.Exception.Message)"
+        }
+        else {
+            $phsQueryUsable = $false
+            $result.Errors += "Could not read Entra Connect Password Hash Sync Application events from ${EntraConnectServer}: $msg"
         }
     }
 
-    $heartbeat = @($result.Events | Where-Object { $_.AuthMode -eq 'PHS' -and $_.EventId -eq 654 })
-    if (($HybridAuthMode -in @('Auto','PHS')) -and $heartbeat.Count -eq 0) {
-        $result.Notes += "No PHS heartbeat event 654 found in the searched window on $EntraConnectServer."
+    # Ask whether PHS is even enabled before judging its health. A PTA-only tenant has no
+    # heartbeat by design, and warning about it is a false alarm that points at a healthy
+    # server during an incident.
+    $phsState = Get-PhsEnabledState -Server $EntraConnectServer
+    $result.PhsEnabled  = $phsState.PhsEnabled
+    $result.StagingMode = $phsState.StagingMode
+
+    if ($phsState.Determined -and -not $phsState.PhsEnabled) {
+        $result.Notes += "Password hash sync is NOT enabled on this tenant (PasswordHashSync=False), so the absence of heartbeat event 654 is expected rather than a fault. Sign-in validation is happening elsewhere - check the Pass-through Authentication evidence below, or Entra sign-in logs if neither applies."
+    }
+    elseif ($phsState.Determined -and $phsState.StagingMode) {
+        $result.Notes += "This Entra Connect server is in STAGING MODE, which suppresses password hash sync entirely. A missing heartbeat is expected here; the active sync server is elsewhere."
+    }
+    elseif (-not $phsState.Determined -and $phsState.Detail) {
+        $result.Notes += $phsState.Detail
     }
 
+    # Only judge heartbeat freshness when the query worked AND password hash sync is
+    # actually in use. $null (undetermined) still runs the check - better a hedged
+    # warning than silence when we genuinely do not know.
+    $phsInUse = -not ($phsState.Determined -and (-not $phsState.PhsEnabled -or $phsState.StagingMode))
+    if ($phsQueryUsable -and $phsInUse -and $HybridAuthMode -in @('Auto','PHS')) {
+        $heartbeatTimes = @($result.Events |
+            Where-Object { $_.AuthMode -eq 'PHS' -and $_.EventId -eq 654 } |
+            Select-Object -ExpandProperty Time)
+        $freshness = Test-PhsHeartbeatFreshness -HeartbeatTimes $heartbeatTimes
+        if (-not $freshness.Fresh) {
+            $result.Notes += "$($freshness.Message) (server: $EntraConnectServer)"
+        }
+    }
+
+    # -MaxEvents rather than "| Select-Object -First 50": both keep 50, but -MaxEvents
+    # stops the provider reading after 50 instead of pulling the whole channel across the
+    # wire and discarding most of it. Get-WinEvent returns newest-first, so the cap keeps
+    # the 50 most recent - the right end for an active incident.
+    # The channel name is DISCOVERED rather than hardcoded. Microsoft documents the PTA
+    # Admin log only as an Event Viewer tree path -
+    #   Application and Service Logs\Microsoft\AzureAdConnect\AuthenticationAgent\Admin
+    # - and never prints the channel string in the form Get-WinEvent -LogName expects.
+    # Translating that path by hand is a guess, and a wrong guess fails as "no events",
+    # which reads as "no PTA activity" - a wrong answer rather than an error.
+    #
+    # Asking the server which channels it actually has removes the guess. The documented
+    # spelling stays as the fallback so behaviour is unchanged when enumeration is not
+    # permitted (-ListLog needs remote registry/WinRM that event reads alone do not).
+    # https://learn.microsoft.com/entra/identity/hybrid/connect/tshoot-connect-pass-through-authentication
+    $ptaLogName = 'Microsoft-AzureADConnect-AuthenticationAgent/Admin'
     try {
-        $ptaEvents = @(Get-WinEvent -ComputerName $EntraConnectServer -FilterHashtable @{
-                LogName = 'Microsoft-AzureADConnect-AuthenticationAgent/Admin'
-                StartTime = $startTime
-            } -ErrorAction Stop | Select-Object -First 50)
-        foreach ($e in $ptaEvents) {
-            $result.Events += ConvertFrom-EntraConnectEvent -EventXml $e.ToXml() -EventId $e.Id `
-                -Server $EntraConnectServer -LogName 'Microsoft-AzureADConnect-AuthenticationAgent/Admin' -Message $e.Message
+        $found = @(Get-WinEvent -ComputerName $EntraConnectServer -ListLog '*AuthenticationAgent*' -ErrorAction Stop |
+                   Where-Object { $_.LogName -like '*Admin*' } |
+                   Select-Object -ExpandProperty LogName)
+        if ($found.Count -gt 0) {
+            if ($found -notcontains $ptaLogName) {
+                $result.Notes += "PTA Admin log channel on $EntraConnectServer is '$($found[0])' rather than the assumed '$ptaLogName'; using the discovered name."
+            }
+            $ptaLogName = $found[0]
         }
     } catch {
-        if ($_.Exception.Message -match 'No events were found') {
+        # Enumeration unavailable - fall through and try the documented name directly.
+        Write-Verbose "Could not enumerate PTA log channels on ${EntraConnectServer}: $($_.Exception.Message)"
+    }
+
+    $ptaCap = 50
+    try {
+        $ptaEvents = @(Get-WinEvent -ComputerName $EntraConnectServer -FilterHashtable @{
+                LogName   = $ptaLogName
+                StartTime = $startTime
+            } -MaxEvents $ptaCap -ErrorAction Stop)
+
+        # Say so when the cap is hit. A silently truncated list reads as "this is all the
+        # PTA activity there was", which is the wrong conclusion to hand someone during a
+        # lockout investigation.
+        if ($ptaEvents.Count -ge $ptaCap) {
+            $result.Notes += "PTA Authentication Agent Admin log returned the $ptaCap most recent events (the cap); older events in the $DaysBack-day window were not read. Review the log directly on $EntraConnectServer for the full picture."
+        }
+        foreach ($e in $ptaEvents) {
+            $result.Events += ConvertFrom-EntraConnectEvent -EventXml $e.ToXml() -EventId $e.Id `
+                -Server $EntraConnectServer -LogName $ptaLogName -Message $e.Message
+        }
+    } catch {
+        $msg = $_.Exception.Message
+        if ($msg -match 'There is not an event log|not find the specified log|not exist') {
+            # No such channel. On a PHS-only server that is expected; the distinction that
+            # matters is "the log is not there" versus "the log is there and empty", and
+            # only the second supports "no PTA activity".
+            $result.Notes += "No PTA Authentication Agent log channel exists on $EntraConnectServer, so no Pass-through Authentication agent is installed there. This is expected on a password-hash-sync-only server."
+        }
+        elseif ($msg -match 'No events were found') {
             if ($HybridAuthMode -in @('Auto','PTA')) {
-                $result.Notes += "No PTA Authentication Agent Admin events were found on $EntraConnectServer in the last $DaysBack day(s)."
+                $result.Notes += "The PTA Authentication Agent Admin log exists on $EntraConnectServer but recorded no events in the last $DaysBack day(s)."
             }
-        } else {
-            $result.Errors += "Could not read PTA Authentication Agent Admin events from ${EntraConnectServer}: $($_.Exception.Message)"
+        }
+        else {
+            $result.Errors += "Could not read PTA Authentication Agent Admin events from ${EntraConnectServer}: $msg"
         }
     }
 

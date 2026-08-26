@@ -3,22 +3,45 @@ BeforeAll {
 }
 
 Describe 'ConvertFrom-LockoutEvent' {
-    It 'extracts TargetUserName and CallerComputerName from event XML' {
+    # REGRESSION GUARD. These tests previously fed synthetic XML containing a
+    # CallerComputerName element, which real 4740 events do not have. The tests passed
+    # while production returned null for every caller, rendering every lockout source as
+    # "(not recorded)". The XML below matches Microsoft's documented event.
+    # https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4740
+    It 'reads the caller machine from TargetDomainName, as real 4740 events emit it' {
         $xml = @'
 <Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
   <System><TimeCreated SystemTime="2026-08-01T13:05:00.000Z"/></System>
   <EventData>
     <Data Name="TargetUserName">jdoe</Data>
-    <Data Name="TargetDomainName">CONTOSO</Data>
-    <Data Name="CallerComputerName">LAPTOP-7</Data>
+    <Data Name="TargetDomainName">LAPTOP-7</Data>
+    <Data Name="TargetSid">S-1-5-21-1-2-3-1104</Data>
+    <Data Name="SubjectUserSid">S-1-5-18</Data>
+    <Data Name="SubjectUserName">DC01$</Data>
+    <Data Name="SubjectDomainName">CONTOSO</Data>
   </EventData>
 </Event>
 '@
         $row = ConvertFrom-LockoutEvent -EventXml $xml -DcName 'DC01'
         $row.User           | Should -Be 'jdoe'
-        $row.Domain         | Should -Be 'CONTOSO'
         $row.CallerComputer | Should -Be 'LAPTOP-7'
+        $row.Domain         | Should -Be 'CONTOSO'
         $row.DC             | Should -Be 'DC01'
+    }
+
+    It 'falls back to CallerComputerName when a producer does emit it' {
+        $xml = @'
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System><TimeCreated SystemTime="2026-08-01T13:05:00.000Z"/></System>
+  <EventData>
+    <Data Name="TargetUserName">jdoe</Data>
+    <Data Name="SubjectDomainName">CONTOSO</Data>
+    <Data Name="CallerComputerName">LAPTOP-9</Data>
+  </EventData>
+</Event>
+'@
+        $row = ConvertFrom-LockoutEvent -EventXml $xml -DcName 'DC01'
+        $row.CallerComputer | Should -Be 'LAPTOP-9'
     }
 }
 

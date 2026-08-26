@@ -1,4 +1,5 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
     Reports and optionally increases the Security event log size on domain controllers.

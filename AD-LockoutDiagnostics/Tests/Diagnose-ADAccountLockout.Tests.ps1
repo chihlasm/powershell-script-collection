@@ -3,21 +3,132 @@ BeforeAll {
 }
 
 Describe 'ConvertFrom-LockoutEvent' {
-    It 'extracts TargetUserName and CallerComputerName from event XML' {
+    # REGRESSION GUARD. These tests previously fed synthetic XML containing a
+    # CallerComputerName element, which real 4740 events do not have. The tests passed
+    # while production returned null for every caller, rendering every lockout source as
+    # "(not recorded)". The XML below matches Microsoft's documented event.
+    # https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4740
+    It 'reads the caller machine from TargetDomainName, as real 4740 events emit it' {
         $xml = @'
 <Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
   <System><TimeCreated SystemTime="2026-06-01T13:05:00.000Z"/></System>
   <EventData>
     <Data Name="TargetUserName">jdoe</Data>
-    <Data Name="TargetDomainName">CONTOSO</Data>
-    <Data Name="CallerComputerName">LAPTOP-7</Data>
+    <Data Name="TargetDomainName">LAPTOP-7</Data>
+    <Data Name="TargetSid">S-1-5-21-1-2-3-1104</Data>
+    <Data Name="SubjectUserSid">S-1-5-18</Data>
+    <Data Name="SubjectUserName">DC01$</Data>
+    <Data Name="SubjectDomainName">CONTOSO</Data>
   </EventData>
 </Event>
 '@
         $row = ConvertFrom-LockoutEvent -EventXml $xml -DcName 'DC01'
         $row.User           | Should -Be 'jdoe'
         $row.CallerComputer | Should -Be 'LAPTOP-7'
+        $row.Domain         | Should -Be 'CONTOSO'
         $row.DC             | Should -Be 'DC01'
+    }
+
+    It 'falls back to CallerComputerName when a producer does emit it' {
+        $xml = @'
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System><TimeCreated SystemTime="2026-06-01T13:05:00.000Z"/></System>
+  <EventData>
+    <Data Name="TargetUserName">jdoe</Data>
+    <Data Name="SubjectDomainName">CONTOSO</Data>
+    <Data Name="CallerComputerName">LAPTOP-9</Data>
+  </EventData>
+</Event>
+'@
+        $row = ConvertFrom-LockoutEvent -EventXml $xml -DcName 'DC01'
+        $row.CallerComputer | Should -Be 'LAPTOP-9'
+    }
+}
+
+Describe 'ConvertFrom-BadLogonEvent 4771 presentation' {
+    # Built from a real collected row: Kerberos pre-auth failure, IPv4-mapped IPv6
+    # address, no hostname, no logon type, status 0x18.
+    BeforeAll {
+        $script:Xml4771 = @'
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System><TimeCreated SystemTime="2026-08-12T14:41:28.000Z"/></System>
+  <EventData>
+    <Data Name="TargetUserName">janelle.mccall</Data>
+    <Data Name="ServiceName">krbtgt/Contoso</Data>
+    <Data Name="Status">0x18</Data>
+    <Data Name="IpAddress">::ffff:192.168.105.128</Data>
+    <Data Name="IpPort">51423</Data>
+  </EventData>
+</Event>
+'@
+    }
+
+    It 'strips the ::ffff: prefix from an IPv4-mapped address' {
+        # Windows renders IPv4 clients in IPv6 notation. The prefix is noise and makes the
+        # address harder to copy into Resolve-DnsName.
+        $row = ConvertFrom-BadLogonEvent -EventXml $script:Xml4771 -EventId 4771 -DcName 'DC02'
+        $row.SourceIp | Should -Be '192.168.105.128'
+    }
+
+    It 'explains the missing hostname instead of leaving it blank' {
+        # 4771 has no workstation field at all. A blank cell reads as a collection failure.
+        $row = ConvertFrom-BadLogonEvent -EventXml $script:Xml4771 -EventId 4771 -DcName 'DC02'
+        $row.SourceHost | Should -Match 'no hostname'
+        $row.SourceHost | Should -Not -BeNullOrEmpty
+    }
+
+    It 'marks logon type as not applicable for Kerberos' {
+        $row = ConvertFrom-BadLogonEvent -EventXml $script:Xml4771 -EventId 4771 -DcName 'DC02'
+        $row.LogonType | Should -Match 'n/a'
+    }
+
+    It 'translates status 0x18 to "Bad password"' {
+        # The code alone tells the reader nothing; the meaning is what separates a genuine
+        # bad password from clock skew or a policy rejection.
+        $row = ConvertFrom-BadLogonEvent -EventXml $script:Xml4771 -EventId 4771 -DcName 'DC02'
+        $row.Status | Should -Match '0x18'
+        $row.Status | Should -Match 'Bad password'
+    }
+
+    It 'does not confuse Kerberos 0x12 with a bad password' {
+        $xml = $script:Xml4771 -replace '0x18', '0x12'
+        $row = ConvertFrom-BadLogonEvent -EventXml $xml -EventId 4771 -DcName 'DC01'
+        $row.Status | Should -Match 'revoked'
+        $row.Status | Should -Not -Match 'Bad password'
+    }
+
+    It 'labels a loopback source as originating on the DC itself' {
+        $xml = $script:Xml4771 -replace '::ffff:192\.168\.105\.128', '::1'
+        $row = ConvertFrom-BadLogonEvent -EventXml $xml -EventId 4771 -DcName 'DC01'
+        $row.SourceIp | Should -Match 'on the DC itself'
+    }
+
+    It 'leaves a genuine IPv6 address untouched' {
+        # Only the ::ffff: IPv4-mapped form should be rewritten.
+        $xml = $script:Xml4771 -replace '::ffff:192\.168\.105\.128', 'fe80::1c2b:3d4e:5f60:7a8b'
+        $row = ConvertFrom-BadLogonEvent -EventXml $xml -EventId 4771 -DcName 'DC01'
+        $row.SourceIp | Should -Be 'fe80::1c2b:3d4e:5f60:7a8b'
+    }
+
+    It 'still reports a real WorkstationName on a 4625 event' {
+        $xml = @'
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System><TimeCreated SystemTime="2026-08-12T14:41:28.000Z"/></System>
+  <EventData>
+    <Data Name="TargetUserName">janelle.mccall</Data>
+    <Data Name="WorkstationName">LPTB04F13C3596E</Data>
+    <Data Name="IpAddress">::ffff:192.168.105.128</Data>
+    <Data Name="LogonType">3</Data>
+    <Data Name="Status">0xC000006D</Data>
+    <Data Name="SubStatus">0xC000006A</Data>
+  </EventData>
+</Event>
+'@
+        $row = ConvertFrom-BadLogonEvent -EventXml $xml -EventId 4625 -DcName 'DC01'
+        $row.SourceHost | Should -Be 'LPTB04F13C3596E'
+        $row.SourceIp   | Should -Be '192.168.105.128'
+        $row.LogonType  | Should -Be '3'
+        $row.Status     | Should -Match 'Bad password'
     }
 }
 
@@ -89,7 +200,7 @@ Describe 'ConvertFrom-BadLogonEvent status selection (verified against Microsoft
 '@
         $row = ConvertFrom-BadLogonEvent -EventXml $xml -EventId 4625 -DcName 'DC01'
         # 0xC0000234 = account locked out. Reporting 0x0 would hide the reason entirely.
-        $row.Status | Should -Be '0xC0000234'
+        $row.Status | Should -Match '^0xC0000234\b'
     }
 
     It 'still prefers SubStatus when it carries a real reason' {
@@ -106,7 +217,7 @@ Describe 'ConvertFrom-BadLogonEvent status selection (verified against Microsoft
         $row = ConvertFrom-BadLogonEvent -EventXml $xml -EventId 4625 -DcName 'DC01'
         # Status 0xC000006D is the generic "bad username or authentication info";
         # SubStatus 0xC000006A is the precise "bad password".
-        $row.Status | Should -Be '0xC000006A'
+        $row.Status | Should -Match '^0xC000006A\b'
     }
 
     It 'treats a padded zero SubStatus as empty too' {
@@ -121,7 +232,7 @@ Describe 'ConvertFrom-BadLogonEvent status selection (verified against Microsoft
 </Event>
 '@
         $row = ConvertFrom-BadLogonEvent -EventXml $xml -EventId 4625 -DcName 'DC01'
-        $row.Status | Should -Be '0xC0000234'
+        $row.Status | Should -Match '^0xC0000234\b'
     }
 }
 
@@ -145,12 +256,12 @@ Describe 'ConvertFrom-BadLogonEvent' {
         $row.SourceHost | Should -Be 'LAPTOP-7'
         $row.SourceIp   | Should -Be '192.168.1.50'
         $row.LogonType  | Should -Be '3'
-        $row.Status     | Should -Be '0xC000006A'
+        $row.Status     | Should -Match '^0xC000006A\b'
         $row.DC         | Should -Be 'DC01'
         $row.Time       | Should -BeOfType [datetime]
     }
 
-    It 'parses a 4771 Kerberos pre-auth event and leaves ::ffff: addresses unchanged' {
+    It 'parses a 4771 Kerberos pre-auth event and strips the ::ffff: prefix' {
         $xml = @'
 <Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
   <System><TimeCreated SystemTime="2026-06-01T10:15:00.000Z"/></System>
@@ -164,14 +275,16 @@ Describe 'ConvertFrom-BadLogonEvent' {
         $row = ConvertFrom-BadLogonEvent -EventXml $xml -EventId 4771 -DcName 'DC02'
         $row.EventId    | Should -Be 4771
         $row.User       | Should -Be 'jdoe'
-        $row.SourceIp   | Should -Be '::ffff:192.168.1.5'
-        $row.SourceHost | Should -BeNullOrEmpty
-        $row.LogonType  | Should -BeNullOrEmpty
-        $row.Status     | Should -Be '0x18'
+        $row.SourceIp   | Should -Be '192.168.1.5'
+        # 4771 carries no hostname or logon type. These now say so explicitly rather than
+        # rendering as blank cells that read like a collection failure.
+        $row.SourceHost | Should -Match 'no hostname'
+        $row.LogonType  | Should -Match 'n/a'
+        $row.Status     | Should -Match '^0x18\b'
         $row.DC         | Should -Be 'DC02'
     }
 
-    It 'normalizes a 4625 with IpAddress "-" to (local)' {
+    It 'normalizes a 4625 with IpAddress "-" to an on-DC marker' {
         $xml = @'
 <Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
   <System><TimeCreated SystemTime="2026-06-01T11:00:00.000Z"/></System>
@@ -185,10 +298,10 @@ Describe 'ConvertFrom-BadLogonEvent' {
 </Event>
 '@
         $row = ConvertFrom-BadLogonEvent -EventXml $xml -EventId 4625 -DcName 'DC01'
-        $row.SourceIp | Should -Be '(local)'
+        $row.SourceIp | Should -Match 'on the DC itself'
     }
 
-    It 'normalizes a 4625 with IpAddress ::1 to (local)' {
+    It 'normalizes a 4625 with IpAddress ::1 to an on-DC marker' {
         $xml = @'
 <Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
   <System><TimeCreated SystemTime="2026-06-01T11:30:00.000Z"/></System>
@@ -202,7 +315,7 @@ Describe 'ConvertFrom-BadLogonEvent' {
 </Event>
 '@
         $row = ConvertFrom-BadLogonEvent -EventXml $xml -EventId 4625 -DcName 'DC01'
-        $row.SourceIp | Should -Be '(local)'
+        $row.SourceIp | Should -Match 'on the DC itself'
     }
 }
 
@@ -429,3 +542,5 @@ Describe 'Write-LockoutReport hybrid diagnostics section' {
         }
     }
 }
+
+

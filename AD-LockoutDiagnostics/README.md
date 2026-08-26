@@ -19,6 +19,24 @@ The gate is the point. An empty lockout report and a clean domain look identical
 
 Add `-MultiForest` when a second forest may be involved, or when auditing is off — that step polls per-DC bad-password counters, which are directory attributes and still work with auditing fully disabled.
 
+Add `-EntraConnectServer` when the account is synced to Microsoft Entra ID:
+
+```powershell
+.\Invoke-ADLockoutInvestigation.ps1 -Identity jdoe -EntraConnectServer AADCONNECT01
+```
+
+This collects sync-server evidence during step 4 — ADSync and Pass-through Authentication agent service state, Password Hash Sync health, and PTA agent events. Without it the investigation examines on-premises evidence only, and a lockout driven by a sync server or a PTA agent looks like a lockout with no identifiable source. The console says so explicitly when hybrid evidence is not collected, so a hybrid-blind run cannot be mistaken for a clean one.
+
+There is no auto-discovery for this: the Entra Connect server is not marked as such in AD, and guessing wrong would query an unrelated machine and report its silence as a healthy sync.
+
+**Before the first real hybrid investigation, run the readiness check once:**
+
+```powershell
+.\Test-EntraConnectReadiness.ps1 -EntraConnectServer AADCONNECT01
+```
+
+Read-only, takes seconds. It confirms the hybrid checks can actually read what they assume — that the `Directory Synchronization` event provider is registered, that the PTA log channel exists under the expected name, and that this account can read both remotely. Every one of those assumptions fails the same way (an empty result), and an empty result is indistinguishable from a healthy quiet server. Run it again after any Entra Connect upgrade.
+
 ---
 
 The individual tools remain runnable on their own when you already know what you want.
@@ -31,6 +49,7 @@ The individual tools remain runnable on their own when you already know what you
 | `Diagnose-ADAccountLockout.ps1`     | Per-account deep dive  | *Why* this account, and from *what machine*?   |
 | `Invoke-ADLockoutForensics.ps1`     | Multi-forest forensics | *Which DC / forest* is receiving the attempts? |
 | `Set-DCSecurityLogRetention.ps1`    | DC log sizing          | *How far back* can these reports actually see? |
+| `Test-EntraConnectReadiness.ps1`    | Hybrid preflight       | Can the hybrid checks *read* what they assume? |
 | `LockoutReference.psd1`             | Shared data            | Documented event IDs, status codes, audit GUIDs|
 
 > **If a lockout report comes back empty, run `Test-ADAuditPolicy.ps1` before concluding
@@ -368,11 +387,27 @@ A ranked **"Likely Cause"** appears at the top of the report:
 When `-EntraConnectServer` is supplied, the report adds an **Entra Connect / Hybrid Auth Diagnostics** section:
 
 - `ADSync`, `AzureADConnectAuthenticationAgent`, and updater service status.
-- Password Hash Sync Application log events, including heartbeat `654` and error events such as `611`, `652`, and `655`.
+- Password Hash Sync Application log events across the full documented table (`601`–`668`), including the heartbeat `654` and connectivity errors `0`, `611`, `652`, `655`.
 - PTA Authentication Agent Admin log events from `Microsoft-AzureADConnect-AuthenticationAgent/Admin`.
 - Notes when expected heartbeat/events are missing or the sync server cannot be queried.
 
 All remote failures are captured as diagnostic notes rather than thrown, so the AD lockout investigation continues even if the sync server is unreachable.
+
+#### The heartbeat is judged against three hours, not the search window
+
+Event `654` is logged **every 30 minutes** while the sync channel is active and no password changes are pending, and Microsoft's own troubleshooting task looks for one **within the past three hours**.
+
+This matters more than it sounds. An earlier version of this check searched the whole `-DaysBack` window and only reported a problem when the *entire* window held no `654` — so on the default 7-day search, password hash sync could have died yesterday and still be reported healthy. Freshness is now measured against the documented three-hour window regardless of how far back events were gathered, and the report states how old the newest heartbeat actually is.
+
+#### Connectivity errors are called out separately
+
+Events `0`, `611`, `652` and `655` are documented together as indicating a connectivity problem between Entra Connect and Active Directory, with the affected forest named in the event message.
+
+These get their own finding because they invert the usual conclusion: a sync server that *cannot reach a DC* is **not** the source of the bad passwords, but from the cloud side it looks identical to a broken account. The remediation is the connector account's `Replicate Directory Changes` / `Replicate Directory Changes All` rights and DC reachability — not anything to do with the user.
+
+Sources for the above:
+[PHS troubleshooting](https://learn.microsoft.com/entra/identity/hybrid/connect/tshoot-connect-password-hash-synchronization) ·
+[PTA troubleshooting](https://learn.microsoft.com/entra/identity/hybrid/connect/tshoot-connect-pass-through-authentication)
 
 ### Report output
 

@@ -1,4 +1,5 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
     Reports every Active Directory account lockout across the domain over a time window.
@@ -80,11 +81,25 @@ function ConvertFrom-LockoutEvent {
     $x = [xml]$EventXml
     $d = @{}
     foreach ($node in $x.Event.EventData.Data) { $d[$node.Name] = $node.'#text' }
+    # The caller machine is in TargetDomainName. There is NO CallerComputerName element in
+    # the 4740 event XML, even though Event Viewer displays the value under the label
+    # "Caller Computer Name" - reading that key returns null for every real event, so
+    # every source rendered as "(not recorded)".
+    #
+    # Microsoft's own sample event shows TargetDomainName="WIN81" for an account in the
+    # CONTOSO domain: the field holds the SOURCE WORKSTATION, not the account's domain.
+    # Some producers also emit CallerComputerName, so that key is honored as a fallback
+    # rather than assumed absent.
+    # https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4740
+    $caller = $d['TargetDomainName']
+    if ([string]::IsNullOrWhiteSpace($caller)) { $caller = $d['CallerComputerName'] }
+
     [PSCustomObject]@{
         Time           = [datetime]$x.Event.System.TimeCreated.SystemTime
         User           = $d['TargetUserName']
-        Domain         = $d['TargetDomainName']
-        CallerComputer = $d['CallerComputerName']
+        # The account's own domain is in SubjectDomainName; TargetDomainName is the caller.
+        Domain         = $d['SubjectDomainName']
+        CallerComputer = $caller
         DC             = $DcName
     }
 }

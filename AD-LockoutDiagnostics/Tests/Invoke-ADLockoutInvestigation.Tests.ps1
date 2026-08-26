@@ -131,6 +131,36 @@ Describe 'New-CaseSummary' {
         )
     }
 
+    It 'leads with the findings, so the answer is readable without opening a CSV' {
+        # SUMMARY.txt is what gets attached to a ticket. The cause belongs at the top -
+        # a reader who stops after ten lines should still know what to go and fix.
+        $gate = [PSCustomObject]@{ Ran=$true; Blocking=$false; CriticalGaps=@(); OtherGaps=@(); Message='' }
+        $findings = @(
+            [PSCustomObject]@{ FailureCount=47
+                               Sentence='svc_backup (47 failures from SQLSRV02 [10.0.0.50]) - Windows service running as this account with a stale password'
+                               Confidence='High'
+                               Remediation='On the source machine open services.msc, sort by "Log On As", and update the password on each service running as this account.' }
+        )
+        $out = New-CaseSummary -Identity 'svc_backup' -DaysBack 30 -Gate $gate -Steps $script:Steps `
+                 -CaseFolder 'C:\x' -GeneratedOn '2026-08-20 10:00:00' -Findings $findings
+
+        $out | Should -Match 'FINDINGS'
+        $out | Should -Match 'SQLSRV02'
+        $out | Should -Match 'services\.msc'
+        $out | Should -Match 'High'
+        # The findings block must come before the supporting evidence sections.
+        $out.IndexOf('FINDINGS') | Should -BeLessThan $out.IndexOf('EVIDENCE QUALITY')
+    }
+
+    It 'omits the findings block entirely when there are none' {
+        # An empty "FINDINGS" heading reads as "we found nothing wrong", which is not the
+        # same as "the cause step did not run".
+        $gate = [PSCustomObject]@{ Ran=$true; Blocking=$false; CriticalGaps=@(); OtherGaps=@(); Message='' }
+        $out = New-CaseSummary -Identity 'jdoe' -DaysBack 30 -Gate $gate -Steps $script:Steps `
+                 -CaseFolder 'C:\x' -GeneratedOn '2026-08-20 10:00:00' -Findings @()
+        $out | Should -Not -Match 'FINDINGS'
+    }
+
     It 'leads with a loud warning when evidence is not trustworthy' {
         $gate = [PSCustomObject]@{ Ran=$true; Blocking=$true
                                    CriticalGaps=@('DC02: User Account Management is No Auditing')
