@@ -204,3 +204,51 @@ Describe 'New-CaseSummary' {
         $out | Should -Match 'Audit Account Lockout -> Failure'
     }
 }
+
+Describe 'Bugs found in the real Case_jdoe run' {
+    # REGRESSION GUARDS from a live investigation. Every one of these degraded QUIETLY -
+    # the run reported success and produced files. That is the failure mode that survives
+    # unit tests, because nothing throws.
+
+    Context 'SUMMARY.txt keeps its FINDINGS section' {
+        # The findings lookup searched $caseFolder non-recursively, but the reports are
+        # moved into numbered subfolders BEFORE that runs. It found nothing, and the
+        # summary silently dropped the one section that states the answer.
+
+        It 'searches recursively, because reports live in numbered subfolders' {
+            $src = Get-Content -Raw "$PSScriptRoot\..\Invoke-ADLockoutInvestigation.ps1"
+            $src | Should -Match "Filter '\*LockoutCauses_\*\.csv' -Recurse"
+        }
+
+        It 'renders a FINDINGS section when findings exist' {
+            $gate = [PSCustomObject]@{ Ran=$true; Blocking=$false; CriticalGaps=@(); OtherGaps=@(); Message='ok' }
+            $findings = @([PSCustomObject]@{
+                FailureCount = 92
+                Sentence     = 'jdoe (92 failures from 192.168.10.181) - stale credential'
+                Confidence   = 'High'
+                Remediation  = 'Check saved credentials on that device.'
+            })
+            $out = New-CaseSummary -Identity 'jdoe' -DaysBack 7 -Gate $gate -Steps @() `
+                     -CaseFolder 'C:\x' -GeneratedOn 'now' -Findings $findings
+            $out | Should -Match 'FINDINGS'
+            $out | Should -Match '192\.168\.10\.181'
+        }
+    }
+
+    Context 'Every produced report gets a description' {
+        # Four of the newer reports listed with a blank description because the pattern
+        # was anchored to a '^\d+_' filename prefix these files do not have.
+
+        It 'describes the device-identity and cause reports' {
+            $src = Get-Content -Raw "$PSScriptRoot\..\Invoke-ADLockoutInvestigation.ps1"
+            foreach ($p in "'AuthSources'", "'AuthEvents'", "'LockoutCauses'", "'ADLockout_'") {
+                $src | Should -Match ([regex]::Escape($p))
+            }
+        }
+
+        It 'no longer anchors the account report to a numeric prefix' {
+            $src = Get-Content -Raw "$PSScriptRoot\..\Invoke-ADLockoutInvestigation.ps1"
+            $src | Should -Not -Match '\^\d\+_ADLockout_'
+        }
+    }
+}

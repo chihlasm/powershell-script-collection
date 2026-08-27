@@ -397,7 +397,13 @@ function New-CaseSummary {
                 'Forensics.*perdc' { 'Per-DC bad-password counters (works without auditing)'; break }
                 'Forensics.*event' { 'Raw collected events'; break }
                 'Forensics'        { 'Multi-forest forensics'; break }
-                '^\d+_ADLockout_'  { 'Deep dive on the account'; break }
+                # No ^\d+_ prefix: these filenames start with the report name. The old
+                # anchored pattern matched nothing, so four of the newer reports listed
+                # with a blank description.
+                'AuthEvents'       { 'Every authentication failure, one row per event'; break }
+                'AuthSources'      { 'WHICH DEVICE each failure came from'; break }
+                'LockoutCauses'    { 'Ranked likely causes and the fix for each'; break }
+                'ADLockout_'       { 'Deep dive on the account'; break }
                 default            { '' }
             }
             $null = $sb.AppendLine(("  {0,-52} {1}" -f $f.Name, $what))
@@ -727,7 +733,11 @@ try {
 # headline answer is visible without opening a CSV. Best-effort: a missing or unreadable
 # causes file must not cost us the summary.
 $findings = @()
-$causesCsv = Get-ChildItem -Path $caseFolder -Filter '*LockoutCauses_*.csv' -ErrorAction SilentlyContinue |
+# -Recurse because the reports were sorted into numbered subfolders before this runs.
+# Without it the lookup searched an empty top-level folder, found nothing, and SUMMARY.txt
+# silently lost its FINDINGS section - the one part that states the answer. It degraded
+# quietly, which is why it survived a real run unnoticed.
+$causesCsv = Get-ChildItem -Path $caseFolder -Filter '*LockoutCauses_*.csv' -Recurse -ErrorAction SilentlyContinue |
              Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if ($causesCsv) {
     try {

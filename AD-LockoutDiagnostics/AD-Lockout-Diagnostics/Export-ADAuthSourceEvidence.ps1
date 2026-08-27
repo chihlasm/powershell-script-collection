@@ -1151,11 +1151,16 @@ function Group-AuthSource {
             LogonTypes       = (@($failures |
                                   Where-Object { -not [string]::IsNullOrWhiteSpace($_.LogonTypeMeaning) } |
                                   Select-Object -ExpandProperty LogonTypeMeaning -Unique) -join '; ')
-            TopStatus        = (@($failures |
+            # The trailing [0] is load-bearing. Wrapping the pipeline in @() makes this an
+            # Object[] even when it holds a single string, and Export-Csv renders an array
+            # as the literal text "System.Object[]" - which is exactly what shipped: every
+            # row's most important column, the reason the attempts failed, was unreadable
+            # in the CSV. Select-Object -First 1 alone does not unwrap it.
+            TopStatus        = @($failures |
                                   Where-Object { -not [string]::IsNullOrWhiteSpace($_.StatusMeaning) } |
                                   Group-Object StatusMeaning |
                                   Sort-Object Count -Descending |
-                                  Select-Object -First 1 -ExpandProperty Name))
+                                  Select-Object -ExpandProperty Name)[0]
             DCsSeen          = (@($g.Group | Select-Object -ExpandProperty DC -Unique | Sort-Object) -join ', ')
             FirstSeen        = if ($times.Count) { $times[0] } else { $null }
             LastSeen         = if ($times.Count) { $times[-1] } else { $null }
@@ -1681,6 +1686,41 @@ function ConvertTo-AuthHtmlSafe {
     return [System.Net.WebUtility]::HtmlEncode([string]$Text)
 }
 
+function Format-ResolutionMethod {
+    # ResolutionMethod and DeviceClass are internal CamelCase tokens. They are precise but
+    # they read as jargon in a report a helpdesk tech opens, and "EventLogCorrelation"
+    # tells them nothing about how much to trust the name. Plain English, with the
+    # evidence named.
+    param([string]$Method)
+
+    switch ("$Method") {
+        'EventLogCorrelation' { 'the machine named itself in the event log' }
+        'ReverseDns'          { 'reverse DNS only (the name may be stale)' }
+        'DhcpLease'           { 'a DHCP lease covering the failure time' }
+        'DhcpReservation'     { 'a DHCP reservation' }
+        'AdComputerObject'    { 'a matching Active Directory computer object' }
+        'InventoryCsv'        { 'the inventory file supplied' }
+        'Unresolved'          { '' }
+        ''                    { '' }
+        default               { $Method }
+    }
+}
+
+function Format-DeviceClass {
+    param([string]$Class)
+
+    switch ("$Class") {
+        'DomainJoinedWorkstation' { 'Domain-joined workstation' }
+        'DomainController'        { 'Domain controller' }
+        'NonDomainDevice'         { 'Not domain-joined' }
+        'LocalOrConsole'          { 'The domain controller itself' }
+        'NetworkDevice'           { 'Network device' }
+        'Unknown'                 { '' }
+        ''                        { '' }
+        default                   { $Class }
+    }
+}
+
 function Get-AuthSourceVerdict {
     # One sentence naming what the evidence shows, before any table. The three readings
     # below are genuinely different problems and the counts alone do not distinguish them.
@@ -1695,10 +1735,21 @@ function Get-AuthSourceVerdict {
         }
     }
 
-    $top = $src[0]
-    # One source against many accounts is a spray or a shared service credential; the
-    # security reading is the one that must not be missed.
-    $spray = @($src | Where-Object { [int]$_.DistinctAccounts -ge 5 })
+    # The domain controller itself, and loopback, are RELAYS rather than culprits. A DC
+    # re-presents credentials on behalf of other things - Pass-through Authentication
+    # agents validating Entra sign-ins, scheduled tasks, services - so the failure is
+    # recorded as originating there while the real device is elsewhere entirely.
+    #
+    # On a real run the DC accounted for 1043 of 1418 failures across 16 accounts. Naming
+    # it as the top source is technically true and operationally useless: it sends a
+    # technician to audit a domain controller for a stale credential that is not on it.
+    $relayClasses = @('DomainController','LocalOrConsole')
+    $external = @($src | Where-Object { $_.DeviceClass -notin $relayClasses })
+    $relay    = @($src | Where-Object { $_.DeviceClass -in $relayClasses })
+
+    # A spray reading only counts when it comes from an EXTERNAL source. A DC showing
+    # many accounts is just aggregation.
+    $spray = @($external | Where-Object { [int]$_.DistinctAccounts -ge 5 })
     if ($spray.Count -gt 0) {
         $s = $spray[0]
         $who = if ($s.ResolvedName) { $s.ResolvedName } else { $s.SourceIp }
@@ -1708,6 +1759,18 @@ function Get-AuthSourceVerdict {
             Next  = 'One source failing against many accounts is either a password spray or one shared credential configured everywhere. If this device is not one you recognise, treat it as a security event before treating it as a lockout.'
         }
     }
+
+    if ($external.Count -eq 0 -and $relay.Count -gt 0) {
+        $r = $relay[0]
+        return [PSCustomObject]@{
+            Class = 'warn'
+            Line  = "Every failure was recorded as originating on $($r.SourceKey) itself."
+            Next  = 'A domain controller re-presents credentials for other things - Pass-through Authentication agents validating Entra sign-ins, services, scheduled tasks - so it appears as the source while the real device is elsewhere. Correlate these timestamps against Entra sign-in logs and the PTA agent log rather than auditing the DC.'
+        }
+    }
+
+    # Rank on external sources from here: the DC is noise at the top of the list.
+    $top = if ($external.Count -gt 0) { $external[0] } else { $src[0] }
 
     $who = if ($top.ResolvedName) { $top.ResolvedName } else { $top.SourceIp }
     if (-not $top.ResolvedName) {
@@ -1826,8 +1889,9 @@ function New-AuthSourceReportHtml {
             default  { '' }
         }
         $tags = ''
-        if ($s.Confidence) { $tags += "<span class=`"tag $confClass`">$(ConvertTo-AuthHtmlSafe $s.Confidence) confidence</span>" }
-        if ($s.DeviceClass -and $s.DeviceClass -ne 'Unknown') { $tags += "<span class=`"tag`">$(ConvertTo-AuthHtmlSafe $s.DeviceClass)</span>" }
+        if ($s.Confidence -and $s.Confidence -ne 'None') { $tags += "<span class=`"tag $confClass`">$(ConvertTo-AuthHtmlSafe $s.Confidence) confidence</span>" }
+        $classText = Format-DeviceClass -Class $s.DeviceClass
+        if ($classText) { $tags += "<span class=`"tag`">$(ConvertTo-AuthHtmlSafe $classText)</span>" }
         if ([int]$s.DistinctAccounts -ge 5) { $tags += '<span class="tag bad">possible spray</span>' }
 
         $null = $sb.AppendLine('<article class="rank">')
@@ -1838,9 +1902,9 @@ function New-AuthSourceReportHtml {
         $null = $sb.AppendLine('<dl class="rank-meta">')
         $pairs = [ordered]@{
             'IP address'  = $s.SourceIp
-            'Device'      = if ($s.DeviceDetail) { $s.DeviceDetail } elseif ($s.DeviceClass) { $s.DeviceClass } else { 'not identified' }
+            'Device'      = if ($s.DeviceDetail) { $s.DeviceDetail } else { Format-DeviceClass -Class $s.DeviceClass }
             'MAC / vendor'= if ($s.MacAddress) { "$($s.MacAddress) - $($s.MacVendor)" } else { '' }
-            'How resolved'= $s.ResolutionMethod
+            'How resolved'= Format-ResolutionMethod -Method $s.ResolutionMethod
             'DHCP lease'  = if ($s.DhcpLease) { "$($s.DhcpLease)$(if ($s.LeaseCoverageNote) { " ($($s.LeaseCoverageNote))" })" } else { '' }
             'Accounts'    = "$($s.DistinctAccounts) - $($s.Accounts)"
             'Result'      = $s.TopStatus

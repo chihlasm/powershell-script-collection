@@ -772,3 +772,144 @@ Describe 'New-AuthSourceReportHtml' {
         $html | Should -Match '\.rank|\.card'
     }
 }
+
+Describe 'Bugs found in the real Case_jdoe run' {
+    Context 'TopStatus must be a string, not an array' {
+        # In the live CSV every row's TopStatus read "System.Object[]" - the single most
+        # important column, the reason the attempts failed, was unreadable. Wrapping the
+        # pipeline in @() produced an Object[] even for one value, and Export-Csv renders
+        # an array as its type name. Select-Object -First 1 does NOT unwrap that.
+
+        It 'unwraps the grouped status to a plain string' {
+            $failures = @(
+                [PSCustomObject]@{ StatusMeaning = 'Bad password' }
+                [PSCustomObject]@{ StatusMeaning = 'Bad password' }
+                [PSCustomObject]@{ StatusMeaning = 'Account locked' }
+            )
+            $top = @($failures |
+                     Where-Object { -not [string]::IsNullOrWhiteSpace($_.StatusMeaning) } |
+                     Group-Object StatusMeaning |
+                     Sort-Object Count -Descending |
+                     Select-Object -ExpandProperty Name)[0]
+            $top | Should -BeOfType [string]
+            $top | Should -Be 'Bad password'
+            "$top" | Should -Not -Match 'System\.Object'
+        }
+
+        It 'uses the indexed form in the source, not the @()-wrapped one' {
+            $src = Get-Content -Raw "$PSScriptRoot\..\Export-ADAuthSourceEvidence.ps1"
+            $src | Should -Match 'Select-Object -ExpandProperty Name\)\[0\]'
+        }
+    }
+
+    Context 'Internal tokens are translated for the reader' {
+        # ResolutionMethod and DeviceClass are CamelCase internals. "EventLogCorrelation"
+        # is precise but tells a helpdesk tech nothing about how much to trust the name.
+
+        It 'explains how a name was resolved in plain English' {
+            Format-ResolutionMethod -Method 'EventLogCorrelation' | Should -Match 'named itself'
+            Format-ResolutionMethod -Method 'ReverseDns'          | Should -Match 'reverse DNS'
+            Format-ResolutionMethod -Method 'DhcpLease'           | Should -Match 'DHCP'
+        }
+
+        It 'flags reverse DNS as the weaker evidence it is' {
+            # A stale PTR record names a machine that may no longer hold that address.
+            Format-ResolutionMethod -Method 'ReverseDns' | Should -Match 'stale'
+        }
+
+        It 'returns empty for unresolved rather than the token' {
+            Format-ResolutionMethod -Method 'Unresolved' | Should -BeNullOrEmpty
+            Format-DeviceClass -Class 'Unknown'          | Should -BeNullOrEmpty
+        }
+
+        It 'translates the device classes seen in the real run' {
+            Format-DeviceClass -Class 'DomainJoinedWorkstation' | Should -Be 'Domain-joined workstation'
+            Format-DeviceClass -Class 'DomainController'        | Should -Be 'Domain controller'
+            Format-DeviceClass -Class 'NonDomainDevice'         | Should -Match 'Not domain-joined'
+            Format-DeviceClass -Class 'LocalOrConsole'          | Should -Match 'domain controller itself'
+        }
+
+        It 'passes through an unrecognized class rather than blanking it' {
+            Format-DeviceClass -Class 'SomethingNew' | Should -Be 'SomethingNew'
+        }
+
+        It 'does not print a confidence tag for an unresolved source' {
+            # "None confidence" is noise; the card already says "not resolved".
+            $s = @([PSCustomObject]@{
+                SourceIp='10.0.0.1'; ResolvedName=''; DeviceClass='Unknown'; Confidence='None'
+                ResolutionMethod='Unresolved'; MacAddress=''; MacVendor=''; FailureCount=9
+                DistinctAccounts=1; Accounts='u'; TopStatus='Bad password'; LogonTypes=''
+                EventIds='4771'; FirstSeen='a'; LastSeen='b'; TimingPattern='Burst'
+                MedianGapMinutes=0; TimingDetail='burst'; DCsSeen='DC'; NamesSeenInLog=''
+                ReverseDnsName=''; DhcpLease=''; LeaseCoversFailure=$false; LeaseCoverageNote=''
+                DeviceDetail='' })
+            $html = New-AuthSourceReportHtml -Sources $s -DaysBack 7 -GeneratedOn 'now'
+            $html | Should -Not -Match 'None confidence'
+        }
+    }
+}
+
+Describe 'The domain controller is a relay, not a culprit' {
+    # From the real run: DC02 recorded 1043 of 1418 failures across 16 accounts,
+    # and 127.0.0.1 another 47 across 11. Naming the DC as the top source is true and
+    # useless - it sends a technician to audit a domain controller for a stale credential
+    # that lives on a workstation. A DC re-presents credentials for PTA agents validating
+    # Entra sign-ins, services and scheduled tasks.
+
+    BeforeAll {
+        $script:RealShape = @(
+            [PSCustomObject]@{ SourceKey='DC02'; SourceIp=''; ResolvedName='DC02'
+                DeviceClass='DomainController'; Confidence='High'; ResolutionMethod='EventLogCorrelation'
+                MacAddress=''; MacVendor=''; FailureCount=1043; DistinctAccounts=16; Accounts='many'
+                TopStatus='Bad password'; LogonTypes=''; EventIds='4625'; FirstSeen='a'; LastSeen='b'
+                TimingPattern='Burst'; MedianGapMinutes=0; TimingDetail='burst'; DCsSeen='DC'
+                NamesSeenInLog=''; ReverseDnsName=''; DhcpLease=''; LeaseCoversFailure=$true
+                LeaseCoverageNote=''; DeviceDetail='Domain controller' }
+            [PSCustomObject]@{ SourceKey='192.168.10.181'; SourceIp='192.168.10.181'; ResolvedName=''
+                DeviceClass='Unknown'; Confidence='None'; ResolutionMethod='Unresolved'
+                MacAddress=''; MacVendor=''; FailureCount=92; DistinctAccounts=3; Accounts='three'
+                TopStatus='Bad password'; LogonTypes=''; EventIds='4771'; FirstSeen='a'; LastSeen='b'
+                TimingPattern='Burst'; MedianGapMinutes=0.03; TimingDetail='burst'; DCsSeen='DC'
+                NamesSeenInLog=''; ReverseDnsName=''; DhcpLease=''; LeaseCoversFailure=$true
+                LeaseCoverageNote=''; DeviceDetail='' }
+        )
+    }
+
+    It 'does not name the domain controller as the source to chase' {
+        $v = Get-AuthSourceVerdict -Sources $script:RealShape
+        $v.Line | Should -Not -Match 'DC02'
+    }
+
+    It 'points at the highest external source instead' {
+        $v = Get-AuthSourceVerdict -Sources $script:RealShape
+        $v.Line | Should -Match '192\.168\.10\.181'
+    }
+
+    It 'does not treat DC account aggregation as a password spray' {
+        # 16 accounts through a DC is aggregation. 16 accounts from one workstation is
+        # a spray. Same number, opposite meaning.
+        $v = Get-AuthSourceVerdict -Sources $script:RealShape
+        $v.Line | Should -Not -Match '16 different accounts'
+    }
+
+    It 'still flags a genuine spray from an external source' {
+        $spray = @($script:RealShape[0], ([PSCustomObject]@{
+            SourceKey='10.0.0.5'; SourceIp='10.0.0.5'; ResolvedName='KIOSK-1'
+            DeviceClass='NonDomainDevice'; Confidence='Low'; ResolutionMethod='ReverseDns'
+            MacAddress=''; MacVendor=''; FailureCount=40; DistinctAccounts=12; Accounts='many'
+            TopStatus='Bad password'; LogonTypes=''; EventIds='4771'; FirstSeen='a'; LastSeen='b'
+            TimingPattern='Burst'; MedianGapMinutes=0; TimingDetail='burst'; DCsSeen='DC'
+            NamesSeenInLog=''; ReverseDnsName=''; DhcpLease=''; LeaseCoversFailure=$true
+            LeaseCoverageNote=''; DeviceDetail='' }))
+        $v = Get-AuthSourceVerdict -Sources $spray
+        $v.Line  | Should -Match 'KIOSK-1'
+        $v.Class | Should -Be 'bad'
+    }
+
+    It 'explains the relay when the DC is the ONLY source' {
+        $onlyDc = @($script:RealShape[0])
+        $v = Get-AuthSourceVerdict -Sources $onlyDc
+        $v.Line | Should -Match 'originating on DC02 itself'
+        $v.Next | Should -Match 'Pass-through Authentication|Entra'
+    }
+}
