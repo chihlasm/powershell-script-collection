@@ -117,6 +117,49 @@
   .kv { display:grid; grid-template-columns:auto 1fr; gap:3px 14px; margin:0; font-size:13px; }
   .kv dt { color:var(--ink-faint); white-space:nowrap; }
   .kv dd { margin:0; color:var(--ink-dim); word-break:break-word; }
+
+  /* Ranked account cards (Get-ADLockoutHistory). These live HERE rather than only in
+     that script because the combined case report discards each page's own <style> and
+     builds on this sheet - a class defined only in the generator renders as unstyled
+     text once combined. That failed twice: first .stats/.kv, then these. */
+  .rank { background:var(--surface); border:1px solid var(--line); border-radius:8px;
+          padding:14px 18px; margin-bottom:10px; }
+  .rank:first-of-type { border-color:color-mix(in srgb, var(--bad) 40%, var(--line));
+                        background:color-mix(in srgb, var(--bad) 6%, var(--surface)); }
+  .rank-head { display:flex; align-items:baseline; gap:10px 12px; flex-wrap:wrap; }
+  .rank-name { font-size:16px; font-weight:650; color:#fff; word-break:break-all;
+               font-family:Consolas,'Cascadia Mono',monospace; letter-spacing:-.01em; }
+  .rank-count { margin-left:auto; font-size:22px; font-weight:700; color:var(--ink);
+                font-variant-numeric:tabular-nums; }
+  .rank-count small { font-size:13px; color:var(--ink-faint); font-weight:400; }
+  /* Two columns on anything wider than a phone: three label/value pairs stacked in one
+     column is what made these cards read as a wall of text. */
+  .rank-meta { display:grid; grid-template-columns:max-content 1fr; gap:4px 14px;
+               margin:0; font-size:13px; align-items:baseline; }
+  @media (min-width:680px) {
+    .rank-meta { grid-template-columns:max-content minmax(0,1fr) max-content minmax(0,1fr); }
+  }
+  .rank-meta dt { color:var(--ink-faint); white-space:nowrap; font-size:11px;
+                  text-transform:uppercase; letter-spacing:.07em; }
+  .rank-meta dd { margin:0; color:var(--ink-dim); word-break:break-word;
+                  font-variant-numeric:tabular-nums; }
+  .meta { color:var(--ink-faint); font-size:13px; margin:0 0 18px; max-width:76ch; }
+
+  /* Per-column sizing. Left to itself the browser sizes by content, which wrapped a
+     14-character IP address onto two lines while a status sentence took a third of the
+     width. Identifiers the reader scans for - IP, time, host - must never wrap; prose
+     columns absorb the slack instead. */
+  .c-ip, .c-time, .c-num, .c-span { white-space:nowrap; font-variant-numeric:tabular-nums; }
+  .c-ip   { font-family:Consolas,'Cascadia Mono',monospace; color:var(--ink); width:1%; }
+  .c-time { color:var(--ink-dim); width:1%; }
+  .c-num  { text-align:right; font-weight:650; color:var(--ink); width:1%; }
+  .c-span { color:var(--ink-faint); width:1%; }
+  .c-host { font-family:Consolas,'Cascadia Mono',monospace; word-break:break-word;
+            min-width:14ch; }
+  .c-dc   { color:var(--ink-faint); font-size:12px; word-break:break-word; min-width:12ch; }
+  .c-type { color:var(--ink-dim); min-width:10ch; }
+  .c-status { color:var(--ink-dim); }
+  th.c-num { text-align:right; }
   details { border-top:1px solid var(--line); margin-top:26px; padding-top:16px; }
   summary { cursor:pointer; font-size:12px; letter-spacing:.15em; text-transform:uppercase;
             color:var(--ink-faint); font-weight:700; list-style:none; }

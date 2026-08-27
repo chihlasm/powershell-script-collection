@@ -544,3 +544,89 @@ Describe 'Write-LockoutReport hybrid diagnostics section' {
 }
 
 
+
+Describe 'Get-BadPasswordSummary' {
+    # A real run produced 78 bad-password rows that were nearly identical: same source,
+    # same DC, same status, differing only by second. Rendered as a flat table that is
+    # 78 rows of noise where the actual finding - "one source, one status, over this
+    # window" - is something the reader has to reconstruct by scrolling.
+    #
+    # Grouping answers the question the table is being read to answer, and the raw rows
+    # stay available underneath for anyone who needs the individual timestamps.
+
+    It 'collapses repeated attempts from one source into a single row' {
+        $rows = @(
+            [PSCustomObject]@{ Time='2026-08-26 12:00:00'; EventId=4771; SourceHost='(4771 records no hostname - resolve the IP)'
+                               SourceIp='192.168.10.181'; LogonType='(n/a for Kerberos)'; Status='0x18 - Bad password'; DC='DC01' }
+            [PSCustomObject]@{ Time='2026-08-26 12:00:05'; EventId=4771; SourceHost='(4771 records no hostname - resolve the IP)'
+                               SourceIp='192.168.10.181'; LogonType='(n/a for Kerberos)'; Status='0x18 - Bad password'; DC='DC01' }
+        )
+        $s = Get-BadPasswordSummary -Rows $rows
+        @($s).Count    | Should -Be 1
+        $s[0].Attempts | Should -Be 2
+    }
+
+    It 'keeps distinct sources separate' {
+        $rows = @(
+            [PSCustomObject]@{ Time='2026-08-26 12:00:00'; EventId=4771; SourceHost='A'; SourceIp='10.0.0.1'
+                               LogonType='3'; Status='0x18 - Bad password'; DC='DC01' }
+            [PSCustomObject]@{ Time='2026-08-26 12:00:01'; EventId=4771; SourceHost='B'; SourceIp='10.0.0.2'
+                               LogonType='3'; Status='0x18 - Bad password'; DC='DC01' }
+        )
+        @(Get-BadPasswordSummary -Rows $rows).Count | Should -Be 2
+    }
+
+    It 'separates different status codes from the same source' {
+        # 0x18 (bad password) and 0x12 (already locked out) mean different things: the
+        # first is the cause, the second is the consequence. Merging them would hide
+        # which attempts actually drove the lockout.
+        $rows = @(
+            [PSCustomObject]@{ Time='2026-08-26 12:00:00'; EventId=4771; SourceHost='A'; SourceIp='10.0.0.1'
+                               LogonType='3'; Status='0x18 - Bad password'; DC='DC01' }
+            [PSCustomObject]@{ Time='2026-08-26 12:00:01'; EventId=4771; SourceHost='A'; SourceIp='10.0.0.1'
+                               LogonType='3'; Status='0x12 - Credentials revoked'; DC='DC01' }
+        )
+        @(Get-BadPasswordSummary -Rows $rows).Count | Should -Be 2
+    }
+
+    It 'reports the first and last time seen for the group' {
+        $rows = @(
+            [PSCustomObject]@{ Time='2026-08-26 12:00:00'; EventId=4771; SourceHost='A'; SourceIp='10.0.0.1'
+                               LogonType='3'; Status='0x18'; DC='DC01' }
+            [PSCustomObject]@{ Time='2026-08-26 14:30:00'; EventId=4771; SourceHost='A'; SourceIp='10.0.0.1'
+                               LogonType='3'; Status='0x18'; DC='DC01' }
+        )
+        $s = Get-BadPasswordSummary -Rows $rows
+        $s[0].FirstSeen | Should -Match '12:00:00'
+        $s[0].LastSeen  | Should -Match '14:30:00'
+    }
+
+    It 'ranks the busiest source first' {
+        $rows = @(
+            [PSCustomObject]@{ Time='2026-08-26 12:00:00'; EventId=4771; SourceHost='quiet'; SourceIp='10.0.0.9'
+                               LogonType='3'; Status='0x18'; DC='DC01' }
+            [PSCustomObject]@{ Time='2026-08-26 12:00:01'; EventId=4771; SourceHost='busy'; SourceIp='10.0.0.1'
+                               LogonType='3'; Status='0x18'; DC='DC01' }
+            [PSCustomObject]@{ Time='2026-08-26 12:00:02'; EventId=4771; SourceHost='busy'; SourceIp='10.0.0.1'
+                               LogonType='3'; Status='0x18'; DC='DC01' }
+        )
+        (Get-BadPasswordSummary -Rows $rows)[0].SourceHost | Should -Be 'busy'
+    }
+
+    It 'returns nothing for no rows rather than throwing' {
+        @(Get-BadPasswordSummary -Rows @()).Count | Should -Be 0
+    }
+
+    It 'computes the span so a burst is distinguishable from a slow drip' {
+        # 78 attempts in 90 seconds is an automated retry loop; 78 over a week is a
+        # person. Same count, completely different remediation.
+        $rows = @(
+            [PSCustomObject]@{ Time='2026-08-26 12:00:00'; EventId=4771; SourceHost='A'; SourceIp='10.0.0.1'
+                               LogonType='3'; Status='0x18'; DC='DC01' }
+            [PSCustomObject]@{ Time='2026-08-26 12:01:30'; EventId=4771; SourceHost='A'; SourceIp='10.0.0.1'
+                               LogonType='3'; Status='0x18'; DC='DC01' }
+        )
+        $s = Get-BadPasswordSummary -Rows $rows
+        $s[0].Span | Should -Not -BeNullOrEmpty
+    }
+}

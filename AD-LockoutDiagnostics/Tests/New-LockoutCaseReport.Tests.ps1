@@ -187,3 +187,61 @@ Describe 'New-CombinedReport styling completeness' {
         $html | Should -Match '\.panel'
     }
 }
+
+Describe 'Every class the source reports emit must be styled in the combined page' {
+    # REGRESSION GUARD, second occurrence. The first was .stats/.stat/.kv; this one was
+    # .rank/.rank-head/.rank-name/.rank-count/.rank-meta, which Get-ADLockoutHistory.ps1
+    # defines in its OWN <style> block rather than in the shared LockoutReference.psd1.
+    # The combiner discards each page's style block, so those cards rendered as bare
+    # stacked text: account names as plain body copy and the Source/Last seen/First seen
+    # definition list collapsed into a vertical run of labels and values.
+    #
+    # The lesson from the first occurrence was "build on the shared stylesheet". That was
+    # necessary but not sufficient - it only helps for classes that ARE in the shared
+    # sheet. This test closes the actual gap by checking the emitted page against the
+    # classes the report generators really use.
+
+    It 'styles the ranked-account card classes' {
+        $css = Get-BaseCss
+        foreach ($cls in '\.rank\b', '\.rank-head', '\.rank-name', '\.rank-count', '\.rank-meta') {
+            $css | Should -Match $cls -Because 'Get-ADLockoutHistory.ps1 emits this class'
+        }
+    }
+
+    It 'styles the rank-meta definition list so it renders as a grid, not stacked text' {
+        $css = Get-BaseCss
+        $css | Should -Match '\.rank-meta dt'
+        $css | Should -Match '\.rank-meta dd'
+    }
+
+    It 'covers every class emitted by the report generators' {
+        # Scrapes class="..." out of the sibling report scripts and asserts the combined
+        # stylesheet defines each one. This catches the NEXT report that adds a class
+        # without adding it to the shared sheet, rather than waiting for someone to
+        # notice unstyled output in a screenshot.
+        $generators = @(
+            'Get-ADLockoutHistory.ps1', 'Diagnose-ADAccountLockout.ps1',
+            'Test-ADAuditPolicy.ps1', 'Invoke-ADLockoutForensics.ps1'
+        ) | ForEach-Object { Join-Path (Split-Path $PSScriptRoot -Parent) $_ } |
+            Where-Object { Test-Path -LiteralPath $_ }
+
+        $emitted = [System.Collections.Generic.HashSet[string]]::new()
+        foreach ($g in $generators) {
+            $src = Get-Content -Raw $g
+            foreach ($m in [regex]::Matches($src, 'class="([^"$]+)"')) {
+                foreach ($token in ($m.Groups[1].Value -split '\s+')) {
+                    if ($token -and $token -notmatch '[^a-zA-Z0-9_-]') { $null = $emitted.Add($token) }
+                }
+            }
+        }
+
+        # Layout/state classes that intentionally have no styling of their own.
+        $exempt = @('no-js')
+        $css = (Get-BaseCss) + (Get-TabCss)
+        $unstyled = @($emitted | Where-Object {
+            $_ -notin $exempt -and $css -notmatch ('\.' + [regex]::Escape($_) + '(?![\w-])')
+        })
+
+        $unstyled | Should -BeNullOrEmpty -Because 'a class with no rule renders as unstyled text in the combined report'
+    }
+}
