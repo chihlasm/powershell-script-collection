@@ -753,6 +753,64 @@ function Get-EntraConnectDiagnostics {
     return [PSCustomObject]$result
 }
 
+function Get-BadPasswordSummary {
+    # Collapses the raw bad-password rows into one row per (source, status, logon type).
+    #
+    # A real run produced 78 rows that differed only by second - same IP, same DC, same
+    # status - so the table showed 78 lines of noise and made the reader reconstruct the
+    # actual finding by scrolling. The finding is "one source, one status, this many
+    # attempts, over this span", which is one line.
+    #
+    # Status is part of the key on purpose: 0x18 (bad password) and 0x12 (account already
+    # locked) mean different things. The first is the cause, the second the consequence.
+    # Merging them would hide which attempts actually drove the lockout.
+    param([object[]]$Rows)
+
+    $rows = @($Rows | Where-Object { $_ })
+    if ($rows.Count -eq 0) { return @() }
+
+    $groups = $rows | Group-Object {
+        '{0}|{1}|{2}|{3}' -f $_.SourceHost, $_.SourceIp, $_.Status, $_.LogonType
+    }
+
+    $summary = foreach ($g in $groups) {
+        # try/catch rather than [datetime]::TryParse: passing [ref] to a local declared
+        # inside a ForEach-Object scriptblock fails to bind the overload under PS 5.1
+        # ("Cannot find an overload for TryParse and the argument count: 2").
+        $times = @($g.Group | ForEach-Object {
+            try { [datetime]$_.Time } catch { }
+        }) | Sort-Object
+
+        $first = if ($times.Count) { $times[0] } else { $null }
+        $last  = if ($times.Count) { $times[-1] } else { $null }
+
+        # The span separates an automated retry loop from a person typing. 78 attempts in
+        # 90 seconds and 78 over a week need completely different remediation.
+        $span = if ($first -and $last) {
+            $d = $last - $first
+            if     ($d.TotalSeconds -lt 1)  { 'same second' }
+            elseif ($d.TotalMinutes -lt 1)  { '{0} sec' -f [int]$d.TotalSeconds }
+            elseif ($d.TotalHours   -lt 1)  { '{0} min' -f [int]$d.TotalMinutes }
+            elseif ($d.TotalDays    -lt 1)  { '{0} hr'  -f [int]$d.TotalHours }
+            else                            { '{0} days' -f [int]$d.TotalDays }
+        } else { '' }
+
+        [PSCustomObject]@{
+            SourceHost = $g.Group[0].SourceHost
+            SourceIp   = $g.Group[0].SourceIp
+            LogonType  = $g.Group[0].LogonType
+            Status     = $g.Group[0].Status
+            DC         = $g.Group[0].DC
+            Attempts   = $g.Count
+            FirstSeen  = if ($first) { $first.ToString('yyyy-MM-dd HH:mm:ss') } else { ($g.Group[0].Time) }
+            LastSeen   = if ($last)  { $last.ToString('yyyy-MM-dd HH:mm:ss') }  else { ($g.Group[0].Time) }
+            Span       = $span
+        }
+    }
+
+    return @($summary | Sort-Object Attempts -Descending)
+}
+
 function Get-LockoutVerdict {
     # Pure ranking helper. Takes parsed lockout rows, bad-logon rows, and the effective
     # policy object, and returns an ORDERED [string[]] of plain-English findings shown as
@@ -1095,13 +1153,25 @@ function Write-LockoutReport {
 
     # Generic data-table builder
     function New-DataTable {
-        param([object[]]$Rows, [string[]]$Headers, [string[]]$Props, [string]$EmptyText)
+        # -Classes tags each column so the stylesheet can size it. Without per-column
+        # classes the browser sizes purely by content, which let a 14-character IP wrap
+        # onto two lines while a status sentence took a third of the width. An IP address
+        # is a fixed-width identifier and must never wrap - it is the thing the reader is
+        # scanning for.
+        param(
+            [object[]]$Rows, [string[]]$Headers, [string[]]$Props, [string]$EmptyText,
+            [string[]]$Classes
+        )
         if (-not $Rows -or $Rows.Count -eq 0) {
             return "    <p class=`"empty`">$(Convert-Esc $EmptyText)</p>"
         }
-        $thead = ($Headers | ForEach-Object { "<th>$(Convert-Esc $_)</th>" }) -join ''
+        $cls = { param([int]$i) if ($Classes -and $i -lt $Classes.Count) { " class=`"c-$($Classes[$i])`"" } else { '' } }
+
+        $thead = (0..($Headers.Count - 1) | ForEach-Object {
+            "<th$(& $cls $_)>$(Convert-Esc $Headers[$_])</th>" }) -join ''
         $body  = foreach ($r in $Rows) {
-            $cells = ($Props | ForEach-Object { "<td>$(Convert-Esc $r.$_)</td>" }) -join ''
+            $cells = (0..($Props.Count - 1) | ForEach-Object {
+                "<td$(& $cls $_)>$(Convert-Esc $r.($Props[$_]))</td>" }) -join ''
             "        <tr>$cells</tr>"
         }
         "    <table>$nl      <thead><tr>$thead</tr></thead>$nl      <tbody>$nl$($body -join $nl)$nl      </tbody>$nl    </table>"
@@ -1114,10 +1184,25 @@ function Write-LockoutReport {
         -EmptyText "No lockout events in the last $DaysBack day(s)."
 
     # 5) Bad-Password Sources (4625 / 4771)
+    # Grouped view first - it answers the question the table is read to answer - with the
+    # raw per-event rows kept underneath in a collapsed section for anyone who needs the
+    # individual timestamps.
+    $badSummary = Get-BadPasswordSummary -Rows $BadLogons
+    $badSummaryHtml = if (@($badSummary).Count -eq 0) {
+        "    <p class=`"empty`">No bad-password events (4625 / 4771) found in the last $DaysBack day(s).</p>"
+    } else {
+        New-DataTable -Rows $badSummary `
+            -Headers @('Attempts','Source','Source IP','Logon Type','Status','Span','Last seen','DC') `
+            -Props   @('Attempts','SourceHost','SourceIp','LogonType','Status','Span','LastSeen','DC') `
+            -EmptyText 'None.' `
+            -Classes  @('num','host','ip','type','status','span','time','dc')
+    }
+
     $badHtml = New-DataTable -Rows $BadLogons `
         -Headers @('Time','Event','Source Host','Source IP','Logon Type','Status','DC') `
         -Props   @('Time','EventId','SourceHost','SourceIp','LogonType','Status','DC') `
-        -EmptyText "No bad-password events (4625 / 4771) found in the last $DaysBack day(s)."
+        -EmptyText "No bad-password events (4625 / 4771) found in the last $DaysBack day(s)." `
+        -Classes  @('time','num','host','ip','type','status','dc')
 
     # 6) Admin / Helpdesk Resets (4724)
     $resetHtml = New-DataTable -Rows $Resets `
@@ -1250,9 +1335,19 @@ $supportingHtml
 </div>
 
 <h2>Where the bad passwords came from</h2>
+<p class="meta">Grouped by source and result. Repeated attempts from the same place with the
+same outcome are one row - the span tells you whether it is an automated retry loop or a
+person. Individual events are below.</p>
 <div class="tablewrap">
-$badHtml
+$badSummaryHtml
 </div>
+
+<details>
+  <summary>Every bad-password event ($badCount)</summary>
+  <div class="tablewrap">
+$badHtml
+  </div>
+</details>
 
 <h2>When it locked</h2>
 <div class="tablewrap">

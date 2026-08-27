@@ -333,6 +333,34 @@ function New-LockoutHistoryHtml {
         -EmptyText "No lockout events in the last $DaysBack day(s)."
 
     $genTime = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+
+    # Shared stylesheet, same as every other report in this folder. This script used to
+    # carry its own inline copy, which is how .rank/.rank-head/.rank-name/.rank-meta came
+    # to exist ONLY here - the combined case report discards each page's <style> and
+    # builds on the shared sheet, so those cards rendered as unstyled stacked text once
+    # combined. One sheet means that cannot happen again.
+    $css = $null
+    $refPath = Join-Path $PSScriptRoot 'LockoutReference.psd1'
+    if (Test-Path -LiteralPath $refPath) {
+        try { $css = (Import-PowerShellDataFile -Path $refPath -ErrorAction Stop).ReportCss } catch { $css = $null }
+    }
+    if (-not $css) {
+        $css = @'
+  body { background:#15181c; color:#e8eaed; font-family:'Segoe UI',system-ui,sans-serif;
+         margin:0; padding:32px; max-width:1100px; margin-inline:auto; line-height:1.55; }
+  .verdict { border-left:5px solid #e2686a; padding:4px 0 4px 20px; margin-bottom:26px; }
+  .verdict .line { font-size:25px; font-weight:600; color:#fff; margin:0 0 12px; }
+  .rank { background:#1d2126; border:1px solid #333a44; border-radius:8px;
+          padding:14px 18px; margin-bottom:10px; }
+  .rank-head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
+  .rank-name { font-size:16px; font-weight:650; color:#fff; }
+  .rank-count { margin-left:auto; font-size:22px; font-weight:700; }
+  .rank-meta { display:grid; grid-template-columns:max-content 1fr; gap:4px 14px; font-size:13px; }
+  .rank-meta dt { color:#6d7885; } .rank-meta dd { margin:0; color:#98a2b0; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { text-align:left; padding:7px 10px; border-bottom:1px solid #333a44; }
+'@
+    }
     $nextCmd = if ($Summary.Count -gt 0) {
         ".\Diagnose-ADAccountLockout.ps1 -Identity $($Summary[0].User)"
     } else {
@@ -347,112 +375,7 @@ function New-LockoutHistoryHtml {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AD Lockout History - Last $DaysBack Day(s)</title>
 <style>
-  /* Structure follows reading order: verdict -> what to do -> who -> raw evidence.
-     Everything below the verdict is optional detail, and the raw timeline is collapsed
-     by default so the page opens short. */
-  :root {
-    --bg:#15181c; --surface:#1d2126; --surface-2:#242931; --line:#333a44;
-    --ink:#e8eaed; --ink-dim:#98a2b0; --ink-faint:#6d7885;
-    --accent:#5dade2; --bad:#e2686a; --warn:#e0a458; --ok:#5fc98a;
-    --space: clamp(20px, 4vw, 40px);
-  }
-  * { box-sizing:border-box; }
-  body { background:var(--bg); color:var(--ink); margin:0; padding:var(--space);
-         font-family:'Segoe UI',system-ui,sans-serif; line-height:1.55;
-         max-width:1100px; margin-inline:auto; }
-
-  /* --- Header: small, gets out of the way --- */
-  .top { display:flex; flex-wrap:wrap; gap:8px 20px; align-items:baseline;
-         padding-bottom:14px; border-bottom:1px solid var(--line); margin-bottom:var(--space); }
-  .top h1 { font-size:15px; font-weight:700; letter-spacing:.14em; text-transform:uppercase;
-            color:var(--ink-dim); margin:0; }
-  .top .facts { color:var(--ink-faint); font-size:12.5px; display:flex; flex-wrap:wrap; gap:14px; }
-  .top .facts b { color:var(--ink-dim); font-weight:600; }
-
-  /* --- Verdict: the one thing to read. Sized to be unmissable. --- */
-  .verdict { border-left:5px solid var(--ink-faint); padding:4px 0 4px 20px; margin-bottom:26px; }
-  .verdict.bad     { border-left-color:var(--bad); }
-  .verdict.warn    { border-left-color:var(--warn); }
-  .verdict.ok      { border-left-color:var(--ok); }
-  .verdict.unknown { border-left-color:var(--ink-faint); }
-  .verdict .label { font-size:11px; letter-spacing:.16em; text-transform:uppercase;
-                    color:var(--ink-faint); margin-bottom:6px; }
-  .verdict .line { font-size:clamp(20px, 3.4vw, 27px); line-height:1.25; font-weight:600;
-                   color:#fff; margin:0 0 12px; letter-spacing:-.01em; }
-  .verdict .next { font-size:15px; color:var(--ink-dim); margin:0; max-width:68ch; }
-
-  /* --- Alert: only appears when the data itself is untrustworthy --- */
-  .alert { background:color-mix(in srgb, var(--warn) 12%, var(--surface));
-           border:1px solid color-mix(in srgb, var(--warn) 45%, var(--line));
-           border-radius:8px; padding:14px 18px; margin-bottom:24px; }
-  .alert-title { font-weight:700; color:var(--warn); font-size:14px; margin-bottom:4px; }
-  .alert p { margin:4px 0; font-size:13.5px; color:var(--ink-dim); }
-  .alert-sub { color:var(--ink-faint) !important; }
-  .note { color:var(--ink-faint); font-size:13px; margin-bottom:24px; }
-
-  /* --- Stat strip: three numbers, no table --- */
-  .stats { display:flex; flex-wrap:wrap; gap:10px; margin-bottom:30px; }
-  .stat { background:var(--surface); border:1px solid var(--line); border-radius:8px;
-          padding:12px 18px; min-width:132px; flex:1 1 132px; }
-  .stat .n { font-size:26px; font-weight:700; color:#fff; line-height:1.1;
-             font-variant-numeric:tabular-nums; }
-  .stat .k { font-size:11.5px; color:var(--ink-faint); text-transform:uppercase;
-             letter-spacing:.09em; margin-top:3px; }
-
-  h2 { font-size:12px; letter-spacing:.15em; text-transform:uppercase; color:var(--ink-faint);
-       margin:0 0 14px; font-weight:700; }
-
-  /* --- Ranked cards: count and source together, bar for relative severity --- */
-  .rank { background:var(--surface); border:1px solid var(--line); border-radius:8px;
-          padding:14px 18px; margin-bottom:10px; }
-  .rank:first-of-type { border-color:color-mix(in srgb, var(--bad) 40%, var(--line));
-                        background:color-mix(in srgb, var(--bad) 6%, var(--surface)); }
-  .rank-head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
-  .rank-name { font-size:17px; font-weight:650; color:#fff; word-break:break-all; }
-  .rank-count { margin-left:auto; font-size:22px; font-weight:700; color:var(--ink);
-                font-variant-numeric:tabular-nums; }
-  .rank-count small { font-size:13px; color:var(--ink-faint); font-weight:400; }
-  .tag { font-size:10.5px; text-transform:uppercase; letter-spacing:.08em;
-         color:var(--ink-faint); border:1px solid var(--line); border-radius:99px;
-         padding:1px 8px; }
-  .bar { height:3px; background:var(--surface-2); border-radius:99px; overflow:hidden;
-         margin:10px 0 12px; }
-  .bar span { display:block; height:100%; background:var(--accent); border-radius:99px; }
-  .rank:first-of-type .bar span { background:var(--bad); }
-  .rank-meta { display:grid; grid-template-columns:auto 1fr; gap:3px 14px; margin:0;
-               font-size:13px; }
-  .rank-meta dt { color:var(--ink-faint); white-space:nowrap; }
-  .rank-meta dd { margin:0; color:var(--ink-dim); word-break:break-word; }
-
-  /* --- Collapsed raw evidence --- */
-  details { border-top:1px solid var(--line); margin-top:26px; padding-top:16px; }
-  summary { cursor:pointer; font-size:12px; letter-spacing:.15em; text-transform:uppercase;
-            color:var(--ink-faint); font-weight:700; list-style:none; }
-  summary::-webkit-details-marker { display:none; }
-  summary::before { content:'\25B8'; display:inline-block; margin-right:8px;
-                    transition:transform .15s ease-out; }
-  details[open] summary::before { transform:rotate(90deg); }
-  summary:hover { color:var(--ink-dim); }
-  .tablewrap { overflow-x:auto; margin-top:14px; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  thead th { text-align:left; padding:8px 10px; font-weight:600; color:var(--ink-faint);
-             border-bottom:1px solid var(--line); white-space:nowrap;
-             font-size:11px; letter-spacing:.07em; text-transform:uppercase; }
-  td { padding:7px 10px; border-bottom:1px solid var(--surface-2); vertical-align:top;
-       word-break:break-word; }
-  tbody tr:hover { background:var(--surface); }
-  .empty { color:var(--ink-faint); font-style:italic; }
-
-  footer { color:var(--ink-faint); font-size:12.5px; margin-top:34px;
-           border-top:1px solid var(--line); padding-top:16px; }
-  code { background:var(--surface-2); padding:2px 7px; border-radius:4px;
-         color:var(--accent); font-size:12.5px; }
-  @media print {
-    body { background:#fff; color:#000; max-width:none; }
-    details { display:block; }
-    details > summary { display:none; }
-    .rank, .stat { break-inside:avoid; }
-  }
+$css
 </style>
 </head>
 <body>
