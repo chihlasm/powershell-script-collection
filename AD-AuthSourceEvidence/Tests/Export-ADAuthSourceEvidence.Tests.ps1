@@ -662,3 +662,113 @@ Describe 'Get-ResolutionConfidence' {
         Get-ResolutionConfidence -Method 'Unresolved' | Should -Be 'None'
     }
 }
+
+Describe 'New-AuthSourceReportHtml' {
+    # The exporter resolves what a source ACTUALLY IS - device class, MAC vendor, DHCP
+    # lease, timing pattern - which is the most specific evidence the whole toolkit
+    # produces. It was writing only CSV, so the combined case report had nothing to lift
+    # and the "Which Device" tab never appeared. The best evidence was the least visible.
+
+    BeforeAll {
+        $script:Sources = @(
+            [PSCustomObject]@{
+                SourceIp='192.168.10.181'; ResolvedName='LAPTOP-7.contoso.local'
+                DeviceClass='Windows workstation'; Confidence='High'
+                ResolutionMethod='DHCP lease + reverse DNS'; MacAddress='AA-BB-CC-11-22-33'
+                MacVendor='Dell Inc.'; FailureCount=78; DistinctAccounts=1
+                Accounts='jdoe'; TopStatus='0x18 - Bad password'; LogonTypes='3 - Network'
+                EventIds='4771'; FirstSeen='2026-08-26 12:13:25'; LastSeen='2026-08-26 19:17:57'
+                TimingPattern='Regular'; MedianGapMinutes=5; TimingDetail='every ~5 min'
+                DCsSeen='DC01'; NamesSeenInLog=''; ReverseDnsName='LAPTOP-7.contoso.local'
+                DhcpLease='DHCP01'; LeaseCoversFailure=$true; LeaseCoverageNote='lease covers window'
+                DeviceDetail='Dell workstation'
+            }
+            [PSCustomObject]@{
+                SourceIp='10.0.0.9'; ResolvedName=''; DeviceClass='Unknown'; Confidence='None'
+                ResolutionMethod=''; MacAddress=''; MacVendor=''; FailureCount=12
+                DistinctAccounts=9; Accounts='a; b; c'; TopStatus='0x18 - Bad password'
+                LogonTypes='3 - Network'; EventIds='4625'; FirstSeen='2026-08-25 01:00:00'
+                LastSeen='2026-08-25 01:04:00'; TimingPattern='Burst'; MedianGapMinutes=0
+                TimingDetail='burst'; DCsSeen='DC01'; NamesSeenInLog=''; ReverseDnsName=''
+                DhcpLease=''; LeaseCoversFailure=$false; LeaseCoverageNote=''; DeviceDetail=''
+            }
+        )
+    }
+
+    It 'produces a complete standalone page the combiner can lift a body from' {
+        $html = New-AuthSourceReportHtml -Sources $script:Sources -DaysBack 7 -GeneratedOn 'now'
+        $html | Should -Match '<!DOCTYPE html>'
+        $html | Should -Match '<body'
+        $html | Should -Match '</body>'
+        $html | Should -Match '<style>'
+    }
+
+    It 'names a resolved device rather than leaving the reader with an address' {
+        # "192.168.10.181" is what you already knew. "LAPTOP-7, Dell workstation" is the
+        # answer the investigation exists to produce.
+        $html = New-AuthSourceReportHtml -Sources $script:Sources -DaysBack 7 -GeneratedOn 'now'
+        $html | Should -Match 'LAPTOP-7'
+        $html | Should -Match 'Dell'
+    }
+
+    It 'promotes a multi-account source to the verdict over a higher-count single-account one' {
+        # Deliberate ordering: 12 failures against 9 accounts outranks 78 against one.
+        # The first is possibly a spray, the second is one stale credential - and the
+        # security reading is the one that must not be buried under a bigger number.
+        # Assert on the verdict helper directly rather than slicing HTML - the ordering
+        # rule is what matters, and the markup around it is incidental.
+        $v = Get-AuthSourceVerdict -Sources $script:Sources
+        $v.Line  | Should -Match '10\.0\.0\.9'
+        $v.Line  | Should -Match '9 different accounts'
+        $v.Class | Should -Be 'bad'
+    }
+
+    It 'shows the confidence so a guess is never mistaken for a fact' {
+        $html = New-AuthSourceReportHtml -Sources $script:Sources -DaysBack 7 -GeneratedOn 'now'
+        $html | Should -Match 'High'
+    }
+
+    It 'says plainly when a source could not be resolved' {
+        # An unresolved source is a finding, not a blank. It means the device is not in
+        # DHCP or DNS - often exactly the thing worth chasing.
+        $html = New-AuthSourceReportHtml -Sources $script:Sources -DaysBack 7 -GeneratedOn 'now'
+        $html | Should -Match 'not resolved|unresolved|Unknown'
+    }
+
+    It 'flags one source hitting many accounts as a possible spray' {
+        # One device failing against nine accounts is a different problem from one device
+        # failing against one - and the security-relevant one.
+        $html = New-AuthSourceReportHtml -Sources $script:Sources -DaysBack 7 -GeneratedOn 'now'
+        $html | Should -Match 'spray|multiple accounts|9 accounts'
+    }
+
+    It 'surfaces the timing pattern, which separates a machine from a person' {
+        $html = New-AuthSourceReportHtml -Sources $script:Sources -DaysBack 7 -GeneratedOn 'now'
+        $html | Should -Match 'Regular|Burst'
+    }
+
+    It 'escapes values so log content cannot inject markup' {
+        $evil = @([PSCustomObject]@{
+            SourceIp='<script>alert(1)</script>'; ResolvedName=''; DeviceClass=''; Confidence=''
+            ResolutionMethod=''; MacAddress=''; MacVendor=''; FailureCount=1; DistinctAccounts=1
+            Accounts=''; TopStatus=''; LogonTypes=''; EventIds=''; FirstSeen=''; LastSeen=''
+            TimingPattern=''; MedianGapMinutes=0; TimingDetail=''; DCsSeen=''; NamesSeenInLog=''
+            ReverseDnsName=''; DhcpLease=''; LeaseCoversFailure=$false; LeaseCoverageNote=''
+            DeviceDetail='' })
+        $html = New-AuthSourceReportHtml -Sources $evil -DaysBack 7 -GeneratedOn 'now'
+        $html | Should -Not -Match '<script>alert'
+        $html | Should -Match '&lt;script&gt;'
+    }
+
+    It 'renders a usable page when nothing was collected' {
+        $html = New-AuthSourceReportHtml -Sources @() -DaysBack 7 -GeneratedOn 'now'
+        $html | Should -Match '<!DOCTYPE html>'
+        $html | Should -Match 'No authentication sources|nothing'
+    }
+
+    It 'uses the shared stylesheet so it matches the other reports' {
+        $html = New-AuthSourceReportHtml -Sources $script:Sources -DaysBack 7 -GeneratedOn 'now'
+        $html | Should -Match '\.verdict'
+        $html | Should -Match '\.rank|\.card'
+    }
+}

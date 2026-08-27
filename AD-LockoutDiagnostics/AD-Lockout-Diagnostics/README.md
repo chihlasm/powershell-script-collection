@@ -76,6 +76,7 @@ The individual tools remain runnable on their own when you already know what you
 | `Invoke-ADLockoutForensics.ps1`     | Multi-forest forensics | *Which DC / forest* is receiving the attempts? |
 | `Set-DCSecurityLogRetention.ps1`    | DC log sizing          | *How far back* can these reports actually see? |
 | `Test-EntraConnectReadiness.ps1`    | Hybrid preflight       | Can the hybrid checks *read* what they assume? |
+| `Export-ADAuthSourceEvidence.ps1`   | Device identity        | *What is* the machine behind that source IP?   |
 | `LockoutReference.psd1`             | Shared data            | Documented event IDs, status codes, audit GUIDs|
 
 > **If a lockout report comes back empty, run `Test-ADAuditPolicy.ps1` before concluding

@@ -1675,6 +1675,197 @@ function Resolve-SourceIdentity {
     }
 }
 
+function ConvertTo-AuthHtmlSafe {
+    param([string]$Text)
+    if ($null -eq $Text) { return '' }
+    return [System.Net.WebUtility]::HtmlEncode([string]$Text)
+}
+
+function Get-AuthSourceVerdict {
+    # One sentence naming what the evidence shows, before any table. The three readings
+    # below are genuinely different problems and the counts alone do not distinguish them.
+    param([object[]]$Sources)
+
+    $src = @($Sources)
+    if ($src.Count -eq 0) {
+        return [PSCustomObject]@{
+            Class = 'unknown'
+            Line  = 'No authentication sources were collected.'
+            Next  = 'Either nothing is failing, or the events were never recorded. Check the audit policy tab before concluding anything from this.'
+        }
+    }
+
+    $top = $src[0]
+    # One source against many accounts is a spray or a shared service credential; the
+    # security reading is the one that must not be missed.
+    $spray = @($src | Where-Object { [int]$_.DistinctAccounts -ge 5 })
+    if ($spray.Count -gt 0) {
+        $s = $spray[0]
+        $who = if ($s.ResolvedName) { $s.ResolvedName } else { $s.SourceIp }
+        return [PSCustomObject]@{
+            Class = 'bad'
+            Line  = "$who failed against $($s.DistinctAccounts) different accounts."
+            Next  = 'One source failing against many accounts is either a password spray or one shared credential configured everywhere. If this device is not one you recognise, treat it as a security event before treating it as a lockout.'
+        }
+    }
+
+    $who = if ($top.ResolvedName) { $top.ResolvedName } else { $top.SourceIp }
+    if (-not $top.ResolvedName) {
+        return [PSCustomObject]@{
+            Class = 'warn'
+            Line  = "$($top.SourceIp) sent $($top.FailureCount) failures and could not be identified."
+            Next  = 'No DHCP lease, no reverse DNS, no AD computer object. That is itself informative: unmanaged devices, personal phones, and appliances look exactly like this. Check the MAC vendor below and your switch ARP tables.'
+        }
+    }
+
+    return [PSCustomObject]@{
+        Class = 'bad'
+        Line  = "$who sent $($top.FailureCount) failures."
+        Next  = "Identified with $($top.Confidence.ToLower()) confidence via $($top.ResolutionMethod). Go to that machine and check saved credentials: cmdkey /list, mapped drives, scheduled tasks, services, and any mobile device signed in as this user."
+    }
+}
+
+function New-AuthSourceReportHtml {
+    <#
+    .SYNOPSIS
+        Renders the resolved authentication sources as a standalone HTML report.
+    .DESCRIPTION
+        This script resolves what a source ACTUALLY IS - device class, MAC vendor, DHCP
+        lease, AD computer object, timing pattern - which is the most specific evidence
+        the toolkit produces. It used to write only CSV, so the combined case report had
+        nothing to lift and the "Which Device" tab never appeared: the best evidence was
+        the least visible.
+
+        The page leads with the identity rather than the address. "192.168.10.181" is
+        what the investigator already knew; "LAPTOP-7, Dell workstation, high confidence"
+        is the answer they came for.
+    #>
+    param(
+        [object[]]$Sources,
+        [int]$DaysBack,
+        [string]$GeneratedOn
+    )
+
+    $src = @($Sources)
+    $verdict = Get-AuthSourceVerdict -Sources $src
+
+    # Shared stylesheet, so this page matches the rest of the toolkit and the combined
+    # report styles it correctly. Resolved from either layout: the repo (sibling folder)
+    # or the packaged zip (flat).
+    $css = $null
+    foreach ($p in @(
+        (Join-Path $PSScriptRoot 'LockoutReference.psd1'),
+        (Join-Path (Split-Path $PSScriptRoot -Parent) 'AD-LockoutDiagnostics\LockoutReference.psd1')
+    )) {
+        if (Test-Path -LiteralPath $p) {
+            try { $css = (Import-PowerShellDataFile -LiteralPath $p -ErrorAction Stop).ReportCss; break } catch { }
+        }
+    }
+    if (-not $css) {
+        $css = @'
+  body { background:#15181c; color:#e8eaed; font-family:'Segoe UI',system-ui,sans-serif;
+         margin:0; padding:32px; max-width:1100px; margin-inline:auto; line-height:1.55; }
+  .verdict { border-left:5px solid #e2686a; padding:4px 0 4px 20px; margin-bottom:26px; }
+  .verdict .line { font-size:25px; font-weight:600; color:#fff; margin:0 0 12px; }
+  .rank { background:#1d2126; border:1px solid #333a44; border-radius:8px;
+          padding:14px 18px; margin-bottom:10px; }
+  .rank-head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
+  .rank-name { font-size:16px; font-weight:650; color:#fff; }
+  .rank-count { margin-left:auto; font-size:22px; font-weight:700; }
+  .rank-meta { display:grid; grid-template-columns:max-content 1fr; gap:4px 14px; font-size:13px; }
+  .rank-meta dt { color:#6d7885; } .rank-meta dd { margin:0; color:#98a2b0; }
+'@
+    }
+
+    $sb = New-Object System.Text.StringBuilder
+    $null = $sb.AppendLine('<!DOCTYPE html>')
+    $null = $sb.AppendLine('<html lang="en"><head><meta charset="utf-8">')
+    $null = $sb.AppendLine('<meta name="viewport" content="width=device-width, initial-scale=1">')
+    $null = $sb.AppendLine('<title>Authentication Sources - Which Device</title>')
+    $null = $sb.AppendLine("<style>$css</style></head><body>")
+
+    $null = $sb.AppendLine('<div class="top"><h1>Which Device</h1><div class="facts">')
+    $null = $sb.AppendLine("<span>Last <b>$DaysBack days</b></span><span><b>$(ConvertTo-AuthHtmlSafe $GeneratedOn)</b></span></div></div>")
+
+    $null = $sb.AppendLine("<div class=`"verdict $($verdict.Class)`"><div class=`"label`">What this means</div>")
+    $null = $sb.AppendLine("<p class=`"line`">$(ConvertTo-AuthHtmlSafe $verdict.Line)</p>")
+    $null = $sb.AppendLine("<p class=`"next`">$(ConvertTo-AuthHtmlSafe $verdict.Next)</p></div>")
+
+    if ($src.Count -eq 0) {
+        $null = $sb.AppendLine('<p class="empty">No authentication sources were collected in this window.</p>')
+        $null = $sb.AppendLine('</body></html>')
+        return $sb.ToString()
+    }
+
+    $resolved   = @($src | Where-Object { $_.ResolvedName }).Count
+    $unresolved = $src.Count - $resolved
+    $multi      = @($src | Where-Object { [int]$_.DistinctAccounts -ge 5 }).Count
+
+    $null = $sb.AppendLine('<div class="stats">')
+    $null = $sb.AppendLine("<div class=`"stat`"><div class=`"n`">$($src.Count)</div><div class=`"k`">Sources</div></div>")
+    $null = $sb.AppendLine("<div class=`"stat`"><div class=`"n ok`">$resolved</div><div class=`"k`">Identified</div></div>")
+    $null = $sb.AppendLine("<div class=`"stat`"><div class=`"n`">$unresolved</div><div class=`"k`">Not resolved</div></div>")
+    if ($multi -gt 0) {
+        $null = $sb.AppendLine("<div class=`"stat`"><div class=`"n bad`">$multi</div><div class=`"k`">Hitting 5+ accounts</div></div>")
+    }
+    $null = $sb.AppendLine('</div>')
+
+    $null = $sb.AppendLine('<h2>Sources by failure count</h2>')
+    $max = ($src | Measure-Object -Property FailureCount -Maximum).Maximum
+
+    foreach ($s in $src) {
+        $name = if ($s.ResolvedName) { $s.ResolvedName } else { "$($s.SourceIp) (not resolved)" }
+        $pct  = if ($max -gt 0) { [math]::Max(4, [math]::Round(([double]$s.FailureCount / $max) * 100)) } else { 4 }
+
+        # Confidence is shown as a tag rather than buried in a field: an identification
+        # the tool is unsure about must never read like a fact.
+        $confClass = switch ("$($s.Confidence)") {
+            'High'   { 'ok' }
+            'Medium' { 'warn' }
+            'Low'    { 'warn' }
+            default  { '' }
+        }
+        $tags = ''
+        if ($s.Confidence) { $tags += "<span class=`"tag $confClass`">$(ConvertTo-AuthHtmlSafe $s.Confidence) confidence</span>" }
+        if ($s.DeviceClass -and $s.DeviceClass -ne 'Unknown') { $tags += "<span class=`"tag`">$(ConvertTo-AuthHtmlSafe $s.DeviceClass)</span>" }
+        if ([int]$s.DistinctAccounts -ge 5) { $tags += '<span class="tag bad">possible spray</span>' }
+
+        $null = $sb.AppendLine('<article class="rank">')
+        $null = $sb.AppendLine("<div class=`"rank-head`"><span class=`"rank-name`">$(ConvertTo-AuthHtmlSafe $name)</span>$tags")
+        $null = $sb.AppendLine("<span class=`"rank-count`">$($s.FailureCount)<small>&times;</small></span></div>")
+        $null = $sb.AppendLine("<div class=`"bar`"><span style=`"width:$pct%`"></span></div>")
+
+        $null = $sb.AppendLine('<dl class="rank-meta">')
+        $pairs = [ordered]@{
+            'IP address'  = $s.SourceIp
+            'Device'      = if ($s.DeviceDetail) { $s.DeviceDetail } elseif ($s.DeviceClass) { $s.DeviceClass } else { 'not identified' }
+            'MAC / vendor'= if ($s.MacAddress) { "$($s.MacAddress) - $($s.MacVendor)" } else { '' }
+            'How resolved'= $s.ResolutionMethod
+            'DHCP lease'  = if ($s.DhcpLease) { "$($s.DhcpLease)$(if ($s.LeaseCoverageNote) { " ($($s.LeaseCoverageNote))" })" } else { '' }
+            'Accounts'    = "$($s.DistinctAccounts) - $($s.Accounts)"
+            'Result'      = $s.TopStatus
+            'Logon types' = $s.LogonTypes
+            'Pattern'     = if ($s.TimingDetail) { "$($s.TimingPattern) - $($s.TimingDetail)" } else { $s.TimingPattern }
+            'First seen'  = $s.FirstSeen
+            'Last seen'   = $s.LastSeen
+            'Seen on DCs' = $s.DCsSeen
+        }
+        foreach ($k in $pairs.Keys) {
+            $v = "$($pairs[$k])"
+            if ([string]::IsNullOrWhiteSpace($v) -or $v -eq ' - ') { continue }
+            $null = $sb.AppendLine("<dt>$(ConvertTo-AuthHtmlSafe $k)</dt><dd>$(ConvertTo-AuthHtmlSafe $v)</dd>")
+        }
+        $null = $sb.AppendLine('</dl></article>')
+    }
+
+    $null = $sb.AppendLine('<footer>')
+    $null = $sb.AppendLine('A source that could not be resolved has no DHCP lease, no reverse DNS, and no AD computer object. Unmanaged devices, personal phones and appliances all look like this - the MAC vendor is often the only lead, followed by switch ARP tables.<br><br>')
+    $null = $sb.AppendLine('Event 4771 (Kerberos) records no workstation name at all, only an IP, which is why address resolution is the only route to a device name for those events.')
+    $null = $sb.AppendLine('</footer></body></html>')
+
+    return $sb.ToString()
+}
+
 if ($LoadFunctionsOnly) { return }
 
 # =============================================================================
@@ -2162,9 +2353,23 @@ $sourcesCsv = Join-Path $OutputPath "AuthSources_$stamp.csv"
 @($eventExport)     | Sort-Object Time     | Export-Csv -Path $eventsCsv  -NoTypeInformation -Encoding UTF8
 @($resolvedSources) | Export-Csv -Path $sourcesCsv -NoTypeInformation -Encoding UTF8
 
+# HTML as well as CSV. The CSV is for pivoting; the HTML is what the combined case
+# report lifts into its "Which Device" tab. Without it this script's output - the most
+# specific evidence the toolkit produces - was invisible in the one file people open.
+$sourcesHtml = Join-Path $OutputPath "AuthSources_$stamp.html"
+try {
+    $reportHtml = New-AuthSourceReportHtml -Sources @($resolvedSources) -DaysBack $DaysBack `
+                    -GeneratedOn (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+    [System.IO.File]::WriteAllText($sourcesHtml, $reportHtml, (New-Object System.Text.UTF8Encoding($false)))
+} catch {
+    Write-Status "Could not write the HTML report: $($_.Exception.Message)" 'WARN'
+    $sourcesHtml = $null
+}
+
 Write-Host ''
 Write-Status "Events  : $eventsCsv  ($(@($eventExport).Count) rows)" 'PASS'
 Write-Status "Sources : $sourcesCsv ($(@($resolvedSources).Count) rows)" 'PASS'
+if ($sourcesHtml) { Write-Status "Report  : $sourcesHtml" 'PASS' }
 
 # --- Console summary ----------------------------------------------------------
 Write-Host ''
