@@ -963,7 +963,7 @@ function Run-CitrixVDAConsolidatedDiagnostics {
         # Disk queue length
         $queueLength = Get-DiskQueueLength -DriveLetter $driveLetter
         if ($queueLength -ne $null) {
-            $status = if ($queueLength -gt 2) { "WARNING" } elseif ($queueLength -gt 5) { "CRITICAL" } else { "OK" }
+            $status = if ($queueLength -gt 5) { "CRITICAL" } elseif ($queueLength -gt 2) { "WARNING" } else { "OK" }
             Write-Host "    Disk Queue Length: $queueLength ($status)" -ForegroundColor $(if ($status -eq "OK") { "Green" } elseif ($status -eq "WARNING") { "Yellow" } else { "Red" })
         }
 

@@ -140,7 +140,7 @@ function Get-LogTimestamp { Get-Date -Format 'yyyy-MM-dd HH:mm:ss' }
 # ============================================================
 # Start transcript immediately so all output is captured
 # ============================================================
-Start-Transcript -Path $transcriptLog -Force | Out-Null
+Start-Transcript -Path $transcriptLog -Force -WhatIf:$false | Out-Null
 
 # ============================================================
 # Banner
@@ -246,7 +246,7 @@ Write-Host ""
 
 if (-not $preFlightPassed) {
     Write-Host "[FAIL] One or more pre-flight checks failed. Resolve the issues above and re-run." -ForegroundColor Red
-    Stop-Transcript | Out-Null
+    Stop-Transcript -WhatIf:$false | Out-Null
     exit 1
 }
 
@@ -316,7 +316,7 @@ $vhdxFiles = Get-ChildItem -Path $ProfileShare -Filter '*.vhdx' -Recurse -ErrorA
 
 if (-not $vhdxFiles -or @($vhdxFiles).Count -eq 0) {
     Write-Host "    [FAIL] No VHDX files found at: $ProfileShare" -ForegroundColor Red
-    Stop-Transcript | Out-Null
+    Stop-Transcript -WhatIf:$false | Out-Null
     exit 1
 }
 
@@ -331,7 +331,7 @@ Write-Host ""
 if (-not $Force) {
     if (-not $PSCmdlet.ShouldProcess("$vhdxCount VHDX files in $ProfileShare", 'Scan and Repair')) {
         Write-Host "[INFO] Operation cancelled by user." -ForegroundColor Cyan
-        Stop-Transcript | Out-Null
+        Stop-Transcript -WhatIf:$false | Out-Null
         exit 0
     }
 }
@@ -398,37 +398,37 @@ $workerScript = {
             }
             catch { <# non-fatal -- leave null #> }
 
-            # --- Mount VHDX read-write
-            $diskImage = Mount-DiskImage -ImagePath $VhdxFullName -PassThru -ErrorAction Stop
+            # --- Mount VHDX read-write without assigning a drive letter
+            Mount-DiskImage -ImagePath $VhdxFullName -NoDriveLetter -PassThru -ErrorAction Stop | Out-Null
 
-            # --- Wait for volume
-            $volume    = $null
-            $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+            # --- Wait for partition to appear
+            $partition  = $null
+            $stopwatch  = [System.Diagnostics.Stopwatch]::StartNew()
 
             while ($stopwatch.Elapsed.TotalSeconds -lt $MountTimeoutSeconds) {
                 $diskInfo = Get-DiskImage -ImagePath $VhdxFullName -ErrorAction SilentlyContinue
                 if ($diskInfo -and $diskInfo.Number -gt 0) {
                     $partition = Get-Partition -DiskNumber $diskInfo.Number -ErrorAction SilentlyContinue |
-                                 Where-Object { $_.DriveLetter }
-                    if ($partition) {
-                        $volume = Get-Volume -DriveLetter $partition.DriveLetter -ErrorAction SilentlyContinue
-                        if ($volume) { break }
-                    }
+                                 Where-Object { $_.Type -ne 'Reserved' -and $_.Size -gt 0 } |
+                                 Select-Object -First 1
+                    if ($partition) { break }
                 }
                 Start-Sleep -Milliseconds 500
             }
             $stopwatch.Stop()
 
-            if (-not $volume) {
-                throw "Volume not available after $MountTimeoutSeconds seconds"
+            if (-not $partition) {
+                throw "Partition not available after $MountTimeoutSeconds seconds"
             }
 
+            # --- Get volume via partition association (no drive letter needed)
+            $volume = Get-Volume -Partition $partition -ErrorAction Stop
             $result.HealthBefore = $volume.HealthStatus
-            $driveLetter         = $volume.DriveLetter
+            $volObjectId = $volume.ObjectId
 
-            # --- Disk space analysis: capture fragmentation via Optimize-Volume -Analyze
+            # --- Disk space analysis: capture fragmentation
             try {
-                $analysis = Optimize-Volume -DriveLetter $driveLetter -Analyze -NoDriveLetter:$false -ErrorAction SilentlyContinue -PassThru
+                $analysis = Optimize-Volume -ObjectId $volObjectId -Analyze -ErrorAction SilentlyContinue
                 if ($analysis -and $null -ne $analysis.FragmentationPercentage) {
                     $result.FragmentationPct = $analysis.FragmentationPercentage
                 }
@@ -450,11 +450,11 @@ $workerScript = {
                     $result.LogLines.Add("    [INFO] REPAIRING: $VhdxName (Before: $($result.HealthBefore))")
                 }
 
-                $repair              = Repair-Volume -DriveLetter $driveLetter -OfflineScanAndFix -ErrorAction Stop
+                $repair              = Repair-Volume -ObjectId $volObjectId -OfflineScanAndFix -ErrorAction Stop
                 $result.RepairResult = "$repair"
                 $result.RetryCount   = $attempt - 1
 
-                $volumeAfter        = Get-Volume -DriveLetter $driveLetter -ErrorAction SilentlyContinue
+                $volumeAfter        = Get-Volume -Partition $partition -ErrorAction SilentlyContinue
                 $result.HealthAfter = if ($volumeAfter) { $volumeAfter.HealthStatus } else { 'Unknown' }
 
                 if ($result.HealthAfter -eq 'Healthy') {
@@ -469,13 +469,13 @@ $workerScript = {
             }
 
             # --- Dismount cleanly
-            Dismount-DiskImage -ImagePath $VhdxFullName -ErrorAction Stop
+            Dismount-DiskImage -ImagePath $VhdxFullName -ErrorAction Stop | Out-Null
         }
         catch {
             $lastError = $_.Exception.Message
             $result.LogLines.Add("    [FAIL] ERROR (attempt $attempt): $VhdxName -- $lastError")
             # Best-effort dismount before retry
-            try { Dismount-DiskImage -ImagePath $VhdxFullName -ErrorAction SilentlyContinue } catch { }
+            try { Dismount-DiskImage -ImagePath $VhdxFullName -ErrorAction SilentlyContinue | Out-Null } catch { }
         }
 
     } while (-not $repaired -and $attempt -le $MaxRetries)
@@ -756,4 +756,4 @@ Write-Host "[INFO] Transcript log saved to: $transcriptLog" -ForegroundColor Cya
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host ""
 
-Stop-Transcript | Out-Null
+Stop-Transcript -WhatIf:$false | Out-Null

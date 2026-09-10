@@ -138,70 +138,149 @@ function New-WalkState {
         Records     = [System.Collections.Generic.List[object]]::new()
         Unreadable  = [System.Collections.Generic.List[string]]::new()
         FolderCount = 0
+        RootBytes   = 0L
     }
 }
 
+# Fast iterative folder walker using .NET DirectoryInfo enumerators.
+#
+# Why not Get-ChildItem recursion: Get-ChildItem materializes full PowerShell
+# objects per entry and is ~10-50x slower than native enumeration. A typical
+# Windows C: drive with 300k+ folders would take an hour+ with the cmdlet
+# approach; this version does it in minutes.
+#
+# Approach: depth-first iterative walk using an explicit stack. For each
+# directory we enumerate FileSystemInfos once (single MFT scan), sum file
+# lengths inline, and queue subdirectories for later processing. Totals are
+# accumulated on a post-order pass via a parent-map dictionary so each
+# folder's size includes everything beneath it.
 function Invoke-FolderWalk {
     param(
-        [string]$Path,
-        [int]$CurrentDepth,
+        [string]$RootPath,
         [int]$MaxDepth,
         [object]$State
     )
 
-    $State.FolderCount++
+    # Per-folder direct byte counts (files directly in that folder).
+    $direct = [System.Collections.Generic.Dictionary[string, long]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    # Parent -> children map so we can roll up post-order without recursion.
+    $children = [System.Collections.Generic.Dictionary[string, [System.Collections.Generic.List[string]]]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    # Depth of every folder we visit (including the root at depth 0).
+    $depthMap = [System.Collections.Generic.Dictionary[string, int]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    # Visit order so we can do a reverse-order rollup (deepest first).
+    $visited = [System.Collections.Generic.List[string]]::new()
 
-    # Sum files directly in this folder (non-recursive).
-    $directBytes = 0L
-    try {
-        $files = Get-ChildItem -LiteralPath $Path -File -Force -ErrorAction Stop
-        foreach ($f in $files) {
-            if ($f.Length) { $directBytes += [long]$f.Length }
-        }
-    }
-    catch [System.UnauthorizedAccessException], [System.IO.IOException] {
-        $State.Unreadable.Add($Path) | Out-Null
-    }
-    catch {
-        $State.Unreadable.Add($Path) | Out-Null
-    }
+    $reparseFlag = [System.IO.FileAttributes]::ReparsePoint
 
-    $totalBytes = $directBytes
-
-    # Recurse into subfolders; skip reparse points to avoid loops.
-    $subDirs = @()
-    try {
-        $subDirs = Get-ChildItem -LiteralPath $Path -Directory -Force -ErrorAction Stop |
-            Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) }
-    }
-    catch {
-        $State.Unreadable.Add($Path) | Out-Null
+    # Normalize root; EnumerateFileSystemInfos needs no trailing slash.
+    $rootNorm = $RootPath.TrimEnd('\', '/')
+    if ($rootNorm.Length -eq 2 -and $rootNorm[1] -eq ':') {
+        # "C:" alone resolves to the current directory on that drive in .NET.
+        # Use "C:\" to anchor at the volume root.
+        $rootNorm = $rootNorm + '\'
     }
 
-    foreach ($sub in $subDirs) {
+    $depthMap[$rootNorm] = 0
+    $visited.Add($rootNorm) | Out-Null
+
+    $stack = [System.Collections.Generic.Stack[string]]::new()
+    $stack.Push($rootNorm)
+
+    $progressEvery = 2000
+    $nextProgress = $progressEvery
+
+    while ($stack.Count -gt 0) {
+        $current = $stack.Pop()
+        $State.FolderCount++
+
+        $currentDepth = $depthMap[$current]
+        $directBytes  = 0L
+        $kidList      = [System.Collections.Generic.List[string]]::new()
+
         try {
-            $childBytes = Invoke-FolderWalk -Path $sub.FullName `
-                -CurrentDepth ($CurrentDepth + 1) `
-                -MaxDepth $MaxDepth `
-                -State $State
-            $totalBytes += $childBytes
+            $di = [System.IO.DirectoryInfo]::new($current)
+            # Single enumeration returns files and dirs together with
+            # .Length/.Attributes already populated from WIN32_FIND_DATA.
+            $enum = $di.EnumerateFileSystemInfos('*', [System.IO.SearchOption]::TopDirectoryOnly)
+            foreach ($item in $enum) {
+                $attrs = $item.Attributes
+                if ($item -is [System.IO.DirectoryInfo]) {
+                    # Skip reparse points (junctions, symlinks) to avoid loops
+                    # and double-counting.
+                    if (($attrs -band $reparseFlag) -eq $reparseFlag) { continue }
+                    $kidList.Add($item.FullName) | Out-Null
+                }
+                else {
+                    # Skip file reparse points too (rare, but keeps sizing honest).
+                    if (($attrs -band $reparseFlag) -eq $reparseFlag) { continue }
+                    $len = $item.Length
+                    if ($len -gt 0) { $directBytes += [long]$len }
+                }
+            }
+        }
+        catch [System.UnauthorizedAccessException] {
+            $State.Unreadable.Add($current) | Out-Null
+        }
+        catch [System.IO.DirectoryNotFoundException] {
+            $State.Unreadable.Add($current) | Out-Null
+        }
+        catch [System.IO.IOException] {
+            $State.Unreadable.Add($current) | Out-Null
         }
         catch {
-            $State.Unreadable.Add($sub.FullName) | Out-Null
+            $State.Unreadable.Add($current) | Out-Null
+        }
+
+        $direct[$current]   = $directBytes
+        $children[$current] = $kidList
+
+        foreach ($kid in $kidList) {
+            $depthMap[$kid] = $currentDepth + 1
+            $visited.Add($kid) | Out-Null
+            $stack.Push($kid)
+        }
+
+        if ($State.FolderCount -ge $nextProgress) {
+            Write-Status INFO ("    scanned {0:N0} folders so far..." -f $State.FolderCount)
+            $nextProgress += $progressEvery
         }
     }
 
-    if ($CurrentDepth -ge 1 -and $CurrentDepth -le $MaxDepth) {
-        $State.Records.Add([PSCustomObject]@{
-            Path       = $Path
-            Depth      = $CurrentDepth
-            SizeBytes  = $totalBytes
-            ParentPath = [System.IO.Path]::GetDirectoryName($Path)
-            IsMisc     = $false
-        }) | Out-Null
+    # Post-order rollup: deepest-first so parents always find child totals ready.
+    $totals = [System.Collections.Generic.Dictionary[string, long]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+
+    for ($i = $visited.Count - 1; $i -ge 0; $i--) {
+        $p = $visited[$i]
+        $sum = $direct[$p]
+        $kids = $children[$p]
+        if ($kids) {
+            foreach ($k in $kids) {
+                $kt = 0L
+                if ($totals.TryGetValue($k, [ref]$kt)) { $sum += $kt }
+            }
+        }
+        $totals[$p] = $sum
     }
 
-    return $totalBytes
+    # Emit records for folders inside the reporting depth band.
+    foreach ($p in $visited) {
+        $d = $depthMap[$p]
+        if ($d -ge 1 -and $d -le $MaxDepth) {
+            $State.Records.Add([PSCustomObject]@{
+                Path       = $p
+                Depth      = $d
+                SizeBytes  = $totals[$p]
+                ParentPath = [System.IO.Path]::GetDirectoryName($p)
+                IsMisc     = $false
+            }) | Out-Null
+        }
+    }
+
+    $State.RootBytes = $totals[$rootNorm]
 }
 
 # --- Misc rollup -----------------------------------------------------------
@@ -527,8 +606,9 @@ foreach ($d in $drives) {
 
     $state = New-WalkState
     try {
-        $rootBytes = Invoke-FolderWalk -Path ("{0}\" -f $d.DeviceID) `
-            -CurrentDepth 0 -MaxDepth $Depth -State $state
+        Invoke-FolderWalk -RootPath ("{0}\" -f $d.DeviceID) `
+            -MaxDepth $Depth -State $state
+        $rootBytes = $state.RootBytes
     }
     catch {
         Write-Status WARN ("{0}\ failed to scan: {1}" -f $d.DeviceID, $_.Exception.Message)
