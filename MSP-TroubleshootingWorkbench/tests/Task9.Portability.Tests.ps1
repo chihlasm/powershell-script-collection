@@ -4,6 +4,11 @@
 param()
 
 $ErrorActionPreference = "Stop"
+
+# Pin discovery to the shipped module path. A broken third-party module elsewhere on
+# PSModulePath that exports wildcard cmdlets can shadow built-ins like Write-Host.
+$env:PSModulePath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\Modules"
+
 $script:Failures = @()
 
 function Assert-True {
