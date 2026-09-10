@@ -2,6 +2,89 @@
 
 This collection of PowerShell scripts provides a solution for hiding Active Directory users from the Global Address List (GAL) in Exchange Online using Entra Connect (formerly Azure AD Connect) synchronization rules.
 
+---
+
+## Read this first: the tool depends on a rule that lives somewhere else
+
+These scripts work in two halves, running on **two different servers**:
+
+| Half | Where it runs | What it does |
+|---|---|---|
+| **The marker** | `HideFromGAL.ps1`, on a DC or admin workstation | Writes `msDS-cloudExtensionAttribute1 = "HideFromGAL"` on the user in AD |
+| **The enforcement** | A custom sync rule *inside Entra Connect* | Flows that marker to `msExchHideFromAddressLists`, hiding the user from the GAL |
+
+**The marker alone does nothing.** If the sync rule is missing, setting the attribute
+hides no one.
+
+Custom synchronization rules are **not** carried over when Entra Connect is moved,
+swung, or rebuilt on a new server — Microsoft's guidance is that they must be recreated
+manually. See
+[Import and export Connect configuration](https://learn.microsoft.com/entra/identity/hybrid/connect/how-to-connect-import-export-config).
+
+> **After any Entra Connect server move, run `HideFromGal-RuleBuilder.ps1` against the
+> new server, or this tool will silently stop hiding anyone.**
+
+`HideFromGAL.ps1` verifies the rule at startup and shows a status banner naming the
+server it checked. When the rule is confirmed missing or broken, hiding is disabled and
+the banner offers a *How to fix* button. When the check simply cannot run, the tool still
+works and says so: **"could not verify" is treated differently from "rule is missing"**.
+Unhiding is never blocked.
+
+### Run it on the Entra Connect server
+
+Entra Connect exposes its management interface as a WCF endpoint bound to
+`net.pipe://localhost/ADSyncManagement`, and it **rejects calls arriving over a
+PowerShell remoting hop** — even a hop back to the same machine. So `Get-ADSyncRule`
+cannot be reliably called from another server.
+
+The scripts detect when they are running on the Connect server and call the ADSync
+cmdlets directly, which works. Run them elsewhere and rule verification will usually
+report 🟡 *"cannot be read from this machine"* — everything else still works, you just do
+not get the green/red confirmation.
+
+Both scripts accept `-EntraConnectServer` to name the sync server, and auto-discover it
+otherwise. The discovered name is cached in `EntraConnectSettings.json`; delete that file
+to force rediscovery after a migration.
+
+### Launching
+
+Double-click **`Launch-HideFromGAL.vbs`**, not the `.ps1` — launching the `.ps1` directly
+leaves a blue PowerShell console window behind the GUI.
+
+Run the tests with `Invoke-Pester -Path .\Tests`.
+
+> `Shared-EntraConnect.ps1` is **duplicated** from the `Block 365 Sign-in` folder, which
+> has the same architecture and the same dependency. Changes must be mirrored to both
+> copies. It is **required** — without it the GUI throws "term not recognized" errors at
+> startup.
+
+### Common problems
+
+**"The term '...\Shared-EntraConnect.ps1' is not recognized"**
+That file is missing from the folder. All files must travel together. If copied from a
+network share, unblock them: `Get-ChildItem "<folder>\*.ps1" | Unblock-File`
+
+**🔴 "NOT FOUND" but you can see the rule in the Rules Editor**
+The tool looks for an inbound rule flowing to `msExchHideFromAddressLists` that also
+references `msDS-cloudExtensionAttribute1`. Check what the rule actually uses:
+
+```powershell
+$r = Get-ADSyncRule | Where-Object { $_.Name -eq '<rule name>' }
+$r.AttributeFlowMappings | Format-List Destination, FlowType, Source, Expression
+$r.ScopeFilter.ScopeConditionList | Format-List Attribute, ComparisonOperator, ComparisonValue
+```
+
+**A user shows "Marked - NOT hidden"**
+The attribute is set but nothing is acting on it — they are still visible in the GAL. Fix
+the enforcement rule, then run a sync.
+
+**Hidden users still appear in the GAL**
+The change has not synced yet, or Outlook is using a cached offline address book. The OAB
+regenerates on Microsoft's schedule; Outlook may take up to 24 hours to pick it up even
+after the sync completes.
+
+---
+
 ## Scripts Overview
 
 ### HideFromGal-RuleBuilder.ps1
@@ -35,11 +118,16 @@ This collection of PowerShell scripts provides a solution for hiding Active Dire
 
 ### Step 1: Set Up the Synchronization Rule
 
-1. Copy `HideFromGal-RuleBuilder.ps1` to your Entra Connect server.
+**Only needed when no enforcement rule exists yet - check the status banner first.**
+Creating a second rule for the same attribute causes conflicting sync behavior.
+
+1. Copy the whole folder to your Entra Connect server (the RuleBuilder needs
+   `Shared-EntraConnect.ps1` alongside it).
 2. Open PowerShell as Administrator on the Entra Connect server.
 3. Navigate to the script location and run:
    ```powershell
-   PowerShell -ExecutionPolicy Bypass -File .\HideFromGal-RuleBuilder.ps1
+   PowerShell -ExecutionPolicy Bypass -File .\HideFromGal-RuleBuilder.ps1 -WhatIf   # preview
+   PowerShell -ExecutionPolicy Bypass -File .\HideFromGal-RuleBuilder.ps1           # create
    ```
 4. The script will:
    - Automatically detect the local AD domain
@@ -52,12 +140,13 @@ This collection of PowerShell scripts provides a solution for hiding Active Dire
 
 ### Step 2: Manage User GAL Visibility
 
-1. Copy `HideFromGAL.ps1` to a domain-joined administrative workstation.
-2. Open PowerShell as Administrator.
-3. Navigate to the script location and run:
-   ```powershell
-   PowerShell -ExecutionPolicy Bypass -File .\HideFromGAL.ps1
-   ```
+1. Copy the **whole folder** to the target machine - `HideFromGAL.ps1`,
+   `Shared-EntraConnect.ps1`, and `Launch-HideFromGAL.vbs` must stay together. Copying
+   only the .ps1 produces "term not recognized" errors at startup.
+   Prefer the Entra Connect server, so rule verification can run (see
+   [Run it on the Entra Connect server](#run-it-on-the-entra-connect-server)).
+2. Double-click **`Launch-HideFromGAL.vbs`** (no console window), or right-click it and
+   choose *Run as administrator*.
 
 4. The GUI will open with the following features:
    - **Search**: Filter users by name or username
@@ -93,10 +182,14 @@ After hiding/unhiding users:
 
 ## Troubleshooting
 
-- **Rule Creation Fails**: Verify ADSync module is available and you have permissions to create sync rules.
+See [Common problems](#common-problems) above for the issues seen most often
+(missing `Shared-EntraConnect.ps1`, a rule the tool cannot see, users marked but not
+hidden). Additionally:
+
+- **Rule Creation Fails**: Verify the ADSync module is available and you have permission to create sync rules. Rule creation must run ON the Entra Connect server.
 - **Connector Not Found**: Ensure the Entra Connect server is domain-joined and the connector name matches the domain.
 - **AD Modifications Fail**: Check domain admin rights and AD connectivity.
-- **GAL Changes Not Visible**: Wait for sync cycle completion and check Azure AD/Entra admin portal.
+- **GAL Changes Not Visible**: Wait for the sync cycle to finish, then allow for offline address book caching in Outlook.
 
 ## Security Considerations
 
