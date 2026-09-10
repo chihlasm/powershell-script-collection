@@ -81,8 +81,8 @@ function Get-StorageInfo {
                     Drive = "$driveLetter`:"
                     TotalGB = [math]::Round($vol.Size / 1GB, 2)
                     FreeGB = [math]::Round($vol.SizeRemaining / 1GB, 2)
-                    UsedGB = [math]::Round($vol.Size - $vol.SizeRemaining, 2)
-                    UsedPercent = [math]::Round(($vol.Size - $vol.SizeRemaining) / $vol.Size * 100, 2)
+                    UsedGB = [math]::Round(($vol.Size - $vol.SizeRemaining) / 1GB, 2)
+                    UsedPercent = if ($vol.Size -gt 0) { [math]::Round(($vol.Size - $vol.SizeRemaining) / $vol.Size * 100, 2) } else { 0 }
                     DriveType = $vol.DriveType
                     Label = $vol.FileSystemLabel
                 }
@@ -108,8 +108,8 @@ function Get-StorageInfo {
                         Drive = "$driveLetter`:"
                         TotalGB = [math]::Round($vol.Size / 1GB, 2)
                         FreeGB = [math]::Round($vol.SizeRemaining / 1GB, 2)
-                        UsedGB = [math]::Round($vol.Size - $vol.SizeRemaining, 2)
-                        UsedPercent = [math]::Round((($vol.Size - $vol.SizeRemaining) / $vol.Size) * 100, 2)
+                        UsedGB = [math]::Round(($vol.Size - $vol.SizeRemaining) / 1GB, 2)
+                        UsedPercent = if ($vol.Size -gt 0) { [math]::Round((($vol.Size - $vol.SizeRemaining) / $vol.Size) * 100, 2) } else { 0 }
                         DriveType = $vol.DriveType
                         Label = $vol.FileSystemLabel
                     }

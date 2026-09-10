@@ -19,15 +19,13 @@ A comprehensive PowerShell script to diagnose performance issues on Citrix Virtu
 
 This collection now includes additional specialized tools for comprehensive Citrix FSLogix environment management:
 
-### **Remove-OrphanedFSLogixTempProfiles.ps1**
-- **Purpose**: Safely identifies and removes orphaned temporary user profiles
-- **Key Features**:
-  - Detects FSLogix temporary profiles that remain after user logoff failures
-  - Compares active sessions against registry profile entries
-  - Removes unused profile registry keys and C:\Users folders
-  - WhatIf mode for safe testing
-  - Includes FSLogix event log analysis
-  - Configurable logging and confirmation prompts
+### **Remove-OrphanedFSLogixTempProfiles.ps1** ⚠️ DO NOT USE
+- **Status**: **BROKEN — do not run in any environment.** This script has unsafe defects that can delete live user profiles mid-session. Specifically:
+  - No `SupportsShouldProcess` — the hand-rolled `-WhatIf` does not integrate with PowerShell's confirmation pipeline and leaves an incomplete audit trail.
+  - No minimum-age filter — a profile whose user logged off seconds ago is immediately eligible for deletion, while FSLogix is still flushing the VHD.
+  - Fragile `query session` parsing mis-identifies usernames, so the "active user" guard is unreliable and a currently logged-in user may be deleted.
+  - `Test-UserFolderExists` has a parameter/argument mismatch — its `FolderExists` result is meaningless.
+- **Next steps**: Rewrite required before use. See review notes in git history. A replacement should use `SupportsShouldProcess`, a `-MinAgeHours` safety window, reliable session enumeration (e.g. `Get-CimInstance Win32_LoggedOnUser` or `quser.exe` fixed-width parsing), and a corrected folder-existence check.
 
 ### **Monitor-CitrixFSLogixStorage.ps1**
 - **Purpose**: Monitors storage space across Citrix VDAs and FSLogix storage servers
@@ -40,8 +38,8 @@ This collection now includes additional specialized tools for comprehensive Citr
   - Comprehensive HTML/CSV/TXT reporting
   - Health status analysis with recommendations
 
-### **CitrixVDA-Consolidated.ps1** ⭐ NEW
-- **Purpose**: Unified comprehensive Citrix VDA diagnostics combining all features from both CitrixVDADiagnostics.ps1 and CitrixFSLogix-AdvancedDiagnostics.ps1
+### **CitrixVDA-Consolidated.ps1** ⭐ RECOMMENDED
+- **Purpose**: Unified comprehensive Citrix VDA diagnostics. This is the primary diagnostic tool for this folder — use it first.
 - **Key Features**:
   - Complete integration of all diagnostic functionality
   - **Citrix Virtual Apps and Desktops version detection**
@@ -83,63 +81,7 @@ This collection now includes additional specialized tools for comprehensive Citr
 
 ## Usage
 
-### Basic Usage
-```powershell
-.\CitrixVDADiagnostics.ps1
-```
-
-### Remote Server Analysis
-```powershell
-.\CitrixVDADiagnostics.ps1 -ServerName "RemoteServer01"
-```
-
-### Verbose Output
-```powershell
-.\CitrixVDADiagnostics.ps1 -Verbose
-```
-
-### Report Generation
-```powershell
-# Generate HTML report (default)
-.\CitrixVDADiagnostics.ps1 -ExportReport
-
-# Generate CSV report
-.\CitrixVDADiagnostics.ps1 -ExportReport -ReportFormat CSV
-
-# Generate JSON report
-.\CitrixVDADiagnostics.ps1 -ExportReport -ReportFormat JSON
-
-# Custom report path
-.\CitrixVDADiagnostics.ps1 -ExportReport -ReportFormat HTML -ReportPath "C:\Reports\VDA_Report.html"
-```
-
-### Combined Usage
-```powershell
-# Remote server with verbose output and HTML report
-.\CitrixVDADiagnostics.ps1 -ServerName "CitrixProd01" -Verbose -ExportReport -ReportFormat HTML
-```
-
-## Temporary Profile Cleanup Usage
-
-### Basic Profile Cleanup
-```powershell
-.\Remove-OrphanedFSLogixTempProfiles.ps1
-```
-
-### Safe Mode (Preview Changes)
-```powershell
-.\Remove-OrphanedFSLogixTempProfiles.ps1 -WhatIf
-```
-
-### Force Cleanup (No Confirmation)
-```powershell
-.\Remove-OrphanedFSLogixTempProfiles.ps1 -Force
-```
-
-### Verbose Output with Logging
-```powershell
-.\Remove-OrphanedFSLogixTempProfiles.ps1 -Verbose -LogPath "C:\Logs\ProfileCleanup.log"
-```
+Start with **CitrixVDA-Consolidated.ps1** (see [Consolidated Diagnostics Usage](#consolidated-diagnostics-usage-) below). The sections that follow cover the other tools in this folder.
 
 ## Storage Monitoring Usage
 
@@ -192,7 +134,7 @@ $cred | Export-Clixml -Path "C:\Secure\FSLogixCred.xml"
 
 ## Consolidated Diagnostics Usage ⭐
 
-The **CitrixVDA-Consolidated.ps1** script combines all functionality from both original scripts into one unified diagnostic tool.
+The **CitrixVDA-Consolidated.ps1** script is the primary unified diagnostic tool for this folder.
 
 ### Basic Consolidated Diagnosis
 ```powershell
@@ -427,7 +369,7 @@ For regular monitoring, create a scheduled task:
 
 ```powershell
 # Create scheduled task to run daily at 9 AM
-$action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-File C:\Path\To\CitrixVDADiagnostics.ps1"
+$action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-File C:\Path\To\CitrixVDA-Consolidated.ps1 -ExportReport"
 $trigger = New-ScheduledTaskTrigger -Daily -At 9am
 Register-ScheduledTask -Action $action -Trigger $trigger -TaskName "CitrixVDAHealthCheck" -Description "Daily Citrix VDA diagnostics"
 ```
@@ -436,7 +378,7 @@ Register-ScheduledTask -Action $action -Trigger $trigger -TaskName "CitrixVDAHea
 
 Output can be redirected to a log file:
 ```powershell
-.\CitrixVDADiagnostics.ps1 | Out-File -FilePath "C:\Logs\CitrixVDA_$(Get-Date -Format 'yyyyMMdd').log"
+.\CitrixVDA-Consolidated.ps1 | Out-File -FilePath "C:\Logs\CitrixVDA_$(Get-Date -Format 'yyyyMMdd').log"
 ```
 
 ## Troubleshooting
