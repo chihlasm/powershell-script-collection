@@ -7,7 +7,12 @@
 
     $script:ScriptFiles = @(
         foreach ($r in $script:Roots) {
-            Get-ChildItem -LiteralPath $r -File -Include '*.ps1','*.psd1' -Recurse -ErrorAction SilentlyContinue
+            # -Include is silently ignored when -LiteralPath has no trailing wildcard,
+            # which made this scan every file (zips, markdown) and report false failures.
+            # -Filter takes one pattern, so run it once per extension.
+            foreach ($pattern in '*.ps1', '*.psd1') {
+                Get-ChildItem -LiteralPath $r -File -Filter $pattern -Recurse -ErrorAction SilentlyContinue
+            }
         }
     )
 }

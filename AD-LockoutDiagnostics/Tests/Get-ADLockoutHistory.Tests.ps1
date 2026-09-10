@@ -92,7 +92,9 @@ Describe 'Group-LockoutsByAccount' {
 
     It 'applies the MinLockouts filter' {
         $result = Group-LockoutsByAccount -Lockouts $script:Sample -MinLockouts 3
-        $result.Count   | Should -Be 1
+        # Wrap in @() - PowerShell 5.1 unwraps a single-element array to a bare
+        # PSCustomObject, which has no .Count, so the assertion saw $null.
+        @($result).Count | Should -Be 1
         $result[0].User | Should -Be 'svc_backup'
     }
 
