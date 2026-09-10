@@ -1,8 +1,7 @@
 ﻿BeforeAll {
     $script:Roots = @(
         (Join-Path $PSScriptRoot '..'),
-        (Join-Path $PSScriptRoot '..\..\AD-AuthSourceEvidence'),
-        (Join-Path $PSScriptRoot '..\AD-Lockout-Diagnostics')
+        (Join-Path $PSScriptRoot '..\..\AD-AuthSourceEvidence')
     ) | Where-Object { Test-Path -LiteralPath $_ }
 
     $script:ScriptFiles = @(
