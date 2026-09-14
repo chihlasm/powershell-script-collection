@@ -1,4 +1,4 @@
-BeforeAll {
+﻿BeforeAll {
     $script:Ref = Import-PowerShellDataFile -Path "$PSScriptRoot\..\DriveMapReference.psd1"
 }
 

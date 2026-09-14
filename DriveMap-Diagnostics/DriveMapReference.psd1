@@ -1,4 +1,4 @@
-@{
+﻿@{
     # Group Policy Preferences events are written to the Application log. Informational
     # events are ONLY logged when the 'Logging and tracing' policy is enabled, so an
     # empty Application log means "not recorded", never "no failures".
@@ -19,14 +19,22 @@
     # The Group Policy engine's own CSE-processing events, in a DIFFERENT channel:
     # Microsoft-Windows-GroupPolicy/Operational. These say whether the Drive Maps CSE
     # ran at all; the GppEvents above say whether an individual drive item applied.
-    # https://learn.microsoft.com/en-us/troubleshoot/windows-client/group-policy/scenario-guide-gpo-to-map-network-drive-doesn-t-apply-as-expected
     GpOperationalLogName = 'Microsoft-Windows-GroupPolicy/Operational'
     GpOperationalEvents = @{
+        # https://learn.microsoft.com/en-us/troubleshoot/windows-server/group-policy/scenario-guide-gpo-to-map-network-drive-doesn-t-apply-as-expected
         4001 = 'Group Policy processing started'
         4016 = 'CSE processing started'
+
+        # https://learn.microsoft.com/en-us/troubleshoot/windows-server/group-policy/applying-group-policy-troubleshooting-guidance
         5016 = 'CSE processing completed successfully'
+
+        # https://learn.microsoft.com/en-us/troubleshoot/windows-server/group-policy/scenario-guide-gpo-to-map-network-drive-doesn-t-apply-as-expected
         5017 = 'Organizational unit resolved'
         5312 = 'List of applicable GPOs'
+
+        # 7016 is inferred from the documented warning/error numbering convention
+        # (warning IDs begin 6, error IDs begin 7, with the last three digits matching
+        # the start event). It is not independently verified in Microsoft documentation.
         7016 = 'CSE processing completed with an error'
     }
 
