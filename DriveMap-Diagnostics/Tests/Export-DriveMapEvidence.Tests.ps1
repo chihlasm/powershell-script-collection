@@ -80,13 +80,13 @@ Describe 'New-EvidenceManifest' {
         }
         $manifest.Collected | Should -Contain 'PersistentMounts'
         $manifest.Empty     | Should -Contain 'GppEvents'
-        $manifest.Failed    | Should -Contain 'TraceFiles'
+        $manifest.Failed.Collector | Should -Contain 'TraceFiles'
     }
 
     It 'records the reason a collector could not run' {
         $manifest = New-EvidenceManifest -Results @{
             TraceFiles = [PSCustomObject]@{ State = 'CouldNotCollect'; Reason = 'Tracing disabled' }
         }
-        ($manifest.Failed -join ' ') | Should -Match 'Tracing disabled'
+        ($manifest.Failed | Where-Object { $_.Collector -eq 'TraceFiles' }).Reason | Should -Match 'Tracing disabled'
     }
 }

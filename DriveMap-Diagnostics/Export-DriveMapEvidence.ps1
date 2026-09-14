@@ -326,6 +326,13 @@ function New-EvidenceManifest {
         without asking them what they ran. An item that could not be collected must
         never be silently absent from the manifest - absence would read as "nothing
         was there", exactly the ambiguity the three-state contract exists to remove.
+
+        Failed carries structured objects ([PSCustomObject] with Collector and
+        Reason properties), not a flat array of strings, specifically so a
+        consumer (such as the HTML report built from this manifest) can pair a
+        failed collector with its own reason directly - by property, not by
+        assuming a fixed name/reason/name/reason ordering that a Reason string
+        happening to match another collector's name could silently corrupt.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Results
@@ -333,18 +340,14 @@ function New-EvidenceManifest {
 
     $collected = New-Object System.Collections.Generic.List[string]
     $empty     = New-Object System.Collections.Generic.List[string]
-    $failed    = New-Object System.Collections.Generic.List[string]
+    $failed    = New-Object System.Collections.Generic.List[object]
 
     foreach ($key in $Results.Keys) {
         $result = $Results[$key]
         switch ($result.State) {
             'Found'           { $collected.Add($key) }
             'EmptyButValid'   { $empty.Add($key) }
-            # Add the collector's own name (so 'Should -Contain <Name>' identifies
-            # exactly which collector failed) AND its Reason as a separate element
-            # (so the joined Failed list surfaces the reason text for a human
-            # reading the manifest, without ever silently dropping either half).
-            'CouldNotCollect' { $failed.Add($key); $failed.Add($result.Reason) }
+            'CouldNotCollect' { $failed.Add([PSCustomObject]@{ Collector = $key; Reason = $result.Reason }) }
         }
     }
 
@@ -985,7 +988,10 @@ $manifest = New-EvidenceManifest -Results $results
 Write-Host ''
 Write-Status INFO "Collected: $($manifest.Collected -join ', ')"
 if ($manifest.Empty.Count -gt 0)  { Write-Status INFO  "Empty (confirmed, not missing evidence): $($manifest.Empty -join ', ')" }
-if ($manifest.Failed.Count -gt 0) { Write-Status WARN  "Could not collect: $($manifest.Failed -join ' | ')" }
+if ($manifest.Failed.Count -gt 0) {
+    $failedText = ($manifest.Failed | ForEach-Object { "$($_.Collector): $($_.Reason)" }) -join ' | '
+    Write-Status WARN "Could not collect: $failedText"
+}
 
 $manifestObject = [PSCustomObject]@{
     GeneratedAt  = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
