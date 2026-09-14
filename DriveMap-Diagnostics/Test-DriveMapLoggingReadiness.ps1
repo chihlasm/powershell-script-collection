@@ -256,6 +256,20 @@ function Get-SplitTokenRisk {
     [PSCustomObject]@{ AtRisk = $atRisk; Explanation = $explanation; Remediations = $remediations }
 }
 
+function Test-TraceEvidenceCoversFault {
+    # Trace-file existence alone is not evidence tracing is CURRENTLY on - a file left
+    # over from a prior configuration can sit in the default folder indefinitely. The
+    # same "does the evidence reach back to the fault?" reasoning already applied to
+    # Application log retention (see Test-BlindCondition) must also apply here: a trace
+    # file older than the fault cannot contain evidence of it, so it cannot corroborate
+    # that tracing was on when the fault occurred.
+    param(
+        [Parameter(Mandatory)][timespan]$TraceAge,
+        [Parameter(Mandatory)][timespan]$FaultAge
+    )
+    $TraceAge -le $FaultAge
+}
+
 if ($LoadFunctionsOnly) { return }
 
 # ---------------------------------------------------------------------------
@@ -365,8 +379,12 @@ try {
         if ($traceFiles.Count -gt 0) {
             $newest = $traceFiles | Sort-Object LastWriteTime -Descending | Select-Object -First 1
             $traceAge = (Get-Date) - $newest.LastWriteTime
-            $tracingEnabled = $true
-            Write-Status INFO ("Trace files exist at the default location ({0}); newest was modified {1:N1} hours ago. This is CORROBORATING evidence that tracing is on, drawn from the files' existence - not a read of the policy itself, and the path may have been relocated by policy." -f $traceFolder, $traceAge.TotalHours)
+            if (Test-TraceEvidenceCoversFault -TraceAge $traceAge -FaultAge $faultAge) {
+                $tracingEnabled = $true
+                Write-Status INFO ("Trace files exist at the default location ({0}); newest was modified {1:N1} hours ago, which covers the reported {2:N1}-hour-old fault. This is CORROBORATING evidence that tracing is on, drawn from the files' existence - not a read of the policy itself, and the path may have been relocated by policy." -f $traceFolder, $traceAge.TotalHours, $faultAge.TotalHours)
+            } else {
+                Write-Status WARN ("Trace files exist at the default location ({0}), but the newest was modified {1:N1} hours ago - older than the reported {2:N1}-hour-old fault. These files predate the fault, so they cannot contain evidence of it; tracing may have been on at some point but does not appear to have run since. This is indirect evidence only - the trace path may have been relocated by policy." -f $traceFolder, $traceAge.TotalHours, $faultAge.TotalHours)
+            }
         } else {
             Write-Status WARN "The default trace folder ($traceFolder) exists but is empty. This is indirect evidence that tracing is probably OFF, but the trace path may have been customized by policy - this is not definitive."
         }
