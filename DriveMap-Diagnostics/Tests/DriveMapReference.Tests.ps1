@@ -50,6 +50,13 @@ Describe 'Registry path reference (verified against Microsoft Learn)' {
     It 'points persistent mount lookups at HKCU\Network' {
         $script:Ref.RegistryPaths.PersistentMounts | Should -Be 'HKCU:\Network'
     }
+
+    # The Drive Maps CSE is registered at HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\GPExtensions
+    # https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-server-2012-R2-and-2012/dn581924(v=ws.11)
+    It 'uses the correct Winlogon\GPExtensions path for Drive Maps CSE registration' {
+        $script:Ref.RegistryPaths.DriveMapsCse |
+            Should -Be 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\GPExtensions\{5794DAFD-BE60-433f-88A2-1A31939AC01F}'
+    }
 }
 
 Describe 'Group Policy operational event reference' {

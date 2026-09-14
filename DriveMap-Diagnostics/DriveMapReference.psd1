@@ -51,6 +51,11 @@
         # Drive Maps CSE registration. NoBackgroundPolicy=1 means the CSE is never
         # called during background refresh - half of the every-other-logon mechanism.
         # https://learn.microsoft.com/en-us/archive/technet-wiki/12221.group-policy-troubleshooting-drive-maps-preference-extension-replace-mode-only-maps-the-drive-every-other-logon
-        DriveMapsCse = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\{5794DAFD-BE60-433f-88A2-1A31939AC01F}'
+        # Microsoft documents the registration key's values as Default, DLLName, and
+        # EventSources, but does NOT document NoBackgroundPolicy there. A consumer that
+        # finds no NoBackgroundPolicy value must treat it as "could not determine", never
+        # as "risk absent".
+        # https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-server-2012-R2-and-2012/dn581924(v=ws.11)
+        DriveMapsCse = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\GPExtensions\{5794DAFD-BE60-433f-88A2-1A31939AC01F}'
     }
 }
