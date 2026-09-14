@@ -613,3 +613,98 @@ try {
 } catch {
     Write-Status FAIL "Could not write readiness report: $($_.Exception.Message)"
 }
+
+# ---------------------------------------------------------------------------
+# Machine-readable companion (JSON), alongside the human-readable .txt above.
+#
+# This gate computes several signals that Invoke-DriveMapInvestigation.ps1's
+# ranked-cause verdict logic needs (EnableLinkedConnections, Fast Logon
+# Optimization, "Always wait for the network", NoBackgroundPolicy, GPP
+# logging/tracing state, the blind-condition result) but previously exposed
+# them only as console text and prose inside the .txt report - unreadable by
+# another script without fragile text-scraping. Without this file, the two
+# ranked-cause rules that depend on these signals (every-other-logon,
+# split-token visibility) could never fire on a real run, silently disabling
+# this toolkit's two highest-value, most-documented conclusions (spec section
+# 6; sections 3.3 and 3.4).
+#
+# Every value is written as a three-state record - { State; Value; Reason } -
+# using this script's own New-CollectionResult shape, so the
+# Found/EmptyButValid/CouldNotCollect distinction survives into JSON exactly
+# as it exists in memory. A value this script could not determine (for
+# example GppLoggingEnabled and TracingEnabled, which per the ruling above are
+# NEVER read from an undocumented registry value) must serialize as
+# CouldNotCollect with its Reason preserved, not as a bare $false - collapsing
+# that here would let a downstream consumer treat "could not determine" as a
+# confirmed negative, precisely the failure the three-state contract exists to
+# prevent.
+$jsonPath = Join-Path $OutputPath "DriveMapLoggingReadiness_$stamp.json"
+try {
+    $readinessData = [ordered]@{
+        GeneratedAt   = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        ComputerName  = $ComputerName
+        DriveLetter   = $DriveLetter
+
+        EnableLinkedConnections = [ordered]@{
+            State  = $elcResult.State
+            Value  = if ($elcResult.State -eq 'Found') { $elcValue } else { $null }
+            Reason = $elcResult.Reason
+        }
+
+        # Not read from the registry - see the citation above this section: no Microsoft
+        # Learn page documents a value name for either Fast Logon Optimization or "Always
+        # wait for the network", so this script falls back to the documented CLIENT DEFAULT
+        # (Fast Logon Optimization on, "Always wait" off) rather than guessing a registry
+        # read. That fallback is itself not a confirmed measurement of THIS machine's
+        # effective policy, so it is recorded as CouldNotCollect with an explicit reason,
+        # never as Found - a downstream consumer must not treat this as verified.
+        FastLogonOptimization = [ordered]@{
+            State  = 'CouldNotCollect'
+            Value  = $null
+            Reason = "Not read from the registry - no Microsoft Learn page documents the underlying value name. The documented CLIENT DEFAULT (enabled) is $fastLogonOptimization but is NOT a measurement of this machine; confirm with 'gpresult /h' or rsop.msc on $ComputerName."
+        }
+        AlwaysWaitForNetwork = [ordered]@{
+            State  = 'CouldNotCollect'
+            Value  = $null
+            Reason = "Not read from the registry - no Microsoft Learn page documents the underlying value name. The documented CLIENT DEFAULT (disabled) is $alwaysWaitForNetwork but is NOT a measurement of this machine; confirm with 'gpresult /h' or rsop.msc on $ComputerName."
+        }
+
+        NoBackgroundPolicy = [ordered]@{
+            State  = $cseResult.State
+            Value  = if ($cseResult.State -eq 'Found') { $cseResult.Data } else { $null }
+            Reason = $cseResult.Reason
+        }
+
+        # Per Ruling 6: the registry value name(s) behind the GPP "Logging and tracing"
+        # policy are not documented anywhere on learn.microsoft.com. This gate never guesses
+        # at them, so GppLoggingEnabled is unconditionally CouldNotCollect - preserved
+        # faithfully here, not flattened to a bare $false.
+        GppLoggingEnabled = [ordered]@{
+            State  = 'CouldNotCollect'
+            Value  = $null
+            Reason = $gppLoggingResult.Reason
+        }
+
+        # Tracing state is corroborated (not proven) via trace-file presence/freshness at
+        # the documented default location - see the orchestration section above. It is a
+        # real (if indirect) measurement, so it IS reported as Found, with its boolean
+        # value and the same corroboration caveat carried in Reason.
+        TracingEnabled = [ordered]@{
+            State  = 'Found'
+            Value  = $tracingEnabled
+            Reason = "Corroborating evidence only (trace-file presence/freshness at $traceFolder), not a direct read of the tracing policy - the trace path can be relocated by policy."
+        }
+
+        BlindCondition = [ordered]@{
+            IsBlind      = $blind.IsBlind
+            BlindReasons = @($blind.BlindReasons)
+        }
+    }
+
+    $utf8Bom = New-Object System.Text.UTF8Encoding($true)
+    $readinessJson = $readinessData | ConvertTo-Json -Depth 6
+    [System.IO.File]::WriteAllText($jsonPath, $readinessJson, $utf8Bom)
+    Write-Status PASS "Machine-readable readiness data written: $jsonPath"
+} catch {
+    Write-Status FAIL "Could not write machine-readable readiness JSON: $($_.Exception.Message)"
+}
