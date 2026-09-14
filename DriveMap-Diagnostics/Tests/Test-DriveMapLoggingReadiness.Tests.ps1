@@ -111,3 +111,19 @@ Describe 'Get-SplitTokenRisk (verified against Microsoft Learn)' {
         $r.Explanation | Should -Match 'prompt'
     }
 }
+
+Describe 'Test-TraceEvidenceCoversFault' {
+    # Trace-file existence alone is not evidence tracing is CURRENTLY on. A trace file
+    # left over from six months ago must not corroborate tracing for a fault that
+    # happened yesterday - the same "does the evidence reach back to the fault?"
+    # reasoning already applied to Application log retention must apply here too.
+    It 'does not treat a stale trace file as covering a more recent fault' {
+        $covers = Test-TraceEvidenceCoversFault -TraceAge ([timespan]::FromDays(180)) -FaultAge ([timespan]::FromHours(24))
+        $covers | Should -BeFalse
+    }
+
+    It 'treats a trace file newer than the fault as covering it' {
+        $covers = Test-TraceEvidenceCoversFault -TraceAge ([timespan]::FromHours(1)) -FaultAge ([timespan]::FromHours(24))
+        $covers | Should -BeTrue
+    }
+}
