@@ -291,25 +291,32 @@ function ConvertFrom-EvidenceBundle {
           TargetingFailures        <- GppEvents, filtered to Category -eq 'TargetingFailed'
                                       (4105/4106/8212), re-shaped to {EventId; Gpo}. $null when
                                       GppEvents could not be collected.
-          Action                   <- Passed through from -DriveMapAction (this bundle format
-                                      does not itself record the configured GPP action; the
-                                      orchestrator supplies it from Audit-GPDriveMaps.ps1's
-                                      findings for this drive letter when available).
+          Action                   <- -Action if explicitly supplied, else read from
+                                      -GpoActionCsvPath (Audit-GPDriveMaps.ps1's own CSV
+                                      output for this drive letter's GPP action) when that
+                                      path is supplied and readable. $null (never guessed)
+                                      when neither source has it - Action comes from the
+                                      domain side, not the endpoint gate, and this function
+                                      never fabricates it.
           FastLogonOptimization,
-          AlwaysWaitForNetwork     <- Passed through from the readiness-gate result
-                                      (Test-DriveMapLoggingReadiness.ps1 does not expose these
-                                      as machine-readable output today, so the orchestrator
-                                      supplies its own best-effort reading here; see -Force
-                                      caller notes).
+          AlwaysWaitForNetwork,
+          EnableLinkedConnections  <- -FastLogonOptimization / -AlwaysWaitForNetwork /
+                                      -EnableLinkedConnections if explicitly supplied
+                                      (non-$null), else read from -ReadinessJsonPath - the
+                                      machine-readable companion Test-DriveMapLoggingReadiness.ps1
+                                      writes alongside its .txt report. Each of that JSON's
+                                      three-state records ({State; Value; Reason}) maps
+                                      State 'Found' to its Value and State 'CouldNotCollect'
+                                      to $null - NEVER to $false - exactly as the endpoint
+                                      bundle's own CouldNotCollect collectors do above. When
+                                      neither an explicit parameter nor a readable JSON file
+                                      is available, the property is $null.
           ElevatedVisible,
           UnelevatedVisible        <- LiveMounts_CurrentContext / LiveMounts_OtherTokenContext.
                                       Both $null when the corresponding context could not be
                                       collected - see Export-DriveMapEvidence.ps1's own
                                       CouldNotCollect reasons for why a single run frequently
                                       cannot see both contexts.
-          EnableLinkedConnections  <- Passed through from -EnableLinkedConnections (read by
-                                      the orchestrator via the gate script's own registry read
-                                      of DriveMapReference.psd1's EnableLinkedConnections path).
 
         Every parameter below is [AllowNull()] and defaults to $null precisely so a caller
         that does not have a given signal yet (rather than guessing) produces the correct
@@ -321,10 +328,66 @@ function ConvertFrom-EvidenceBundle {
         [AllowNull()][string]$Action = $null,
         [AllowNull()][object]$FastLogonOptimization = $null,
         [AllowNull()][object]$AlwaysWaitForNetwork = $null,
-        [AllowNull()][object]$EnableLinkedConnections = $null
+        [AllowNull()][object]$EnableLinkedConnections = $null,
+        [AllowNull()][string]$ReadinessJsonPath = $null,
+        [AllowNull()][string]$GpoActionCsvPath = $null
     )
 
     $letterUpper = $DriveLetter.Trim().TrimEnd(':').ToUpperInvariant()
+
+    # Reads one of Test-DriveMapLoggingReadiness.ps1's JSON three-state records ({State;
+    # Value; Reason}) and returns exactly $null for CouldNotCollect (never $false) or the
+    # record's Value for Found/EmptyButValid - the same rule ConvertFrom-EvidenceBundle
+    # applies to every endpoint-bundle collector above, applied here to the gate's own
+    # machine-readable output.
+    function Read-ReadinessValue {
+        param($Record)
+        if ($null -eq $Record -or $Record.State -eq 'CouldNotCollect') { return $null }
+        return $Record.Value
+    }
+
+    $readinessData = $null
+    if ($ReadinessJsonPath -and (Test-Path -LiteralPath $ReadinessJsonPath)) {
+        try {
+            $readinessData = Get-Content -LiteralPath $ReadinessJsonPath -Raw | ConvertFrom-Json
+        } catch {
+            # A malformed/unreadable readiness JSON must never be treated as "confirmed
+            # absent risk" - leave $readinessData $null so every value below falls through
+            # to $null exactly as if no JSON had been supplied at all.
+            $readinessData = $null
+        }
+    }
+
+    if ($null -eq $FastLogonOptimization -and $readinessData) {
+        $FastLogonOptimization = Read-ReadinessValue -Record $readinessData.FastLogonOptimization
+    }
+    if ($null -eq $AlwaysWaitForNetwork -and $readinessData) {
+        $AlwaysWaitForNetwork = Read-ReadinessValue -Record $readinessData.AlwaysWaitForNetwork
+    }
+    if ($null -eq $EnableLinkedConnections -and $readinessData) {
+        $EnableLinkedConnections = Read-ReadinessValue -Record $readinessData.EnableLinkedConnections
+    }
+
+    if ([string]::IsNullOrEmpty($Action) -and $GpoActionCsvPath -and (Test-Path -LiteralPath $GpoActionCsvPath)) {
+        try {
+            $gpoRows = @(Import-Csv -LiteralPath $GpoActionCsvPath)
+            # Audit-GPDriveMaps.ps1's own CSV column names are read defensively - if a
+            # future version of that script renames or drops the Action/DriveLetter
+            # columns, this must degrade to "not found" (Action stays $null), never throw
+            # and never guess. Reused unmodified per this task's dispatch, so no assumption
+            # about its schema is asserted here as a verified fact.
+            $matchRow = $gpoRows | Where-Object {
+                $_.PSObject.Properties['DriveLetter'] -and
+                ([string]$_.DriveLetter).TrimEnd(':').ToUpperInvariant() -eq $letterUpper
+            } | Select-Object -First 1
+            if ($matchRow -and $matchRow.PSObject.Properties['Action']) {
+                $Action = $matchRow.Action
+            }
+        } catch {
+            # Could not read/parse the GPO audit CSV - Action stays whatever it already was
+            # ($null unless explicitly supplied), never guessed.
+        }
+    }
 
     function Test-LetterPresent {
         param($Result, [string]$Letter)
@@ -764,6 +827,7 @@ $steps = New-Object System.Collections.Generic.List[object]
 $gateScript = Join-Path $scriptRoot 'Test-DriveMapLoggingReadiness.ps1'
 $gateBlind  = $false
 $gateBlindReasons = @()
+$readinessJsonPath = $null
 if (Test-Path -LiteralPath $gateScript) {
     Write-Status INFO 'Running the logging-readiness gate ...'
     try {
@@ -786,6 +850,14 @@ if (Test-Path -LiteralPath $gateScript) {
             $gateBlindReasons = @($gateOutput | Where-Object { "$_" -match '^\[FAIL\]\s+-' } | ForEach-Object { ("$_" -replace '^\[FAIL\]\s+-\s*', '').Trim() })
             if ($gateBlindReasons.Count -eq 0) { $gateBlindReasons = @('The readiness gate reported the machine BLIND; see ReadinessGate.log for details.') }
         }
+        # The gate writes its machine-readable companion JSON into -OutputPath (this case
+        # folder) beside its .txt report, named DriveMapLoggingReadiness_<stamp>.json. Take
+        # the newest one so ConvertFrom-EvidenceBundle below can source
+        # FastLogonOptimization / AlwaysWaitForNetwork / EnableLinkedConnections from it
+        # rather than never populating those verdict-critical properties at all.
+        $newestReadinessJson = Get-ChildItem -LiteralPath $caseFolder -Filter 'DriveMapLoggingReadiness_*.json' -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($newestReadinessJson) { $readinessJsonPath = $newestReadinessJson.FullName }
         $steps.Add([PSCustomObject]@{ Step = 'Logging readiness gate'; Script = 'Test-DriveMapLoggingReadiness.ps1'; Ran = $true; ExitCode = $LASTEXITCODE; Error = '' })
     } catch {
         Write-Status WARN "Could not run the readiness gate: $($_.Exception.Message)"
@@ -842,11 +914,19 @@ if (-not $bundleFolder) {
 # drive after a healthy GPP apply) is exactly what Search-SYSVOLScripts.ps1 exists to find.
 # ---------------------------------------------------------------------------
 $auditScript = Resolve-CompanionScript -FileName 'Audit-GPDriveMaps.ps1' -ScriptRoot $scriptRoot
+$gpoActionCsvPath = $null
 if ($auditScript) {
     $auditArgs = @{ OutputPath = $caseFolder; ExportFormat = 'CSV'; SkipBrowserOpen = $true }
     if ($Identity) { $auditArgs['TargetUser'] = $Identity }
     if ($ComputerName) { $auditArgs['TargetComputer'] = $ComputerName }
     $steps.Add((Invoke-Step -Name 'Domain drive maps (GPO audit)' -ScriptPath $auditScript -Arguments $auditArgs -CaseFolder $caseFolder))
+    # Audit-GPDriveMaps.ps1 (reused unmodified) writes "<ReportName>-AllMappings.csv" with
+    # DriveLetter/Action columns among others - this is the source ConvertFrom-EvidenceBundle
+    # reads Action from below. Located by suffix rather than assuming the full report-name
+    # timestamp pattern, since that naming is this reused script's own implementation detail.
+    $mappingsCsv = Get-ChildItem -LiteralPath $caseFolder -Filter '*-AllMappings.csv' -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($mappingsCsv) { $gpoActionCsvPath = $mappingsCsv.FullName }
 } else {
     Write-Status WARN 'Audit-GPDriveMaps.ps1 was not found beside this script or in a sibling AD-GroupPolicy-DriveMaps folder - skipping the GPO-side audit.'
     $steps.Add([PSCustomObject]@{ Step = 'Domain drive maps (GPO audit)'; Script = 'Audit-GPDriveMaps.ps1'; Ran = $false; ExitCode = $null; Error = 'Script not found.' })
@@ -901,7 +981,7 @@ if ($bundleFolder) {
                 $bundleResults[$name] = [PSCustomObject]@{ State = $state; Data = $data; Reason = $reason }
             }
 
-            $flatEvidence = ConvertFrom-EvidenceBundle -DriveLetter $DriveLetter -Results $bundleResults
+            $flatEvidence = ConvertFrom-EvidenceBundle -DriveLetter $DriveLetter -Results $bundleResults -ReadinessJsonPath $readinessJsonPath -GpoActionCsvPath $gpoActionCsvPath
             $verdicts = Get-DriveMapVerdict -Evidence $flatEvidence
         } catch {
             Write-Status WARN "Could not parse the evidence bundle's manifest.json: $($_.Exception.Message)"

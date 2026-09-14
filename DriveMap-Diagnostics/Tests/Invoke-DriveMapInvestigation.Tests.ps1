@@ -154,6 +154,63 @@ Describe 'ConvertFrom-EvidenceBundle' {
         @($flat.ScriptDeletions).Count   | Should -Be 0
         @($flat.TargetingFailures).Count | Should -Be 0
     }
+
+    # Test-DriveMapLoggingReadiness.ps1 writes a machine-readable JSON companion alongside
+    # its .txt report, carrying FastLogonOptimization / AlwaysWaitForNetwork /
+    # EnableLinkedConnections as three-state records so the every-other-logon and
+    # split-token verdict rules - the toolkit's two highest-value, most-documented
+    # conclusions - can actually fire on a real run instead of always seeing $null.
+    It 'populates FastLogonOptimization, AlwaysWaitForNetwork and EnableLinkedConnections from a readiness JSON fixture' {
+        $readinessFixture = @{
+            EnableLinkedConnections = @{ State = 'Found'; Value = 1; Reason = $null }
+            FastLogonOptimization   = @{ State = 'Found'; Value = $true; Reason = $null }
+            AlwaysWaitForNetwork    = @{ State = 'Found'; Value = $false; Reason = $null }
+            NoBackgroundPolicy      = @{ State = 'Found'; Value = 1; Reason = $null }
+            GppLoggingEnabled       = @{ State = 'CouldNotCollect'; Value = $null; Reason = 'Not documented by Microsoft' }
+            TracingEnabled          = @{ State = 'Found'; Value = $false; Reason = 'Corroborating evidence only' }
+            BlindCondition          = @{ IsBlind = $true; BlindReasons = @('Logging disabled') }
+        }
+        $jsonPath = Join-Path $TestDrive 'readiness.json'
+        ($readinessFixture | ConvertTo-Json -Depth 6) | Set-Content -Path $jsonPath -Encoding UTF8
+
+        $flat = ConvertFrom-EvidenceBundle -DriveLetter 'X' -Results @{} -ReadinessJsonPath $jsonPath
+
+        $flat.EnableLinkedConnections | Should -Be 1
+        $flat.FastLogonOptimization   | Should -Be $true
+        $flat.AlwaysWaitForNetwork    | Should -Be $false
+    }
+
+    # THE CRITICAL CASE: a CouldNotCollect entry in the readiness JSON must become $null,
+    # never $false. A gate that could not determine EnableLinkedConnections (for example, a
+    # remote registry read denied) must not be silently read downstream as "confirmed not
+    # set to 1" - that would fabricate a split-token finding the gate never actually made.
+    It 'maps a CouldNotCollect entry in the readiness JSON to $null, not $false' {
+        $readinessFixture = @{
+            EnableLinkedConnections = @{ State = 'CouldNotCollect'; Value = $null; Reason = 'Access denied' }
+            FastLogonOptimization   = @{ State = 'CouldNotCollect'; Value = $null; Reason = 'Not documented by Microsoft' }
+            AlwaysWaitForNetwork    = @{ State = 'CouldNotCollect'; Value = $null; Reason = 'Not documented by Microsoft' }
+        }
+        $jsonPath = Join-Path $TestDrive 'readiness-blind.json'
+        ($readinessFixture | ConvertTo-Json -Depth 6) | Set-Content -Path $jsonPath -Encoding UTF8
+
+        $flat = ConvertFrom-EvidenceBundle -DriveLetter 'X' -Results @{} -ReadinessJsonPath $jsonPath
+
+        $flat.EnableLinkedConnections | Should -BeNullOrEmpty
+        $flat.EnableLinkedConnections | Should -Not -Be $false
+        $flat.FastLogonOptimization   | Should -BeNullOrEmpty
+        $flat.FastLogonOptimization   | Should -Not -Be $false
+        $flat.AlwaysWaitForNetwork    | Should -BeNullOrEmpty
+        $flat.AlwaysWaitForNetwork    | Should -Not -Be $false
+    }
+
+    It 'still returns a valid evidence object with $null properties when no readiness JSON is supplied' {
+        $flat = ConvertFrom-EvidenceBundle -DriveLetter 'X' -Results @{}
+
+        $flat.EnableLinkedConnections | Should -BeNullOrEmpty
+        $flat.FastLogonOptimization   | Should -BeNullOrEmpty
+        $flat.AlwaysWaitForNetwork    | Should -BeNullOrEmpty
+        $flat.Action                  | Should -BeNullOrEmpty
+    }
 }
 
 Describe 'Resolve-CompanionScript' {
