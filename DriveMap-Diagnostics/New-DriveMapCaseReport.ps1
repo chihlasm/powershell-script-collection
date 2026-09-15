@@ -551,8 +551,18 @@ function ConvertTo-ReportSections {
     $sections['InRegistry']        = $Evidence.InRegistry
     $sections['ElevatedVisible']   = $Evidence.ElevatedVisible
     $sections['UnelevatedVisible'] = $Evidence.UnelevatedVisible
-    $sections['ScriptDeletions']   = if ($null -eq $Evidence.ScriptDeletions) { $null } else { @($Evidence.ScriptDeletions) }
-    $sections['TargetingFailures'] = if ($null -eq $Evidence.TargetingFailures) { $null } else { @($Evidence.TargetingFailures) }
+    # The [object[]] casts guard the Windows PowerShell 5.1 unwrapping hazard: assigning the
+    # result of an `if` EXPRESSION that yields a ONE-element array unwraps it to the bare
+    # element on 5.1 (PowerShell 7 hides this by unifying `.Count` across scalars). A single
+    # script deletion would otherwise reach the report as a bare object. This is currently
+    # masked downstream - New-InterferenceSectionHtml re-coerces via its [object[]] parameter
+    # - but the hashtable must not be the thing that loses the array shape, since any future
+    # consumer reading $sections['ScriptDeletions'].Count directly would silently read $null.
+    # The cast must NOT collapse $null into an empty array: [object[]]$null stays $null, so
+    # "could not collect" still reads differently from "looked and found nothing".
+    # Verified on Windows PowerShell 5.1.26100 and PowerShell 7.
+    [object[]]$sections['ScriptDeletions']   = if ($null -eq $Evidence.ScriptDeletions) { $null } else { @($Evidence.ScriptDeletions) }
+    [object[]]$sections['TargetingFailures'] = if ($null -eq $Evidence.TargetingFailures) { $null } else { @($Evidence.TargetingFailures) }
     # GpoAuditNote has no established source anywhere in this toolkit's evidence today -
     # deliberately left out of the hashtable (New-IntendedStateSectionHtml reads a missing
     # key as $null) rather than inventing placeholder text.
@@ -941,7 +951,19 @@ $verdictsFile = Get-ChildItem -LiteralPath $CaseFolder -Filter 'Verdicts.json' -
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if ($verdictsFile) {
     try {
-        $verdicts = @(Get-Content -LiteralPath $verdictsFile.FullName -Raw -ErrorAction Stop | ConvertFrom-Json)
+        # Assign ConvertFrom-Json's result to a variable FIRST, then wrap - do not pipe it
+        # straight into @(...). Windows PowerShell 5.1 emits a converted JSON array as a
+        # SINGLE pipeline object rather than enumerating its items, so
+        # '@($json | ConvertFrom-Json)' yields a one-element array whose only element is the
+        # array itself. $verdicts[0].Cause is then empty and the report's headline verdict
+        # renders blank on the declared target runtime while looking perfect on PowerShell 7,
+        # which does enumerate. Assigning first and then wrapping behaves identically on both:
+        # the variable holds the Object[] either way, and @() on an existing array is a no-op.
+        # -NoEnumerate would also fix it but was introduced in PowerShell 6 and does not exist
+        # on 5.1, which this script declares as its minimum version.
+        # https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/convertfrom-json
+        $parsedVerdicts = Get-Content -LiteralPath $verdictsFile.FullName -Raw -ErrorAction Stop | ConvertFrom-Json
+        $verdicts = @($parsedVerdicts)
         Write-Status PASS "Loaded verdicts: $($verdictsFile.FullName)"
     } catch {
         Write-Status WARN "Could not parse Verdicts.json: $($_.Exception.Message)"
