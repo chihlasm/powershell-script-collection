@@ -108,6 +108,64 @@ Describe 'Get-DriveMapVerdict' {
         })
         ($v.Remediation -join ' ') | Should -Not -Match 'NoBackgroundPolicy'
     }
+
+    # CRITICAL REGRESSION COVERAGE: @($null) is a ONE-element array in PowerShell
+    # ('@($null).Count' is 1, not 0), so a rule that wraps a $null (unestablished) property
+    # in @() before counting would treat "we could not look" identically to "we found
+    # something" - fabricating a confident verdict from a collector that never ran. These
+    # five tests exercise exactly the input space the original 12 tests never touched: every
+    # property genuinely $null, and EnableLinkedConnections left unset.
+    It 'returns exactly No cause identified when every evidence property is $null' {
+        $v = Get-DriveMapVerdict -Evidence ([PSCustomObject]@{
+            GppApplied = $null; DrivePresent = $null; ScriptDeletions = $null
+            InRegistry = $null; InLiveMounts = $null; TargetingFailures = $null
+            Action = $null; FastLogonOptimization = $null; AlwaysWaitForNetwork = $null
+            ElevatedVisible = $null; UnelevatedVisible = $null; EnableLinkedConnections = $null
+        })
+        $v.Count | Should -Be 1
+        $v[0].Cause | Should -Match 'No cause identified'
+    }
+
+    It 'does not fabricate a logon-script verdict when DrivePresent is $false but ScriptDeletions was never collected' {
+        $v = Get-DriveMapVerdict -Evidence ([PSCustomObject]@{
+            GppApplied = $null; DrivePresent = $false; ScriptDeletions = $null
+            InRegistry = $null; InLiveMounts = $null; TargetingFailures = $null
+            Action = $null; FastLogonOptimization = $null; AlwaysWaitForNetwork = $null
+            ElevatedVisible = $null; UnelevatedVisible = $null; EnableLinkedConnections = $null
+        })
+        ($v.Cause -join ' ') | Should -Not -Match 'logon script'
+    }
+
+    It 'does not fire the split-token rule when EnableLinkedConnections was never read' {
+        $v = Get-DriveMapVerdict -Evidence ([PSCustomObject]@{
+            GppApplied = $null; DrivePresent = $null; ScriptDeletions = $null
+            InRegistry = $null; InLiveMounts = $null; TargetingFailures = $null
+            Action = $null; FastLogonOptimization = $null; AlwaysWaitForNetwork = $null
+            ElevatedVisible = $false; UnelevatedVisible = $true; EnableLinkedConnections = $null
+        })
+        ($v.Cause -join ' ') | Should -Not -Match 'elevated|visibility'
+    }
+
+    It 'still fires the split-token rule when EnableLinkedConnections is a CONFIRMED 0 (proving the fix did not over-correct)' {
+        $v = Get-DriveMapVerdict -Evidence ([PSCustomObject]@{
+            GppApplied = $null; DrivePresent = $null; ScriptDeletions = $null
+            InRegistry = $null; InLiveMounts = $null; TargetingFailures = $null
+            Action = $null; FastLogonOptimization = $null; AlwaysWaitForNetwork = $null
+            ElevatedVisible = $false; UnelevatedVisible = $true; EnableLinkedConnections = 0
+        })
+        ($v.Cause -join ' ') | Should -Match 'elevated|visibility'
+    }
+
+    It 'distinguishes a genuinely empty ScriptDeletions array from $null (no false verdict, no crash)' {
+        $v = Get-DriveMapVerdict -Evidence ([PSCustomObject]@{
+            GppApplied = $null; DrivePresent = $false; ScriptDeletions = @()
+            InRegistry = $null; InLiveMounts = $null; TargetingFailures = $null
+            Action = $null; FastLogonOptimization = $null; AlwaysWaitForNetwork = $null
+            ElevatedVisible = $null; UnelevatedVisible = $null; EnableLinkedConnections = $null
+        })
+        ($v.Cause -join ' ') | Should -Not -Match 'logon script'
+        $v.Count | Should -BeGreaterOrEqual 1
+    }
 }
 
 Describe 'ConvertFrom-EvidenceBundle' {
@@ -242,5 +300,69 @@ Describe 'New-CaseSummary' {
             -Steps @([PSCustomObject]@{ Step = 'Domain drive maps'; Ran = $false; Error = 'Script not found' }) `
             -CaseFolder 'C:\Cases\X' -GeneratedOn '2026-09-14 10:00:00'
         $summary | Should -Match 'Script not found'
+    }
+}
+
+Describe 'Verdicts.json serialization' {
+    # Invoke-DriveMapInvestigation.ps1's orchestration writes Get-DriveMapVerdict's output as
+    # Verdicts.json via 'ConvertTo-Json -InputObject @($verdicts) -Depth 6', which
+    # New-DriveMapCaseReport.ps1 (Task 6) reads back to render the investigation's
+    # conclusions. This exercises that EXACT serialization call against real verdict output,
+    # including a verdict whose Evidence/Remediation arrays have multiple elements - a
+    # single-element array is the one shape PowerShell's JSON conversion is known to degrade
+    # to a bare scalar under some call patterns, so it must be proven NOT to happen here.
+    It 'round-trips Cause, Confidence, Evidence and Remediation through ConvertTo-Json/ConvertFrom-Json intact' {
+        $verdicts = Get-DriveMapVerdict -Evidence ([PSCustomObject]@{
+            GppApplied        = $true
+            DrivePresent      = $false
+            ScriptDeletions   = @([PSCustomObject]@{ Source = 'DomainWideSettings'; Line = 'net use x: /delete' })
+            InRegistry        = $false
+            InLiveMounts      = $false
+            TargetingFailures = @()
+            Action            = 'Replace'
+            FastLogonOptimization  = $false
+            AlwaysWaitForNetwork   = $true
+            ElevatedVisible   = $true
+            UnelevatedVisible = $true
+            EnableLinkedConnections = 1
+        })
+
+        $verdicts.Count | Should -BeGreaterThan 0
+        # The top-level verdict's Remediation array has 2 elements (see Rule 1) - confirm the
+        # fixture actually exercises a multi-element array before trusting the round-trip.
+        @($verdicts[0].Remediation).Count | Should -BeGreaterThan 1
+
+        $json = ConvertTo-Json -InputObject @($verdicts) -Depth 6
+        $roundTripped = @($json | ConvertFrom-Json)
+
+        $roundTripped | Should -Not -BeNullOrEmpty
+        $roundTripped.Count | Should -Be $verdicts.Count
+        $roundTripped[0].Cause | Should -Be $verdicts[0].Cause
+        $roundTripped[0].Confidence | Should -Be $verdicts[0].Confidence
+        @($roundTripped[0].Evidence).Count | Should -Be @($verdicts[0].Evidence).Count
+        @($roundTripped[0].Remediation).Count | Should -Be @($verdicts[0].Remediation).Count
+        @($roundTripped[0].Remediation) -contains $verdicts[0].Remediation[0] | Should -Be $true
+        @($roundTripped[0].Remediation) -contains $verdicts[0].Remediation[1] | Should -Be $true
+    }
+
+    It 'round-trips a single No-cause-identified verdict as a one-element JSON array, not a bare object' {
+        $verdicts = Get-DriveMapVerdict -Evidence ([PSCustomObject]@{
+            GppApplied = $true; DrivePresent = $true; ScriptDeletions = @()
+            InRegistry = $true; InLiveMounts = $true; TargetingFailures = @()
+            Action = 'Create'; FastLogonOptimization = $false; AlwaysWaitForNetwork = $true
+            ElevatedVisible = $true; UnelevatedVisible = $true; EnableLinkedConnections = 1
+        })
+        $verdicts.Count | Should -Be 1
+
+        $json = ConvertTo-Json -InputObject @($verdicts) -Depth 6
+        # A bare object (not wrapped in []) would mean the report's own @(... | ConvertFrom-Json)
+        # is doing the array-wrapping work instead of this write - fragile if that reader ever
+        # changes. Assert the JSON text itself starts with '[', proving THIS write is
+        # unconditionally array-shaped regardless of how many verdicts there are.
+        $json.TrimStart() | Should -Match '^\['
+
+        $roundTripped = @($json | ConvertFrom-Json)
+        $roundTripped.Count | Should -Be 1
+        $roundTripped[0].Cause | Should -Match 'No cause identified'
     }
 }

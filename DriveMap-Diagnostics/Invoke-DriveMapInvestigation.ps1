@@ -543,8 +543,17 @@ function Get-DriveMapVerdict {
     function Test-True  { param($Value) $null -ne $Value -and $Value -eq $true }
     function Test-False { param($Value) $null -ne $Value -and $Value -eq $false }
 
-    $scriptDeletions = @($Evidence.ScriptDeletions)
-    $targetingFailures = @($Evidence.TargetingFailures)
+    # CRITICAL: @($null) is a ONE-element array in PowerShell ('@($null).Count' is 1, not
+    # 0), so wrapping a $null property (meaning "this collector never ran / could not be
+    # established") in @() before counting would make "not established" indistinguishable
+    # from "found one real item" - exactly the confident-plausible-wrong-answer failure this
+    # entire toolkit exists to prevent, in its own verdict engine. $null must be converted to
+    # a genuinely empty array (Count 0) so it can never satisfy a "-gt 0" match; only an
+    # ACTUAL populated array (Task 3's ScriptDeletions/TargetingFailures collectors already
+    # emit $null - never @() - for a CouldNotCollect source; see ConvertFrom-EvidenceBundle
+    # above) may cause a rule below to fire.
+    $scriptDeletions = if ($null -eq $Evidence.ScriptDeletions) { @() } else { @($Evidence.ScriptDeletions) }
+    $targetingFailures = if ($null -eq $Evidence.TargetingFailures) { @() } else { @($Evidence.TargetingFailures) }
 
     # ---------------------------------------------------------------------------------
     # Rule 1 (spec 6, row 1 / section 3.5): GPP applied OK + drive absent + a logon-script
@@ -553,8 +562,13 @@ function Get-DriveMapVerdict {
     # UNRELATED GPO's logon script deleted it afterward. Confidence High: an actual deletion
     # command was found, naming its source.
     # ---------------------------------------------------------------------------------
-    if ($scriptDeletions.Count -gt 0 -and (Test-False $Evidence.DrivePresent)) {
-        $sources = ($scriptDeletions | ForEach-Object { $_.Source }) -join ', '
+    # Defense in depth: even though $scriptDeletions is now guaranteed to be a real,
+    # non-empty array whenever this branch is entered (see the $null-vs-empty-array guard
+    # above), require at least one entry to actually carry a non-empty Source before
+    # rendering the "found in: ..." text, so a malformed entry can never produce a garbled
+    # "found in: " / ": " fragment in a real verdict.
+    if ($scriptDeletions.Count -gt 0 -and (Test-False $Evidence.DrivePresent) -and (@($scriptDeletions | Where-Object { $_.Source }).Count -gt 0)) {
+        $sources = ($scriptDeletions | ForEach-Object { $_.Source } | Where-Object { $_ }) -join ', '
         $lines   = ($scriptDeletions | ForEach-Object { "$($_.Source): $($_.Line)" })
         $verdicts.Add([PSCustomObject]@{
             Cause       = "A logon script deletes the drive after Group Policy maps it (found in: $sources)"
@@ -622,7 +636,14 @@ function Get-DriveMapVerdict {
     # the drive itself, and instead names elevated-session visibility as the subject.
     # https://learn.microsoft.com/en-us/troubleshoot/windows-client/networking/mapped-drives-not-available-from-elevated-command
     # ---------------------------------------------------------------------------------
-    if ((Test-True $Evidence.UnelevatedVisible) -and (Test-False $Evidence.ElevatedVisible) -and $Evidence.EnableLinkedConnections -ne 1) {
+    # CRITICAL: EnableLinkedConnections must be a CONFIRMED non-1 reading, not merely
+    # "anything other than the literal value 1" - native PowerShell comparison ($null -ne 1)
+    # evaluates to $true, so an unread/denied registry value ($null, meaning "we could not
+    # look") would otherwise satisfy this condition identically to a confirmed 0. Require the
+    # value to be non-$null before comparing it to 1, so a genuinely unestablished reading
+    # can never fire this rule.
+    $enableLinkedConnectionsConfirmedNotOne = ($null -ne $Evidence.EnableLinkedConnections) -and ($Evidence.EnableLinkedConnections -ne 1)
+    if ((Test-True $Evidence.UnelevatedVisible) -and (Test-False $Evidence.ElevatedVisible) -and $enableLinkedConnectionsConfirmedNotOne) {
         $verdicts.Add([PSCustomObject]@{
             Cause       = "The drive is not visible in elevated sessions (a visibility artifact of UAC's split token, not a disappearance)"
             Confidence  = 'High'
@@ -643,9 +664,13 @@ function Get-DriveMapVerdict {
     # Rule 5 (spec 6, row 5): item-level targeting failure events (4105/4106/8212) were
     # recorded for this drive's GPO.
     # ---------------------------------------------------------------------------------
-    if ($targetingFailures.Count -gt 0) {
+    # Defense in depth: $targetingFailures is guaranteed non-empty here (see the
+    # $null-vs-empty-array guard above), but also require at least one entry to carry a
+    # non-empty EventId before rendering, so a malformed entry can never produce a garbled
+    # "Targeting-failure event(s) recorded: ." fragment in a real verdict.
+    if ($targetingFailures.Count -gt 0 -and (@($targetingFailures | Where-Object { $_.EventId }).Count -gt 0)) {
         $gpoNames = @($targetingFailures | Where-Object { $_.Gpo } | ForEach-Object { $_.Gpo }) -join ', '
-        $eventIds = ($targetingFailures | ForEach-Object { $_.EventId }) -join ', '
+        $eventIds = ($targetingFailures | Where-Object { $_.EventId } | ForEach-Object { $_.EventId }) -join ', '
         $verdicts.Add([PSCustomObject]@{
             Cause       = 'An item-level targeting filter failed, so the drive-map preference item never applied'
             Confidence  = 'Medium'
@@ -768,11 +793,6 @@ if ($LoadFunctionsOnly) { return }
 # =============================================================================
 # Orchestration
 # =============================================================================
-
-function Test-IsLocalComputer {
-    param([string]$Name)
-    $Name -eq $env:COMPUTERNAME -or $Name -eq 'localhost' -or $Name -eq '.'
-}
 
 # Files must be UTF-8 WITH BOM on both PowerShell 5.1 and 7. PowerShell 7's -Encoding UTF8
 # omits the BOM; Windows PowerShell 5.1's does not. Writing bytes directly with an explicit
@@ -1017,6 +1037,27 @@ try {
     Write-Status PASS "Case summary written: $summaryPath"
 } catch {
     Write-Status FAIL "Could not write SUMMARY.txt: $($_.Exception.Message)"
+}
+
+# Task 6's New-DriveMapCaseReport.ps1 looks for a machine-readable Verdicts.json in the case
+# folder and renders the investigation's CONCLUSIONS from it; without this file the HTML
+# report can show the evidence collected but never the verdicts reached, silently defeating
+# "findings on screen at open" (spec section 7). Written even for the single 'No cause
+# identified' verdict - that is a real finding the report must display, never an empty file.
+# -InputObject @($verdicts) (not a bare pipeline) guarantees the JSON's top level is always
+# an array, even for exactly one verdict - ConvertTo-Json only collapses a single PIPELINE
+# item to a bare object, not a single element of an array passed via -InputObject, so this
+# avoids ever writing a scalar object where the report expects an array. Property order
+# within each verdict (Cause, Confidence, Evidence, Remediation) and verdict order
+# (most-confident first, as Get-DriveMapVerdict already returns them) are both preserved
+# exactly as produced.
+$verdictsJsonPath = Join-Path $caseFolder 'Verdicts.json'
+try {
+    $verdictsJson = ConvertTo-Json -InputObject @($verdicts) -Depth 6
+    Write-Utf8BomFile -Path $verdictsJsonPath -Content $verdictsJson
+    Write-Status PASS "Verdicts written: $verdictsJsonPath"
+} catch {
+    Write-Status FAIL "Could not write Verdicts.json: $($_.Exception.Message)"
 }
 
 $reportScript = Resolve-CompanionScript -FileName 'New-DriveMapCaseReport.ps1' -ScriptRoot $scriptRoot
