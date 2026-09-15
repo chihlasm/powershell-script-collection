@@ -18,6 +18,24 @@ Describe 'ConvertTo-SafeHtml' {
     It 'returns empty string for null input' {
         ConvertTo-SafeHtml -Text $null | Should -Be ''
     }
+    It 'escapes BOTH quote characters so the output is safe in single- and double-quoted attributes' {
+        # This script's generated HTML quotes attributes with SINGLE quotes, so escaping only
+        # '"' would leave a single-quoted attribute breakable by an apostrophe in customer
+        # data (a GPO name or UNC path can contain one). Defence in depth: no customer value
+        # reaches an attribute today, but a future caller must not be able to open the hole.
+        ConvertTo-SafeHtml -Text "O'Brien"   | Should -Be 'O&#39;Brien'
+        ConvertTo-SafeHtml -Text 'say "hi"'  | Should -Be 'say &quot;hi&quot;'
+    }
+    It 'does not double-escape the ampersand it introduces when escaping a quote' {
+        ConvertTo-SafeHtml -Text "a & 'b'" | Should -Be 'a &amp; &#39;b&#39;'
+    }
+    It 'neutralizes an apostrophe-based attribute break attempt' {
+        # The concrete shape the escaping prevents: closing a single-quoted attribute early
+        # and appending an event handler.
+        $escaped = ConvertTo-SafeHtml -Text "x' onmouseover='alert(1)"
+        $escaped | Should -Not -Match "'"
+        $escaped | Should -Match '&#39;'
+    }
 }
 
 Describe 'New-CollectionStateBadge' {
