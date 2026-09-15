@@ -729,6 +729,20 @@ function Get-DriveMapVerdict {
         $ruledOut.Add("Targeting failures found: $($targetingFailures.Count)")
 
         $toCollect = New-Object System.Collections.Generic.List[string]
+
+        # The every-other-logon mechanism (Fast Logon Optimization + Replace-mode CSE) is the
+        # single most likely explanation for an intermittently vanishing drive, and Rule 2
+        # above can NEVER fire on a real run: it needs FastLogonOptimization and
+        # AlwaysWaitForNetwork as confirmed booleans, but no Microsoft Learn page documents
+        # the registry value names those policies write, so the readiness gate reports both
+        # as CouldNotCollect rather than guessing - and this engine correctly refuses to act
+        # on a $null. That makes it a structural blind spot, not an oversight: the one
+        # high-value finding the automation cannot make for itself. Anyone who reaches "no
+        # cause identified" must be pointed at the gate's own report, which does surface it.
+        # This entry is listed FIRST for that reason.
+        # https://learn.microsoft.com/en-us/archive/technet-wiki/12221.group-policy-troubleshooting-drive-maps-preference-extension-replace-mode-only-maps-the-drive-every-other-logon
+        $toCollect.Add("CHECK FIRST: the every-other-logon mechanism (Fast Logon Optimization + a Replace-mode drive map) is the most common cause of an intermittent drive and CANNOT be confirmed automatically - the registry value names behind those policies are not documented by Microsoft, so this engine never sees them as established. Open the Test-DriveMapLoggingReadiness.ps1 .txt report's 'EVERY-OTHER-LOGON RISK' section, then confirm the effective setting with 'gpresult /h report.html' or rsop.msc on the affected machine.")
+
         if ($null -eq $Evidence.GppApplied)        { $toCollect.Add('GPP logging/tracing was not confirmed on - re-run after enabling it (Test-DriveMapLoggingReadiness.ps1 -EnableLogging) and reproducing the fault.') }
         if ($null -eq $Evidence.ElevatedVisible -or $null -eq $Evidence.UnelevatedVisible) { $toCollect.Add('Collect live mounts in BOTH UAC token contexts (run Export-DriveMapEvidence.ps1 once elevated and once not) to rule split-token visibility fully in or out.') }
         $toCollect.Add('Run Watch-DriveMapActivity.ps1 to capture the actual disappearance transition and its timing, which a point-in-time snapshot cannot recover.')
