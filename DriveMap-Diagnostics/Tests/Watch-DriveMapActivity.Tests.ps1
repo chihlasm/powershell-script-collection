@@ -1,4 +1,4 @@
-BeforeAll {
+﻿BeforeAll {
     . "$PSScriptRoot\..\Watch-DriveMapActivity.ps1" -LoadFunctionsOnly
 }
 

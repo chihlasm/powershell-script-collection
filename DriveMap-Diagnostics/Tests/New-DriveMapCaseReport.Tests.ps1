@@ -1,4 +1,4 @@
-BeforeAll {
+﻿BeforeAll {
     . "$PSScriptRoot\..\New-DriveMapCaseReport.ps1" -LoadFunctionsOnly
 }
 
