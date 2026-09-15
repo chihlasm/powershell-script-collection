@@ -366,3 +366,72 @@ Describe 'Verdicts.json serialization' {
         $roundTripped[0].Cause | Should -Match 'No cause identified'
     }
 }
+
+Describe 'Evidence.json serialization' {
+    # Invoke-DriveMapInvestigation.ps1's orchestration writes the flattened evidence object
+    # produced by ConvertFrom-EvidenceBundle (the SAME object handed to Get-DriveMapVerdict)
+    # as Evidence.json via 'ConvertTo-Json -InputObject $flatEvidence -Depth 6', so
+    # New-DriveMapCaseReport.ps1 (Task 6) can populate its tab-2/3/4 sections from it instead
+    # of always rendering their "not established" fallback text. This exercises that EXACT
+    # serialization call against real ConvertFrom-EvidenceBundle output.
+
+    It 'round-trips a $null evidence property as $null, never as $false or an empty array' {
+        # A CouldNotCollect source flattens to $null in ConvertFrom-EvidenceBundle - "we could
+        # not look". If Evidence.json's round trip silently turned that into $false or @(),
+        # New-DriveMapCaseReport.ps1 would render "not present" / "none found" instead of
+        # "not established", which is exactly the confident-plausible-wrong-answer failure
+        # this toolkit exists to prevent, now crossing one more (JSON) boundary than before.
+        $results = @{
+            LiveMounts_CurrentContext    = [PSCustomObject]@{ State = 'CouldNotCollect'; Data = @(); Reason = 'Access denied' }
+            LiveMounts_OtherTokenContext = [PSCustomObject]@{ State = 'CouldNotCollect'; Data = @(); Reason = 'Access denied' }
+            PersistentMounts             = [PSCustomObject]@{ State = 'CouldNotCollect'; Data = @(); Reason = 'Access denied' }
+            GppEvents                    = [PSCustomObject]@{ State = 'CouldNotCollect'; Data = @(); Reason = 'Access denied' }
+            LogonScriptReferences        = [PSCustomObject]@{ State = 'CouldNotCollect'; Data = @(); Reason = 'Access denied' }
+        }
+        $flatEvidence = ConvertFrom-EvidenceBundle -DriveLetter 'X' -Results $results
+
+        # Sanity: confirm the fixture actually produces $null before trusting the round trip.
+        $flatEvidence.DrivePresent | Should -Be $null
+        $flatEvidence.ScriptDeletions | Should -Be $null
+        $flatEvidence.InRegistry | Should -Be $null
+
+        $json = ConvertTo-Json -InputObject $flatEvidence -Depth 6
+        $roundTripped = $json | ConvertFrom-Json
+
+        $roundTripped.DrivePresent | Should -Be $null
+        ($null -eq $roundTripped.DrivePresent) | Should -Be $true
+        ($roundTripped.DrivePresent -eq $false) | Should -Be $false
+        $roundTripped.ScriptDeletions | Should -Be $null
+        $roundTripped.InRegistry | Should -Be $null
+        $roundTripped.TargetingFailures | Should -Be $null
+    }
+
+    It 'round-trips a single-element ScriptDeletions as an array, not a bare object' {
+        # A single deleting logon script is the most likely real-world shape - Task 5's own
+        # Verdicts.json fix had to specifically guard against PowerShell degrading a
+        # one-element array to a scalar through ConvertTo-Json/ConvertFrom-Json, so this must
+        # be proven for Evidence.json too, not assumed to behave the same way by inheritance.
+        $results = @{
+            LiveMounts_CurrentContext    = [PSCustomObject]@{ State = 'Found'; Data = @(); Reason = $null }
+            LiveMounts_OtherTokenContext = [PSCustomObject]@{ State = 'CouldNotCollect'; Data = @(); Reason = 'Not elevated' }
+            PersistentMounts             = [PSCustomObject]@{ State = 'Found'; Data = @(); Reason = $null }
+            GppEvents                    = [PSCustomObject]@{ State = 'Found'; Data = @(); Reason = $null }
+            LogonScriptReferences        = [PSCustomObject]@{
+                State = 'Found'
+                Data  = @([PSCustomObject]@{ ScriptPath = 'DomainWideSettings\logon.bat'; Line = 'net use x: /delete'; Operation = 'Delete' })
+                Reason = $null
+            }
+        }
+        $flatEvidence = ConvertFrom-EvidenceBundle -DriveLetter 'X' -Results $results
+
+        @($flatEvidence.ScriptDeletions).Count | Should -Be 1
+
+        $json = ConvertTo-Json -InputObject $flatEvidence -Depth 6
+        $roundTripped = $json | ConvertFrom-Json
+
+        $roundTripped.ScriptDeletions | Should -Not -BeNullOrEmpty
+        @($roundTripped.ScriptDeletions).Count | Should -Be 1
+        @($roundTripped.ScriptDeletions)[0].Source | Should -Be 'DomainWideSettings\logon.bat'
+        @($roundTripped.ScriptDeletions)[0].Line | Should -Be 'net use x: /delete'
+    }
+}
