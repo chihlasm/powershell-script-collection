@@ -533,10 +533,27 @@ function Get-DriveMapVerdict {
         test file for the exact contract): GppApplied, DrivePresent, ScriptDeletions,
         InRegistry, InLiveMounts, TargetingFailures, Action, FastLogonOptimization,
         AlwaysWaitForNetwork, ElevatedVisible, UnelevatedVisible, EnableLinkedConnections.
+    .PARAMETER DriveLetter
+        The affected drive letter, used only to render verdict and remediation text. Accepts
+        'X', 'x' or 'X:' and is normalized to a bare upper-case letter internally. Defaults
+        to the script-scope -DriveLetter when this function runs inside a full investigation.
     #>
     param(
-        [Parameter(Mandatory)][PSCustomObject]$Evidence
+        [Parameter(Mandatory)][PSCustomObject]$Evidence,
+        # The affected drive letter, used only in verdict text. Declared explicitly rather
+        # than inherited from the script-level -DriveLetter parameter: PowerShell's dynamic
+        # scoping made the bare $DriveLetter references in the rules below resolve to the
+        # script parameter during a real run, but to nothing at all when this function is
+        # called in isolation - emitting user-facing remediation reading "a drive-delete
+        # command for :." with the letter silently missing. Defaults to the script-scope
+        # value when present so existing callers keep working unchanged.
+        [string]$DriveLetter = $(if ($script:DriveLetter) { $script:DriveLetter } else { '' })
     )
+
+    # Normalize once: accept 'X', 'x' or 'X:' and render consistently as a bare upper-case
+    # letter, so the ${letter}: interpolations below never produce 'X::' or a lower-case
+    # letter that does not match the rest of the report.
+    $letter = ([string]$DriveLetter).Trim().TrimEnd(':').ToUpperInvariant()
 
     $verdicts = New-Object System.Collections.Generic.List[object]
 
@@ -552,8 +569,20 @@ function Get-DriveMapVerdict {
     # ACTUAL populated array (Task 3's ScriptDeletions/TargetingFailures collectors already
     # emit $null - never @() - for a CouldNotCollect source; see ConvertFrom-EvidenceBundle
     # above) may cause a rule below to fire.
-    $scriptDeletions = if ($null -eq $Evidence.ScriptDeletions) { @() } else { @($Evidence.ScriptDeletions) }
-    $targetingFailures = if ($null -eq $Evidence.TargetingFailures) { @() } else { @($Evidence.TargetingFailures) }
+    # WINDOWS POWERSHELL 5.1 ARRAY UNWRAPPING (this script declares #Requires -Version 5.1,
+    # so 5.1 - not 7.x - is the contract): assigning the RESULT OF AN `if` EXPRESSION that
+    # yields a ONE-element array unwraps it to the bare element on 5.1. PowerShell 7 unifies
+    # `.Count` across scalars and arrays, so `$x.Count` is 1 there and the bug is invisible;
+    # 5.1 has no such unification, so `.Count` on the unwrapped scalar is $null, `-gt 0` is
+    # $false, and the rule below NEVER FIRES. That silently suppressed a true positive:
+    # exactly one deleting logon script - Microsoft's own documented scenario for this
+    # problem and the most common real-world shape - reported as "no cause identified" while
+    # the evidence tab still showed the 'net use X: /d' line that was found.
+    # The explicit [object[]] cast forces the array type on assignment and is the fix; note
+    # that a plain `$x = @(...)` assignment does NOT unwrap, only the `if`-expression form.
+    # Verified on Windows PowerShell 5.1.26100 and PowerShell 7.
+    [object[]]$scriptDeletions = if ($null -eq $Evidence.ScriptDeletions) { @() } else { @($Evidence.ScriptDeletions) }
+    [object[]]$targetingFailures = if ($null -eq $Evidence.TargetingFailures) { @() } else { @($Evidence.TargetingFailures) }
 
     # ---------------------------------------------------------------------------------
     # Rule 1 (spec 6, row 1 / section 3.5): GPP applied OK + drive absent + a logon-script
@@ -575,7 +604,7 @@ function Get-DriveMapVerdict {
             Confidence  = 'High'
             Evidence    = @($lines)
             Remediation = @(
-                "Identify and remove or fix the logon script/GPO named above ($sources) that runs a drive-delete command for ${DriveLetter}:.",
+                "Identify and remove or fix the logon script/GPO named above ($sources) that runs a drive-delete command for ${letter}:.",
                 "Confirm with 'gpresult /h' which GPO actually links that script, then unlink, edit, or deny it for the affected user/computer."
             )
         })
@@ -619,8 +648,8 @@ function Get-DriveMapVerdict {
             Cause       = 'The drive is registered to reconnect at logon, but the reconnect is failing'
             Confidence  = 'Medium'
             Evidence    = @(
-                "${DriveLetter}: is present in HKCU:\Network (a persistent, reconnect-at-logon mapping).",
-                "${DriveLetter}: is NOT present among live mounts - the mapping did not actually reconnect."
+                "${letter}: is present in HKCU:\Network (a persistent, reconnect-at-logon mapping).",
+                "${letter}: is NOT present among live mounts - the mapping did not actually reconnect."
             )
             Remediation = @(
                 'Check whether the target share/server (or DFS namespace) was reachable at the moment of logon - name resolution, network timing, and VPN/profile timing are the most common causes.',
@@ -648,8 +677,8 @@ function Get-DriveMapVerdict {
             Cause       = "The drive is not visible in elevated sessions (a visibility artifact of UAC's split token, not a disappearance)"
             Confidence  = 'High'
             Evidence    = @(
-                "${DriveLetter}: is visible in the standard (unelevated) session.",
-                "${DriveLetter}: is NOT visible in the elevated session.",
+                "${letter}: is visible in the standard (unelevated) session.",
+                "${letter}: is NOT visible in the elevated session.",
                 "EnableLinkedConnections is $(if ($null -eq $Evidence.EnableLinkedConnections) { 'not set' } else { $Evidence.EnableLinkedConnections }), not 1."
             )
             Remediation = @(
@@ -727,7 +756,15 @@ function Get-DriveMapVerdict {
         }
     }
 
-    return $ordered
+    # Return with the comma (array-wrap) operator, NOT a bare `return $ordered`. On Windows
+    # PowerShell 5.1 a function returning a ONE-element collection unwraps it to the bare
+    # element, so a caller's `$verdicts.Count` is $null rather than 1 - the same 5.1
+    # unwrapping hazard documented at the top of this function, on the function's own output
+    # contract this time. This function is documented to ALWAYS return at least one verdict
+    # (the No-cause-identified fallback), so the single-element case is the common path, not
+    # an edge case: without the comma, every caller that counts or indexes the result breaks
+    # on 5.1 while passing on 7. Verified on Windows PowerShell 5.1.26100 and PowerShell 7.
+    return ,$ordered
 }
 
 function New-CaseSummary {
@@ -786,6 +823,92 @@ function New-CaseSummary {
     }
 
     $sb.ToString()
+}
+
+function ConvertFrom-EvidenceManifest {
+    <#
+    .SYNOPSIS
+        Rebuilds a New-CollectionResult-shaped Results hashtable from a persisted evidence
+        bundle (its manifest.json plus the per-collector CSVs written beside it).
+    .DESCRIPTION
+        Export-DriveMapEvidence.ps1 holds its collector results in memory as a hashtable of
+        {State; Data; Reason} objects. When the investigation reads a bundle back off disk
+        instead, that hashtable has to be reconstructed from the manifest's Collected/Empty/
+        Failed lists and the CSV files - and the reconstruction is the place where the
+        toolkit's central three-state guarantee is easiest to lose.
+
+        THE RULE THIS FUNCTION ENFORCES: a collector the manifest says returned DATA, but
+        whose rows cannot actually be read back, degrades to CouldNotCollect - never to an
+        empty Data array. An empty array means "we looked and there was nothing", which makes
+        Test-LetterPresent return a confident $false about rows that were never persisted,
+        feeding a fabricated real negative straight into the verdict rules. "I could not
+        look" must never be reported as "I looked and found nothing".
+
+        Two ways a Found collector can have unreadable data:
+          1. No CSV export is defined for it at all. LiveMounts_OtherTokenContext is the only
+             one of the 15 collectors in this position today. It is currently harmless
+             because every branch of that collector returns CouldNotCollect, but it goes live
+             the moment the other-token read is implemented.
+          2. Its CSV is named in the map but absent from the bundle (truncated copy, partial
+             transfer, manual edit).
+    .PARAMETER Manifest
+        The parsed manifest.json object (Collected / Empty / Failed).
+    .PARAMETER BundleFolder
+        Folder holding the per-collector CSV files named by the manifest.
+    .OUTPUTS
+        Hashtable keyed by collector name, each value a [PSCustomObject] with State, Data and
+        Reason - the same shape Export-DriveMapEvidence.ps1's New-CollectionResult produces,
+        so ConvertFrom-EvidenceBundle can consume either interchangeably.
+    #>
+    param(
+        [Parameter(Mandatory)][psobject]$Manifest,
+        [Parameter(Mandatory)][string]$BundleFolder
+    )
+
+    $bundleResults = @{}
+    $csvMap = @{
+        'PersistentMounts'          = 'PersistentMounts.csv'
+        'LiveMounts_CurrentContext' = 'LiveMounts_CurrentContext.csv'
+        'GppEvents'                 = 'GppEvents.csv'
+        'LogonScriptReferences'     = 'LogonScriptReferences.csv'
+    }
+
+    foreach ($name in @('PersistentMounts','LiveMounts_CurrentContext','LiveMounts_OtherTokenContext','GppEvents','LogonScriptReferences')) {
+        $state = if ($Manifest.Collected -contains $name) { 'Found' }
+                 elseif ($Manifest.Empty -contains $name) { 'EmptyButValid' }
+                 else { 'CouldNotCollect' }
+
+        $data = @()
+        $missingDataReason = $null
+        if ($state -eq 'Found') {
+            if (-not $csvMap.ContainsKey($name)) {
+                $state = 'CouldNotCollect'
+                $missingDataReason = "The evidence manifest recorded '$name' as collected, but this bundle format has no data file for it, so its rows cannot be read back. Treating it as not established rather than as an empty result."
+            } else {
+                $csvPath = Join-Path $BundleFolder $csvMap[$name]
+                if (Test-Path -LiteralPath $csvPath) {
+                    $data = @(Import-Csv -LiteralPath $csvPath)
+                } else {
+                    $state = 'CouldNotCollect'
+                    $missingDataReason = "The evidence manifest recorded '$name' as collected, but its data file ($($csvMap[$name])) is missing from the bundle. Treating it as not established rather than as an empty result."
+                }
+            }
+        }
+
+        $reason = $null
+        if ($state -eq 'CouldNotCollect') {
+            if ($missingDataReason) {
+                $reason = $missingDataReason
+            } else {
+                $failedRow = @($Manifest.Failed) | Where-Object { $_.Collector -eq $name } | Select-Object -First 1
+                $reason = if ($failedRow) { $failedRow.Reason } else { "Collector '$name' was not recorded in the evidence manifest." }
+            }
+        }
+
+        $bundleResults[$name] = [PSCustomObject]@{ State = $state; Data = $data; Reason = $reason }
+    }
+
+    $bundleResults
 }
 
 if ($LoadFunctionsOnly) { return }
@@ -977,32 +1100,12 @@ if ($bundleFolder) {
             # Reconstruct a Results hashtable of New-CollectionResult-shaped objects from the
             # manifest + per-collector CSVs, so ConvertFrom-EvidenceBundle can consume it the
             # same way it would consume the collector's own in-memory $results hashtable.
-            $bundleResults = @{}
-            $csvMap = @{
-                'PersistentMounts'             = 'PersistentMounts.csv'
-                'LiveMounts_CurrentContext'    = 'LiveMounts_CurrentContext.csv'
-                'GppEvents'                    = 'GppEvents.csv'
-                'LogonScriptReferences'        = 'LogonScriptReferences.csv'
-            }
-            foreach ($name in @('PersistentMounts','LiveMounts_CurrentContext','LiveMounts_OtherTokenContext','GppEvents','LogonScriptReferences')) {
-                $state = if ($manifest.Collected -contains $name) { 'Found' }
-                         elseif ($manifest.Empty -contains $name) { 'EmptyButValid' }
-                         else { 'CouldNotCollect' }
-                $data = @()
-                if ($state -eq 'Found' -and $csvMap.ContainsKey($name)) {
-                    $csvPath = Join-Path $bundleFolder $csvMap[$name]
-                    if (Test-Path -LiteralPath $csvPath) { $data = @(Import-Csv -LiteralPath $csvPath) }
-                }
-                $reason = $null
-                if ($state -eq 'CouldNotCollect') {
-                    $failedRow = @($manifest.Failed) | Where-Object { $_.Collector -eq $name } | Select-Object -First 1
-                    $reason = if ($failedRow) { $failedRow.Reason } else { "Collector '$name' was not recorded in the evidence manifest." }
-                }
-                $bundleResults[$name] = [PSCustomObject]@{ State = $state; Data = $data; Reason = $reason }
-            }
+            # Extracted into a function so the "manifest says Found but the data cannot be
+            # read back" degradation is directly unit-testable - see its help.
+            $bundleResults = ConvertFrom-EvidenceManifest -Manifest $manifest -BundleFolder $bundleFolder
 
             $flatEvidence = ConvertFrom-EvidenceBundle -DriveLetter $DriveLetter -Results $bundleResults -ReadinessJsonPath $readinessJsonPath -GpoActionCsvPath $gpoActionCsvPath
-            $verdicts = Get-DriveMapVerdict -Evidence $flatEvidence
+            $verdicts = Get-DriveMapVerdict -Evidence $flatEvidence -DriveLetter $DriveLetter
         } catch {
             Write-Status WARN "Could not parse the evidence bundle's manifest.json: $($_.Exception.Message)"
         }
@@ -1011,7 +1114,7 @@ if ($bundleFolder) {
     }
 } else {
     Write-Status WARN 'No evidence bundle was collected or supplied - producing a verdict from whatever was ruled out is not possible. Writing a no-cause-identified summary.'
-    $verdicts = Get-DriveMapVerdict -Evidence ([PSCustomObject]@{
+    $verdicts = Get-DriveMapVerdict -DriveLetter $DriveLetter -Evidence ([PSCustomObject]@{
         GppApplied = $null; DrivePresent = $null; ScriptDeletions = $null
         InRegistry = $null; InLiveMounts = $null; TargetingFailures = $null
         Action = $null; FastLogonOptimization = $null; AlwaysWaitForNetwork = $null

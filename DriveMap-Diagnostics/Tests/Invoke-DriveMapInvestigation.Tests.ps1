@@ -166,6 +166,188 @@ Describe 'Get-DriveMapVerdict' {
         ($v.Cause -join ' ') | Should -Not -Match 'logon script'
         $v.Count | Should -BeGreaterOrEqual 1
     }
+
+    # ---------------------------------------------------------------------------------
+    # Windows PowerShell 5.1 one-element array unwrapping (these scripts declare
+    # #Requires -Version 5.1, so 5.1 is the contract - PS 7 is not).
+    #
+    # Assigning the result of an `if` EXPRESSION that yields a ONE-element array unwraps it
+    # to the bare element on 5.1. PS 7 unifies `.Count` across scalars and arrays, so the bug
+    # is completely invisible there: these exact cases passed on 7 while the rule silently
+    # never fired on 5.1, turning a found deletion command into "no cause identified" - a
+    # suppressed true positive presented as a clean result, with the 'net use X: /d' line
+    # still visible in the report's own evidence tab.
+    #
+    # ONE element is the entire bug: zero-element stays empty and two-or-more stays an array,
+    # so only the single-item case regresses - and one deleting logon script is both the most
+    # common real-world shape and Microsoft's own documented scenario for this problem.
+    # https://learn.microsoft.com/en-us/troubleshoot/windows-client/group-policy/scenario-guide-gpo-to-map-network-drive-doesn-t-apply-as-expected
+    #
+    # These must pass on BOTH runtimes; on 5.1 they fail without the [object[]] casts in
+    # Get-DriveMapVerdict and the `return ,$ordered` array-wrap on its output.
+    # ---------------------------------------------------------------------------------
+    It 'fires the logon-script rule when ScriptDeletions holds EXACTLY ONE element (PS 5.1 array unwrapping)' {
+        $v = Get-DriveMapVerdict -Evidence ([PSCustomObject]@{
+            GppApplied        = $true
+            DrivePresent      = $false
+            ScriptDeletions   = @([PSCustomObject]@{ Source = 'GPO-A'; Line = 'net use X: /d' })
+            InRegistry        = $null; InLiveMounts = $null; TargetingFailures = $null
+            Action            = $null; FastLogonOptimization = $null; AlwaysWaitForNetwork = $null
+            ElevatedVisible   = $null; UnelevatedVisible = $null; EnableLinkedConnections = $null
+        })
+        ($v.Cause -join ' ') | Should -Match 'logon script'
+        ($v.Cause -join ' ') | Should -Match 'GPO-A'
+        $v[0].Confidence | Should -Be 'High'
+        # The Low "no cause identified" fallback must NOT be the headline when a real cause
+        # was found - that is the exact user-visible symptom of the 5.1 regression.
+        $v[0].Cause | Should -Not -Match 'No cause identified'
+    }
+
+    It 'fires the targeting rule when TargetingFailures holds EXACTLY ONE element (PS 5.1 array unwrapping)' {
+        $v = Get-DriveMapVerdict -Evidence ([PSCustomObject]@{
+            GppApplied        = $null; DrivePresent = $null; ScriptDeletions = $null
+            InRegistry        = $null; InLiveMounts = $null
+            TargetingFailures = @([PSCustomObject]@{ EventId = 8194; Gpo = 'GPO-B' })
+            Action            = $null; FastLogonOptimization = $null; AlwaysWaitForNetwork = $null
+            ElevatedVisible   = $null; UnelevatedVisible = $null; EnableLinkedConnections = $null
+        })
+        ($v.Cause -join ' ') | Should -Match 'targeting'
+        ($v.Cause -join ' ') | Should -Not -Match '^No cause identified'
+    }
+
+    It 'renders the drive letter in remediation text instead of a bare colon' {
+        # Regression: the rules referenced a bare $DriveLetter that was never a parameter of
+        # this function. Under PowerShell's dynamic scoping it resolved to the script-level
+        # -DriveLetter during a real run, but to nothing when the function was called in
+        # isolation - emitting user-facing remediation reading "a drive-delete command for :."
+        # with the letter silently missing. The letter is the single most load-bearing piece
+        # of context in the whole report, so an empty one is a real defect, not cosmetic.
+        $v = Get-DriveMapVerdict -DriveLetter 'X' -Evidence ([PSCustomObject]@{
+            GppApplied        = $true
+            DrivePresent      = $false
+            ScriptDeletions   = @([PSCustomObject]@{ Source = 'GPO-A'; Line = 'net use X: /d' })
+            InRegistry        = $null; InLiveMounts = $null; TargetingFailures = $null
+            Action            = $null; FastLogonOptimization = $null; AlwaysWaitForNetwork = $null
+            ElevatedVisible   = $null; UnelevatedVisible = $null; EnableLinkedConnections = $null
+        })
+        $remediation = @($v[0].Remediation) -join ' '
+        $remediation | Should -Match 'X:'
+        $remediation | Should -Not -Match 'command for :'
+    }
+
+    It 'normalizes a drive letter supplied as "x:" so verdict text never shows "X::"' {
+        $v = Get-DriveMapVerdict -DriveLetter 'x:' -Evidence ([PSCustomObject]@{
+            GppApplied        = $null; DrivePresent = $false
+            ScriptDeletions   = @([PSCustomObject]@{ Source = 'GPO-A'; Line = 'net use X: /d' })
+            InRegistry        = $null; InLiveMounts = $null; TargetingFailures = $null
+            Action            = $null; FastLogonOptimization = $null; AlwaysWaitForNetwork = $null
+            ElevatedVisible   = $null; UnelevatedVisible = $null; EnableLinkedConnections = $null
+        })
+        $remediation = @($v[0].Remediation) -join ' '
+        $remediation | Should -Match 'X:'
+        $remediation | Should -Not -Match 'X::'
+    }
+
+    It 'returns an array shape even for a single verdict, so .Count and indexing work on PS 5.1' {
+        # Get-DriveMapVerdict is documented to ALWAYS return at least one verdict, so the
+        # one-element return is the COMMON path. A bare `return $ordered` unwraps it on 5.1
+        # and every caller that counts or indexes the result breaks while passing on 7.
+        $v = Get-DriveMapVerdict -Evidence ([PSCustomObject]@{
+            GppApplied = $null; DrivePresent = $null; ScriptDeletions = $null
+            InRegistry = $null; InLiveMounts = $null; TargetingFailures = $null
+            Action = $null; FastLogonOptimization = $null; AlwaysWaitForNetwork = $null
+            ElevatedVisible = $null; UnelevatedVisible = $null; EnableLinkedConnections = $null
+        })
+        $v.Count | Should -Be 1
+        ,$v | Should -BeOfType [System.Object[]]
+        $v[0].Cause | Should -Match 'No cause identified'
+    }
+}
+
+Describe 'ConvertFrom-EvidenceManifest' {
+    # The reconstruction step that rebuilds the in-memory Results hashtable from a persisted
+    # bundle is where the toolkit's three-state guarantee is easiest to lose: a collector the
+    # manifest calls Found, whose rows cannot actually be read back, must degrade to
+    # CouldNotCollect. Handing ConvertFrom-EvidenceBundle an empty Data array instead makes
+    # Test-LetterPresent return a confident $false about data that was never persisted -
+    # "I could not look" reported as "I looked and found nothing", fed to the verdict rules
+    # as a real negative.
+    It 'treats a Found collector with NO data file as CouldNotCollect, never as empty data' {
+        # LiveMounts_OtherTokenContext is the only one of the 15 collectors with no CSV
+        # export. Latent today (every branch of that collector returns CouldNotCollect) but
+        # live the moment the other-token read is implemented.
+        $manifest = [PSCustomObject]@{
+            Collected = @('LiveMounts_OtherTokenContext')
+            Empty     = @()
+            Failed    = @()
+        }
+        $r = ConvertFrom-EvidenceManifest -Manifest $manifest -BundleFolder $TestDrive
+        $r['LiveMounts_OtherTokenContext'].State | Should -Be 'CouldNotCollect'
+        $r['LiveMounts_OtherTokenContext'].Reason | Should -Match 'no data file|cannot be read back'
+    }
+
+    It 'does not let a Found-but-unreadable collector fabricate a $false presence reading' {
+        # The end-to-end property that actually matters: the fabricated-empty path must not
+        # reach the flattened evidence as a confident $false.
+        $manifest = [PSCustomObject]@{
+            Collected = @('LiveMounts_OtherTokenContext')
+            Empty     = @()
+            Failed    = @()
+        }
+        $r = ConvertFrom-EvidenceManifest -Manifest $manifest -BundleFolder $TestDrive
+        $flat = ConvertFrom-EvidenceBundle -DriveLetter 'X' -Results $r
+        # Both UAC-context properties derive from the two live-mount collectors; with the
+        # other context unreadable they must stay "not established", not become $false.
+        $flat.UnelevatedVisible | Should -BeNullOrEmpty
+        $flat.UnelevatedVisible | Should -Not -Be $false
+    }
+
+    It 'treats a Found collector whose CSV is missing from the bundle as CouldNotCollect' {
+        $manifest = [PSCustomObject]@{
+            Collected = @('PersistentMounts')
+            Empty     = @()
+            Failed    = @()
+        }
+        $r = ConvertFrom-EvidenceManifest -Manifest $manifest -BundleFolder $TestDrive
+        $r['PersistentMounts'].State | Should -Be 'CouldNotCollect'
+        $r['PersistentMounts'].Reason | Should -Match 'missing from the bundle'
+    }
+
+    It 'still reads a Found collector whose CSV IS present (proving the fix did not over-correct)' {
+        $csv = Join-Path $TestDrive 'PersistentMounts.csv'
+        [PSCustomObject]@{ DriveLetter = 'X'; RemotePath = '\\srv\share' } |
+            Export-Csv -LiteralPath $csv -NoTypeInformation -Encoding UTF8
+        $manifest = [PSCustomObject]@{
+            Collected = @('PersistentMounts')
+            Empty     = @()
+            Failed    = @()
+        }
+        $r = ConvertFrom-EvidenceManifest -Manifest $manifest -BundleFolder $TestDrive
+        $r['PersistentMounts'].State | Should -Be 'Found'
+        @($r['PersistentMounts'].Data).Count | Should -Be 1
+        $r['PersistentMounts'].Reason | Should -BeNullOrEmpty
+    }
+
+    It 'preserves EmptyButValid as a genuine confirmed-empty reading, distinct from CouldNotCollect' {
+        $manifest = [PSCustomObject]@{
+            Collected = @()
+            Empty     = @('PersistentMounts')
+            Failed    = @()
+        }
+        $r = ConvertFrom-EvidenceManifest -Manifest $manifest -BundleFolder $TestDrive
+        $r['PersistentMounts'].State | Should -Be 'EmptyButValid'
+    }
+
+    It 'carries the manifest Failed reason through for a genuinely failed collector' {
+        $manifest = [PSCustomObject]@{
+            Collected = @()
+            Empty     = @()
+            Failed    = @([PSCustomObject]@{ Collector = 'GppEvents'; Reason = 'Access denied reading the event log.' })
+        }
+        $r = ConvertFrom-EvidenceManifest -Manifest $manifest -BundleFolder $TestDrive
+        $r['GppEvents'].State | Should -Be 'CouldNotCollect'
+        $r['GppEvents'].Reason | Should -Be 'Access denied reading the event log.'
+    }
 }
 
 Describe 'ConvertFrom-EvidenceBundle' {
@@ -333,7 +515,15 @@ Describe 'Verdicts.json serialization' {
         @($verdicts[0].Remediation).Count | Should -BeGreaterThan 1
 
         $json = ConvertTo-Json -InputObject @($verdicts) -Depth 6
-        $roundTripped = @($json | ConvertFrom-Json)
+        # Assign first, THEN wrap - mirroring New-DriveMapCaseReport.ps1's reader. Windows
+        # PowerShell 5.1 emits a converted JSON array as a single pipeline object instead of
+        # enumerating it, so '@($json | ConvertFrom-Json)' would produce a one-element array
+        # containing the array, and $roundTripped[0].Cause would be empty. PowerShell 7
+        # enumerates and hides the difference entirely. -NoEnumerate is the documented fix
+        # but is PowerShell 6+ only, and these scripts declare #Requires -Version 5.1.
+        # https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/convertfrom-json
+        $parsed = $json | ConvertFrom-Json
+        $roundTripped = @($parsed)
 
         $roundTripped | Should -Not -BeNullOrEmpty
         $roundTripped.Count | Should -Be $verdicts.Count
@@ -361,9 +551,39 @@ Describe 'Verdicts.json serialization' {
         # unconditionally array-shaped regardless of how many verdicts there are.
         $json.TrimStart() | Should -Match '^\['
 
-        $roundTripped = @($json | ConvertFrom-Json)
+        # Assign then wrap: on Windows PowerShell 5.1 ConvertFrom-Json does not enumerate an
+        # array into the pipeline, so wrapping the pipe directly would nest the array one
+        # level deep and leave $roundTripped[0].Cause empty. See the round-trip test above.
+        $parsed = $json | ConvertFrom-Json
+        $roundTripped = @($parsed)
         $roundTripped.Count | Should -Be 1
         $roundTripped[0].Cause | Should -Match 'No cause identified'
+    }
+
+    It 'reads a one-verdict Verdicts.json back with its Cause intact (PS 5.1 ConvertFrom-Json non-enumeration)' {
+        # The shape New-DriveMapCaseReport.ps1 actually reads off disk. On Windows PowerShell
+        # 5.1 ConvertFrom-Json hands a converted array to the pipeline as ONE object rather
+        # than enumerating it, so the natural-looking '@($raw | ConvertFrom-Json)' nests the
+        # array one level deep: $verdicts[0] is an Object[], $verdicts[0].Cause is empty, and
+        # the report's headline verdict renders BLANK - on the declared target runtime, while
+        # looking perfect on PowerShell 7. -NoEnumerate is the documented fix but is
+        # PowerShell 6+ only. Assigning before wrapping is the portable form and is what the
+        # reader now does.
+        # https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/convertfrom-json
+        $path = Join-Path $TestDrive 'Verdicts.json'
+        $json = ConvertTo-Json -InputObject @(
+            [PSCustomObject]@{ Cause = 'A logon script deletes the drive'; Confidence = 'High'; Evidence = @('GPO-A: net use X: /d'); Remediation = @('Unlink it') }
+        ) -Depth 6
+        Set-Content -LiteralPath $path -Value $json -Encoding UTF8
+
+        $parsed = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $verdicts = @($parsed)
+
+        $verdicts.Count | Should -Be 1
+        $verdicts[0].Cause | Should -Be 'A logon script deletes the drive'
+        $verdicts[0].Confidence | Should -Be 'High'
+        # The precise failure mode: a nested array instead of the verdict object.
+        $verdicts[0] | Should -Not -BeOfType [System.Object[]]
     }
 }
 
