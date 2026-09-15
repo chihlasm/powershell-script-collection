@@ -511,6 +511,55 @@ function New-VerdictsSectionHtml {
     "<p class='panel-intro'>Every rule that matched the evidence, ranked most-confident first. More than one can be true at once - a machine can have more than one problem.</p>$($cards -join '')"
 }
 
+function ConvertTo-ReportSections {
+    <#
+    .SYNOPSIS
+        Builds the tab-2/3/4 portion of New-DriveMapHtmlReport's -Sections hashtable from the
+        flattened evidence object Invoke-DriveMapInvestigation.ps1 writes as Evidence.json.
+    .DESCRIPTION
+        Evidence.json holds the SAME object ConvertFrom-EvidenceBundle (in
+        Invoke-DriveMapInvestigation.ps1) produced to build that case's verdicts - not
+        recomputed here from the manifest/CSVs, so the three-state ($null = not established,
+        never coerced to $false or to an empty array) handling that function is responsible
+        for has exactly one implementation in this toolkit, with its own regression tests,
+        rather than a second copy here that could silently drift from it.
+
+        $Evidence may be $null (no Evidence.json was found for this case - an older case
+        folder, or a bundle supplied by hand without one): every key below is then simply
+        omitted from the returned hashtable, and New-DriveMapHtmlReport's tabs already render
+        an absent key exactly like a $null value - their existing "not established" fallback
+        text - so this is not a special case the caller needs to branch on.
+
+        Every property is passed through EXACTLY as read: $null stays $null, and
+        ScriptDeletions/TargetingFailures are only re-wrapped with @() to normalize
+        PowerShell's single-item-vs-array unwrapping on the JSON read side, never to turn a
+        $null (CouldNotCollect) reading into an empty (confirmed-nothing-found) array - those
+        mean opposite things throughout this toolkit and this function must not be the place
+        that collapses them.
+    .PARAMETER Evidence
+        The parsed Evidence.json object (or $null).
+    #>
+    param(
+        [AllowNull()][psobject]$Evidence
+    )
+
+    $sections = @{}
+    if ($null -eq $Evidence) { return $sections }
+
+    $sections['Action']            = $Evidence.Action
+    $sections['DrivePresent']      = $Evidence.DrivePresent
+    $sections['InRegistry']        = $Evidence.InRegistry
+    $sections['ElevatedVisible']   = $Evidence.ElevatedVisible
+    $sections['UnelevatedVisible'] = $Evidence.UnelevatedVisible
+    $sections['ScriptDeletions']   = if ($null -eq $Evidence.ScriptDeletions) { $null } else { @($Evidence.ScriptDeletions) }
+    $sections['TargetingFailures'] = if ($null -eq $Evidence.TargetingFailures) { $null } else { @($Evidence.TargetingFailures) }
+    # GpoAuditNote has no established source anywhere in this toolkit's evidence today -
+    # deliberately left out of the hashtable (New-IntendedStateSectionHtml reads a missing
+    # key as $null) rather than inventing placeholder text.
+
+    $sections
+}
+
 function New-DriveMapHtmlReport {
     <#
     .SYNOPSIS
@@ -899,6 +948,26 @@ if ($verdictsFile) {
     }
 }
 
+# Evidence.json (written by Invoke-DriveMapInvestigation.ps1 alongside Verdicts.json) is the
+# SAME flattened evidence object ConvertFrom-EvidenceBundle produced to build those verdicts -
+# not recomputed here from the manifest/CSVs, so the three-state ($null vs $false vs empty
+# array) handling that function is responsible for has exactly one implementation in this
+# toolkit. Older case folders (produced before this file existed, or a bundle supplied by
+# hand without it) simply have no such file - $evidence stays $null and every tab-2/3/4 field
+# below stays $null, which those tabs already render as their "not established" fallback
+# text, not an error. This script must remain independently runnable against such a folder.
+$evidence = $null
+$evidenceFile = Get-ChildItem -LiteralPath $CaseFolder -Filter 'Evidence.json' -File -Recurse -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if ($evidenceFile) {
+    try {
+        $evidence = Get-Content -LiteralPath $evidenceFile.FullName -Raw -ErrorAction Stop | ConvertFrom-Json
+        Write-Status PASS "Loaded evidence: $($evidenceFile.FullName)"
+    } catch {
+        Write-Status WARN "Could not parse Evidence.json: $($_.Exception.Message)"
+    }
+}
+
 # Best-effort drive letter / identity from the case folder name
 # (DriveMapCase_<Computer>_<Letter>_<stamp>), falling back to '?' rather than throwing.
 $driveLetter = '?'
@@ -921,9 +990,8 @@ if (Test-Path -LiteralPath $summaryPath) {
     } catch { }
 }
 
-$sections = @{
-    Manifest = $manifest
-}
+$sections = ConvertTo-ReportSections -Evidence $evidence
+$sections['Manifest'] = $manifest
 
 $generatedOn = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 $reportHtml = New-DriveMapHtmlReport -Verdicts $verdicts -Sections $sections -DriveLetter $driveLetter `

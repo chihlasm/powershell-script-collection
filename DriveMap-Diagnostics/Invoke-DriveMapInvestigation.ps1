@@ -1060,6 +1060,41 @@ try {
     Write-Status FAIL "Could not write Verdicts.json: $($_.Exception.Message)"
 }
 
+# Task 6's New-DriveMapCaseReport.ps1 renders tabs 2-4 (intended state, endpoint state,
+# interference) from the SAME flattened evidence object used to produce the verdicts above
+# ($flatEvidence, or - when no bundle was collected/supplied - the all-$null placeholder
+# object built in that branch). Without persisting it, the report has no way to populate
+# those tabs and they render their "not established" fallback text even on a fully
+# successful run. Written here (not recomputed in the report) so ConvertFrom-EvidenceBundle's
+# three-state handling - the $null-vs-$false / $null-vs-@() distinction that took two fix
+# rounds to get right (see that function's own comments) - has exactly one implementation,
+# with its own regression tests, rather than a second copy in the report script that could
+# silently drift from it. $flatEvidence is guaranteed to be defined by this point: it is set
+# in the "bundle collected" branch above, and the "no bundle" branch's else-clause builds the
+# same-shaped all-$null object and passes it straight into Get-DriveMapVerdict without
+# assigning it to $flatEvidence - so guard for that explicitly rather than assume.
+if ($null -eq $flatEvidence) {
+    $flatEvidence = [PSCustomObject]@{
+        GppApplied = $null; DrivePresent = $null; ScriptDeletions = $null
+        InRegistry = $null; InLiveMounts = $null; TargetingFailures = $null
+        Action = $null; FastLogonOptimization = $null; AlwaysWaitForNetwork = $null
+        ElevatedVisible = $null; UnelevatedVisible = $null; EnableLinkedConnections = $null
+    }
+}
+$evidenceJsonPath = Join-Path $caseFolder 'Evidence.json'
+try {
+    # -InputObject (not a bare pipeline) preserves $null properties as JSON null rather than
+    # ConvertTo-Json silently dropping them, and keeps a single-element array property (e.g.
+    # ScriptDeletions with exactly one deletion - the most likely real-world shape) from being
+    # unwrapped to a bare object by the pipeline the way Verdicts.json's own fix above already
+    # had to guard against for the top-level array.
+    $evidenceJson = ConvertTo-Json -InputObject $flatEvidence -Depth 6
+    Write-Utf8BomFile -Path $evidenceJsonPath -Content $evidenceJson
+    Write-Status PASS "Evidence written: $evidenceJsonPath"
+} catch {
+    Write-Status FAIL "Could not write Evidence.json: $($_.Exception.Message)"
+}
+
 $reportScript = Resolve-CompanionScript -FileName 'New-DriveMapCaseReport.ps1' -ScriptRoot $scriptRoot
 if ($reportScript) {
     $reportArgs = @{ CaseFolder = $caseFolder; OutputPath = $caseFolder }
