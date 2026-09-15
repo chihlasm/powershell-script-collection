@@ -9,6 +9,7 @@ Collection of useful PowerShell scripts for automation and system administration
 - [CopyFileToServer](#copyfiletoserverps1)
 - [CursorFix](#cursorfixps1)
 - [DeleteOldFolders](#deleteoldfoldersps1)
+- [DriveMap-Diagnostics](#drivemap-diagnostics)
 - [FileCopyMoveGUI](#filecopymoveguips1)
 - [FolderPermissionManager](#folderpermissionmanager)
 - [FSLogix-Profile-Backup](#fslogix-profile-backup)
@@ -252,6 +253,32 @@ For full documentation, see [AD Export/README-AD-Group-Export.md](AD%20Export/RE
 - Requires administrator privileges.
 - Supports local and remote computer management.
 - Domain users/groups must exist in Active Directory.
+
+## DriveMap-Diagnostics
+
+**Description**: A toolkit that diagnoses why a user's mapped network drive intermittently disappears. Gates on whether Group Policy Preferences logging is even turned on (it's off by default, so an empty report and a healthy machine otherwise look identical), collects endpoint and domain-side evidence, watches a drive live to catch the actual disappearance transition, and produces a ranked, plain-English verdict plus a tabbed HTML case report.
+
+**Files Included**:
+- `Invoke-DriveMapInvestigation.ps1` - Orchestrator; runs the gate and every collector below, then writes a ranked verdict
+- `Test-DriveMapLoggingReadiness.ps1` - Prerequisite gate; also flags the "every other logon" and UAC split-token risks directly
+- `Export-DriveMapEvidence.ps1` - Endpoint evidence collector (live/persistent mounts, GPP events, logon scripts, scheduled tasks, startup items)
+- `Watch-DriveMapActivity.ps1` - Live watcher; captures full context at the moment the drive actually disappears
+- `New-DriveMapCaseReport.ps1` - Builds the self-contained, tabbed HTML case report
+- `DriveMapReference.psd1` - Shared, documented event IDs and registry paths
+- `README.md` - Full documentation, including a PS Remoting setup guide and known limitations
+
+**Prerequisites**:
+- PowerShell 5.1 or later
+- RSAT `GroupPolicy` and `ActiveDirectory` modules (for the domain-side steps)
+- Local administrator rights on the target machine for elevated-context checks
+- PowerShell Remoting (WinRM) if collecting evidence remotely — optional; evidence can be collected locally and handed back instead
+
+**Usage Examples**:
+- Full investigation: `.\DriveMap-Diagnostics\Invoke-DriveMapInvestigation.ps1 -Identity jsmith -ComputerName WS01 -DriveLetter X`
+- Check whether a machine's evidence can even be trusted first: `.\DriveMap-Diagnostics\Test-DriveMapLoggingReadiness.ps1 -ComputerName WS01 -DriveLetter X`
+- Watch a drive live to catch the disappearance itself: `.\DriveMap-Diagnostics\Watch-DriveMapActivity.ps1 -DriveLetter X -DurationHours 8`
+
+For full documentation, see [DriveMap-Diagnostics/README.md](DriveMap-Diagnostics/README.md)
 
 # SMB Diagnostic & Drive Mapping Script
 
