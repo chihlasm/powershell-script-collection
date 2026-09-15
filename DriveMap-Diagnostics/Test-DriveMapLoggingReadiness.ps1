@@ -503,8 +503,24 @@ $alwaysWaitForNetwork  = $false
 $driveMapAction = 'Replace'
 $everyOtherLogonRisk = Get-EveryOtherLogonRisk -Action $driveMapAction -FastLogonOptimization $fastLogonOptimization -AlwaysWaitForNetwork $alwaysWaitForNetwork
 if ($everyOtherLogonRisk.AtRisk) {
+    # This is the single most likely explanation for an intermittently disappearing mapped
+    # drive, AND it is the one finding the automated verdict engine structurally cannot make
+    # for itself: Invoke-DriveMapInvestigation.ps1's Rule 2 needs Fast Logon Optimization and
+    # "Always wait for the network" as CONFIRMED booleans, but neither has a registry value
+    # name documented on any reachable Microsoft Learn page, so this gate reports both as
+    # CouldNotCollect rather than guessing - and a rule that requires a confirmed $true can
+    # never fire on a $null. A human reading this output is therefore the ONLY path by which
+    # this cause gets identified, so it must not read as one warning among many.
+    Write-Host ''
+    Write-Status WARN '================================================================'
+    Write-Status WARN 'MOST LIKELY CAUSE OF AN INTERMITTENT DRIVE - CHECK THIS FIRST'
+    Write-Status WARN '================================================================'
     Write-Status WARN $everyOtherLogonRisk.Explanation
+    Write-Status WARN 'This toolkit CANNOT confirm this automatically: the registry value names behind Fast Logon Optimization and "Always wait for the network" are not documented by Microsoft, so this script will not guess at them. The assessment above is based on the DOCUMENTED CLIENT DEFAULT, not a measurement of this machine.'
+    Write-Status WARN "Confirm the effective setting yourself with 'gpresult /h report.html' or rsop.msc on $ComputerName, then apply whichever fix below matches."
     foreach ($r in $everyOtherLogonRisk.Remediations) { Write-Status WARN "  Fix: $r" }
+    Write-Status WARN '================================================================'
+    Write-Host ''
 } else {
     Write-Status PASS $everyOtherLogonRisk.Explanation
 }
@@ -586,9 +602,34 @@ $reportLines.Add("AtRisk: $($splitTokenRisk.AtRisk)")
 $reportLines.Add($splitTokenRisk.Explanation)
 foreach ($r in $splitTokenRisk.Remediations) { $reportLines.Add("  Fix: $r") }
 $reportLines.Add('')
-$reportLines.Add('--- Every-other-logon risk (Fast Logon Optimization / Replace mode) ---')
+$reportLines.Add('=== EVERY-OTHER-LOGON RISK (Fast Logon Optimization / Replace mode) ===')
 $reportLines.Add("AtRisk: $($everyOtherLogonRisk.AtRisk)")
+if ($everyOtherLogonRisk.AtRisk) {
+    $reportLines.Add('*** MOST LIKELY CAUSE OF AN INTERMITTENT DRIVE - CHECK THIS FIRST ***')
+}
 $reportLines.Add($everyOtherLogonRisk.Explanation)
+if ($everyOtherLogonRisk.AtRisk) {
+    # The automated verdict engine cannot reach this conclusion on its own (see the console
+    # block above), so the human reading this file is the only path to identifying it. Say so
+    # here rather than letting a reader assume the absence of an automated finding means the
+    # condition was ruled out.
+    $reportLines.Add('')
+    $reportLines.Add('IMPORTANT - THIS CANNOT BE CONFIRMED AUTOMATICALLY:')
+    $reportLines.Add('The registry value names behind Fast Logon Optimization and "Always wait for the')
+    $reportLines.Add('network at computer startup and logon" are not documented on any reachable Microsoft')
+    $reportLines.Add('Learn page, so this script will not guess at them. The assessment above uses the')
+    $reportLines.Add('DOCUMENTED CLIENT DEFAULT (Fast Logon Optimization on, "Always wait" off) and is NOT')
+    $reportLines.Add('a measurement of this machine.')
+    $reportLines.Add('')
+    $reportLines.Add('Because both values are reported as CouldNotCollect rather than as confirmed')
+    $reportLines.Add('booleans, Invoke-DriveMapInvestigation.ps1 can never raise this as an automated')
+    $reportLines.Add('verdict - it requires confirmed readings and correctly refuses to act on unknowns.')
+    $reportLines.Add('If that investigation reported "No cause identified", this section is the first')
+    $reportLines.Add('thing to rule out by hand.')
+    $reportLines.Add('')
+    $reportLines.Add("Confirm the effective setting with 'gpresult /h report.html' or rsop.msc on")
+    $reportLines.Add("$ComputerName, then apply whichever fix below matches.")
+}
 foreach ($r in $everyOtherLogonRisk.Remediations) { $reportLines.Add("  Fix: $r") }
 $reportLines.Add('')
 $reportLines.Add('--- Drive Maps CSE NoBackgroundPolicy ---')

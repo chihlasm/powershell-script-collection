@@ -47,9 +47,10 @@ differently from "looked and found nothing."
 
 ## If the drive disappears on some logons but not others
 
-**Check this first.** It is the single most common cause of an "intermittent" mapped drive,
-it has nothing to do with permissions or network connectivity, and it takes one command to
-confirm.
+**Check this first.** It is the single most common cause of an "intermittent" mapped drive and
+it has nothing to do with permissions or network connectivity — but it is also the one cause
+this toolkit **cannot** confirm for you automatically. See the subsection below before
+trusting any "no cause identified" result.
 
 The Group Policy Drive Maps client-side extension (the code that actually applies a drive-map
 preference item) has `NoBackgroundPolicy=1` — Microsoft's own documentation for this extension
@@ -62,14 +63,46 @@ synchronously on the **next** logon. The practical effect: a **Replace**-mode dr
 end up applying only on every *other* logon, with no configuration change and no error
 anywhere in the logs.
 
-Run this to check for the condition on a specific machine:
+### This toolkit cannot confirm this condition automatically — you must check it by hand
+
+This is the one high-value finding the automated verdict engine **structurally cannot make**,
+so read this before relying on `Invoke-DriveMapInvestigation.ps1`'s conclusion.
+
+Microsoft documents Fast Logon Optimization and "Always wait for the network at computer
+startup and logon" only as **Group Policy settings** (`Computer Configuration\Policies\
+Administrative Templates\System\Logon`). No reachable Microsoft Learn page documents the
+underlying **registry value names** those policies write. Per this toolkit's rule against
+asserting unverified facts, nothing here guesses at them — so both signals are reported as
+`CouldNotCollect`, never as confirmed booleans.
+
+The verdict engine's every-other-logon rule requires both as confirmed `$true`/`$false` and
+correctly refuses to fire on an unknown. The practical consequence:
+
+> **`Invoke-DriveMapInvestigation.ps1` will never name this cause, even when it is the
+> cause.** A "No cause identified" verdict does **not** mean this condition was ruled out —
+> it means it was never measured. The verdict output says so in its own "what to check next"
+> list, with this check listed first.
+
+**Where the toolkit does surface it:** the readiness gate flags the risk based on the
+*documented client default* (Fast Logon Optimization on, "Always wait" off), clearly labeled
+as a default rather than a measurement of your machine:
 
 ```powershell
 .\Test-DriveMapLoggingReadiness.ps1 -ComputerName WS01 -DriveLetter X
 ```
 
-It reports the Fast-Logon-Optimization / Replace-mode / "always wait for network" combination
-explicitly as a named risk, separate from the logging-readiness gate itself.
+Look for the **`EVERY-OTHER-LOGON RISK`** section in the `.txt` report it writes (the same
+finding is printed to the console in a banner). That section states the risk, says plainly
+that it could not be confirmed automatically, and gives the remediation.
+
+**How to actually confirm it** — run one of these against the affected machine and read the
+effective setting for "Always wait for the network at computer startup and logon":
+
+```powershell
+gpresult /h report.html    # then open report.html
+# or
+rsop.msc
+```
 
 **Remediation** (either one resolves it):
 - Enable **"Always wait for the network at computer startup and logon"**
@@ -335,6 +368,18 @@ collect locally and hand back the bundle.
 ---
 
 ## Known limitations
+
+- **The most common cause of all — the every-other-logon mechanism — can never be reported as
+  an automated verdict.** Microsoft documents Fast Logon Optimization and "Always wait for the
+  network at computer startup and logon" only as Group Policy settings, never with the registry
+  value names they write, so this toolkit reports both as "could not collect" rather than
+  guessing. The verdict engine's rule for this cause requires both as confirmed booleans and
+  correctly declines to fire on an unknown — meaning **"No cause identified" never rules this
+  out.** `Test-DriveMapLoggingReadiness.ps1` flags the risk from the documented client default
+  in its `.txt` report's `EVERY-OTHER-LOGON RISK` section, and the verdict output lists this
+  check first under "what to check next". Confirm it by hand with `gpresult /h report.html` or
+  `rsop.msc`. See [If the drive disappears on some logons but not
+  others](#if-the-drive-disappears-on-some-logons-but-not-others).
 
 - **GPP logging/tracing state is often reported as "could not determine," not "off."** The
   registry value name(s) that the "Logging and tracing" Group Policy setting actually writes
