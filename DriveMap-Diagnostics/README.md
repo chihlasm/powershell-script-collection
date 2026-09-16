@@ -121,6 +121,71 @@ ever suggests it.
 
 Source: [Group Policy troubleshooting: Drive Maps preference extension (Replace mode) only maps the drive every other logon](https://learn.microsoft.com/en-us/archive/technet-wiki/12221.group-policy-troubleshooting-drive-maps-preference-extension-replace-mode-only-maps-the-drive-every-other-logon)
 
+## Citrix / RDS environments
+
+**Run the endpoint scripts (`Export-DriveMapEvidence.ps1`, `Test-DriveMapLoggingReadiness.ps1`)
+on the VDA the user actually landed on — not the endpoint device the user is physically
+sitting at, and not a domain controller.** This is not a hypothetical mistake: on a real case,
+the first run of this toolkit went against a domain controller, which has neither the user's
+session, the user's live mounts, nor the user's GPP processing history — every endpoint
+collector came back empty for reasons that had nothing to do with the drive-mapping problem.
+`Get-CitrixSessions.ps1` (in this repository) finds which VDA a given user is actually on:
+
+```powershell
+.\Get-CitrixSessions\Get-CitrixSessions.ps1 -VdaMachineName "DOMAIN\jsmith"
+```
+
+Then point `-ComputerName` at that VDA (or run the endpoint scripts locally on it):
+
+```powershell
+.\Invoke-DriveMapInvestigation.ps1 -Identity jsmith -ComputerName VDA07 -DriveLetter X
+```
+
+**Loopback processing is standard for Citrix/RDS session hosts, and this toolkit accounts for
+it.** User Group Policy Loopback Processing makes a *computer*-linked GPO's *User*-scope
+settings apply to whoever logs on to that computer — which is exactly why a VDA's effective
+drive mapping can come from a GPO that is not linked anywhere near the user's own OU.
+`Audit-GPDriveMaps.ps1` (reused unmodified by this toolkit) already detects loopback mode
+(Merge/Replace) on the VDA's computer OU chain and folds it into its precedence simulation;
+`Invoke-DriveMapInvestigation.ps1` now reads that result back out of
+`*-EffectiveMaps.csv`'s `Reason` column and surfaces it as a lead callout on the case report's
+"What should the user get?" tab whenever it applies, specifically so a Citrix precedence
+result is not misread as an unexplained anomaly. If you are reading `Audit-GPDriveMaps.ps1`'s
+own report directly instead, look for `LoopbackMode` in its precedence section and a `Reason`
+of the form `"Applied via loopback (Merge) from GPO linked to computer OU '...'"` in its
+effective-maps table.
+
+**Two Citrix-specific mechanisms are checked directly by `Export-DriveMapEvidence.ps1` and are
+otherwise invisible to every Group-Policy-side collector in this toolkit:**
+
+- **Citrix Workspace Environment Management (WEM).** WEM maps drives through its own
+  console-configured actions, applied by its own agent — entirely outside Group Policy, so a
+  WEM-mapped drive produces no GPP events, no GPO to audit, and nothing for
+  `Audit-GPDriveMaps.ps1` to find. `Export-DriveMapEvidence.ps1` checks for the
+  **Citrix WEM Agent Host Service** (formerly **Norskale Agent Host Service**) by exact service
+  name and reports a three-state result: `Found` names the service and its status, and a
+  confirmed-absent result (`EmptyButValid`) closes the question rather than leaving WEM an open
+  suspicion. If it is present, treat it as a first-class suspect alongside Group Policy, not an
+  afterthought.
+- **Citrix Client Drive Mapping (CDM).** CDM redirects the *endpoint device's* own drives into
+  the session as a virtual channel — not a network mapping at all, so neither Group Policy nor
+  a logon script can be its root cause. Citrix does not document any registry, WMI, or other
+  queryable signal that lets a script running inside the session confirm whether one *specific*
+  drive letter is CDM-mapped, so `Export-DriveMapEvidence.ps1` does not guess at one: it reports
+  the session's raw `SESSIONNAME` value and whether the Citrix VDA registration registry key
+  (`HKLM\Software\Citrix\VirtualDesktopAgent`) is present, both as corroborating context, and
+  says plainly that per-letter CDM confirmation has to be done by hand — via Citrix Connection
+  Center on the endpoint device, or the VDA's own client drive list.
+
+**Non-persistent VDAs would destroy trace evidence at logoff — this is a caveat for this
+environment, not a blocker, since it is running persistent VDAs.** GPP trace files, the
+Application log's GPP preference-item events, and any registry state this toolkit reads all
+live on the VDA itself. On a non-persistent VDA, all of that resets to the base image at
+logoff, so any evidence not collected *during the affected session* is gone before a technician
+can log in and run `Export-DriveMapEvidence.ps1`. If a persistent-VDA assumption ever changes,
+collect evidence live (`Watch-DriveMapActivity.ps1`) or immediately upon reproducing the fault,
+rather than after the user logs off.
+
 ## The tools
 
 | Script                                  | Role                    | Answers                                                          |
