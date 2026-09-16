@@ -398,12 +398,33 @@ function New-IntendedStateSectionHtml {
     <#
     .SYNOPSIS
         Renders the "What should the user get?" tab - the GPO/domain-side intended mapping.
+    .DESCRIPTION
+        LEADS WITH THE LOOPBACK FINDING when $GpoAuditNote is present. User Group Policy
+        Loopback Processing (a computer-linked GPO's User-scope settings applying to whoever
+        logs on) is standard for Citrix/RDS session-host deployments and is exactly the
+        context that makes a GPO precedence result on a VDA look surprising without it - so
+        this callout renders FIRST, above the raw Action value, not appended as an
+        afterthought at the bottom of the tab.
+
+        Conflicting-GPO and unreachable-target findings (Rules 6/7 of Get-DriveMapVerdict)
+        are also surfaced here, since both are properties of "what should the user get" -
+        a real, unresolved targeting conflict or an unreachable target means the intended
+        state itself is ambiguous or undeliverable, which belongs on this tab rather than
+        only inside the ranked verdicts on tab 5.
     #>
     param(
         [string]$DriveLetter,
         [AllowNull()][string]$Action,
-        [AllowNull()][string]$GpoAuditNote
+        [AllowNull()][string]$GpoAuditNote,
+        [AllowNull()][object]$ConflictingGpos,
+        [AllowNull()][object[]]$ConflictDetail,
+        [AllowNull()][object]$UnreachableTarget,
+        [AllowNull()][object[]]$UnreachableDetail
     )
+
+    $loopbackHtml = if ([string]::IsNullOrWhiteSpace($GpoAuditNote)) { '' } else {
+        "<div class='callout callout-warn'><strong>Loopback processing applied this mapping.</strong> $(ConvertTo-SafeHtml -Text $GpoAuditNote) In a Citrix/RDS environment this is standard, not a misconfiguration - a computer-linked GPO's User settings apply to whoever logs on to that computer, which is exactly why the winning GPO can be one that is not linked anywhere near the user's own OU.</div>"
+    }
 
     $actionHtml = if ([string]::IsNullOrWhiteSpace($Action)) {
         "<p class='muted'>The intended Group Policy action (Create/Replace/Update/Delete) for ${DriveLetter}: was not established from the evidence collected for this case. Re-run Audit-GPDriveMaps.ps1 -TargetUser to fill this in.</p>"
@@ -411,14 +432,35 @@ function New-IntendedStateSectionHtml {
         "<div class='kv-row'><span class='kv-key'>Group Policy action</span><span class='kv-val'>$(ConvertTo-SafeHtml -Text $Action)</span></div>"
     }
 
-    $noteHtml = if ([string]::IsNullOrWhiteSpace($GpoAuditNote)) { '' } else {
-        "<p>$(ConvertTo-SafeHtml -Text $GpoAuditNote)</p>"
+    $conflictHtml = if ($null -eq $ConflictingGpos) {
+        "<p class='muted'>Whether another GPO targets ${DriveLetter}: with a different path was not established for this case (the domain drive-maps audit did not run, or did not run successfully).</p>"
+    } elseif ($ConflictingGpos -eq $true -and @($ConflictDetail).Count -gt 0) {
+        $rows = @($ConflictDetail) | ForEach-Object {
+            $mappings = if ($_.Mappings) { ConvertTo-SafeHtml -Text $_.Mappings } else { '' }
+            "<li>$mappings</li>"
+        }
+        "<div class='callout callout-warn'><strong>Two or more GPOs target ${DriveLetter}: with different paths.</strong></div><ul class='evidence-list'>$($rows -join '')</ul>"
+    } else {
+        "<p class='muted'>No conflicting GPO was found for ${DriveLetter}: - every GPO that targets this letter agrees on the path, or targeting keeps them mutually exclusive.</p>"
+    }
+
+    $unreachableHtml = if ($null -eq $UnreachableTarget) {
+        "<p class='muted'>Whether ${DriveLetter}:'s target share/server is reachable was not established for this case (the domain drive-maps audit did not run, or did not run successfully).</p>"
+    } elseif ($UnreachableTarget -eq $true -and @($UnreachableDetail).Count -gt 0) {
+        $rows = @($UnreachableDetail) | ForEach-Object { "<li>$(ConvertTo-SafeHtml -Text ([string]$_))</li>" }
+        "<div class='callout callout-warn'><strong>${DriveLetter}:'s target is unreachable.</strong> The mapping can be configured correctly and still fail to appear for this reason - a different fix from a Group Policy application failure.</div><ul class='evidence-list'>$($rows -join '')</ul>"
+    } else {
+        "<p class='muted'>${DriveLetter}:'s target share/server was confirmed reachable.</p>"
     }
 
     @"
 <p class='panel-intro'>What Group Policy is actually configured to give this user for ${DriveLetter}: - the intended state, before comparing it against what the endpoint actually has.</p>
+$loopbackHtml
 $actionHtml
-$noteHtml
+<h3>Conflicting GPOs</h3>
+$conflictHtml
+<h3>Target reachability</h3>
+$unreachableHtml
 <p class='muted'>For full GPO precedence, conflicts, and item-level targeting detail, see Audit-GPDriveMaps.ps1's own report in this case folder.</p>
 "@
 }
@@ -547,11 +589,19 @@ function ConvertTo-ReportSections {
         text - so this is not a special case the caller needs to branch on.
 
         Every property is passed through EXACTLY as read: $null stays $null, and
-        ScriptDeletions/TargetingFailures are only re-wrapped with @() to normalize
-        PowerShell's single-item-vs-array unwrapping on the JSON read side, never to turn a
-        $null (CouldNotCollect) reading into an empty (confirmed-nothing-found) array - those
-        mean opposite things throughout this toolkit and this function must not be the place
-        that collapses them.
+        ScriptDeletions/TargetingFailures/ConflictDetail/UnreachableDetail are only
+        re-wrapped with @() to normalize PowerShell's single-item-vs-array unwrapping on the
+        JSON read side, never to turn a $null (CouldNotCollect) reading into an empty
+        (confirmed-nothing-found) array - those mean opposite things throughout this toolkit
+        and this function must not be the place that collapses them.
+
+        GpoAuditNote (Invoke-DriveMapInvestigation.ps1's ConvertFrom-EvidenceBundle,
+        sourced from ConvertFrom-GPDriveMapAudit's LoopbackNote) is Audit-GPDriveMaps.ps1's
+        own *-EffectiveMaps.csv Reason text for this letter, when that text mentions
+        loopback - the single most valuable field for a Citrix/RDS diagnosis, since
+        loopback processing (computer-linked GPOs applying to the user) is exactly what
+        makes a GPO precedence result on a VDA look surprising without it. Tab 2
+        (New-IntendedStateSectionHtml) is responsible for leading with it when present.
     .PARAMETER Evidence
         The parsed Evidence.json object (or $null).
     #>
@@ -567,6 +617,9 @@ function ConvertTo-ReportSections {
     $sections['InRegistry']        = $Evidence.InRegistry
     $sections['ElevatedVisible']   = $Evidence.ElevatedVisible
     $sections['UnelevatedVisible'] = $Evidence.UnelevatedVisible
+    $sections['ConflictingGpos']   = $Evidence.ConflictingGpos
+    $sections['UnreachableTarget'] = $Evidence.UnreachableTarget
+    $sections['GpoAuditNote']      = $Evidence.GpoAuditNote
     # The [object[]] casts guard the Windows PowerShell 5.1 unwrapping hazard: assigning the
     # result of an `if` EXPRESSION that yields a ONE-element array unwraps it to the bare
     # element on 5.1 (PowerShell 7 hides this by unifying `.Count` across scalars). A single
@@ -577,11 +630,10 @@ function ConvertTo-ReportSections {
     # The cast must NOT collapse $null into an empty array: [object[]]$null stays $null, so
     # "could not collect" still reads differently from "looked and found nothing".
     # Verified on Windows PowerShell 5.1.26100 and PowerShell 7.
-    [object[]]$sections['ScriptDeletions']   = if ($null -eq $Evidence.ScriptDeletions) { $null } else { @($Evidence.ScriptDeletions) }
-    [object[]]$sections['TargetingFailures'] = if ($null -eq $Evidence.TargetingFailures) { $null } else { @($Evidence.TargetingFailures) }
-    # GpoAuditNote has no established source anywhere in this toolkit's evidence today -
-    # deliberately left out of the hashtable (New-IntendedStateSectionHtml reads a missing
-    # key as $null) rather than inventing placeholder text.
+    [object[]]$sections['ScriptDeletions']    = if ($null -eq $Evidence.ScriptDeletions) { $null } else { @($Evidence.ScriptDeletions) }
+    [object[]]$sections['TargetingFailures']  = if ($null -eq $Evidence.TargetingFailures) { $null } else { @($Evidence.TargetingFailures) }
+    [object[]]$sections['ConflictDetail']     = if ($null -eq $Evidence.ConflictDetail) { $null } else { @($Evidence.ConflictDetail) }
+    [object[]]$sections['UnreachableDetail']  = if ($null -eq $Evidence.UnreachableDetail) { $null } else { @($Evidence.UnreachableDetail) }
 
     $sections
 }
@@ -608,7 +660,17 @@ function New-DriveMapHtmlReport {
         Hashtable of pre-built section context, all keys optional:
           Manifest            - parsed manifest.json (Collected/Empty/Failed) for tab 1.
           Action               - GPO-intended Drive Maps action (string) for tab 2.
-          GpoAuditNote         - free-text note for tab 2.
+          GpoAuditNote         - free-text note for tab 2; the loopback finding from
+                                  Audit-GPDriveMaps.ps1's *-EffectiveMaps.csv Reason column
+                                  when it mentions loopback, rendered as a lead callout.
+          ConflictingGpos      - tri-state ($true/$false/$null) for tab 2/5: does another GPO
+                                  target this letter with a different path (Rule 6)?
+          ConflictDetail       - array of {Recommendation; Mappings} (or $null/empty) backing
+                                  ConflictingGpos, for tab 2.
+          UnreachableTarget    - tri-state ($true/$false/$null) for tab 2/5: is this letter's
+                                  target share/host unreachable (Rule 7)?
+          UnreachableDetail    - array of plain-text detail lines (or $null/empty) backing
+                                  UnreachableTarget, for tab 2.
           DrivePresent, InRegistry, ElevatedVisible, UnelevatedVisible - tri-state ($true/
                                   $false/$null) endpoint facts for tab 3.
           ScriptDeletions      - array of {Source; Line} (or $null if CouldNotCollect) for
@@ -638,7 +700,9 @@ function New-DriveMapHtmlReport {
 
     # --- Build tab content -------------------------------------------------------------
     $tab1 = New-ManifestSectionHtml -Manifest $Sections['Manifest']
-    $tab2 = New-IntendedStateSectionHtml -DriveLetter $letter -Action $Sections['Action'] -GpoAuditNote $Sections['GpoAuditNote']
+    $tab2 = New-IntendedStateSectionHtml -DriveLetter $letter -Action $Sections['Action'] -GpoAuditNote $Sections['GpoAuditNote'] `
+                -ConflictingGpos $Sections['ConflictingGpos'] -ConflictDetail $Sections['ConflictDetail'] `
+                -UnreachableTarget $Sections['UnreachableTarget'] -UnreachableDetail $Sections['UnreachableDetail']
     $tab3 = New-EndpointStateSectionHtml -DriveLetter $letter -DrivePresent $Sections['DrivePresent'] `
                 -InRegistry $Sections['InRegistry'] -ElevatedVisible $Sections['ElevatedVisible'] `
                 -UnelevatedVisible $Sections['UnelevatedVisible']

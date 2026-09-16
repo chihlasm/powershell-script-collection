@@ -155,10 +155,35 @@ Describe 'ConvertTo-ReportSections' {
         @($sections['ScriptDeletions'])[0].Source | Should -Be 'DomainWideSettings\logon.bat'
     }
 
-    It 'does not set GpoAuditNote - no source for it exists in the evidence today' {
+    # GpoAuditNote now has a real source: Invoke-DriveMapInvestigation.ps1's
+    # ConvertFrom-EvidenceBundle populates it from ConvertFrom-GPDriveMapAudit's LoopbackNote
+    # (Audit-GPDriveMaps.ps1's own *-EffectiveMaps.csv Reason column, when it mentions
+    # loopback). This function passes it straight through rather than inventing placeholder
+    # text when the underlying evidence simply has none to report.
+    It 'passes GpoAuditNote through from Evidence.GpoAuditNote when present' {
+        $evidence = [PSCustomObject]@{
+            Action       = 'Replace'
+            GpoAuditNote = "Applied via loopback (Merge) from GPO linked to computer OU 'OU=VDAs,DC=contoso,DC=com'"
+        }
+        $sections = ConvertTo-ReportSections -Evidence $evidence
+        $sections['GpoAuditNote'] | Should -Match 'loopback'
+    }
+
+    It 'sets GpoAuditNote to $null (never invented placeholder text) when the evidence has none' {
         $evidence = [PSCustomObject]@{ Action = 'Replace' }
         $sections = ConvertTo-ReportSections -Evidence $evidence
-        $sections.ContainsKey('GpoAuditNote') | Should -Be $false
+        $sections['GpoAuditNote'] | Should -BeNullOrEmpty
+    }
+
+    It 'passes ConflictingGpos and UnreachableTarget through from Evidence' {
+        $evidence = [PSCustomObject]@{
+            Action            = 'Replace'
+            ConflictingGpos   = $true
+            UnreachableTarget = $false
+        }
+        $sections = ConvertTo-ReportSections -Evidence $evidence
+        $sections['ConflictingGpos']   | Should -Be $true
+        $sections['UnreachableTarget'] | Should -Be $false
     }
 }
 
