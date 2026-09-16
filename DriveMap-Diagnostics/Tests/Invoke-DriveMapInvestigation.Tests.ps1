@@ -453,6 +453,342 @@ Describe 'ConvertFrom-EvidenceBundle' {
     }
 }
 
+Describe 'ConvertFrom-GPDriveMapAudit' {
+    # Audit-GPDriveMaps.ps1 (reused UNMODIFIED) writes a given CSV ONLY when that finding
+    # type has at least one row anywhere in the domain (every export is inside an
+    # "if (...Count -gt 0)" guard). An absent CSV is therefore ambiguous on its own: it can
+    # mean either "the audit ran and found nothing" (EmptyButValid) or "the audit step never
+    # ran / failed" (CouldNotCollect) - and -AuditStepRan is the one piece of information
+    # that resolves it. Getting this backwards is exactly the confident-plausible-wrong-
+    # answer failure this whole toolkit exists to prevent.
+
+    It 'reports CouldNotCollect for every finding type when the audit step did not run, even with no CSVs present' {
+        $result = ConvertFrom-GPDriveMapAudit -CaseFolder $TestDrive -DriveLetter 'X' -AuditStepRan $false
+
+        $result.Conflicts.State      | Should -Be 'CouldNotCollect'
+        $result.EffectiveMap.State   | Should -Be 'CouldNotCollect'
+        $result.PathValidation.State | Should -Be 'CouldNotCollect'
+        $result.StaleHosts.State     | Should -Be 'CouldNotCollect'
+        $result.GroupOverlap.State   | Should -Be 'CouldNotCollect'
+        $result.Duplicates.State     | Should -Be 'CouldNotCollect'
+        $result.Conflicts.Reason     | Should -Match 'did not run successfully'
+    }
+
+    It 'reports EmptyButValid (never CouldNotCollect) for a finding type with no CSV when the audit DID run successfully' {
+        # No *-Conflicts.csv etc. written at all - Audit-GPDriveMaps.ps1's own export code
+        # only writes one when Issues.Conflicts.Count -gt 0, so an audit that ran cleanly and
+        # found no conflicts anywhere leaves this case folder with no Conflicts.csv at all.
+        $result = ConvertFrom-GPDriveMapAudit -CaseFolder $TestDrive -DriveLetter 'X' -AuditStepRan $true
+
+        $result.Conflicts.State | Should -Be 'EmptyButValid'
+        @($result.Conflicts.Data).Count | Should -Be 0
+    }
+
+    It 'parses a real Conflicts.csv row for the target letter as Found' {
+        $conflictsPath = Join-Path $TestDrive 'DriveMap-Audit-2026-09-16-Conflicts.csv'
+        [PSCustomObject]@{
+            DriveLetter    = 'X'
+            FindingType    = 'TargetingConflict'
+            Severity       = 'High'
+            GPOCount       = 2
+            PathCount      = 2
+            Mappings       = "GPO-A [Replace] -> \\srv\share | GPO-B [Create] -> \\other\share (UNREACHABLE)"
+            Recommendation = 'REAL CONFLICT: review targeting'
+        } | Export-Csv -LiteralPath $conflictsPath -NoTypeInformation -Encoding UTF8
+
+        $result = ConvertFrom-GPDriveMapAudit -CaseFolder $TestDrive -DriveLetter 'X' -AuditStepRan $true
+
+        $result.Conflicts.State | Should -Be 'Found'
+        $result.Conflicts.Data[0].Mappings | Should -Match 'GPO-A'
+    }
+
+    It 'does not match a Conflicts.csv row for a DIFFERENT drive letter' {
+        $conflictsPath = Join-Path $TestDrive 'DriveMap-Audit-2026-09-16-Conflicts.csv'
+        [PSCustomObject]@{
+            DriveLetter = 'Y'; FindingType = 'TargetingConflict'; Severity = 'High'
+            GPOCount = 2; PathCount = 2; Mappings = 'GPO-A -> \\srv\share'; Recommendation = 'Review'
+        } | Export-Csv -LiteralPath $conflictsPath -NoTypeInformation -Encoding UTF8
+
+        $result = ConvertFrom-GPDriveMapAudit -CaseFolder $TestDrive -DriveLetter 'X' -AuditStepRan $true
+
+        $result.Conflicts.State | Should -Be 'EmptyButValid'
+    }
+
+    It 'extracts the loopback Reason from EffectiveMaps.csv into LoopbackNote' {
+        $effectiveMapsPath = Join-Path $TestDrive 'DriveMap-Audit-2026-09-16-EffectiveMaps.csv'
+        [PSCustomObject]@{
+            DriveLetter = 'X'; UNCPath = '\\srv\share'; Label = 'Shared'; Action = 'C'
+            WinningGPO = 'VDA-Loopback-GPO'; WinningGPOId = '{GUID}'; Enforced = $false
+            LinkedTo = 'OU=VDAs,DC=contoso,DC=com'; ILTSummary = 'No targeting'
+            Reason = "Applied via loopback (Merge) from GPO linked to computer OU 'OU=VDAs,DC=contoso,DC=com'"
+        } | Export-Csv -LiteralPath $effectiveMapsPath -NoTypeInformation -Encoding UTF8
+
+        $result = ConvertFrom-GPDriveMapAudit -CaseFolder $TestDrive -DriveLetter 'X' -AuditStepRan $true
+
+        $result.EffectiveMap.State | Should -Be 'Found'
+        $result.LoopbackNote | Should -Match 'loopback'
+        $result.LoopbackNote | Should -Match 'OU=VDAs'
+    }
+
+    It 'leaves LoopbackNote $null when EffectiveMaps.csv has no loopback mention' {
+        $effectiveMapsPath = Join-Path $TestDrive 'DriveMap-Audit-2026-09-16-EffectiveMaps.csv'
+        [PSCustomObject]@{
+            DriveLetter = 'X'; UNCPath = '\\srv\share'; Label = 'Shared'; Action = 'C'
+            WinningGPO = 'Normal-GPO'; WinningGPOId = '{GUID}'; Enforced = $false
+            LinkedTo = 'OU=Users,DC=contoso,DC=com'; ILTSummary = 'No targeting'
+            Reason = "GPO linked to 'OU=Users,DC=contoso,DC=com' (closest applicable scope)"
+        } | Export-Csv -LiteralPath $effectiveMapsPath -NoTypeInformation -Encoding UTF8
+
+        $result = ConvertFrom-GPDriveMapAudit -CaseFolder $TestDrive -DriveLetter 'X' -AuditStepRan $true
+
+        $result.LoopbackNote | Should -BeNullOrEmpty
+    }
+
+    It 'leaves LoopbackNote $null when the audit step did not run' {
+        $result = ConvertFrom-GPDriveMapAudit -CaseFolder $TestDrive -DriveLetter 'X' -AuditStepRan $false
+        $result.LoopbackNote | Should -BeNullOrEmpty
+    }
+
+    It 'scopes PathValidation to only the UNC path(s) this letter references' {
+        $caseFolder2 = Join-Path $TestDrive 'case2'
+        New-Item -ItemType Directory -Path $caseFolder2 -Force | Out-Null
+        [PSCustomObject]@{
+            DriveLetter = 'X'; UNCPath = '\\deadserver\share'; Label = ''; Action = 'C'
+            WinningGPO = 'GPO-A'; WinningGPOId = '{GUID}'; Enforced = $false
+            LinkedTo = 'OU=Users,DC=contoso,DC=com'; ILTSummary = ''; Reason = 'GPO linked'
+        } | Export-Csv -LiteralPath (Join-Path $caseFolder2 'Audit-EffectiveMaps.csv') -NoTypeInformation -Encoding UTF8
+        @(
+            [PSCustomObject]@{ UNCPath = '\\deadserver\share'; Reachable = $false; Error = 'The network path was not found'; AffectedGPOs = 'GPO-A'; DriveLetters = 'X'; Severity = 'High'; Recommendation = 'Fix it' }
+            [PSCustomObject]@{ UNCPath = '\\otherserver\othershare'; Reachable = $false; Error = 'timeout'; AffectedGPOs = 'GPO-Z'; DriveLetters = 'Z'; Severity = 'High'; Recommendation = 'Fix it too' }
+        ) | Export-Csv -LiteralPath (Join-Path $caseFolder2 'Audit-PathValidation.csv') -NoTypeInformation -Encoding UTF8
+
+        $result = ConvertFrom-GPDriveMapAudit -CaseFolder $caseFolder2 -DriveLetter 'X' -AuditStepRan $true
+
+        $result.PathValidation.State | Should -Be 'Found'
+        @($result.PathValidation.Data).Count | Should -Be 1
+        $result.PathValidation.Data[0].UNCPath | Should -Be '\\deadserver\share'
+    }
+
+    It 'matches a StaleHosts.csv row via its comma-joined DriveLetters column' {
+        $caseFolder3 = Join-Path $TestDrive 'case3'
+        New-Item -ItemType Directory -Path $caseFolder3 -Force | Out-Null
+        [PSCustomObject]@{
+            StaleHost = 'deadserver'; DriveLetters = 'X, Y'; UNCPaths = '\\deadserver\share'
+            AffectedGPOs = 'GPO-A'; MappingCount = 2; Severity = 'High'; Recommendation = 'Repoint'
+        } | Export-Csv -LiteralPath (Join-Path $caseFolder3 'Audit-StaleHosts.csv') -NoTypeInformation -Encoding UTF8
+
+        $result = ConvertFrom-GPDriveMapAudit -CaseFolder $caseFolder3 -DriveLetter 'X' -AuditStepRan $true
+
+        $result.StaleHosts.State | Should -Be 'Found'
+        $result.StaleHosts.Data[0].StaleHost | Should -Be 'deadserver'
+    }
+
+    It 'reports CouldNotCollect when a matching CSV exists but cannot be parsed' {
+        $caseFolder4 = Join-Path $TestDrive 'case4'
+        New-Item -ItemType Directory -Path $caseFolder4 -Force | Out-Null
+        # Not valid CSV content.
+        Set-Content -Path (Join-Path $caseFolder4 'Audit-Conflicts.csv') -Value "`u{0}not,,,valid" -Encoding UTF8
+
+        $result = ConvertFrom-GPDriveMapAudit -CaseFolder $caseFolder4 -DriveLetter 'X' -AuditStepRan $true
+
+        # A present-but-unparseable CSV must degrade to CouldNotCollect, never to a silent
+        # EmptyButValid that would misreport "the audit ran and found nothing" when the file
+        # genuinely could not be read.
+        $result.Conflicts.State | Should -Be 'CouldNotCollect'
+    }
+}
+
+Describe 'Get-DriveMapVerdict - Conflicting GPOs and Unreachable target (Rules 6 and 7)' {
+    # Rule 6: two or more GPOs target the letter with different paths.
+    It 'identifies conflicting GPOs when ConflictingGpos is confirmed true' {
+        $v = Get-DriveMapVerdict -DriveLetter 'X' -Evidence ([PSCustomObject]@{
+            GppApplied = $null; DrivePresent = $null; ScriptDeletions = $null
+            InRegistry = $null; InLiveMounts = $null; TargetingFailures = $null
+            Action = $null; FastLogonOptimization = $null; AlwaysWaitForNetwork = $null
+            ElevatedVisible = $null; UnelevatedVisible = $null; EnableLinkedConnections = $null
+            ConflictingGpos = $true
+            ConflictDetail  = @([PSCustomObject]@{ Recommendation = 'Fix the targeting'; Mappings = 'GPO-A [Replace] -> \\srv\share | GPO-B [Create] -> \\other\share' })
+            UnreachableTarget = $null; UnreachableDetail = $null
+        })
+        ($v.Cause -join ' ') | Should -Match 'conflict'
+        $v[0].Confidence | Should -Be 'High'
+        ($v[0].Evidence -join ' ') | Should -Match 'GPO-A'
+    }
+
+    It 'does not fire the conflicting-GPO rule when ConflictingGpos is confirmed false' {
+        $v = Get-DriveMapVerdict -DriveLetter 'X' -Evidence ([PSCustomObject]@{
+            GppApplied = $null; DrivePresent = $null; ScriptDeletions = $null
+            InRegistry = $null; InLiveMounts = $null; TargetingFailures = $null
+            Action = $null; FastLogonOptimization = $null; AlwaysWaitForNetwork = $null
+            ElevatedVisible = $null; UnelevatedVisible = $null; EnableLinkedConnections = $null
+            ConflictingGpos = $false; ConflictDetail = $null
+            UnreachableTarget = $null; UnreachableDetail = $null
+        })
+        ($v.Cause -join ' ') | Should -Not -Match 'conflict'
+    }
+
+    # CRITICAL REGRESSION COVERAGE: ConflictingGpos being $null (audit never ran) must never
+    # fire this rule - a $null must never be treated as a positive finding.
+    It 'does not fire the conflicting-GPO rule when ConflictingGpos was never established ($null)' {
+        $v = Get-DriveMapVerdict -DriveLetter 'X' -Evidence ([PSCustomObject]@{
+            GppApplied = $null; DrivePresent = $null; ScriptDeletions = $null
+            InRegistry = $null; InLiveMounts = $null; TargetingFailures = $null
+            Action = $null; FastLogonOptimization = $null; AlwaysWaitForNetwork = $null
+            ElevatedVisible = $null; UnelevatedVisible = $null; EnableLinkedConnections = $null
+            ConflictingGpos = $null; ConflictDetail = $null
+            UnreachableTarget = $null; UnreachableDetail = $null
+        })
+        ($v.Cause -join ' ') | Should -Not -Match 'conflict'
+        $v[0].Cause | Should -Match 'No cause identified'
+    }
+
+    # PS 5.1 one-element-array unwrapping regression coverage for the two NEW detail arrays,
+    # matching the existing coverage for ScriptDeletions/TargetingFailures - a SINGLE
+    # conflicting-GPO row (the plausible real-world shape) must not unwrap to a bare object.
+    It 'fires the conflicting-GPO rule when ConflictDetail holds EXACTLY ONE element (PS 5.1 array unwrapping)' {
+        $v = Get-DriveMapVerdict -DriveLetter 'X' -Evidence ([PSCustomObject]@{
+            GppApplied = $null; DrivePresent = $null; ScriptDeletions = $null
+            InRegistry = $null; InLiveMounts = $null; TargetingFailures = $null
+            Action = $null; FastLogonOptimization = $null; AlwaysWaitForNetwork = $null
+            ElevatedVisible = $null; UnelevatedVisible = $null; EnableLinkedConnections = $null
+            ConflictingGpos = $true
+            ConflictDetail  = @([PSCustomObject]@{ Recommendation = 'Fix it'; Mappings = 'GPO-A -> \\srv\share' })
+            UnreachableTarget = $null; UnreachableDetail = $null
+        })
+        ($v.Cause -join ' ') | Should -Match 'conflict'
+        $v[0].Cause | Should -Not -Match 'No cause identified'
+    }
+
+    # Rule 7: the mapping applied correctly but the target is unreachable.
+    It 'identifies an unreachable target when UnreachableTarget is confirmed true' {
+        $v = Get-DriveMapVerdict -DriveLetter 'X' -Evidence ([PSCustomObject]@{
+            GppApplied = $true; DrivePresent = $false; ScriptDeletions = $null
+            InRegistry = $null; InLiveMounts = $null; TargetingFailures = $null
+            Action = $null; FastLogonOptimization = $null; AlwaysWaitForNetwork = $null
+            ElevatedVisible = $null; UnelevatedVisible = $null; EnableLinkedConnections = $null
+            ConflictingGpos = $null; ConflictDetail = $null
+            UnreachableTarget = $true
+            UnreachableDetail = @("Path validation: \\deadserver\share is unreachable (The network path was not found).")
+        })
+        ($v.Cause -join ' ') | Should -Match 'unreachable'
+        ($v.Cause -join ' ') | Should -Match 'Medium|unreachable'
+    }
+
+    It 'does not fire the unreachable-target rule when UnreachableTarget was never established ($null)' {
+        $v = Get-DriveMapVerdict -DriveLetter 'X' -Evidence ([PSCustomObject]@{
+            GppApplied = $null; DrivePresent = $null; ScriptDeletions = $null
+            InRegistry = $null; InLiveMounts = $null; TargetingFailures = $null
+            Action = $null; FastLogonOptimization = $null; AlwaysWaitForNetwork = $null
+            ElevatedVisible = $null; UnelevatedVisible = $null; EnableLinkedConnections = $null
+            ConflictingGpos = $null; ConflictDetail = $null
+            UnreachableTarget = $null; UnreachableDetail = $null
+        })
+        ($v.Cause -join ' ') | Should -Not -Match 'unreachable'
+    }
+
+    It 'fires the unreachable-target rule when UnreachableDetail holds EXACTLY ONE element (PS 5.1 array unwrapping)' {
+        $v = Get-DriveMapVerdict -DriveLetter 'X' -Evidence ([PSCustomObject]@{
+            GppApplied = $null; DrivePresent = $null; ScriptDeletions = $null
+            InRegistry = $null; InLiveMounts = $null; TargetingFailures = $null
+            Action = $null; FastLogonOptimization = $null; AlwaysWaitForNetwork = $null
+            ElevatedVisible = $null; UnelevatedVisible = $null; EnableLinkedConnections = $null
+            ConflictingGpos = $null; ConflictDetail = $null
+            UnreachableTarget = $true
+            UnreachableDetail = @("Stale host: 'deadserver' is unreachable but is still referenced by this drive letter's mapping.")
+        })
+        ($v.Cause -join ' ') | Should -Match 'unreachable'
+        $v[0].Cause | Should -Not -Match 'No cause identified'
+    }
+
+    It 'never recommends NoBackgroundPolicy=0 in the conflicting-GPO or unreachable-target verdicts' {
+        $v = Get-DriveMapVerdict -DriveLetter 'X' -Evidence ([PSCustomObject]@{
+            GppApplied = $null; DrivePresent = $null; ScriptDeletions = $null
+            InRegistry = $null; InLiveMounts = $null; TargetingFailures = $null
+            Action = $null; FastLogonOptimization = $null; AlwaysWaitForNetwork = $null
+            ElevatedVisible = $null; UnelevatedVisible = $null; EnableLinkedConnections = $null
+            ConflictingGpos = $true
+            ConflictDetail  = @([PSCustomObject]@{ Recommendation = 'Fix targeting'; Mappings = 'GPO-A -> \\srv\share' })
+            UnreachableTarget = $true
+            UnreachableDetail = @('Path validation: \\srv\share is unreachable.')
+        })
+        ($v.Remediation -join ' ') | Should -Not -Match 'NoBackgroundPolicy'
+    }
+}
+
+Describe 'ConvertFrom-EvidenceBundle - GpAuditData flattening' {
+    It 'flattens a Found Conflicts result to ConflictingGpos = $true with ConflictDetail populated' {
+        $gpAuditData = [PSCustomObject]@{
+            Conflicts      = [PSCustomObject]@{ State = 'Found'; Data = @([PSCustomObject]@{ Recommendation = 'Fix it'; Mappings = 'GPO-A -> \\srv\share' }) }
+            EffectiveMap   = [PSCustomObject]@{ State = 'EmptyButValid'; Data = @() }
+            PathValidation = [PSCustomObject]@{ State = 'EmptyButValid'; Data = @() }
+            StaleHosts     = [PSCustomObject]@{ State = 'EmptyButValid'; Data = @() }
+            GroupOverlap   = [PSCustomObject]@{ State = 'EmptyButValid'; Data = @() }
+            Duplicates     = [PSCustomObject]@{ State = 'EmptyButValid'; Data = @() }
+            LoopbackNote   = $null
+        }
+        $flat = ConvertFrom-EvidenceBundle -DriveLetter 'X' -Results @{} -GpAuditData $gpAuditData
+
+        $flat.ConflictingGpos | Should -Be $true
+        @($flat.ConflictDetail).Count | Should -Be 1
+        $flat.UnreachableTarget | Should -Be $false
+    }
+
+    It 'flattens a CouldNotCollect Conflicts result to $null, never to $false' {
+        $gpAuditData = [PSCustomObject]@{
+            Conflicts      = [PSCustomObject]@{ State = 'CouldNotCollect'; Data = $null; Reason = 'Audit did not run' }
+            EffectiveMap   = [PSCustomObject]@{ State = 'CouldNotCollect'; Data = $null; Reason = 'Audit did not run' }
+            PathValidation = [PSCustomObject]@{ State = 'CouldNotCollect'; Data = $null; Reason = 'Audit did not run' }
+            StaleHosts     = [PSCustomObject]@{ State = 'CouldNotCollect'; Data = $null; Reason = 'Audit did not run' }
+            GroupOverlap   = [PSCustomObject]@{ State = 'CouldNotCollect'; Data = $null; Reason = 'Audit did not run' }
+            Duplicates     = [PSCustomObject]@{ State = 'CouldNotCollect'; Data = $null; Reason = 'Audit did not run' }
+            LoopbackNote   = $null
+        }
+        $flat = ConvertFrom-EvidenceBundle -DriveLetter 'X' -Results @{} -GpAuditData $gpAuditData
+
+        $flat.ConflictingGpos   | Should -BeNullOrEmpty
+        $flat.ConflictingGpos   | Should -Not -Be $false
+        $flat.UnreachableTarget | Should -BeNullOrEmpty
+        $flat.UnreachableTarget | Should -Not -Be $false
+    }
+
+    It 'flattens UnreachableTarget to $true when only StaleHosts (not PathValidation) is Found' {
+        $gpAuditData = [PSCustomObject]@{
+            Conflicts      = [PSCustomObject]@{ State = 'EmptyButValid'; Data = @() }
+            EffectiveMap   = [PSCustomObject]@{ State = 'EmptyButValid'; Data = @() }
+            PathValidation = [PSCustomObject]@{ State = 'EmptyButValid'; Data = @() }
+            StaleHosts     = [PSCustomObject]@{ State = 'Found'; Data = @([PSCustomObject]@{ StaleHost = 'deadserver'; DriveLetters = 'X' }) }
+            GroupOverlap   = [PSCustomObject]@{ State = 'EmptyButValid'; Data = @() }
+            Duplicates     = [PSCustomObject]@{ State = 'EmptyButValid'; Data = @() }
+            LoopbackNote   = $null
+        }
+        $flat = ConvertFrom-EvidenceBundle -DriveLetter 'X' -Results @{} -GpAuditData $gpAuditData
+
+        $flat.UnreachableTarget | Should -Be $true
+        @($flat.UnreachableDetail).Count | Should -BeGreaterThan 0
+    }
+
+    It 'passes GpoAuditNote straight through from GpAuditData.LoopbackNote' {
+        $gpAuditData = [PSCustomObject]@{
+            Conflicts = [PSCustomObject]@{ State = 'EmptyButValid'; Data = @() }
+            EffectiveMap = [PSCustomObject]@{ State = 'Found'; Data = @() }
+            PathValidation = [PSCustomObject]@{ State = 'EmptyButValid'; Data = @() }
+            StaleHosts = [PSCustomObject]@{ State = 'EmptyButValid'; Data = @() }
+            GroupOverlap = [PSCustomObject]@{ State = 'EmptyButValid'; Data = @() }
+            Duplicates = [PSCustomObject]@{ State = 'EmptyButValid'; Data = @() }
+            LoopbackNote = "Applied via loopback (Merge) from GPO linked to computer OU 'OU=VDAs,DC=contoso,DC=com'"
+        }
+        $flat = ConvertFrom-EvidenceBundle -DriveLetter 'X' -Results @{} -GpAuditData $gpAuditData
+        $flat.GpoAuditNote | Should -Match 'loopback'
+    }
+
+    It 'leaves every new property $null when GpAuditData is not supplied at all' {
+        $flat = ConvertFrom-EvidenceBundle -DriveLetter 'X' -Results @{}
+        $flat.ConflictingGpos   | Should -BeNullOrEmpty
+        $flat.UnreachableTarget | Should -BeNullOrEmpty
+        $flat.GpoAuditNote      | Should -BeNullOrEmpty
+    }
+}
+
 Describe 'Resolve-CompanionScript' {
     It 'returns null when the companion is absent' {
         Resolve-CompanionScript -FileName 'Nope-DoesNotExist.ps1' -ScriptRoot $TestDrive | Should -BeNullOrEmpty

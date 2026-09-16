@@ -321,6 +321,37 @@ function ConvertFrom-EvidenceBundle {
         Every parameter below is [AllowNull()] and defaults to $null precisely so a caller
         that does not have a given signal yet (rather than guessing) produces the correct
         "not established" flat value instead of a fabricated one.
+
+          ConflictingGpos          <- -GpAuditData.Conflicts (ConvertFrom-GPDriveMapAudit's
+                                      own three-state result for *-Conflicts.csv, filtered to
+                                      this letter). $true when that result is Found (a real
+                                      conflict row exists for this letter), $false when it is
+                                      EmptyButValid, $null when CouldNotCollect - the SAME
+                                      three-state rule as every other property here.
+          ConflictDetail           <- The Conflicts.csv row(s) for this letter, re-shaped to
+                                      {Recommendation; Mappings} for verdict text. $null
+                                      unless ConflictingGpos is exactly $true.
+          UnreachableTarget        <- -GpAuditData.PathValidation / .StaleHosts: $true when
+                                      either result is Found (an unreachable UNC path/host
+                                      was recorded for a share this letter's own mapping
+                                      references), $false when both are EmptyButValid, $null
+                                      when either is CouldNotCollect and neither is Found -
+                                      an unknown on one source must never be masked by a
+                                      confirmed-empty reading on the other, since either
+                                      source alone finding the target unreachable is enough
+                                      to fire the rule, but neither finding it does NOT mean
+                                      reachability was actually established unless BOTH
+                                      sources actually ran.
+          UnreachableDetail        <- The matching PathValidation/StaleHosts row(s), re-shaped
+                                      to plain text for verdict evidence. $null unless
+                                      UnreachableTarget is exactly $true.
+          GpoAuditNote             <- -GpAuditData.LoopbackNote passed straight through: the
+                                      EffectiveMaps.csv Reason text for this letter when it
+                                      mentions loopback, surfaced here so the report's "What
+                                      should the user get?" tab (tab 2) can lead with it -
+                                      the context that makes a Citrix/RDS precedence result
+                                      interpretable. $null when no loopback finding exists
+                                      (including when GpAuditData itself was not supplied).
     #>
     param(
         [Parameter(Mandatory)][string]$DriveLetter,
@@ -330,7 +361,8 @@ function ConvertFrom-EvidenceBundle {
         [AllowNull()][object]$AlwaysWaitForNetwork = $null,
         [AllowNull()][object]$EnableLinkedConnections = $null,
         [AllowNull()][string]$ReadinessJsonPath = $null,
-        [AllowNull()][string]$GpoActionCsvPath = $null
+        [AllowNull()][string]$GpoActionCsvPath = $null,
+        [AllowNull()][psobject]$GpAuditData = $null
     )
 
     $letterUpper = $DriveLetter.Trim().TrimEnd(':').ToUpperInvariant()
@@ -475,6 +507,67 @@ function ConvertFrom-EvidenceBundle {
         })
     }
 
+    # ConflictingGpos / ConflictDetail: from -GpAuditData.Conflicts (ConvertFrom-GPDriveMapAudit's
+    # own three-state result for *-Conflicts.csv). Same three-state rule as every property
+    # above: Found -> $true, EmptyButValid -> $false, CouldNotCollect -> $null. GpAuditData
+    # itself being $null (no domain-side audit data supplied at all) is treated identically
+    # to its Conflicts sub-result being CouldNotCollect - "we do not have this" either way.
+    $conflictingGpos = $null
+    $conflictDetail  = $null
+    if ($GpAuditData -and $GpAuditData.Conflicts -and $GpAuditData.Conflicts.State -ne 'CouldNotCollect') {
+        $conflictRows = @($GpAuditData.Conflicts.Data)
+        $conflictingGpos = $conflictRows.Count -gt 0
+        if ($conflictingGpos) {
+            $conflictDetail = @($conflictRows | ForEach-Object {
+                $recommendation = if ($_.PSObject.Properties['Recommendation']) { $_.Recommendation } else { $null }
+                $mappings       = if ($_.PSObject.Properties['Mappings']) { $_.Mappings } else { $null }
+                [PSCustomObject]@{ Recommendation = $recommendation; Mappings = $mappings }
+            })
+        }
+    }
+
+    # UnreachableTarget / UnreachableDetail: from -GpAuditData.PathValidation and .StaleHosts.
+    # Either source alone reporting Found is enough to fire the rule (an unreachable UNC path
+    # OR an unreachable host referenced by this letter both mean the same thing: the mapping
+    # would apply correctly but the target cannot be reached) - but the $null ("not
+    # established") case requires BOTH sources to be unavailable, since one source actually
+    # having run and confirmed EmptyButValid is real evidence toward "reachable" even if the
+    # other source could not run.
+    $unreachableTarget = $null
+    $unreachableDetail = $null
+    if ($GpAuditData) {
+        $pv = $GpAuditData.PathValidation
+        $sh = $GpAuditData.StaleHosts
+        $pvFound = $pv -and $pv.State -eq 'Found'
+        $shFound = $sh -and $sh.State -eq 'Found'
+        $pvKnown = $pv -and $pv.State -ne 'CouldNotCollect'
+        $shKnown = $sh -and $sh.State -ne 'CouldNotCollect'
+        if ($pvFound -or $shFound) {
+            $unreachableTarget = $true
+            $detail = New-Object System.Collections.Generic.List[string]
+            if ($pvFound) {
+                foreach ($row in @($pv.Data)) {
+                    $uncText = if ($row.PSObject.Properties['UNCPath']) { $row.UNCPath } else { $null }
+                    $detail.Add("Path validation: $uncText is unreachable$(if ($row.PSObject.Properties['Error'] -and $row.Error) { " ($($row.Error))" }).")
+                }
+            }
+            if ($shFound) {
+                foreach ($row in @($sh.Data)) {
+                    $hostText = if ($row.PSObject.Properties['StaleHost']) { $row.StaleHost } else { $null }
+                    $detail.Add("Stale host: '$hostText' is unreachable but is still referenced by this drive letter's mapping.")
+                }
+            }
+            $unreachableDetail = @($detail)
+        } elseif ($pvKnown -and $shKnown) {
+            $unreachableTarget = $false
+        }
+    }
+
+    # GpoAuditNote: -GpAuditData.LoopbackNote passed straight through (already the raw
+    # EffectiveMaps.csv Reason text when it mentions loopback, or $null - see
+    # ConvertFrom-GPDriveMapAudit's own LoopbackNote documentation).
+    $gpoAuditNote = if ($GpAuditData) { $GpAuditData.LoopbackNote } else { $null }
+
     [PSCustomObject]@{
         GppApplied              = $gppApplied
         DrivePresent            = $drivePresent
@@ -488,6 +581,11 @@ function ConvertFrom-EvidenceBundle {
         ElevatedVisible         = $elevatedVisible
         UnelevatedVisible       = $unelevatedVisible
         EnableLinkedConnections = $EnableLinkedConnections
+        ConflictingGpos         = $conflictingGpos
+        ConflictDetail          = $conflictDetail
+        UnreachableTarget       = $unreachableTarget
+        UnreachableDetail       = $unreachableDetail
+        GpoAuditNote            = $gpoAuditNote
     }
 }
 
@@ -583,6 +681,16 @@ function Get-DriveMapVerdict {
     # Verified on Windows PowerShell 5.1.26100 and PowerShell 7.
     [object[]]$scriptDeletions = if ($null -eq $Evidence.ScriptDeletions) { @() } else { @($Evidence.ScriptDeletions) }
     [object[]]$targetingFailures = if ($null -eq $Evidence.TargetingFailures) { @() } else { @($Evidence.TargetingFailures) }
+
+    # Same PS 5.1 one-element-array-unwrapping guard as $scriptDeletions/$targetingFailures
+    # above, applied to the two new GP-audit-derived detail arrays (Rules 6 and 7 below): a
+    # SINGLE conflicting-GPO row or a SINGLE unreachable-target row - very plausibly the exact
+    # real-world shape here - would otherwise unwrap to a bare object on assignment from an
+    # `if` expression, making `.Count` $null and silently preventing the rule from ever
+    # firing on the declared target runtime while working fine on PowerShell 7. Verified on
+    # Windows PowerShell 5.1.26100 and PowerShell 7.
+    [object[]]$conflictDetail    = if ($null -eq $Evidence.ConflictDetail) { @() } else { @($Evidence.ConflictDetail) }
+    [object[]]$unreachableDetail = if ($null -eq $Evidence.UnreachableDetail) { @() } else { @($Evidence.UnreachableDetail) }
 
     # ---------------------------------------------------------------------------------
     # Rule 1 (spec 6, row 1 / section 3.5): GPP applied OK + drive absent + a logon-script
@@ -714,6 +822,53 @@ function Get-DriveMapVerdict {
     }
 
     # ---------------------------------------------------------------------------------
+    # Rule 6 (Conflicting GPOs): two or more GPOs target this letter with different paths.
+    # Sourced from ConvertFrom-GPDriveMapAudit's parsing of Audit-GPDriveMaps.ps1's own
+    # *-Conflicts.csv (reused UNMODIFIED - see this toolkit's README). Confidence High
+    # specifically because Evidence.ConflictingGpos is only ever $true when that CSV
+    # actually carries a row for this letter - Audit-GPDriveMaps.ps1 itself only writes a
+    # conflict row after checking item-level targeting overlap (Find-DriveMapConflicts:
+    # FindingType 'TargetingConflict'), so a row reaching this far already represents a
+    # confirmed, not merely suspected, competing mapping.
+    # ---------------------------------------------------------------------------------
+    if ((Test-True $Evidence.ConflictingGpos) -and $conflictDetail.Count -gt 0) {
+        $mappingsText = ($conflictDetail | Where-Object { $_.Mappings } | ForEach-Object { $_.Mappings }) -join ' || '
+        $recommendationText = ($conflictDetail | Where-Object { $_.Recommendation } | ForEach-Object { $_.Recommendation } | Select-Object -Unique) -join ' '
+        $verdicts.Add([PSCustomObject]@{
+            Cause       = "Two or more GPOs target ${letter}: with different paths (a real, unresolved targeting conflict)"
+            Confidence  = 'High'
+            Evidence    = @(
+                "Audit-GPDriveMaps.ps1's conflict analysis recorded a targeting conflict for ${letter}::",
+                "$mappingsText"
+            )
+            Remediation = @(
+                $(if ($recommendationText) { $recommendationText } else { "Review the item-level targeting on each GPO that maps ${letter}: - the targeting does not fully separate which users/computers get which path, so the winning mapping depends on GPO precedence rather than intent." }),
+                'Run Audit-GPDriveMaps.ps1 -CheckGroupOverlap to confirm whether the competing targeting groups actually share members.'
+            )
+        })
+    }
+
+    # ---------------------------------------------------------------------------------
+    # Rule 7 (Unreachable target): the mapping applied correctly but the share/host itself
+    # is unreachable. This LOOKS IDENTICAL to a policy-application failure from the
+    # endpoint's own evidence alone (the drive is simply absent either way), but has a
+    # completely different fix - and is common in Citrix/VDA environments, where a VDA can
+    # be on a different network segment or DNS scope than the endpoint device. Sourced from
+    # ConvertFrom-GPDriveMapAudit's parsing of *-PathValidation.csv / *-StaleHosts.csv.
+    # ---------------------------------------------------------------------------------
+    if ((Test-True $Evidence.UnreachableTarget) -and $unreachableDetail.Count -gt 0) {
+        $verdicts.Add([PSCustomObject]@{
+            Cause       = "${letter}: maps correctly, but its target share/server is unreachable"
+            Confidence  = 'Medium'
+            Evidence    = @($unreachableDetail)
+            Remediation = @(
+                'Verify the target server/share is online and reachable from the machine that actually processes this mapping (in a Citrix/RDS environment, that is the VDA the user is logged into - see this README''s "Citrix / RDS environments" section - not the endpoint device the user is physically on).',
+                'Check DNS resolution and network routing/firewall rules between that machine and the target server, and confirm the share still exists and has not been renamed or decommissioned.'
+            )
+        })
+    }
+
+    # ---------------------------------------------------------------------------------
     # Fallback (spec 6, final table row): an unresolved case is a finding with a next step,
     # never a blank page. This function must NEVER return an empty array.
     # ---------------------------------------------------------------------------------
@@ -725,6 +880,8 @@ function Get-DriveMapVerdict {
         if ($null -ne $Evidence.InLiveMounts)             { $ruledOut.Add("Live mount present: $($Evidence.InLiveMounts)") }
         if ($null -ne $Evidence.ElevatedVisible)          { $ruledOut.Add("Visible in the elevated session: $($Evidence.ElevatedVisible)") }
         if ($null -ne $Evidence.UnelevatedVisible)        { $ruledOut.Add("Visible in the unelevated session: $($Evidence.UnelevatedVisible)") }
+        if ($null -ne $Evidence.ConflictingGpos)          { $ruledOut.Add("Conflicting GPOs for this letter: $($Evidence.ConflictingGpos)") }
+        if ($null -ne $Evidence.UnreachableTarget)        { $ruledOut.Add("Target share/host unreachable: $($Evidence.UnreachableTarget)") }
         $ruledOut.Add("Script deletions found: $($scriptDeletions.Count)")
         $ruledOut.Add("Targeting failures found: $($targetingFailures.Count)")
 
@@ -746,7 +903,11 @@ function Get-DriveMapVerdict {
         if ($null -eq $Evidence.GppApplied)        { $toCollect.Add('GPP logging/tracing was not confirmed on - re-run after enabling it (Test-DriveMapLoggingReadiness.ps1 -EnableLogging) and reproducing the fault.') }
         if ($null -eq $Evidence.ElevatedVisible -or $null -eq $Evidence.UnelevatedVisible) { $toCollect.Add('Collect live mounts in BOTH UAC token contexts (run Export-DriveMapEvidence.ps1 once elevated and once not) to rule split-token visibility fully in or out.') }
         $toCollect.Add('Run Watch-DriveMapActivity.ps1 to capture the actual disappearance transition and its timing, which a point-in-time snapshot cannot recover.')
-        $toCollect.Add('Review Audit-GPDriveMaps.ps1 output for conflicting drive-letter mappings across GPOs, and Search-SYSVOLScripts.ps1 output for any other script referencing this letter.')
+        if ($null -eq $Evidence.ConflictingGpos -or $null -eq $Evidence.UnreachableTarget) {
+            $toCollect.Add('The domain drive-maps audit (Audit-GPDriveMaps.ps1) did not run, or did not run successfully, for this case - conflicting-GPO and unreachable-target findings could not be evaluated. Re-run Invoke-DriveMapInvestigation.ps1 with domain connectivity and RSAT GroupPolicy/ActiveDirectory modules available, or run Audit-GPDriveMaps.ps1 -TargetUser -TargetComputer -CheckGroupOverlap directly and review its own report for this drive letter.')
+        } else {
+            $toCollect.Add('Review Audit-GPDriveMaps.ps1 output for conflicting drive-letter mappings across GPOs, and Search-SYSVOLScripts.ps1 output for any other script referencing this letter.')
+        }
 
         $verdicts.Add([PSCustomObject]@{
             Cause       = 'No cause identified from the evidence collected so far'
@@ -925,6 +1086,238 @@ function ConvertFrom-EvidenceManifest {
     $bundleResults
 }
 
+function ConvertFrom-GPDriveMapAudit {
+    <#
+    .SYNOPSIS
+        Parses Audit-GPDriveMaps.ps1's own CSV exports for the target drive letter into a
+        structured, three-state object - the second half of the GPO-side evidence this
+        toolkit collects but, before this function existed, discarded everything except one
+        Action string.
+
+    .DESCRIPTION
+        Audit-GPDriveMaps.ps1 (reused UNMODIFIED - see this toolkit's README) writes up to
+        seven CSVs into the case folder, and writes a given CSV ONLY when that finding type
+        has at least one row (every export in that script is inside an
+        "if (...Count -gt 0)" guard). That makes an ABSENT CSV ambiguous on its own: it can
+        mean either "the audit ran and found nothing for this finding type"
+        (EmptyButValid) or "the audit step itself never ran or failed" (CouldNotCollect) -
+        and those two cases point to opposite conclusions about how much to trust a report
+        that cites none of these findings. This function resolves that ambiguity using the
+        one piece of information a CSV's mere absence cannot supply: whether the audit step
+        itself ran successfully, passed in as -AuditStepRan by the caller (which reads it
+        from Invoke-Step's own Ran/ExitCode/Error return row, e.g. $auditStepResult.Ran
+        -and -not $auditStepResult.Error).
+
+        THE RULE THIS FUNCTION ENFORCES: for each finding type,
+          - if -AuditStepRan is $false           -> CouldNotCollect (the audit never ran/failed)
+          - elseif its CSV exists and has rows   -> Found
+          - elseif -AuditStepRan is $true         -> EmptyButValid (the audit ran; there were
+                                                      genuinely no rows of this type)
+        Getting this backwards - treating "the audit never ran" as "no conflicts found" - is
+        exactly the confident-plausible-wrong-answer failure this entire toolkit exists to
+        prevent, one CSV away from where Export-DriveMapEvidence.ps1's own three-state
+        contract already prevents it.
+
+        CSV column shapes (read verbatim from Audit-GPDriveMaps.ps1's own Export-CSVReports
+        function, not assumed):
+          *-AllMappings.csv    : GPOName, GPOId, GPOStatus, Configuration, Action, ActionName,
+                                  DriveLetter, Visibility, UNCPath, Label, Reconnect,
+                                  ILTSummary, GPOLinksText
+          *-Conflicts.csv      : DriveLetter, FindingType, Severity, GPOCount, PathCount,
+                                  Mappings (pre-flattened text), Recommendation
+          *-EffectiveMaps.csv  : DriveLetter, UNCPath, Label, Action, WinningGPO, WinningGPOId,
+                                  Enforced, LinkedTo, ILTSummary, Reason
+          *-PathValidation.csv : UNC reachability rows (UNCPath, Reachable, ... - read
+                                  defensively, schema not otherwise re-asserted here)
+          *-StaleHosts.csv     : StaleHost, DriveLetters, UNCPaths, AffectedGPOs, MappingCount,
+                                  Severity, Recommendation
+          *-GroupOverlap.csv   : DriveLetter, User, MemberOfGroups, PossiblePaths,
+                                  CompetingGroups
+          *-Duplicates.csv     : UNCPath, DriveLetters, AffectedGPOs, GPOCount, IsSameLetter,
+                                  Severity, Recommendation
+
+        THE LOOPBACK FINDING. *-EffectiveMaps.csv's Reason column already carries loopback
+        attribution per letter (Audit-GPDriveMaps.ps1's Get-EffectiveDriveMaps function
+        writes "Applied via loopback (<Mode>) from GPO linked to computer OU '<SOMPath>'"
+        when the winning GPO reached the user via a computer-linked GPO with User Group
+        Policy Loopback Processing enabled). In a Citrix/RDS environment with persistent
+        VDAs, that Reason text is the single most valuable field this function surfaces,
+        because it is the one piece of evidence that makes a Citrix precedence result
+        interpretable at all - so it is broken out onto its own LoopbackNote property
+        (populated only when Reason actually mentions loopback), not left buried inside the
+        raw EffectiveMap row.
+
+        EACH CSV IS LOCATED BY SUFFIX, not the full timestamped report-name pattern, exactly
+        as the existing $gpoActionCsvPath lookup a few lines above this function already
+        does for *-AllMappings.csv - that naming is Audit-GPDriveMaps.ps1's own
+        implementation detail, not part of this toolkit's contract with it.
+
+    .PARAMETER CaseFolder
+        The case folder Invoke-DriveMapInvestigation.ps1 passed as -OutputPath to
+        Audit-GPDriveMaps.ps1 - the same folder its CSVs land in directly (that script does
+        not create its own timestamped subfolder).
+    .PARAMETER DriveLetter
+        The affected drive letter. Accepts 'X', 'x' or 'X:' and is normalized internally.
+    .PARAMETER AuditStepRan
+        Whether Audit-GPDriveMaps.ps1 itself ran successfully as a child step (read by the
+        caller from Invoke-Step's own Ran/Error result). REQUIRED to distinguish
+        EmptyButValid from CouldNotCollect for every finding type below - an absent CSV means
+        two different things depending on this single value, and this function cannot infer
+        it from the case folder's contents alone (a folder with zero matching CSVs looks
+        identical in both cases).
+    #>
+    param(
+        [Parameter(Mandatory)][string]$CaseFolder,
+        [Parameter(Mandatory)][string]$DriveLetter,
+        [Parameter(Mandatory)][bool]$AuditStepRan
+    )
+
+    $letterUpper = $DriveLetter.Trim().TrimEnd(':').ToUpperInvariant()
+
+    # Finds the newest CSV matching a suffix in the case folder, exactly as the existing
+    # *-AllMappings.csv lookup earlier in this script already does. Returns $null when the
+    # audit step never ran a report into this folder at all - not the same thing as "found
+    # the report, but it had no rows for our finding type", which is handled by the caller
+    # checking $AuditStepRan directly rather than inferring it from a missing file.
+    function Find-AuditCsv {
+        param([string]$Suffix)
+        $match = Get-ChildItem -LiteralPath $CaseFolder -Filter "*-$Suffix" -File -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($match) { return $match.FullName }
+        return $null
+    }
+
+    # Reads one CSV, filtered to rows for our drive letter when a DriveLetter/DriveLetters
+    # column is present (StaleHosts/Duplicates carry a comma-joined DriveLetters column
+    # covering possibly several letters, so a substring/split match is used there instead of
+    # an exact -eq). Returns $null on any read failure - never an empty array - so a
+    # corrupt/partial CSV degrades to CouldNotCollect below rather than reading as a
+    # confirmed-empty result the audit never actually produced cleanly.
+    function Read-AuditCsvRows {
+        param([Parameter(Mandatory)][string]$Path)
+        try {
+            return @(Import-Csv -LiteralPath $Path -ErrorAction Stop)
+        } catch {
+            return $null
+        }
+    }
+
+    function Test-RowMatchesLetter {
+        param($Row, [string]$Letter)
+        if ($Row.PSObject.Properties['DriveLetter']) {
+            return ([string]$Row.DriveLetter).TrimEnd(':').ToUpperInvariant() -eq $Letter
+        }
+        if ($Row.PSObject.Properties['DriveLetters']) {
+            $parts = ([string]$Row.DriveLetters) -split ',' | ForEach-Object { $_.Trim().TrimEnd(':').ToUpperInvariant() }
+            return $parts -contains $Letter
+        }
+        return $false
+    }
+
+    # Builds one finding's three-state result. $CsvPath being $null means no matching CSV
+    # exists in the case folder at all - resolved to CouldNotCollect (audit step failed) or
+    # EmptyButValid (audit ran, genuinely nothing of this type) purely from $AuditStepRan,
+    # per this function's central rule. A CSV that DOES exist but fails to parse, or whose
+    # rows do not match our letter, is likewise resolved from $AuditStepRan for the same
+    # reason: Audit-GPDriveMaps.ps1 only ever writes a per-type CSV when at least one row
+    # anywhere in the domain matched - a present-but-non-matching-letter CSV still proves the
+    # audit ran, but this function reports per-letter state, so "no row for THIS letter" and
+    # "no CSV at all" collapse to the same EmptyButValid/CouldNotCollect resolution.
+    function New-AuditFindingResult {
+        param([string]$CsvPath, [string]$Letter, [switch]$NoLetterFilter)
+
+        if (-not $AuditStepRan) {
+            return [PSCustomObject]@{ State = 'CouldNotCollect'; Data = $null; Reason = 'The domain drive-maps audit step (Audit-GPDriveMaps.ps1) did not run successfully, so this finding type was never evaluated - absent from this report is NOT the same as ruled out.' }
+        }
+        if (-not $CsvPath) {
+            return [PSCustomObject]@{ State = 'EmptyButValid'; Data = @() }
+        }
+        $rows = Read-AuditCsvRows -Path $CsvPath
+        if ($null -eq $rows) {
+            return [PSCustomObject]@{ State = 'CouldNotCollect'; Data = $null; Reason = "The audit's $(Split-Path $CsvPath -Leaf) could not be read/parsed - this finding type could not be evaluated for this run." }
+        }
+        $matching = if ($NoLetterFilter) { $rows } else { @($rows | Where-Object { Test-RowMatchesLetter -Row $_ -Letter $Letter }) }
+        if ($matching.Count -eq 0) {
+            return [PSCustomObject]@{ State = 'EmptyButValid'; Data = @() }
+        }
+        return [PSCustomObject]@{ State = 'Found'; Data = $matching }
+    }
+
+    $conflictsCsv       = Find-AuditCsv -Suffix 'Conflicts.csv'
+    $effectiveMapsCsv   = Find-AuditCsv -Suffix 'EffectiveMaps.csv'
+    $pathValidationCsv  = Find-AuditCsv -Suffix 'PathValidation.csv'
+    $staleHostsCsv      = Find-AuditCsv -Suffix 'StaleHosts.csv'
+    $groupOverlapCsv    = Find-AuditCsv -Suffix 'GroupOverlap.csv'
+    $duplicatesCsv      = Find-AuditCsv -Suffix 'Duplicates.csv'
+
+    $conflicts      = New-AuditFindingResult -CsvPath $conflictsCsv      -Letter $letterUpper
+    $effectiveMap   = New-AuditFindingResult -CsvPath $effectiveMapsCsv  -Letter $letterUpper
+    $groupOverlap   = New-AuditFindingResult -CsvPath $groupOverlapCsv   -Letter $letterUpper
+    $staleHosts     = New-AuditFindingResult -CsvPath $staleHostsCsv     -Letter $letterUpper
+    $duplicates     = New-AuditFindingResult -CsvPath $duplicatesCsv     -Letter $letterUpper
+
+    # PathValidation is reachability data keyed by UNCPath, not by DriveLetter - it has no
+    # DriveLetter column to filter on (see the audit script's own PathValidation export,
+    # which passes $AuditResults.PathValidation straight through with no Select-Object at
+    # all). Filter it to the UNC path(s) this letter's effective map (or, failing that, its
+    # raw AllMappings rows) actually reference, so "unreachable target" evidence is scoped to
+    # OUR drive letter rather than every unreachable share in the whole domain.
+    $relevantUncPaths = New-Object System.Collections.Generic.HashSet[string]([StringComparer]::OrdinalIgnoreCase)
+    if ($effectiveMap.State -eq 'Found') {
+        foreach ($row in $effectiveMap.Data) { if ($row.UNCPath) { [void]$relevantUncPaths.Add($row.UNCPath) } }
+    }
+    $allMappingsCsv = Find-AuditCsv -Suffix 'AllMappings.csv'
+    if ($allMappingsCsv) {
+        $allRows = Read-AuditCsvRows -Path $allMappingsCsv
+        if ($null -ne $allRows) {
+            foreach ($row in ($allRows | Where-Object { Test-RowMatchesLetter -Row $_ -Letter $letterUpper })) {
+                if ($row.UNCPath) { [void]$relevantUncPaths.Add($row.UNCPath) }
+            }
+        }
+    }
+
+    if (-not $AuditStepRan) {
+        $pathValidation = [PSCustomObject]@{ State = 'CouldNotCollect'; Data = $null; Reason = 'The domain drive-maps audit step (Audit-GPDriveMaps.ps1) did not run successfully, so UNC reachability was never evaluated for this letter.' }
+    } elseif (-not $pathValidationCsv) {
+        $pathValidation = [PSCustomObject]@{ State = 'EmptyButValid'; Data = @() }
+    } else {
+        $pvRows = Read-AuditCsvRows -Path $pathValidationCsv
+        if ($null -eq $pvRows) {
+            $pathValidation = [PSCustomObject]@{ State = 'CouldNotCollect'; Data = $null; Reason = "The audit's $(Split-Path $pathValidationCsv -Leaf) could not be read/parsed - UNC reachability could not be evaluated for this run." }
+        } else {
+            $matchingPv = @($pvRows | Where-Object { $_.PSObject.Properties['UNCPath'] -and $relevantUncPaths.Contains([string]$_.UNCPath) })
+            $pathValidation = if ($matchingPv.Count -eq 0) {
+                [PSCustomObject]@{ State = 'EmptyButValid'; Data = @() }
+            } else {
+                [PSCustomObject]@{ State = 'Found'; Data = $matchingPv }
+            }
+        }
+    }
+
+    # LoopbackNote: EffectiveMaps.csv's own Reason column already carries loopback
+    # attribution per letter - this is the single most valuable field for a Citrix/RDS
+    # diagnosis (README: "Citrix / RDS environments"), so it is broken out explicitly rather
+    # than left for a caller to re-parse out of the raw EffectiveMap Data rows. $null (not an
+    # empty string) both when EffectiveMap itself is not Found and when it IS Found but its
+    # Reason simply does not mention loopback - both are "no loopback finding to report",
+    # distinct only in that the first also means "we don't even know the effective map".
+    $loopbackNote = $null
+    if ($effectiveMap.State -eq 'Found') {
+        $loopbackRow = $effectiveMap.Data | Where-Object { $_.PSObject.Properties['Reason'] -and $_.Reason -match 'loopback' } | Select-Object -First 1
+        if ($loopbackRow) { $loopbackNote = $loopbackRow.Reason }
+    }
+
+    [PSCustomObject]@{
+        Conflicts       = $conflicts
+        EffectiveMap    = $effectiveMap
+        PathValidation  = $pathValidation
+        StaleHosts      = $staleHosts
+        GroupOverlap    = $groupOverlap
+        Duplicates      = $duplicates
+        LoopbackNote    = $loopbackNote
+    }
+}
+
 if ($LoadFunctionsOnly) { return }
 
 # =============================================================================
@@ -1072,11 +1465,18 @@ if (-not $bundleFolder) {
 # ---------------------------------------------------------------------------
 $auditScript = Resolve-CompanionScript -FileName 'Audit-GPDriveMaps.ps1' -ScriptRoot $scriptRoot
 $gpoActionCsvPath = $null
+# Whether the audit step itself ran successfully - the one piece of information
+# ConvertFrom-GPDriveMapAudit needs to tell "the audit ran and found nothing for a finding
+# type" (EmptyButValid) apart from "the audit step never ran or failed" (CouldNotCollect).
+# See that function's own documentation for why a missing CSV cannot answer this alone.
+$auditStepRan = $false
 if ($auditScript) {
     $auditArgs = @{ OutputPath = $caseFolder; ExportFormat = 'CSV'; SkipBrowserOpen = $true }
     if ($Identity) { $auditArgs['TargetUser'] = $Identity }
     if ($ComputerName) { $auditArgs['TargetComputer'] = $ComputerName }
-    $steps.Add((Invoke-Step -Name 'Domain drive maps (GPO audit)' -ScriptPath $auditScript -Arguments $auditArgs -CaseFolder $caseFolder))
+    $auditStepResult = Invoke-Step -Name 'Domain drive maps (GPO audit)' -ScriptPath $auditScript -Arguments $auditArgs -CaseFolder $caseFolder
+    $steps.Add($auditStepResult)
+    $auditStepRan = [bool]($auditStepResult.Ran -and -not $auditStepResult.Error)
     # Audit-GPDriveMaps.ps1 (reused unmodified) writes "<ReportName>-AllMappings.csv" with
     # DriveLetter/Action columns among others - this is the source ConvertFrom-EvidenceBundle
     # reads Action from below. Located by suffix rather than assuming the full report-name
@@ -1087,6 +1487,20 @@ if ($auditScript) {
 } else {
     Write-Status WARN 'Audit-GPDriveMaps.ps1 was not found beside this script or in a sibling AD-GroupPolicy-DriveMaps folder - skipping the GPO-side audit.'
     $steps.Add([PSCustomObject]@{ Step = 'Domain drive maps (GPO audit)'; Script = 'Audit-GPDriveMaps.ps1'; Ran = $false; ExitCode = $null; Error = 'Script not found.' })
+}
+
+# Parse the rest of Audit-GPDriveMaps.ps1's own CSVs (Conflicts/EffectiveMaps/PathValidation/
+# StaleHosts/GroupOverlap/Duplicates) for this drive letter - everything ConvertFrom-EvidenceBundle
+# previously discarded except the single Action string read from AllMappings.csv above. Only
+# attempted when a -DriveLetter was actually supplied, since every finding type here is
+# scoped per-letter and there is nothing to filter to otherwise.
+$gpAuditData = $null
+if ($DriveLetter) {
+    try {
+        $gpAuditData = ConvertFrom-GPDriveMapAudit -CaseFolder $caseFolder -DriveLetter $DriveLetter -AuditStepRan $auditStepRan
+    } catch {
+        Write-Status WARN "Could not parse Audit-GPDriveMaps.ps1's CSV output: $($_.Exception.Message)"
+    }
 }
 
 $sysvolScript = Resolve-CompanionScript -FileName 'Search-SYSVOLScripts.ps1' -ScriptRoot $scriptRoot
@@ -1118,7 +1532,7 @@ if ($bundleFolder) {
             # read back" degradation is directly unit-testable - see its help.
             $bundleResults = ConvertFrom-EvidenceManifest -Manifest $manifest -BundleFolder $bundleFolder
 
-            $flatEvidence = ConvertFrom-EvidenceBundle -DriveLetter $DriveLetter -Results $bundleResults -ReadinessJsonPath $readinessJsonPath -GpoActionCsvPath $gpoActionCsvPath
+            $flatEvidence = ConvertFrom-EvidenceBundle -DriveLetter $DriveLetter -Results $bundleResults -ReadinessJsonPath $readinessJsonPath -GpoActionCsvPath $gpoActionCsvPath -GpAuditData $gpAuditData
             $verdicts = Get-DriveMapVerdict -Evidence $flatEvidence -DriveLetter $DriveLetter
         } catch {
             Write-Status WARN "Could not parse the evidence bundle's manifest.json: $($_.Exception.Message)"
@@ -1128,12 +1542,14 @@ if ($bundleFolder) {
     }
 } else {
     Write-Status WARN 'No evidence bundle was collected or supplied - producing a verdict from whatever was ruled out is not possible. Writing a no-cause-identified summary.'
-    $verdicts = Get-DriveMapVerdict -DriveLetter $DriveLetter -Evidence ([PSCustomObject]@{
-        GppApplied = $null; DrivePresent = $null; ScriptDeletions = $null
-        InRegistry = $null; InLiveMounts = $null; TargetingFailures = $null
-        Action = $null; FastLogonOptimization = $null; AlwaysWaitForNetwork = $null
-        ElevatedVisible = $null; UnelevatedVisible = $null; EnableLinkedConnections = $null
-    })
+    # The endpoint bundle is unavailable, but the domain-side GPO audit ($gpAuditData) is
+    # independent of it and may still have run successfully - route it through the SAME
+    # ConvertFrom-EvidenceBundle flattening used in the branch above (with an empty Results
+    # hashtable, so every endpoint-derived property still correctly resolves to $null) rather
+    # than hand-building a second placeholder object that could silently drift from the first
+    # and lose the Rule 6/7 GPO-audit findings on this branch alone.
+    $flatEvidence = ConvertFrom-EvidenceBundle -DriveLetter $DriveLetter -Results @{} -GpAuditData $gpAuditData
+    $verdicts = Get-DriveMapVerdict -DriveLetter $DriveLetter -Evidence $flatEvidence
 }
 
 Write-Host ''
@@ -1196,6 +1612,8 @@ if ($null -eq $flatEvidence) {
         InRegistry = $null; InLiveMounts = $null; TargetingFailures = $null
         Action = $null; FastLogonOptimization = $null; AlwaysWaitForNetwork = $null
         ElevatedVisible = $null; UnelevatedVisible = $null; EnableLinkedConnections = $null
+        ConflictingGpos = $null; ConflictDetail = $null
+        UnreachableTarget = $null; UnreachableDetail = $null; GpoAuditNote = $null
     }
 }
 $evidenceJsonPath = Join-Path $caseFolder 'Evidence.json'
