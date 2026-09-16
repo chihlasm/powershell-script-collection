@@ -38,6 +38,23 @@
        is therefore a required collection step, not optional enrichment.
        https://learn.microsoft.com/en-us/troubleshoot/windows-client/group-policy/scenario-guide-gpo-to-map-network-drive-doesn-t-apply-as-expected
 
+    3. CITRIX ENVIRONMENT PROBE (WEM agent presence; Citrix client drive mapping /
+       session-type detection). In a Citrix/RDS environment, TWO drive-mapping
+       mechanisms exist entirely OUTSIDE the scope of every other collector in
+       this script: Citrix Workspace Environment Management (WEM), which maps
+       drives via its own console-configured actions applied by its own agent,
+       completely invisible to Group Policy Preferences and to
+       Audit-GPDriveMaps.ps1 alike; and Citrix Client Drive Mapping (CDM), which
+       redirects the ENDPOINT DEVICE's own drives into the session as a virtual
+       channel, not a network mapping at all. Both are collected here as
+       first-class evidence rather than left as blind spots. Per this toolkit's
+       verification rule, the WEM service name is read from Citrix's own
+       documentation, and the CDM collector reports only raw, directly
+       observable data (SESSIONNAME; Citrix VDA registration registry key
+       presence) rather than guess at an unverified signal for "is THIS letter
+       specifically a CDM drive" - no such signal is documented by Citrix. See
+       this collector's own inline comments for the exact sources consulted.
+
     THE THREE-STATE CONTRACT. Every collector in this script returns the result of
     New-CollectionResult with a State of exactly 'Found', 'EmptyButValid', or
     'CouldNotCollect' (the last always carrying a Reason). A collector that
@@ -149,6 +166,40 @@
       proof the mapping doesn't exist.
       MountPoints2 registry path, HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2:
         https://learn.microsoft.com/en-us/troubleshoot/windows-server/networking/mapped-network-drive-disconnected
+      Citrix WEM agent service names - "Citrix WEM Agent Host Service" (formerly
+      "Norskale Agent Host Service") and the companion "Citrix WEM Agent User
+      Logon Service" - quoted directly from Citrix's own Agent documentation:
+        https://docs.citrix.com/en-us/workspace-environment-management/current-release/install-and-configure/agent-host.html
+      Citrix Client Drive Mapping (CDM) default drive-letter assignment (client
+      drives assigned starting at V: and working backward) and the modern
+      default of mapping client drives as UNC links rather than lettered
+      drives (legacy lettered format re-enabled via
+      HKLM\Software\Citrix\UncLinks UNCEnabled=0, a VDA-side setting):
+        https://docs.citrix.com/en-us/citrix-virtual-apps-desktops/devices/client-drive-mapping.html
+        https://docs.citrix.com/en-us/citrix-workspace-app-for-windows/client-drive-mapping.html
+        https://support.citrix.com/article/CTX127968
+      NOTE ON VERIFICATION: neither of the above CDM pages (nor a further
+      web search restricted to docs.citrix.com/support.citrix.com) documents a
+      registry value, WMI property, or other queryable signal that lets a
+      script running inside a session positively identify a SPECIFIC drive
+      letter as a CDM mapping rather than a network mapping. Per this
+      toolkit's rule against asserting unverified facts, this script does not
+      guess at one - CitrixClientDriveMapping reports the SESSIONNAME
+      environment variable and the presence of the Citrix VDA registration
+      registry key as raw, directly observable data points only, and states
+      plainly that per-letter CDM confirmation could not be automated. A
+      commonly repeated claim that a Citrix ICA/HDX session's SESSIONNAME
+      begins with "ICA-" was researched and traced only to third-party
+      forum/community content, never to an authoritative Microsoft or Citrix
+      page - it is deliberately NOT asserted here as a verified fact, and this
+      script does not pattern-match SESSIONNAME against it.
+      Citrix VDA registration: HKLM\Software\Citrix\VirtualDesktopAgent (or
+      ...\Wow6432Node\Citrix\VirtualDesktopAgent) holds the ListOfDDCs value
+      used for registry-based Delivery Controller configuration; its presence
+      is corroborating evidence a VDA is installed, not proof either way (the
+      page does not state every VDA installation creates this key - e.g. one
+      configured via Active Directory OU instead of the registry may not):
+        https://docs.citrix.com/en-us/citrix-virtual-apps-desktops/manage-deployment/vda-registration.html
 #>
 [CmdletBinding()]
 param(
@@ -979,6 +1030,116 @@ $networkProfileResult = Invoke-Collector -Name 'NetworkProfile' -Collector {
     }
 }
 
+# ---------------------------------------------------------------------------
+# 15. Citrix WEM (Workspace Environment Management) agent presence. WEM maps drives
+# entirely OUTSIDE Group Policy - via its own console-configured actions applied by its own
+# agent - so a WEM-mapped drive is completely invisible to every Group-Policy-side collector
+# in this toolkit (GppEvents, GpOperationalEvents, Audit-GPDriveMaps.ps1). If WEM is present,
+# it is a first-class suspect that must be ruled in or out explicitly, not left undetected.
+# The user reported not believing WEM is deployed in this environment; a definitive
+# "not present" here closes that question permanently rather than leaving it assumed.
+#
+# Service name verified against Citrix's own documentation (not assumed or recalled from
+# training data, per this toolkit's verification rule): "After installation, the agent runs
+# as Citrix WEM Agent Host Service (formerly Norskale Agent Host Service) and Citrix WEM
+# Agent User Logon Service."
+# https://docs.citrix.com/en-us/workspace-environment-management/current-release/install-and-configure/agent-host.html
+# Checked by NAME rather than by matching on "WEM"/"Norskale" substrings in the service
+# display name, so a renamed or unrelated service can never produce a false positive.
+# ---------------------------------------------------------------------------
+$wemAgentResult = Invoke-Collector -Name 'CitrixWemAgentPresence' -Collector {
+    $serviceNames = @('Citrix WEM Agent Host Service', 'Norskale Agent Host Service')
+    $scriptBlock = {
+        param($Names)
+        foreach ($n in $Names) {
+            $svc = Get-Service -Name $n -ErrorAction SilentlyContinue
+            if ($svc) {
+                return [PSCustomObject]@{ ServiceName = $svc.Name; DisplayName = $svc.DisplayName; Status = $svc.Status.ToString() }
+            }
+        }
+        return $null
+    }
+    $found = if ($isLocal) {
+        & $scriptBlock $serviceNames
+    } else {
+        Invoke-Command -ComputerName $ComputerName -ErrorAction Stop -ScriptBlock $scriptBlock -ArgumentList (,$serviceNames)
+    }
+    if ($null -eq $found) {
+        # A definitive, confirmed-absent result - not "could not check". Get-Service with
+        # -ErrorAction SilentlyContinue returning nothing IS a successful check that found no
+        # matching service, distinct from a remoting/access failure (caught below).
+        return New-CollectionResult -State 'EmptyButValid' -Data @()
+    }
+    New-CollectionResult -State 'Found' -Data @([PSCustomObject]@{
+        ServiceName = $found.ServiceName; DisplayName = $found.DisplayName; Status = $found.Status
+    })
+}
+
+# ---------------------------------------------------------------------------
+# 16. Citrix client drive mapping (CDM) - is the target letter a Citrix client-side drive
+# redirected INTO the session, rather than a network mapping at all? This is a fundamentally
+# different kind of "drive" than everything else this toolkit investigates: CDM drives are
+# session-scoped virtual channel redirections from the endpoint device, not SMB mappings, so
+# neither Group Policy nor a logon script can be their root cause.
+#
+# VERIFICATION RESULT: Citrix's own CDM documentation confirms the DEFAULT drive-letter
+# assignment convention (client drives are assigned starting at V: and working backward) but
+# does NOT document any registry value, WMI property, or other queryable signal that lets a
+# script running inside the session positively identify a SPECIFIC drive letter as a CDM
+# mapping rather than a network mapping - modern Citrix Virtual Apps and Desktops maps client
+# drives as UNC links by default (not as lettered drives at all) unless the legacy
+# HKLM\Software\Citrix\UncLinks UNCEnabled=0 format is explicitly configured, which itself is
+# a Citrix Virtual Delivery Agent-side (not endpoint-side) setting this collector has no
+# access to confirm from inside a user session either.
+# https://docs.citrix.com/en-us/citrix-virtual-apps-desktops/devices/client-drive-mapping.html
+# https://docs.citrix.com/en-us/citrix-workspace-app-for-windows/client-drive-mapping.html
+# https://support.citrix.com/article/CTX127968
+#
+# SECOND VERIFICATION RESULT (session-type signal): this script's research also looked for a
+# documented way to tell whether the CURRENT session is a Citrix ICA/HDX session at all (as
+# distinct from RDP or console), since that would at least bound whether CDM is possible
+# before chasing a specific letter by hand. Neither learn.microsoft.com nor docs.citrix.com
+# was found to document what value the SESSIONNAME environment variable takes for a Citrix
+# ICA/HDX session specifically (a commonly repeated claim that it begins "ICA-" was traced
+# only to third-party forum/community content, never to an authoritative Microsoft or Citrix
+# page, and is therefore NOT asserted here as a verified fact).
+#
+# Per this toolkit's rule ("if you cannot verify a fact, report CouldNotCollect with the
+# reason rather than guessing" - see DriveMapReference.psd1's own NoBackgroundPolicy and
+# HKCU\Network precedents), this collector does not attempt to classify the session by
+# pattern-matching SESSIONNAME against an unverified prefix. It reports the raw, directly
+# observable facts only - the SESSIONNAME value itself, and whether the registry location
+# Citrix's own VDA registration documentation names is present. That page documents
+# HKLM\Software\Citrix\VirtualDesktopAgent (or ...\Wow6432Node\Citrix\VirtualDesktopAgent on
+# 32-bit) as where the VDA stores its ListOfDDCs value for registry-based Delivery
+# Controller configuration - it does NOT state this key is guaranteed to exist on every VDA
+# installation (e.g. one configured entirely via Active Directory OU instead), so its
+# presence is corroborating evidence that a VDA is installed here, not proof either way -
+# reported as such, the same "evidence, not proof" treatment this toolkit already gives GPP
+# trace file presence.
+# https://docs.citrix.com/en-us/citrix-virtual-apps-desktops/manage-deployment/vda-registration.html
+# ---------------------------------------------------------------------------
+$citrixCdmResult = Invoke-Collector -Name 'CitrixClientDriveMapping' -Collector {
+    if (-not $isLocal) {
+        return New-CollectionResult -State 'CouldNotCollect' -Reason 'SESSIONNAME reflects the CALLING process''s own session, not the target machine''s interactive session, so this cannot be checked remotely. Re-run locally on the machine the user is actually logged into.'
+    }
+    $sessionName = $env:SESSIONNAME
+    $vdaRegistryKeyFound = $false
+    foreach ($vdaKeyPath in 'HKLM:\SOFTWARE\Citrix\VirtualDesktopAgent', 'HKLM:\SOFTWARE\Wow6432Node\Citrix\VirtualDesktopAgent') {
+        try {
+            if (Test-Path -LiteralPath $vdaKeyPath -ErrorAction SilentlyContinue) { $vdaRegistryKeyFound = $true; break }
+        } catch { }
+    }
+    if ([string]::IsNullOrWhiteSpace($sessionName) -and -not $vdaRegistryKeyFound) {
+        return New-CollectionResult -State 'CouldNotCollect' -Reason 'Neither SESSIONNAME nor the Citrix VDA registration registry key could be read, so whether this is a Citrix session/VDA could not be determined.'
+    }
+    $rows = @([PSCustomObject]@{
+        SessionName             = $sessionName
+        VdaRegistryKeyFound     = $vdaRegistryKeyFound
+        Note                    = "SESSIONNAME is '$sessionName'. Citrix does not document what value SESSIONNAME takes for an ICA/HDX session, so this script does not classify the session type from it - reported as raw data only. The Citrix VDA registration registry key (HKLM\Software\Citrix\VirtualDesktopAgent) was $(if ($vdaRegistryKeyFound) { 'FOUND - corroborating evidence a VDA is installed here, not proof' } else { 'not found - this is evidence, not proof, that no VDA is installed, since a VDA configured via Active Directory OU rather than registry may not create this key' }). Whether ${DriveLetter}: specifically is a Citrix client-mapped drive (CDM) rather than a network mapping cannot be confirmed automatically - no registry/WMI signal for this is documented by Citrix. Confirm by hand via Citrix Connection Center on the endpoint device, or the VDA's own client drive list."
+    })
+    New-CollectionResult -State 'Found' -Data $rows
+}
 
 # ---------------------------------------------------------------------------
 # Write the manifest and every collected data set into the bundle.
@@ -1027,6 +1188,8 @@ $csvExports = @{
     'OfflineFilesState.csv'         = $offlineFilesResult
     'DfsClientState.csv'            = $dfsStateResult
     'NetworkProfile.csv'            = $networkProfileResult
+    'CitrixWemAgentPresence.csv'    = $wemAgentResult
+    'CitrixClientDriveMapping.csv'  = $citrixCdmResult
 }
 
 # Mount-state comparison, computed from the two collectors above.
