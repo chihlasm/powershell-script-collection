@@ -101,8 +101,8 @@ Entries land in `%APPDATA%\VMware\credstore\vicredentials.xml` under the profile
 |------|----------|
 | `Hosts.csv` | Per ESXi host: connection/power state, maintenance mode, vendor, model, serial, BIOS, ESXi version+build, CPU model, sockets/cores/threads, CPU and memory capacity and live usage, uptime, boot time, cluster |
 | `VirtualMachines.csv` | Per VM: power state, host, cluster, folder, resource pool, vCPU, cores-per-socket, memory, provisioned vs used disk, datastores, guest OS (configured and running), hostname, IPs, VMware Tools version and status, hardware version, creation date, notes |
-| `Datastores.csv` | Per datastore: type, state, accessibility, capacity/used/free, uncommitted, total provisioned, provisioned:capacity ratio, overcommit flag, snapshot consumption |
-| `Snapshots.csv` | Per snapshot: VM, name, description, creation date, **age in days**, size (GB and MB), current flag, quiesced flag, parent, child count |
+| `Datastores.csv` | Per datastore: type, state, availability, capacity/used/free, uncommitted, total provisioned, provisioned:capacity ratio, overcommit flag, snapshot consumption |
+| `Snapshots.csv` | Per snapshot: VM, name, description, creation date, **age in days**, size (GB and MB), current flag, parent, child count |
 | `Clusters.csv` | vCenter only: HA and DRS configuration, EVC mode, host count, aggregate CPU and memory |
 | `HostCapacityRollup.csv` | Per host: VM counts, physical cores vs vCPU allocated, physical memory vs memory allocated, and the derived ratios |
 | `Summary.csv` | Per target: totals and environment-wide ratios |
@@ -135,11 +135,15 @@ A VM with disks on several datastores cannot have its snapshot size split betwee
 
 ### Hardware version
 
-Two columns: `HardwareVersion` (a string, e.g. `vmx-21`) and `HardwareVersionEnum`. Use the **string**. The enum is capped at `v18` in current PowerCLI, so any VM on newer hardware reports `Unknown` there — the kind of confidently wrong value that reads as a real finding.
+Reported as `HardwareVersion`, a string (e.g. `vmx-21`). PowerCLI also exposes a `Version` property, but it is an enum capped at `v18` — any VM on newer hardware reports `Unknown` there — and PowerCLI 13.3 deprecates it in favour of the string. The script reads only the string.
 
 ### VMware Tools
 
 `ToolsRunningStatus` and `ToolsVersionStatus` come from the current API fields. The older `toolsStatus` field has been deprecated since vSphere API 4.0 and is deliberately not read.
+
+### Deprecated properties
+
+Verified by reflection against `VMware.VimAutomation.Core 13.3.0.24145081`, these carry `[Obsolete]` and emit a console warning on every read, so the script avoids them: `Datastore.Accessible` (uses `State` instead), `Snapshot.Quiesced`, `Snapshot.Parent` (uses `ParentSnapshot`), `VMGuest.GuestId` (the script reads `VirtualMachine.GuestId`, which is not deprecated), and `Cluster.DrsMode` (uses `DrsAutomationLevel`). `VirtualMachine.Version` is warned about by the cmdlet layer rather than by the type.
 
 ### Standalone ESXi vs vCenter
 

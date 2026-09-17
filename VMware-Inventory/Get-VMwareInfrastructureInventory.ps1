@@ -132,7 +132,8 @@
       https://developer.broadcom.com/powercli/latest/vmware.vimautomation.core/structures/vmware.vimautomation.vicore.types.v1.inventory.virtualmachine
     PowerState enum = PoweredOff | PoweredOn | Suspended (VM; distinct from VMHostPowerState)
       https://developer.broadcom.com/powercli/latest/vmware.vimautomation.core/structures/vmware.vimautomation.vicore.types.v1.inventory.powerstate
-    VMVersion enum (capped at v18 - why HardwareVersion string is preferred)
+    VMVersion enum (capped at v18; VirtualMachine.Version is deprecated in PowerCLI
+    13.3 in favour of the HardwareVersion string, which this script uses)
       https://developer.broadcom.com/powercli/latest/vmware.vimautomation.core/structures/vmware.vimautomation.vicore.types.v1.vm.vmversion
     GuestInfo (toolsStatus deprecated since vSphere API 4.0; use ToolsRunningStatus /
     ToolsVersionStatus2)
@@ -141,6 +142,13 @@
       https://developer.broadcom.com/xapis/vsphere-web-services-api/latest/vim.Datastore.Summary.html
     Get-Snapshot (SizeGB requires Datastore > Browse datastore privilege)
       https://developer.broadcom.com/powercli/latest/vmware.vimautomation.core/commands/get-snapshot
+
+    DEPRECATIONS confirmed by reflection against VMware.VimAutomation.Core
+    13.3.0.24145081 - these carry [Obsolete] and warn on every read, so the script
+    avoids them: Datastore.Accessible (use State), Snapshot.Quiesced, Snapshot.Parent
+    (use ParentSnapshot), VMGuest.GuestId (use ConfiguredGuestId / RuntimeGuestId),
+    Cluster.DrsMode (use DrsAutomationLevel). VirtualMachine.Version is warned about by
+    the cmdlet layer rather than the type.
     Host uptime / boot time via ExtensionData
       https://developer.broadcom.com/xapis/vsphere-web-services-api/latest/vim.host.Summary.QuickStats.html
       https://developer.broadcom.com/xapis/vsphere-web-services-api/latest/vim.host.RuntimeInfo.html
@@ -522,7 +530,6 @@ function Get-VMInventory {
                 ToolsRunningStatus  = [string]$toolsRunning
                 ToolsVersionStatus  = [string]$toolsVersionStatus
                 HardwareVersion     = $vm.HardwareVersion
-                HardwareVersionEnum = [string]$vm.Version
                 CreateDate          = $vm.CreateDate
                 Notes               = $vm.Notes
                 CollectionNote      = ''
@@ -537,7 +544,7 @@ function Get-VMInventory {
                 GuestOSConfigured = $null; GuestOSRunning = $null; GuestState = $null
                 GuestHostName = $null; PrimaryIP = $null; AllIPs = $null
                 ToolsVersion = $null; ToolsRunningStatus = $null; ToolsVersionStatus = $null
-                HardwareVersion = $null; HardwareVersionEnum = $null
+                HardwareVersion = $null
                 CreateDate = $null; Notes = $null
                 CollectionNote = "PARTIAL: $($_.Exception.Message)"
             })
@@ -562,6 +569,12 @@ function Get-DatastoreInventory {
 
     foreach ($ds in $datastores) {
         try {
+            # Datastore.Accessible is deprecated in PowerCLI 13.3, which emits a warning
+            # on every read and directs callers to State instead. DatastoreState is
+            # Available | EnteringMaintenance | Maintenance | Unavailable; only
+            # Available guarantees the Uncommitted figure below is valid.
+            $dsAvailable = ($ds.State -eq 'Available')
+
             $capacityGB = if ($null -ne $ds.CapacityGB)  { [math]::Round($ds.CapacityGB, 2) }  else { $null }
             $freeGB     = if ($null -ne $ds.FreeSpaceGB) { [math]::Round($ds.FreeSpaceGB, 2) } else { $null }
             $usedGB     = if ($null -ne $capacityGB -and $null -ne $freeGB) { [math]::Round($capacityGB - $freeGB, 2) } else { $null }
@@ -576,7 +589,7 @@ function Get-DatastoreInventory {
             # the amount already written - a plausible, confidently wrong number.
             # https://developer.broadcom.com/xapis/vsphere-web-services-api/latest/vim.Datastore.Summary.html
             $uncommittedGB = $null
-            if ($ds.Accessible -and $null -ne $ds.ExtensionData.Summary.Uncommitted) {
+            if ($dsAvailable -and $null -ne $ds.ExtensionData.Summary.Uncommitted) {
                 $uncommittedGB = [math]::Round($ds.ExtensionData.Summary.Uncommitted / 1GB, 2)
             }
 
@@ -589,7 +602,7 @@ function Get-DatastoreInventory {
                 DatastoreName         = $ds.Name
                 Type                  = $ds.Type
                 State                 = [string]$ds.State
-                Accessible            = $ds.Accessible
+                Available             = $dsAvailable
                 CapacityGB            = $capacityGB
                 UsedGB                = $usedGB
                 FreeGB                = $freeGB
@@ -600,12 +613,12 @@ function Get-DatastoreInventory {
                 IsOvercommitted       = if ($null -ne $provisionedGB -and $null -ne $capacityGB) { $provisionedGB -gt $capacityGB } else { $null }
                 SnapshotGB            = $null   # filled in by the caller once snapshots are known
                 SnapshotPctOfUsed     = $null   # filled in by the caller
-                CollectionNote        = if ($ds.Accessible) { '' } else { 'Datastore not accessible; uncommitted/provisioned figures unavailable.' }
+                CollectionNote        = if ($dsAvailable) { '' } else { 'Datastore not available; uncommitted/provisioned figures unavailable.' }
             })
         } catch {
             $rows.Add([PSCustomObject]@{
                 Target = $Connection.Name; DatastoreName = $ds.Name; Type = $ds.Type
-                State = [string]$ds.State; Accessible = $ds.Accessible
+                State = [string]$ds.State; Available = $null
                 CapacityGB = $null; UsedGB = $null; FreeGB = $null; UsedPercent = $null
                 UncommittedGB = $null; ProvisionedGB = $null; ProvisionedVsCapacity = $null
                 IsOvercommitted = $null; SnapshotGB = $null; SnapshotPctOfUsed = $null
@@ -625,7 +638,7 @@ function Get-DatastoreInventory {
 function Get-SnapshotInventory {
     param(
         [Parameter(Mandatory)] $Connection,
-        [Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $VMs
+        [Parameter(Mandatory)] [AllowNull()] [AllowEmptyCollection()] [object[]] $VMs
     )
 
     $rows = New-Object System.Collections.Generic.List[object]
@@ -671,7 +684,6 @@ function Get-SnapshotInventory {
                 SizeGB             = $sizeGB
                 SizeMB             = $sizeMB
                 IsCurrent          = $snap.IsCurrent
-                Quiesced           = $snap.Quiesced
                 PowerStateAtCreate = [string]$snap.PowerState
                 ParentSnapshot     = $snap.ParentSnapshot.Name
                 ChildCount         = @($snap.Children).Count
@@ -681,7 +693,7 @@ function Get-SnapshotInventory {
             $rows.Add([PSCustomObject]@{
                 Target = $Connection.Name; VMName = $snap.VM.Name; SnapshotName = $snap.Name
                 Description = $null; Created = $snap.Created; AgeDays = $null
-                SizeGB = $null; SizeMB = $null; IsCurrent = $null; Quiesced = $null
+                SizeGB = $null; SizeMB = $null; IsCurrent = $null
                 PowerStateAtCreate = $null; ParentSnapshot = $null; ChildCount = $null
                 CollectionNote = "PARTIAL: $($_.Exception.Message)"
             })
@@ -761,8 +773,8 @@ function Get-ClusterInventory {
 
 function Get-HostRollup {
     param(
-        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $HostRows,
-        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $VMRows
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][object[]] $HostRows,
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][object[]] $VMRows
     )
 
     $rollup = New-Object System.Collections.Generic.List[object]
@@ -808,9 +820,9 @@ function Get-HostRollup {
 
 function Add-SnapshotDataToDatastores {
     param(
-        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $DatastoreRows,
-        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $SnapshotRows,
-        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $VMRows
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][object[]] $DatastoreRows,
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][object[]] $SnapshotRows,
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][object[]] $VMRows
     )
 
     if (-not $SnapshotRows -or $SnapshotRows.Count -eq 0) { return }
@@ -868,10 +880,10 @@ function Add-SnapshotDataToDatastores {
 
 function Get-EnvironmentSummary {
     param(
-        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $HostRows,
-        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $VMRows,
-        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $DatastoreRows,
-        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $SnapshotRows
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][object[]] $HostRows,
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][object[]] $VMRows,
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][object[]] $DatastoreRows,
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][object[]] $SnapshotRows
     )
 
     $summary = New-Object System.Collections.Generic.List[object]
