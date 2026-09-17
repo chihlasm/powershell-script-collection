@@ -1,5 +1,26 @@
 # Remove-OrphanedFSLogixTempProfiles.ps1
 # Removes temporary user profiles that were created for FSLogix failures when users are no longer logged in
+#
+# ############################################################################
+# # !!! DO NOT USE — BROKEN !!!                                               #
+# #                                                                           #
+# # This script has unsafe defects that can delete LIVE user profiles         #
+# # mid-session. Do not run in any environment until rewritten. A hard-stop   #
+# # guard at the top of the body aborts execution — remove only after a      #
+# # proper rewrite (see README.md).                                           #
+# #                                                                           #
+# # Known defects:                                                            #
+# #   - No SupportsShouldProcess; hand-rolled -WhatIf does not integrate      #
+# #     with PowerShell's confirmation pipeline and skips audit logging.      #
+# #   - No minimum-age filter: a user who logged off seconds ago is eligible  #
+# #     for deletion while FSLogix is still flushing the VHD.                 #
+# #   - 'query session' parsing mis-identifies usernames, so the active-user  #
+# #     guard is unreliable — currently logged-in users may be deleted.       #
+# #   - Test-UserFolderExists has a parameter/argument mismatch, making its   #
+# #     FolderExists result meaningless.                                      #
+# #                                                                           #
+# # See CitrixVDADiagnostics/README.md for rewrite requirements.              #
+# ############################################################################
 
 param(
     [switch]$WhatIf,
@@ -7,6 +28,8 @@ param(
     [switch]$Verbose,
     [string]$LogPath = ""
 )
+
+throw "Remove-OrphanedFSLogixTempProfiles.ps1 is disabled pending rewrite. See script header and README.md for details."
 
 # Function to get active user sessions
 function Get-ActiveUserSessions {

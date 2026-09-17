@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="workbench-token" content="__WORKBENCH_TOKEN__">
   <title>MSP Troubleshooting Workbench</title>
   <style>
     :root {
@@ -172,9 +173,13 @@
 
     .check-panel {
       display: grid;
-      grid-template-columns: minmax(180px, 1fr) minmax(140px, 0.7fr) minmax(92px, 0.35fr) max-content;
       gap: 12px;
-      align-items: end;
+    }
+
+    .check-inputs {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
     }
 
     .check-list {
@@ -224,6 +229,64 @@
       font-size: 0.9rem;
     }
 
+    .workspace-subtitle {
+      margin: 18px 0 8px;
+      font-size: 0.95rem;
+      font-weight: 650;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .note-list {
+      display: grid;
+      gap: 6px;
+      margin: 0 0 10px;
+      padding: 0;
+      list-style: none;
+    }
+
+    .note-form {
+      display: flex;
+      gap: 10px;
+    }
+
+    .note-form input {
+      flex: 1;
+    }
+
+    .generated-notes {
+      white-space: pre-wrap;
+      background: var(--field-bg);
+      border: 1px solid var(--panel-border);
+      border-radius: 4px;
+      padding: 14px;
+      margin: 0 0 12px;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 0.85rem;
+    }
+
+    .status-pill {
+      display: inline-block;
+      min-width: 44px;
+      padding: 1px 8px;
+      border-radius: 3px;
+      font-size: 0.78rem;
+      font-weight: 700;
+      text-align: center;
+    }
+
+    .status-pass { background: #1f4d2e; color: #9be3ae; }
+    .status-warn { background: #4d3f1f; color: #e3cf9b; }
+    .status-fail { background: #4d1f1f; color: #e39b9b; }
+
+    .evidence-list {
+      margin: 6px 0 0;
+      padding-left: 18px;
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+
     @media (prefers-color-scheme: light) {
       :root {
         --bg: #f5f7fa;
@@ -249,7 +312,7 @@
         grid-column: span 1;
       }
 
-      .check-panel,
+      .check-inputs,
       .check-item {
         grid-template-columns: 1fr;
       }
@@ -334,36 +397,218 @@
       <ul id="case-list" class="case-list"></ul>
     </section>
 
+    <section id="workspace-section" aria-labelledby="workspace-title" hidden>
+      <h2 id="workspace-title">Case workspace</h2>
+      <dl id="workspace-meta"></dl>
+
+      <h3 class="workspace-subtitle">Check results</h3>
+      <p id="workspace-checks-empty" class="empty">No checks have been run for this case yet.</p>
+      <ul id="workspace-checks" class="check-list"></ul>
+
+      <h3 class="workspace-subtitle">Notes</h3>
+      <p id="workspace-notes-empty" class="empty">No notes yet.</p>
+      <ul id="workspace-notes" class="note-list"></ul>
+      <div class="note-form">
+        <input id="note-text" placeholder="Add a note about what you observed or did..." autocomplete="off">
+        <button type="button" id="add-note-button">Add note</button>
+      </div>
+
+      <h3 class="workspace-subtitle">Ticket notes</h3>
+      <pre id="generated-notes" class="generated-notes" hidden></pre>
+      <div class="workspace-actions" aria-label="Case workspace actions">
+        <button type="button" id="generate-notes-button">Generate Notes</button>
+        <button type="button" id="copy-notes-button" hidden>Copy to clipboard</button>
+        <button type="button" id="export-evidence-button">Export Evidence</button>
+        <p id="workspace-action-message" class="form-message" aria-live="polite"></p>
+      </div>
+    </section>
+
     <section aria-labelledby="checks-title">
       <h2 id="checks-title">Checks</h2>
       <p id="checks-empty" class="empty">Loading checks...</p>
       <ul id="check-list" class="check-list"></ul>
       <form id="check-form" class="check-panel">
         <div class="field">
-          <label for="check-case-id">Case ID</label>
-          <input id="check-case-id" name="caseId" autocomplete="off" required>
+          <label for="check-select">Check to run</label>
+          <select id="check-select" name="checkId" required></select>
         </div>
-        <div class="field">
-          <label for="check-target-address">Address</label>
-          <input id="check-target-address" name="targetAddress" autocomplete="off" value="localhost" required>
+        <div id="check-inputs" class="check-inputs"></div>
+        <div class="form-actions">
+          <button type="submit" id="run-check-button">Run check</button>
+          <p id="check-form-message" class="form-message" aria-live="polite"></p>
         </div>
-        <div class="field">
-          <label for="check-port">Port</label>
-          <input id="check-port" name="port" type="number" min="1" max="65535" value="443">
-        </div>
-        <button type="submit" id="run-check-button">Run check</button>
       </form>
-      <div class="workspace-actions" aria-label="Case workspace actions">
-        <button type="button" id="generate-notes-button">Generate Notes</button>
-        <button type="button" id="export-evidence-button">Export Evidence</button>
-        <p id="workspace-action-message" class="form-message" aria-live="polite"></p>
-      </div>
-      <p id="check-form-message" class="form-message" aria-live="polite"></p>
     </section>
   </main>
 
   <script>
     let checkCatalog = [];
+    let selectedCase = null;
+
+    const CHECK_INPUT_FIELDS = {
+      targetAddress: { label: "Address (host or IP)", type: "text", placeholder: "e.g. SRV01 or 10.0.0.5", caseField: "TargetAddress" },
+      port: { label: "Port", type: "number", placeholder: "e.g. 443", min: 1, max: 65535, caseField: null },
+      affectedUser: { label: "User", type: "text", placeholder: "e.g. jdoe", caseField: "AffectedUser" },
+      affectedDevice: { label: "Device", type: "text", placeholder: "e.g. RDSH01", caseField: "AffectedDevice" },
+      daysBack: { label: "Days back", type: "number", placeholder: "e.g. 7", min: 1, max: 90, caseField: null },
+      domainController: { label: "Domain controller (optional)", type: "text", placeholder: "e.g. DC01, DC02", caseField: null }
+    };
+
+    function renderCheckInputs() {
+      const container = document.getElementById("check-inputs");
+      container.innerHTML = "";
+
+      const checkId = document.getElementById("check-select").value;
+      const check = checkCatalog.find((entry) => entry.CheckId === checkId);
+      if (!check) {
+        return;
+      }
+
+      (check.Inputs || []).forEach((inputName) => {
+        const meta = CHECK_INPUT_FIELDS[inputName] || { label: inputName, type: "text", placeholder: "", caseField: null };
+        const field = document.createElement("div");
+        field.className = "field";
+
+        const label = document.createElement("label");
+        label.setAttribute("for", "check-input-" + inputName);
+        label.textContent = meta.label;
+
+        const input = document.createElement("input");
+        input.id = "check-input-" + inputName;
+        input.name = inputName;
+        input.type = meta.type;
+        input.autocomplete = "off";
+        if (meta.placeholder) { input.placeholder = meta.placeholder; }
+        if (meta.min !== undefined) { input.min = meta.min; }
+        if (meta.max !== undefined) { input.max = meta.max; }
+        if (selectedCase && meta.caseField && selectedCase[meta.caseField]) {
+          input.value = selectedCase[meta.caseField];
+        }
+
+        field.append(label, input);
+        container.appendChild(field);
+      });
+    }
+
+    async function selectCase(caseId) {
+      const message = document.getElementById("workspace-action-message");
+      try {
+        const response = await fetch("/api/cases/" + encodeURIComponent(caseId));
+        if (!response.ok) {
+          throw new Error("Could not load case " + caseId);
+        }
+
+        selectedCase = await response.json();
+        renderWorkspace();
+        renderCheckInputs();
+      }
+      catch (error) {
+        message.className = "form-message error";
+        message.textContent = error.message;
+      }
+    }
+
+    function statusPill(status) {
+      const pill = document.createElement("span");
+      const value = (status || "").toLowerCase();
+      pill.className = "status-pill status-" + (["pass", "warn", "fail"].includes(value) ? value : "warn");
+      pill.textContent = status || "?";
+      return pill;
+    }
+
+    function renderWorkspace() {
+      const section = document.getElementById("workspace-section");
+      if (!selectedCase) {
+        section.hidden = true;
+        return;
+      }
+
+      section.hidden = false;
+      document.getElementById("workspace-title").textContent = "Case workspace — " + selectedCase.CaseId;
+
+      const meta = document.getElementById("workspace-meta");
+      meta.innerHTML = "";
+      [
+        ["Client", selectedCase.ClientName],
+        ["Ticket", selectedCase.TicketNumber],
+        ["Issue type", selectedCase.IssueType],
+        ["User", selectedCase.AffectedUser],
+        ["Device", selectedCase.AffectedDevice]
+      ].forEach(([label, value]) => {
+        if (!value) { return; }
+        const dt = document.createElement("dt");
+        dt.textContent = label;
+        const dd = document.createElement("dd");
+        dd.textContent = value;
+        meta.append(dt, dd);
+      });
+
+      const checks = selectedCase.Checks || [];
+      const checksList = document.getElementById("workspace-checks");
+      document.getElementById("workspace-checks-empty").hidden = checks.length > 0;
+      checksList.innerHTML = "";
+      checks.forEach((check) => {
+        const item = document.createElement("li");
+        item.className = "check-item";
+
+        const header = document.createElement("div");
+        const name = document.createElement("span");
+        name.className = "check-name";
+        name.textContent = check.Name || check.CheckId;
+        header.append(name, document.createTextNode(" "), statusPill(check.Status));
+
+        const summary = document.createElement("div");
+        summary.className = "case-meta";
+        summary.textContent = (check.Summary || "") + (check.FinishedAt ? " (" + check.FinishedAt + ")" : "");
+
+        const evidenceList = document.createElement("ul");
+        evidenceList.className = "evidence-list";
+        (check.Evidence || []).forEach((evidence) => {
+          const evidenceItem = document.createElement("li");
+          evidenceItem.textContent = evidence.Name + " [" + evidence.Status + "]: " + evidence.Detail;
+          evidenceList.appendChild(evidenceItem);
+        });
+
+        item.append(header, summary, evidenceList);
+        checksList.appendChild(item);
+      });
+
+      const notes = selectedCase.Notes || [];
+      const notesList = document.getElementById("workspace-notes");
+      document.getElementById("workspace-notes-empty").hidden = notes.length > 0;
+      notesList.innerHTML = "";
+      notes.forEach((note) => {
+        const item = document.createElement("li");
+        item.className = "case-meta";
+        item.textContent = (note.CreatedAt ? note.CreatedAt + " — " : "") + note.Text;
+        notesList.appendChild(item);
+      });
+
+      const generated = document.getElementById("generated-notes");
+      const copyButton = document.getElementById("copy-notes-button");
+      if (selectedCase.GeneratedSummary) {
+        generated.textContent = selectedCase.GeneratedSummary;
+        generated.hidden = false;
+        copyButton.hidden = false;
+      }
+      else {
+        generated.hidden = true;
+        copyButton.hidden = true;
+      }
+    }
+
+    const workbenchToken = document.querySelector('meta[name="workbench-token"]').content;
+
+    async function postJson(url, body) {
+      return fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Workbench-Token": workbenchToken
+        },
+        body: JSON.stringify(body === undefined ? {} : body)
+      });
+    }
 
     async function loadStatus() {
       const loading = document.getElementById("status-loading");
@@ -427,8 +672,7 @@
           list.appendChild(item);
 
           item.addEventListener("click", () => {
-            document.getElementById("check-case-id").value = workbenchCase.CaseId || "";
-            document.getElementById("check-target-address").value = workbenchCase.TargetAddress || "localhost";
+            selectCase(workbenchCase.CaseId);
           });
         });
       }
@@ -470,6 +714,16 @@
           item.append(name, category, description);
           list.appendChild(item);
         });
+
+        const select = document.getElementById("check-select");
+        select.innerHTML = "";
+        checkCatalog.forEach((check) => {
+          const option = document.createElement("option");
+          option.value = check.CheckId;
+          option.textContent = check.Name + " — " + (check.Description || check.Category || "");
+          select.appendChild(option);
+        });
+        renderCheckInputs();
       }
       catch (error) {
         empty.textContent = "Check catalog unavailable.";
@@ -490,13 +744,7 @@
       message.textContent = "Creating case...";
 
       try {
-        const response = await fetch("/api/cases", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify(body)
-        });
+        const response = await postJson("/api/cases", body);
 
         const data = await response.json();
         if (!response.ok) {
@@ -505,8 +753,7 @@
 
         form.reset();
         message.textContent = "Created " + data.CaseId + ".";
-        document.getElementById("check-case-id").value = data.CaseId || "";
-        document.getElementById("check-target-address").value = data.TargetAddress || "localhost";
+        await selectCase(data.CaseId);
         await loadCases();
       }
       catch (error) {
@@ -521,17 +768,23 @@
     async function runCheck(event) {
       event.preventDefault();
 
-      const form = event.currentTarget;
       const button = document.getElementById("run-check-button");
       const message = document.getElementById("check-form-message");
-      const formData = new FormData(form);
-      const body = Object.fromEntries(formData.entries());
-      const caseId = body.caseId || "";
-      const checkId = checkCatalog[0] ? checkCatalog[0].CheckId : "network.quick";
 
-      delete body.caseId;
-      if (!body.port) {
-        delete body.port;
+      const checkId = document.getElementById("check-select").value;
+      const caseId = selectedCase ? selectedCase.CaseId : "";
+      const body = {};
+
+      document.querySelectorAll("#check-inputs input").forEach((input) => {
+        if (input.value.trim() !== "") {
+          body[input.name] = input.value.trim();
+        }
+      });
+
+      if (!caseId) {
+        message.className = "form-message error";
+        message.textContent = "Select a case first, or create one above.";
+        return;
       }
 
       button.disabled = true;
@@ -539,13 +792,7 @@
       message.textContent = "Running check...";
 
       try {
-        const response = await fetch("/api/cases/" + encodeURIComponent(caseId) + "/checks/" + encodeURIComponent(checkId) + "/run", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify(body)
-        });
+        const response = await postJson("/api/cases/" + encodeURIComponent(caseId) + "/checks/" + encodeURIComponent(checkId) + "/run", body);
 
         const data = await response.json();
         if (!response.ok) {
@@ -555,6 +802,7 @@
         const checks = data.Checks || [];
         const latest = checks[checks.length - 1] || {};
         message.textContent = (latest.Status || "Done") + ": " + (latest.Summary || "Check completed.");
+        await selectCase(caseId);
         await loadCases();
       }
       catch (error) {
@@ -566,23 +814,62 @@
       }
     }
 
+    async function addNote() {
+      const input = document.getElementById("note-text");
+      const message = document.getElementById("workspace-action-message");
+      if (!selectedCase || input.value.trim() === "") {
+        return;
+      }
+
+      try {
+        const response = await postJson("/api/cases/" + encodeURIComponent(selectedCase.CaseId) + "/notes", { note: input.value.trim() });
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || "Adding the note failed");
+        }
+
+        input.value = "";
+        selectedCase = data;
+        renderWorkspace();
+      }
+      catch (error) {
+        message.className = "form-message error";
+        message.textContent = error.message;
+      }
+    }
+
+    async function copyGeneratedNotes() {
+      const message = document.getElementById("workspace-action-message");
+      const text = document.getElementById("generated-notes").textContent;
+      try {
+        await navigator.clipboard.writeText(text);
+        message.className = "form-message";
+        message.textContent = "Ticket notes copied to clipboard.";
+      }
+      catch (error) {
+        message.className = "form-message error";
+        message.textContent = "Copy failed — select the text and copy manually.";
+      }
+    }
+
     async function postCaseAction(action, buttonId, pendingText, successText) {
-      const caseId = document.getElementById("check-case-id").value || "";
       const button = document.getElementById(buttonId);
       const message = document.getElementById("workspace-action-message");
+
+      if (!selectedCase) {
+        message.className = "form-message error";
+        message.textContent = "Select a case first, or create one above.";
+        return;
+      }
+
+      const caseId = selectedCase.CaseId;
 
       button.disabled = true;
       message.className = "form-message";
       message.textContent = pendingText;
 
       try {
-        const response = await fetch("/api/cases/" + encodeURIComponent(caseId) + "/" + action, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: "{}"
-        });
+        const response = await postJson("/api/cases/" + encodeURIComponent(caseId) + "/" + action);
 
         const data = await response.json();
         if (!response.ok) {
@@ -596,7 +883,7 @@
           message.textContent = successText + ".";
         }
 
-        await loadCases();
+        await selectCase(caseId);
       }
       catch (error) {
         message.className = "form-message error";
@@ -609,8 +896,14 @@
 
     document.getElementById("case-form").addEventListener("submit", createCase);
     document.getElementById("check-form").addEventListener("submit", runCheck);
+    document.getElementById("check-select").addEventListener("change", renderCheckInputs);
     document.getElementById("generate-notes-button").addEventListener("click", () => postCaseAction("generate-notes", "generate-notes-button", "Generating notes...", "Generated notes"));
     document.getElementById("export-evidence-button").addEventListener("click", () => postCaseAction("export", "export-evidence-button", "Exporting evidence...", "Exported evidence"));
+    document.getElementById("add-note-button").addEventListener("click", addNote);
+    document.getElementById("copy-notes-button").addEventListener("click", copyGeneratedNotes);
+    document.getElementById("note-text").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") { event.preventDefault(); addNote(); }
+    });
     loadStatus();
     loadChecks();
     loadCases();
