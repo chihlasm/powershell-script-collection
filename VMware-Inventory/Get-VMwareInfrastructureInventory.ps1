@@ -480,12 +480,15 @@ function Get-VMInventory {
             $toolsVersionStatus = $ext.Guest.ToolsVersionStatus2
 
             # Datastores backing this VM, de-duplicated: a VM with several disks on one
-            # datastore should list that datastore once.
+            # datastore should list that datastore once. DatastoreIdList is String[] of
+            # MoRef ids (verified by reflection against VMware.VimAutomation.Core
+            # 13.3.0.24145081); Get-View resolves each to its Name.
             $datastoreNames = @()
             try {
-                $datastoreNames = @($vm.DatastoreIdList | ForEach-Object {
-                    (Get-View -Id $_ -Property Name -Server $Connection -ErrorAction Stop).Name
-                } | Sort-Object -Unique)
+                if ($vm.DatastoreIdList) {
+                    $datastoreNames = @(Get-View -Id $vm.DatastoreIdList -Property Name -Server $Connection -ErrorAction Stop |
+                        Select-Object -ExpandProperty Name | Sort-Object -Unique)
+                }
             } catch {
                 $datastoreNames = @()
             }
@@ -650,8 +653,11 @@ function Get-SnapshotInventory {
             # least-privilege service account from silently producing a zeroed-out
             # snapshot report that reads as "no snapshot consumption".
             # https://developer.broadcom.com/powercli/latest/vmware.vimautomation.core/commands/get-snapshot
-            $sizeGB       = if ($null -ne $snap.SizeGB)       { [math]::Round($snap.SizeGB, 2) }       else { $null }
-            $sizeOnDiskGB = if ($null -ne $snap.SizeOnDiskGB) { [math]::Round($snap.SizeOnDiskGB, 2) } else { $null }
+            # Snapshot exposes SizeGB and SizeMB but NOT SizeOnDiskGB - verified by
+            # reflection against VMware.VimAutomation.Core 13.3.0.24145081, including
+            # inherited members. SizeMB is carried as a cross-check on SizeGB rounding.
+            $sizeGB = if ($null -ne $snap.SizeGB) { [math]::Round($snap.SizeGB, 2) } else { $null }
+            $sizeMB = if ($null -ne $snap.SizeMB) { [math]::Round($snap.SizeMB, 1) } else { $null }
 
             $ageDays = if ($snap.Created) { [math]::Round(($now - $snap.Created).TotalDays, 1) } else { $null }
 
@@ -663,7 +669,7 @@ function Get-SnapshotInventory {
                 Created            = $snap.Created
                 AgeDays            = $ageDays
                 SizeGB             = $sizeGB
-                SizeOnDiskGB       = $sizeOnDiskGB
+                SizeMB             = $sizeMB
                 IsCurrent          = $snap.IsCurrent
                 Quiesced           = $snap.Quiesced
                 PowerStateAtCreate = [string]$snap.PowerState
@@ -675,7 +681,7 @@ function Get-SnapshotInventory {
             $rows.Add([PSCustomObject]@{
                 Target = $Connection.Name; VMName = $snap.VM.Name; SnapshotName = $snap.Name
                 Description = $null; Created = $snap.Created; AgeDays = $null
-                SizeGB = $null; SizeOnDiskGB = $null; IsCurrent = $null; Quiesced = $null
+                SizeGB = $null; SizeMB = $null; IsCurrent = $null; Quiesced = $null
                 PowerStateAtCreate = $null; ParentSnapshot = $null; ChildCount = $null
                 CollectionNote = "PARTIAL: $($_.Exception.Message)"
             })

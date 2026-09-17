@@ -102,7 +102,7 @@ Entries land in `%APPDATA%\VMware\credstore\vicredentials.xml` under the profile
 | `Hosts.csv` | Per ESXi host: connection/power state, maintenance mode, vendor, model, serial, BIOS, ESXi version+build, CPU model, sockets/cores/threads, CPU and memory capacity and live usage, uptime, boot time, cluster |
 | `VirtualMachines.csv` | Per VM: power state, host, cluster, folder, resource pool, vCPU, cores-per-socket, memory, provisioned vs used disk, datastores, guest OS (configured and running), hostname, IPs, VMware Tools version and status, hardware version, creation date, notes |
 | `Datastores.csv` | Per datastore: type, state, accessibility, capacity/used/free, uncommitted, total provisioned, provisioned:capacity ratio, overcommit flag, snapshot consumption |
-| `Snapshots.csv` | Per snapshot: VM, name, description, creation date, **age in days**, size, size on disk, current flag, quiesced flag, parent, child count |
+| `Snapshots.csv` | Per snapshot: VM, name, description, creation date, **age in days**, size (GB and MB), current flag, quiesced flag, parent, child count |
 | `Clusters.csv` | vCenter only: HA and DRS configuration, EVC mode, host count, aggregate CPU and memory |
 | `HostCapacityRollup.csv` | Per host: VM counts, physical cores vs vCPU allocated, physical memory vs memory allocated, and the derived ratios |
 | `Summary.csv` | Per target: totals and environment-wide ratios |
