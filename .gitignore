@@ -1,2 +1,20 @@
 work-in-progress/
 .worktrees/
+
+# --- Customer data: script output containing live tenant/AD data. Never commit. ---
+Get-M365SecurityEvidence/*_SecurityEvidence_*/
+AD-GroupMembership-Export/Uploads/
+AD-LockoutDiagnostics/**/Case_*/
+
+# --- Runtime artifacts from running the tools ---
+MSP-TroubleshootingWorkbench/cases/
+MSP-TroubleshootingWorkbench/exports/
+MSP-TroubleshootingWorkbench/logs/
+*.pid
+
+# --- Local agent/tool scratch state ---
+.superpowers/
+graphify-out/
+
+# --- Packaged distribution zips (rebuildable from source) ---
+*.zip
