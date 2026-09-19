@@ -33,6 +33,7 @@ Checks are standalone scripts in `checks\` declared in `checks\manifest.json` (`
 | Network Quick Check (`network.quick`) | address, port | 60s |
 | AD Lockout Diagnostics (`ad.lockout`) | user, days back, domain controller(s) | 240s |
 | Citrix/FSLogix Triage (`citrix.fslogix.triage`) | device, user | 180s |
+| Citrix/FSLogix Fleet Health (`citrix.fslogix.health`) | device(s), days back | 600s |
 
 `timeoutSeconds` (1–3600, default 60) bounds how long the server waits for a check. It must exceed any timeout the check applies to its own child processes — `ad.lockout` uses 240 because its diagnostics script gives its child 120 seconds and still needs headroom to import modules and write its report.
 
@@ -53,6 +54,19 @@ The server stamps `InputsUsed` onto each stored result, so generated notes recor
 The wrapper writes the underlying HTML report to `output\checks\ad.lockout\<timestamp>` under the workbench folder and includes the report path in `RawOutput.ReportPath` and the evidence list when the diagnostic completes.
 
 Local preflight checks return `Status = "Warn"` instead of crashing when the diagnostics script is missing or the RSAT `ActiveDirectory` module cannot load. A real AD run still requires a domain-connected workstation or server, RSAT Active Directory tools, and permissions to read domain controller Security logs.
+
+### Citrix/FSLogix Fleet Health
+
+`citrix.fslogix.health` wraps `..\Citrix-FSLogix-HealthCollector\Get-CitrixFSLogixHealth.ps1` and returns the shared workbench check result fields. It collects sampled performance metrics *and* critical/error/warning events from one or many servers, then reports a verdict per machine. It accepts:
+
+- `affectedDevice`: one server, or several separated by commas or semicolons — e.g. `CTXVDA01, CTXVDA02, FS01`. The workbench gives a single free-text box, so the list is split inside the check.
+- `daysBack`: 1-90 days of event history.
+
+Each machine becomes one evidence line reading `<verdict> - <plain-English reasons>`, so the generated ticket notes name the machine and the problem together without anyone having to open the HTML. The collector's full report is written under `output\checks\citrix.fslogix.health\<timestamp>` and its path is included in the evidence and in `RawOutput.ReportPath`.
+
+The check's overall status is `Fail` if any machine is Critical or unreachable, `Warn` if any is Degraded, otherwise `Pass`.
+
+The 600-second timeout accommodates the collector's default 15-second sampling window per server plus event collection. Performance needs WinRM or DCOM to the target; events need the Remote Event Log Management firewall rule. Either can fail independently and the check still reports whatever it did collect.
 
 ### Citrix/FSLogix Triage
 

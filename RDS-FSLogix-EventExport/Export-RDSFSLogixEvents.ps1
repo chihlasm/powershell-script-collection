@@ -5,14 +5,29 @@
     Exports RDS- and FSLogix-related Windows event log entries for a specified time window to CSV and HTML.
 
 .DESCRIPTION
-    Runs locally on an RDS / Citrix session host. Collects events from:
+    Collects events from one or many RDS / Citrix session hosts. Defaults to the local
+    machine; pass -ComputerName to sweep a pool. Events from:
       - Microsoft-Windows-TerminalServices-*/Operational logs (dynamically enumerated)
       - Microsoft-FSLogix-Apps/Operational, /Admin, and Microsoft-FSLogix-CloudCache/Operational
       - System and Application logs, filtered to RDS/FSLogix providers
       - Optionally Security log entries 4624/4625/4634/4647 filtered to RDP logon types (7, 10)
 
-    Writes a flat CSV plus a self-contained dark-themed HTML report. Per-log errors are
-    caught so a single unreachable or missing log does not halt the run.
+    Writes a flat CSV plus a self-contained dark-themed HTML report covering every host in
+    one document. Per-log AND per-host errors are caught, so a single unreachable server or
+    missing log never halts the run - the hosts that did answer are still reported.
+
+    Get-WinEvent reaches remote machines over RPC rather than PowerShell remoting, so this
+    works against servers where WinRM is switched off. It needs the Remote Event Log
+    Management firewall rule enabled on the target and administrative rights there.
+    https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.diagnostics/get-winevent
+
+.PARAMETER ComputerName
+    One or more hosts to collect from. Defaults to the local machine. Each host is queried
+    in turn, because Get-WinEvent -ComputerName accepts exactly one computer at a time.
+
+.PARAMETER Credential
+    Credential for remote hosts. Ignored for the local machine, which Get-WinEvent refuses
+    to accept a credential for.
 
 .PARAMETER StartTime
     Explicit start of the time window. Mutually exclusive with -LastHours / -LastDays.
@@ -36,6 +51,9 @@
     Event severity levels to include. Defaults to 1,2,3 (Critical, Error, Warning).
     Pass 1..4 to include Information, or 1..5 for everything.
 
+.PARAMETER LoadFunctionsOnly
+    Dot-source the script's functions without running a collection. Used by the Pester suite.
+
 .EXAMPLE
     .\Export-RDSFSLogixEvents.ps1 -LastHours 4
     Exports the last 4 hours of RDS + FSLogix errors and warnings to the current directory.
@@ -47,6 +65,15 @@
 .EXAMPLE
     .\Export-RDSFSLogixEvents.ps1 -LastDays 1 -Level 1,2,3,4
     Exports the last 24 hours including Information-level events.
+
+.EXAMPLE
+    .\Export-RDSFSLogixEvents.ps1 -ComputerName CTXVDA01, CTXVDA02, CTXVDA03 -LastHours 8
+    Sweeps three session hosts and writes one combined CSV and HTML report.
+
+.EXAMPLE
+    .\Export-RDSFSLogixEvents.ps1 -ComputerName (Get-Content .\pool-hosts.txt) `
+        -LastDays 2 -Credential (Get-Credential) -OutputPath \\fileserver\Triage
+    Sweeps a whole pool with explicit credentials.
 
 .NOTES
     Author: VC3 IT
@@ -70,12 +97,19 @@ param(
     [ValidateRange(1, 90)]
     [int]$LastDays,
 
+    [ValidateNotNullOrEmpty()]
+    [string[]]$ComputerName = @($env:COMPUTERNAME),
+
+    [System.Management.Automation.PSCredential]$Credential,
+
     [string]$OutputPath = (Get-Location).Path,
 
     [switch]$IncludeSecurity,
 
     [ValidateRange(1, 5)]
-    [int[]]$Level = @(1, 2, 3)
+    [int[]]$Level = @(1, 2, 3),
+
+    [switch]$LoadFunctionsOnly
 )
 
 # ---- Functions defined below; orchestration block at the bottom ----
@@ -175,6 +209,45 @@ function Test-IsElevated {
     return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+# True when the supplied name refers to the machine this script is running on.
+# Get-WinEvent rejects a credential on a local connection ("The user credential cannot be
+# used for local connections"), so -Credential must be withheld for the local host.
+function Test-IsLocalTarget {
+    param(
+        [AllowEmptyString()][AllowNull()][string]$ComputerName,
+        [AllowEmptyString()][AllowNull()][string]$LocalName = $env:COMPUTERNAME
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ComputerName)) { return $true }
+
+    $name = $ComputerName.Trim()
+    if (@('localhost','.','127.0.0.1','::1') -contains $name) { return $true }
+
+    if ([string]::IsNullOrWhiteSpace($LocalName)) { return $false }
+    if ($name -eq $LocalName) { return $true }
+
+    $short = ($name -split '\.')[0]
+    if ([string]::IsNullOrWhiteSpace($short)) { return $false }
+    return ($short -eq $LocalName)
+}
+
+# Returns the -ComputerName / -Credential arguments to splat onto a Get-WinEvent call for
+# a given target, or an empty hashtable when the target is this machine. Centralised so
+# every call site targets remotely the same way and none can be forgotten.
+function Get-RemoteEventArgs {
+    param(
+        [string]$ComputerName,
+        [System.Management.Automation.PSCredential]$Credential
+    )
+
+    $remoteArgs = @{}
+    if (-not (Test-IsLocalTarget -ComputerName $ComputerName)) {
+        $remoteArgs['ComputerName'] = $ComputerName
+        if ($Credential) { $remoteArgs['Credential'] = $Credential }
+    }
+    return $remoteArgs
+}
+
 # Query a single Windows event log with a time + level filter.
 # Returns an array of [pscustomobject] tagged with the supplied Category and original LogName.
 # Catches the "no events were found" exception and treats it as success-with-zero.
@@ -187,8 +260,12 @@ function Get-EventsFromLog {
         [Parameter(Mandatory)][datetime]$Start,
         [Parameter(Mandatory)][datetime]$End,
         [Parameter(Mandatory)][int[]]$Level,
-        [int[]]$Id          # optional: restrict to specific event IDs
+        [int[]]$Id,         # optional: restrict to specific event IDs
+        [string]$ComputerName = $env:COMPUTERNAME,
+        [System.Management.Automation.PSCredential]$Credential
     )
+
+    $remote = Get-RemoteEventArgs -ComputerName $ComputerName -Credential $Credential
 
     $filter = @{
         LogName   = $LogName
@@ -199,7 +276,7 @@ function Get-EventsFromLog {
     if ($PSBoundParameters.ContainsKey('Id')) { $filter['Id'] = $Id }
 
     try {
-        $raw = @(Get-WinEvent -FilterHashtable $filter -ErrorAction Stop)
+        $raw = @(Get-WinEvent -FilterHashtable $filter @remote -ErrorAction Stop)
     }
     catch {
         $msg = $_.Exception.Message
@@ -272,8 +349,13 @@ function ConvertTo-NormalizedEvent {
 # Enumerate Microsoft-Windows-TerminalServices-* logs that exist on this host.
 # Returns an array of [string] log names.
 function Get-RDSOperationalLogs {
+    param(
+        [string]$ComputerName = $env:COMPUTERNAME,
+        [System.Management.Automation.PSCredential]$Credential
+    )
+    $remote = Get-RemoteEventArgs -ComputerName $ComputerName -Credential $Credential
     try {
-        $logs = Get-WinEvent -ListLog 'Microsoft-Windows-TerminalServices-*' -ErrorAction Stop |
+        $logs = Get-WinEvent -ListLog 'Microsoft-Windows-TerminalServices-*' @remote -ErrorAction Stop |
                 Where-Object { $_.LogName -like '*/Operational' }
         return ,@($logs | Select-Object -ExpandProperty LogName)
     }
@@ -287,11 +369,14 @@ function Get-RDSCategoryEvents {
     param(
         [Parameter(Mandatory)][datetime]$Start,
         [Parameter(Mandatory)][datetime]$End,
-        [Parameter(Mandatory)][int[]]$Level
+        [Parameter(Mandatory)][int[]]$Level,
+        [string]$ComputerName = $env:COMPUTERNAME,
+        [System.Management.Automation.PSCredential]$Credential
     )
     $results = New-Object System.Collections.Generic.List[object]
-    foreach ($logName in (Get-RDSOperationalLogs)) {
-        $events = Get-EventsFromLog -LogName $logName -Category 'RDS' -Start $Start -End $End -Level $Level
+    foreach ($logName in (Get-RDSOperationalLogs -ComputerName $ComputerName -Credential $Credential)) {
+        $events = Get-EventsFromLog -LogName $logName -Category 'RDS' -Start $Start -End $End -Level $Level `
+            -ComputerName $ComputerName -Credential $Credential
         foreach ($e in $events) { $results.Add($e) }
     }
     return ,$results.ToArray()
@@ -301,7 +386,9 @@ function Get-FSLogixCategoryEvents {
     param(
         [Parameter(Mandatory)][datetime]$Start,
         [Parameter(Mandatory)][datetime]$End,
-        [Parameter(Mandatory)][int[]]$Level
+        [Parameter(Mandatory)][int[]]$Level,
+        [string]$ComputerName = $env:COMPUTERNAME,
+        [System.Management.Automation.PSCredential]$Credential
     )
     $logs = @(
         'Microsoft-FSLogix-Apps/Operational'
@@ -310,7 +397,8 @@ function Get-FSLogixCategoryEvents {
     )
     $results = New-Object System.Collections.Generic.List[object]
     foreach ($logName in $logs) {
-        $events = Get-EventsFromLog -LogName $logName -Category 'FSLogix' -Start $Start -End $End -Level $Level
+        $events = Get-EventsFromLog -LogName $logName -Category 'FSLogix' -Start $Start -End $End -Level $Level `
+            -ComputerName $ComputerName -Credential $Credential
         foreach ($e in $events) { $results.Add($e) }
     }
     return ,$results.ToArray()
@@ -320,8 +408,11 @@ function Get-SystemAppCategoryEvents {
     param(
         [Parameter(Mandatory)][datetime]$Start,
         [Parameter(Mandatory)][datetime]$End,
-        [Parameter(Mandatory)][int[]]$Level
+        [Parameter(Mandatory)][int[]]$Level,
+        [string]$ComputerName = $env:COMPUTERNAME,
+        [System.Management.Automation.PSCredential]$Credential
     )
+    $remote = Get-RemoteEventArgs -ComputerName $ComputerName -Credential $Credential
     # ProviderName supports a literal list in FilterHashtable, but no wildcard.
     # Pass 1: query with literal providers (filtered to those actually present on this
     # host — Get-WinEvent errors out if even one named provider is missing).
@@ -336,14 +427,14 @@ function Get-SystemAppCategoryEvents {
     $literalProviders = @($literalProvidersAll | ForEach-Object {
         $name = $_
         try {
-            $null = Get-WinEvent -ListProvider $name -ErrorAction Stop
+            $null = Get-WinEvent -ListProvider $name @remote -ErrorAction Stop
             $name
         } catch {
             # Provider not present — silently skip.
         }
     })
     if ($literalProviders.Count -eq 0) {
-        Write-StatusLine -Status 'INFO' -Message 'No RDS/FSLogix literal providers present on this host - skipping literal pass'
+        Write-StatusLine -Status 'INFO' -Message ("No RDS/FSLogix literal providers present on {0} - skipping literal pass" -f $ComputerName)
     } else {
         Write-StatusLine -Status 'INFO' -Message ("Literal providers found: {0}" -f ($literalProviders -join ', '))
     }
@@ -361,7 +452,7 @@ function Get-SystemAppCategoryEvents {
                     EndTime      = $End
                     Level        = $Level
                     ProviderName = $literalProviders
-                } -ErrorAction Stop)
+                } @remote -ErrorAction Stop)
                 Write-StatusLine -Status 'PASS' -Message ("{0,5} events from {1} (literal providers)" -f $literalEvents.Count, $logName)
             }
             catch {
@@ -382,7 +473,7 @@ function Get-SystemAppCategoryEvents {
                     StartTime = $Start
                     EndTime   = $End
                     Level     = $Level
-                } -ErrorAction Stop |
+                } @remote -ErrorAction Stop |
                     Where-Object { $_.ProviderName -like 'Microsoft-Windows-TerminalServices-*' }
             )
             Write-StatusLine -Status 'PASS' -Message ("{0,5} events from {1} (RDS provider wildcard)" -f $wildcardEvents.Count, $logName)
@@ -411,16 +502,23 @@ function Get-SecurityCategoryEvents {
     param(
         [Parameter(Mandatory)][datetime]$Start,
         [Parameter(Mandatory)][datetime]$End,
-        [Parameter(Mandatory)][int[]]$Level
+        [Parameter(Mandatory)][int[]]$Level,
+        [string]$ComputerName = $env:COMPUTERNAME,
+        [System.Management.Automation.PSCredential]$Credential
     )
 
-    if (-not (Test-IsElevated)) {
+    # The elevation check only means anything for the local machine. Against a remote host
+    # what matters is whether the calling identity is an administrator THERE, which cannot
+    # be determined from here - so the query is attempted and the access-denied path in
+    # Get-EventsFromLog reports the failure honestly.
+    if ((Test-IsLocalTarget -ComputerName $ComputerName) -and -not (Test-IsElevated)) {
         Write-StatusLine -Status 'WARN' -Message 'Security log requires elevation - skipping'
         return @()
     }
 
     # Pull the four logon-related IDs, then post-filter on LogonType.
-    $events = Get-EventsFromLog -LogName 'Security' -Category 'Security' -Start $Start -End $End -Level $Level -Id 4624,4625,4634,4647
+    $events = Get-EventsFromLog -LogName 'Security' -Category 'Security' -Start $Start -End $End -Level $Level `
+        -Id 4624,4625,4634,4647 -ComputerName $ComputerName -Credential $Credential
 
     # 4634 (logoff) and 4647 (initiated logoff) are session-end events and we keep them all;
     # 4624/4625 we filter to LogonType 7 (unlock) or 10 (RemoteInteractive) by parsing
@@ -676,6 +774,9 @@ $scriptBlock
 # Orchestration
 # ============================================================================
 
+# Lets the Pester suite dot-source every function above without starting a collection.
+if ($LoadFunctionsOnly) { return }
+
 try {
     if (-not ('System.Web.HttpUtility' -as [type])) {
         Add-Type -AssemblyName System.Web -ErrorAction SilentlyContinue
@@ -690,44 +791,86 @@ try {
 
     $resolvedOut = Resolve-OutputPath -Path $OutputPath
     $stamp = (Get-Date).ToString('yyyy-MM-dd_HHmmss')
-    $csvPath  = Join-Path $resolvedOut ("RDS-FSLogix-Events_{0}_{1}.csv"  -f $env:COMPUTERNAME, $stamp)
-    $htmlPath = Join-Path $resolvedOut ("RDS-FSLogix-Events_{0}_{1}.html" -f $env:COMPUTERNAME, $stamp)
 
-    Write-StatusLine -Status 'INFO' -Message ("Host:    {0}" -f $env:COMPUTERNAME)
+    # De-duplicate the target list case-insensitively so a repeated name is not collected
+    # twice and double-counted in the report.
+    $targets = @()
+    $seenTargets = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($t in $ComputerName) {
+        if ([string]::IsNullOrWhiteSpace($t)) { continue }
+        $trimmed = $t.Trim()
+        if ($seenTargets.Add($trimmed)) { $targets += $trimmed }
+    }
+    if ($targets.Count -eq 0) { throw 'No valid computer names were supplied.' }
+
+    # One host keeps the original filename shape; a sweep gets a neutral name, because
+    # stamping one machine's name on a file covering twelve of them would be misleading.
+    $fileTag = if ($targets.Count -eq 1) { $targets[0] } else { ("{0}-hosts" -f $targets.Count) }
+    $csvPath  = Join-Path $resolvedOut ("RDS-FSLogix-Events_{0}_{1}.csv"  -f $fileTag, $stamp)
+    $htmlPath = Join-Path $resolvedOut ("RDS-FSLogix-Events_{0}_{1}.html" -f $fileTag, $stamp)
+
+    Write-StatusLine -Status 'INFO' -Message ("Hosts:   {0}" -f ($targets -join ', '))
     Write-StatusLine -Status 'INFO' -Message ("Window:  {0}  ->  {1}" -f $window.Start, $window.End)
     Write-StatusLine -Status 'INFO' -Message ("Levels:  {0}" -f (($Level | Sort-Object) -join ', '))
     Write-StatusLine -Status 'INFO' -Message ("Output:  {0}" -f $resolvedOut)
     if ($IncludeSecurity) { Write-StatusLine -Status 'INFO' -Message 'Security log: requested (admin required)' }
 
     $all = New-Object System.Collections.Generic.List[object]
+    $reached = 0
+    $failedHosts = @()
 
-    Write-StatusLine -Status 'INFO' -Message '--- Collecting RDS Operational logs ---'
-    foreach ($e in (Get-RDSCategoryEvents -Start $window.Start -End $window.End -Level $Level)) {
-        $all.Add($e)
-    }
+    foreach ($target in $targets) {
+        Write-StatusLine -Status 'INFO' -Message ("===== {0} =====" -f $target)
 
-    Write-StatusLine -Status 'INFO' -Message '--- Collecting FSLogix logs ---'
-    foreach ($e in (Get-FSLogixCategoryEvents -Start $window.Start -End $window.End -Level $Level)) {
-        $all.Add($e)
-    }
+        # Each host is wrapped on its own so one unreachable server cannot end the sweep.
+        try {
+            $before = $all.Count
 
-    Write-StatusLine -Status 'INFO' -Message '--- Collecting System / Application (filtered) ---'
-    foreach ($e in (Get-SystemAppCategoryEvents -Start $window.Start -End $window.End -Level $Level)) {
-        $all.Add($e)
-    }
+            Write-StatusLine -Status 'INFO' -Message '--- Collecting RDS Operational logs ---'
+            foreach ($e in (Get-RDSCategoryEvents -Start $window.Start -End $window.End -Level $Level `
+                    -ComputerName $target -Credential $Credential)) {
+                $all.Add($e)
+            }
 
-    if ($IncludeSecurity) {
-        Write-StatusLine -Status 'INFO' -Message '--- Collecting Security (RDP logon events) ---'
-        foreach ($e in (Get-SecurityCategoryEvents -Start $window.Start -End $window.End -Level $Level)) {
-            $all.Add($e)
+            Write-StatusLine -Status 'INFO' -Message '--- Collecting FSLogix logs ---'
+            foreach ($e in (Get-FSLogixCategoryEvents -Start $window.Start -End $window.End -Level $Level `
+                    -ComputerName $target -Credential $Credential)) {
+                $all.Add($e)
+            }
+
+            Write-StatusLine -Status 'INFO' -Message '--- Collecting System / Application (filtered) ---'
+            foreach ($e in (Get-SystemAppCategoryEvents -Start $window.Start -End $window.End -Level $Level `
+                    -ComputerName $target -Credential $Credential)) {
+                $all.Add($e)
+            }
+
+            if ($IncludeSecurity) {
+                Write-StatusLine -Status 'INFO' -Message '--- Collecting Security (RDP logon events) ---'
+                foreach ($e in (Get-SecurityCategoryEvents -Start $window.Start -End $window.End -Level $Level `
+                        -ComputerName $target -Credential $Credential)) {
+                    $all.Add($e)
+                }
+            }
+
+            $reached++
+            Write-StatusLine -Status 'PASS' -Message ("{0}: {1} event(s)" -f $target, ($all.Count - $before))
+        }
+        catch {
+            $failedHosts += $target
+            Write-StatusLine -Status 'FAIL' -Message ("{0}: collection failed - {1}" -f $target, $_.Exception.Message)
         }
     }
 
-    Write-StatusLine -Status 'INFO' -Message ("--- Total events collected: {0} ---" -f $all.Count)
+    Write-StatusLine -Status 'INFO' -Message ("--- Total events collected: {0} from {1}/{2} host(s) ---" -f `
+        $all.Count, $reached, $targets.Count)
+
+    if ($failedHosts.Count -gt 0) {
+        Write-StatusLine -Status 'WARN' -Message ("Could not collect from: {0}" -f ($failedHosts -join ', '))
+    }
 
     Export-EventsToCsv  -Events $all.ToArray() -Path $csvPath
     Export-EventsToHtml -Events $all.ToArray() -Path $htmlPath `
-        -ComputerName $env:COMPUTERNAME -Start $window.Start -End $window.End `
+        -ComputerName ($targets -join ', ') -Start $window.Start -End $window.End `
         -Level $Level -IncludedSecurity ([bool]$IncludeSecurity)
 
     Write-StatusLine -Status 'PASS' -Message 'Done.'

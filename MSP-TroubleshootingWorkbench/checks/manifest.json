@@ -40,6 +40,19 @@
         "affectedDevice",
         "affectedUser"
       ]
+    },
+    {
+      "checkId": "citrix.fslogix.health",
+      "name": "Citrix/FSLogix Fleet Health",
+      "category": "Citrix",
+      "script": "Invoke-CitrixFSLogixHealthCheck.ps1",
+      "description": "Sampled performance plus critical/error/warning events across one or many Citrix, RDS, or FSLogix servers.",
+      "readOnly": true,
+      "timeoutSeconds": 600,
+      "inputs": [
+        "affectedDevice",
+        "daysBack"
+      ]
     }
   ]
 }
