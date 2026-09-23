@@ -5,6 +5,7 @@ Collection of useful PowerShell scripts for automation and system administration
 
 - [AD Export](#ad-export)
 - [Block 365 Sign-in](#cloudsigninmgrps1-block-365-sign-in)
+- [Citrix-FSLogix-HealthCollector](#citrix-fslogix-healthcollector)
 - [CitrixVDADiagnostics](#citrixvdadiagnostics)
 - [CopyFileToServer](#copyfiletoserverps1)
 - [CursorFix](#cursorfixps1)
@@ -20,6 +21,7 @@ Collection of useful PowerShell scripts for automation and system administration
 - [SMBTest](#smb-diagnostic--drive-mapping-script)
 - [AD-GroupPolicy-Audit](#ad-groupolicy-audit)
 - [Get-CitrixSessions](#get-citrixsessions)
+- [RDS-FSLogix-EventExport](#rds-fslogix-eventexport)
 
 ## AD Export
 
@@ -120,6 +122,63 @@ For full documentation, see [AD Export/README-AD-Group-Export.md](AD%20Export/RE
 - Requires administrator privileges to modify HKLM registry
 - Changes take effect after logging off/on (or restarting the system)
 - This is a common fix for cursor issues in Citrix, RDS, or other virtualized environments
+
+## Citrix-FSLogix-HealthCollector
+
+**Description**: Fleet health collector for Citrix, RDS, and FSLogix servers. Gathers **sampled performance metrics** and **critical / error / warning events** in a single pass, then rolls each machine up to one verdict with plain-English reasons. Built to produce a client-ready deliverable from one command.
+
+**Files Included**:
+- `Get-CitrixFSLogixHealth.ps1` - Main collector
+- `Tests/Get-CitrixFSLogixHealth.Tests.ps1` - Pester suite (93 tests)
+- `README.md` - Full documentation
+
+**Two ways to choose targets**:
+- **Broker discovery** (default) - asks a Delivery Controller for every VDA; `-AdditionalComputerName` appends non-VDA servers such as the FSLogix file servers.
+- **Explicit list** - `-ComputerName` takes any set of Windows servers, with no Citrix SDK or Delivery Controller involved.
+
+**Key behaviours**:
+- Performance is **sampled** across a window (`-SampleSeconds`, default 30) and reported as average *and* peak, because a single counter read on a session host says almost nothing. `-SampleSeconds 0` gives a fast instantaneous reading, and the report says so.
+- Processor queue length is **normalized per logical processor** - Microsoft's own published thresholds disagree, and all of them describe a single system-wide queue, so a raw threshold would flag every healthy multi-vCPU host.
+- Citrix event channels are **discovered at runtime**, not hardcoded. Citrix does not publish the literal channel names, and a wrong guess would return zero rows while looking successful.
+- Performance (CIM over WinRM, falling back to DCOM) and events (`Get-WinEvent` over RPC) are **tracked separately**. A machine is only called Unreachable when both fail, so a WinRM-blocked server still yields its event history.
+
+**Usage**:
+```powershell
+# Every VDA in the site
+.\Get-CitrixFSLogixHealth.ps1 -DeliveryController DDC01
+
+# VDA fleet plus the FSLogix file servers, three days of event history
+.\Get-CitrixFSLogixHealth.ps1 -DeliveryController DDC01 `
+    -AdditionalComputerName FS01, FS02 -LastDays 3 -OutputPath C:\Reports\Contoso
+
+# No Citrix - just name the servers
+.\Get-CitrixFSLogixHealth.ps1 -ComputerName RDS01, RDS02, FS01 -SampleSeconds 120
+```
+
+**Output**: per-machine CSV, event CSV, **raw per-sample CSV** (so a performance claim stays auditable), and a self-contained dark HTML report with fleet tiles, a per-machine table, and the fleet-wide most common problems.
+
+Also registered in the MSP Troubleshooting Workbench as the `citrix.fslogix.health` check.
+
+## RDS-FSLogix-EventExport
+
+**Description**: Exports RDS- and FSLogix-related Windows event log entries for a time window to CSV plus a self-contained HTML report. Collects from **one or many** session hosts.
+
+**Files Included**:
+- `Export-RDSFSLogixEvents.ps1` - Main export script
+- `Tests/Export-RDSFSLogixEvents.Tests.ps1` - Pester suite (30 tests)
+- `README.md` - Full documentation
+
+**Usage**:
+```powershell
+# Last 4 hours from the local host
+.\Export-RDSFSLogixEvents.ps1 -LastHours 4
+
+# Sweep a pool of session hosts into one combined report
+.\Export-RDSFSLogixEvents.ps1 -ComputerName CTXVDA01, CTXVDA02, CTXVDA03 -LastHours 8
+```
+
+For a combined performance *and* event view across a fleet, use [Citrix-FSLogix-HealthCollector](#citrix-fslogix-healthcollector) instead.
+
 
 ## CitrixVDADiagnostics
 
