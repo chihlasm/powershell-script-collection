@@ -43,6 +43,29 @@ Add a `REFERENCES` block to the script's `.NOTES` listing the pages consulted.
 
 **When documentation contradicts an assumption in existing code, fix the code** — and add a regression test capturing the corrected behavior, so the wrong version cannot silently return.
 
+## Stack Overflow for Troubleshooting
+
+Stack Overflow is available as a **secondary, on-demand** source. Use it when it would actually help. Unlike Microsoft Learn, it is not a required step.
+
+**Good uses:**
+- Decoding an unfamiliar error message or symptom (e.g. a cryptic WinRM, CIM, or LDAP exception)
+- Known quirks and workarounds the official docs don't cover (PS 5.1 vs 7.x oddities, RSAT module edge cases, serialization/encoding surprises)
+- When a first fix attempt failed and you need to see how others solved it
+
+**Not a substitute for Microsoft documentation.** Anything covered by *Verify Against Microsoft Documentation* above (event IDs, status codes, attribute semantics, GUIDs, registry paths) must still be confirmed on learn.microsoft.com. An answer's score, or the fact that it was accepted, does not prove it is correct for the OS version you're targeting. Check its date and the versions it mentions. When a Stack Overflow answer shapes the code, cite it next to that code, the same way as the Learn citations:
+
+```powershell
+# Workaround for Get-CimInstance hanging on unreachable hosts - see
+# https://stackoverflow.com/a/NNNNNNN
+```
+
+### How to look it up
+
+1. **Stack Overflow MCP server** (`so_search`, `get_content`). This is preferred, but it can be blocked by a Cloudflare challenge.
+2. **Stack Exchange API** as a fallback. It works without authentication:
+   - Search: `https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=votes&q=<terms>&accepted=True&site=stackoverflow`
+   - Answer body: `https://api.stackexchange.com/2.3/answers/<id>?site=stackoverflow&filter=withbody`
+
 ## Script Conventions
 
 ### Parameter and CmdletBinding Style
