@@ -6,6 +6,7 @@ Collection of useful PowerShell scripts for automation and system administration
 - [AD Export](#ad-export)
 - [Block 365 Sign-in](#cloudsigninmgrps1-block-365-sign-in)
 - [Citrix-FSLogix-HealthCollector](#citrix-fslogix-healthcollector)
+- [Citrix-PerfTriage](#citrix-perftriage)
 - [CitrixVDADiagnostics](#citrixvdadiagnostics)
 - [CopyFileToServer](#copyfiletoserverps1)
 - [CursorFix](#cursorfixps1)
@@ -158,6 +159,29 @@ For full documentation, see [AD Export/README-AD-Group-Export.md](AD%20Export/RE
 **Output**: per-machine CSV, event CSV, **raw per-sample CSV** (so a performance claim stays auditable), and a self-contained dark HTML report with fleet tiles, a per-machine table, and the fleet-wide most common problems.
 
 Also registered in the MSP Troubleshooting Workbench as the `citrix.fslogix.health` check.
+
+## Citrix-PerfTriage
+
+**Description**: One-command performance triage for Citrix / RDS session hosts with FSLogix, including the Hyper-V hosts underneath. Runs the health collector, FSLogix log parser, storage event collector, RDS event export, DiskSpd profile share benchmark and the Hyper-V host scripts against the same servers and time window, then writes one summary report that says what to look at first.
+
+**Files Included**:
+- `Invoke-CitrixPerfTriage.ps1` - Orchestrator
+- `Tests/Invoke-CitrixPerfTriage.Tests.ps1` - Pester suite (40 tests)
+- `README.md` - Full documentation
+
+**Key behaviours**:
+- Each tool runs in its own Windows PowerShell 5.1 process with a time limit, so one failure never stops the rest.
+- FSLogix profile re-attach times from the logs are fed into the storage event collector, so SMB or disk events that triggered them are flagged.
+- The profile share is found from `VHDLocations` / `CCDLocations` and benchmarked by default (`-SkipStorageBenchmark` to leave it out - it writes a 1 GB test file and loads the share for ~30 s).
+- When a Hyper-V host refuses access, it builds a **hand-off package** (read-only scripts, a one-command collector and plain-English instructions) for the Hyper-V administrators instead of failing.
+
+**Usage**:
+```powershell
+.\Invoke-CitrixPerfTriage.ps1 -ComputerName CTXVDA01, CTXVDA02 -HyperVCluster HVCLUSTER01
+.\Invoke-CitrixPerfTriage.ps1 -DeliveryController DDC01 -LookbackHours 72
+```
+
+Requires the sibling tool folders from this repository.
 
 ## RDS-FSLogix-EventExport
 
