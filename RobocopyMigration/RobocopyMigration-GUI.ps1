@@ -303,11 +303,14 @@ namespace RoboMigration
 #region Pure helpers
 
 function Write-GuiError {
-    # The timer runs twice a second, so a repeating error is written once a minute at most.
+    # The timer runs twice a second, so each kind of error is written once a minute at most.
+    # Digits are ignored when comparing, so the same error with a changing number counts once.
     param([string]$Message)
-    if ($script:LastGuiError -eq $Message -and $script:LastGuiErrorAt -and ((Get-Date) - $script:LastGuiErrorAt).TotalSeconds -lt 60) { return }
-    $script:LastGuiError = $Message
-    $script:LastGuiErrorAt = Get-Date
+    if (-not $script:GuiErrorSeen) { $script:GuiErrorSeen = @{} }
+    $key = $Message -replace '\d+', '#'
+    $last = $script:GuiErrorSeen[$key]
+    if ($last -and ((Get-Date) - $last).TotalSeconds -lt 60) { return }
+    $script:GuiErrorSeen[$key] = Get-Date
     try {
         if (-not (Test-Path -LiteralPath $script:StateDir)) { New-Item -ItemType Directory -Path $script:StateDir -Force | Out-Null }
         $line = '{0}  {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message
@@ -569,6 +572,21 @@ function Read-RoboSummary {
         Files = $rows[1][0]
         Bytes = $rows[2][0]
     }
+}
+
+function Get-SecondsLeft {
+    # Time left from the copy rate across the samples (each has T = time, B = bytes done).
+    # Returns -1 until there are at least 5 seconds of samples showing progress.
+    param([long]$TotalBytes, [long]$ProcessedBytes, $Samples)
+    if (-not $Samples -or $Samples.Count -lt 2) { return -1.0 }
+    $first = $Samples[0]; $last = $Samples[$Samples.Count - 1]
+    $dt = ($last.T - $first.T).TotalSeconds
+    $db = [double]($last.B - $first.B)
+    if ($dt -lt 5 -or $db -le 0) { return -1.0 }
+    # [double] on both sides: [Math]::Max(0, $long) binds to the Int32 overload and throws
+    # once more than 2 GB is left.
+    $remaining = [Math]::Max([double]0, [double]($TotalBytes - $ProcessedBytes))
+    return $remaining / ($db / $dt)
 }
 
 function Test-FolderName {
@@ -1817,15 +1835,7 @@ function Get-JobProgress {
     if ($Job.preview -and [long]$Job.preview.Bytes -gt 0) {
         $r.Total = [long]$Job.preview.Bytes
         $r.Fraction = [Math]::Min(0.999, $r.Processed / [double]$r.Total)
-        $samples = $script:Rates[$Job.id]
-        if ($samples -and $samples.Count -ge 2) {
-            $first = $samples[0]; $last = $samples[$samples.Count - 1]
-            $dt = ($last.T - $first.T).TotalSeconds
-            $db = $last.B - $first.B
-            if ($dt -ge 5 -and $db -gt 0) {
-                $r.SecondsLeft = [Math]::Max(0, ($r.Total - $r.Processed)) / ($db / $dt)
-            }
-        }
+        $r.SecondsLeft = Get-SecondsLeft -TotalBytes $r.Total -ProcessedBytes $r.Processed -Samples $script:Rates[$Job.id]
     }
     return $r
 }

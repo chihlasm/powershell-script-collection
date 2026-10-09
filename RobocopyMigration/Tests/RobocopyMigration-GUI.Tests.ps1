@@ -566,3 +566,26 @@ Describe 'Invoke-NewFolder' {
         $r.Error | Should -Not -BeNullOrEmpty
     }
 }
+
+Describe 'Get-SecondsLeft' {
+    BeforeAll {
+        $script:t0 = Get-Date '2026-10-09 10:00:00'
+        function New-Samples { param([long]$B0, [long]$B1, [int]$Seconds) @([PSCustomObject]@{ T = $t0; B = $B0 }, [PSCustomObject]@{ T = $t0.AddSeconds($Seconds); B = $B1 }) }
+    }
+    It 'works when more than 2 GB is left (regression: Int32 overflow threw on every tick)' {
+        # 412 GB job, 194 GB done, 30 MB/s -> about 2 hours.
+        $s = New-Samples -B0 (194GB - 1800MB) -B1 194GB -Seconds 60
+        $left = Get-SecondsLeft -TotalBytes 412GB -ProcessedBytes 194GB -Samples $s
+        $left | Should -BeGreaterThan 7000
+        $left | Should -BeLessThan 7700
+    }
+    It 'returns -1 until there are 5 seconds of samples' {
+        Get-SecondsLeft -TotalBytes 100GB -ProcessedBytes 1GB -Samples (New-Samples -B0 0 -B1 1GB -Seconds 3) | Should -Be -1
+    }
+    It 'returns -1 with no progress' {
+        Get-SecondsLeft -TotalBytes 100GB -ProcessedBytes 1GB -Samples (New-Samples -B0 1GB -B1 1GB -Seconds 30) | Should -Be -1
+    }
+    It 'never goes below zero when more was processed than previewed' {
+        Get-SecondsLeft -TotalBytes 10GB -ProcessedBytes 11GB -Samples (New-Samples -B0 0 -B1 11GB -Seconds 30) | Should -Be 0
+    }
+}
