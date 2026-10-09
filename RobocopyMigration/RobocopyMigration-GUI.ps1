@@ -532,7 +532,7 @@ function Get-RoboExitInfo {
         else { $headline = 'Finished, but some files could not be copied.' }
         $details.Add('Some files still failed after all retries. Usually that is "access denied" or a file that was in use.')
         if (@($FailedText | Where-Object { $_ -match '^ERROR 5:' }).Count -gt 0) {
-            $tip = 'Some files were "access denied". Run again as Incremental with Locked-down files set to Backup mode.'
+            $tip = 'Some files were "access denied". Run again as Incremental with "Files this account can''t open" set to "Always backup mode".'
         }
         else { $tip = 'Run again as Incremental to retry just the files that failed.' }
     }
