@@ -518,3 +518,51 @@ Describe 'ConvertTo-LocalDate' {
         ConvertTo-LocalDate $d | Should -Be $d
     }
 }
+
+Describe 'Test-FolderName' {
+    # Rules from https://learn.microsoft.com/windows/win32/fileio/naming-a-file
+    It 'accepts ordinary names, including a leading period' {
+        foreach ($n in 'Finance', 'Q3 Reports', '.temp', 'archive.2026') { Test-FolderName $n | Should -BeNullOrEmpty }
+    }
+    It 'rejects blank names' {
+        Test-FolderName '' | Should -Not -BeNullOrEmpty
+        Test-FolderName '   ' | Should -Not -BeNullOrEmpty
+    }
+    It 'rejects reserved characters' {
+        foreach ($c in '<', '>', ':', '"', '/', '\', '|', '?', '*') { Test-FolderName "a${c}b" | Should -Match 'character' }
+    }
+    It 'rejects control characters' {
+        Test-FolderName "a$([char]9)b" | Should -Not -BeNullOrEmpty
+    }
+    It 'rejects reserved device names, with or without an extension, in any case' {
+        foreach ($n in 'CON', 'prn', 'Aux', 'NUL', 'COM1', 'lpt9', 'NUL.txt', 'com1.tar.gz', "COM$([char]0xB9)", "LPT$([char]0xB3)") {
+            Test-FolderName $n | Should -Match 'reserved'
+        }
+    }
+    It 'allows names that only start like a device name' {
+        foreach ($n in 'CONTRACTS', 'Console', 'COM10', 'LPT0x') { Test-FolderName $n | Should -BeNullOrEmpty }
+    }
+    It 'rejects names ending in a space or a period' {
+        Test-FolderName 'Finance ' | Should -Match 'end'
+        Test-FolderName 'Finance.' | Should -Match 'end'
+    }
+}
+
+Describe 'Invoke-NewFolder' {
+    It 'creates the folder and reports success' {
+        $r = Invoke-NewFolder $TestDrive 'Created'
+        $r.Ok | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $TestDrive 'Created') | Should -BeTrue
+    }
+    It 'refuses a folder that already exists' {
+        New-Item -ItemType Directory -Path (Join-Path $TestDrive 'Dupe') | Out-Null
+        $r = Invoke-NewFolder $TestDrive 'dupe'
+        $r.Ok | Should -BeFalse
+        $r.Error | Should -Match 'already exists'
+    }
+    It 'reports a parent that does not exist' {
+        $r = Invoke-NewFolder (Join-Path $TestDrive 'missing') 'x'
+        $r.Ok | Should -BeFalse
+        $r.Error | Should -Not -BeNullOrEmpty
+    }
+}

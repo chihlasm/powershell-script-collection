@@ -22,7 +22,7 @@ Nothing to install. It's a single `.ps1` file.
 You can also right-click the file and choose **Run with PowerShell**. The tool asks for elevation, opens its window and hides its own console. Close the window to exit.
 
 1. Click **+ New Job** (or press Ctrl+N).
-2. Pick **Copy from** and **Copy to**. **Browse** loads folders in the background, so a slow server won't freeze the window.
+2. Pick **Copy from** and **Copy to**. **Browse** loads folders in the background, so a slow server won't freeze the window. When browsing for the destination, **New folder** creates a folder inside the selected one and selects it.
 3. Choose a **Type of copy** (see below). Open **Advanced options** if you need them.
 4. Click **Preview** (optional, but recommended). It counts files and size without copying, which gives the job a % bar and a time-left estimate.
 5. Click **Add & Start**, or **Add to Queue** to start it later with **Start queue**.
@@ -92,6 +92,6 @@ The tests need Pester 5 or later. They don't need admin rights. They cover the r
 
 ### Manual checks before release
 
-- Dark/light toggle. Browse on a UNC path and on a mapped drive.
+- Dark/light toggle. Browse on a UNC path and on a mapped drive. **New folder** on a share where this account can't write (the reason should appear under the name box).
 - Close the window while a copy is running, choose **Yes** (keep running), then reopen. The job should show **Reattached** and keep updating.
 - Run a copy with 100k+ files. The window should stay responsive and memory should stay flat.

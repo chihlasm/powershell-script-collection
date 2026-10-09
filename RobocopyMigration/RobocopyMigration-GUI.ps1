@@ -571,6 +571,48 @@ function Read-RoboSummary {
     }
 }
 
+function Test-FolderName {
+    # Returns a plain-English problem with a new folder name, or $null if it's fine.
+    # Rules: https://learn.microsoft.com/windows/win32/fileio/naming-a-file
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return 'Type a name for the new folder.' }
+    if ($Name.IndexOfAny([char[]]'<>:"/\|?*') -ge 0) { return 'Folder names can''t contain any of these characters: < > : " / \ | ? *' }
+    foreach ($ch in $Name.ToCharArray()) {
+        if ([int]$ch -lt 32) { return 'Folder names can''t contain control characters (such as tabs).' }
+    }
+    if ($Name.EndsWith(' ') -or $Name.EndsWith('.')) { return 'Folder names can''t end with a space or a period.' }
+    # Device names are reserved with or without an extension (NUL.txt is NUL). Windows also
+    # treats the superscript digits 1-3 (U+00B9, U+00B2, U+00B3) as COM/LPT port numbers.
+    $base = $Name.Split('.')[0].Trim()
+    $sup = "$([char]0xB9)$([char]0xB2)$([char]0xB3)"
+    if ($base -match "^(?i:CON|PRN|AUX|NUL|COM[1-9$sup]|LPT[1-9$sup])$") {
+        return "'$base' is a reserved Windows device name and can't be used as a folder name."
+    }
+    return $null
+}
+
+function Invoke-NewFolder {
+    # Creates Parent\Name. Also used as the body of the background task, so it must not call
+    # other functions from this script (the worker runspace doesn't have them).
+    param([string]$Parent, [string]$Name)
+    try {
+        $path = [System.IO.Path]::Combine($Parent, $Name)
+        if ([System.IO.Directory]::Exists($path)) {
+            return [PSCustomObject]@{ Ok = $false; Path = $path; Error = "A folder named '$Name' already exists here." }
+        }
+        if (-not [System.IO.Directory]::Exists($Parent)) {
+            return [PSCustomObject]@{ Ok = $false; Path = $path; Error = "The parent folder can't be reached: $Parent" }
+        }
+        [void][System.IO.Directory]::CreateDirectory($path)
+        return [PSCustomObject]@{ Ok = $true; Path = $path; Error = $null }
+    }
+    catch {
+        $e = $_.Exception
+        while ($e.InnerException) { $e = $e.InnerException }
+        return [PSCustomObject]@{ Ok = $false; Path = $null; Error = $e.Message }
+    }
+}
+
 function Get-ReattachDecision {
     # On startup, decides what a job saved as Running really is. A PID alone is not enough:
     # Windows reuses PIDs, so the process start time must match too.
@@ -1580,6 +1622,7 @@ $script:BrowseXaml = @'
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="*"/>
       <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
     </Grid.RowDefinitions>
     <StackPanel Grid.Row="0">
       <TextBlock Style="{StaticResource Lbl}" Margin="0,0,0,5" Text="GO TO A SERVER OR FOLDER"/>
@@ -1598,7 +1641,25 @@ $script:BrowseXaml = @'
         <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightTextBrushKey}" Color="#FFFFFF"/>
       </TreeView.Resources>
     </TreeView>
-    <DockPanel Grid.Row="2" Margin="0,12,0,0">
+    <Border x:Name="NewFolderRow" Grid.Row="2" Visibility="Collapsed" Margin="0,10,0,0" Padding="12,10" CornerRadius="4"
+            BorderThickness="1" Background="{DynamicResource SelBg}" BorderBrush="{DynamicResource BorderStrong}">
+      <StackPanel>
+        <TextBlock x:Name="NewFolderLabel" Style="{StaticResource Lbl}" Margin="0,0,0,5" TextTrimming="CharacterEllipsis"/>
+        <DockPanel>
+          <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Margin="6,0,0,0">
+            <Button x:Name="NewFolderCancel" Style="{StaticResource Btn}" Content="Cancel" Margin="0,0,6,0"/>
+            <Button x:Name="NewFolderCreate" Style="{StaticResource PrimaryBtn}" Content="Create"/>
+          </StackPanel>
+          <TextBox x:Name="NewFolderName"/>
+        </DockPanel>
+        <TextBlock x:Name="NewFolderError" Foreground="{DynamicResource Danger}" TextWrapping="Wrap" Margin="0,6,0,0" Visibility="Collapsed"/>
+      </StackPanel>
+    </Border>
+    <DockPanel Grid.Row="3" Margin="0,12,0,0">
+      <Button x:Name="NewFolderBtn" DockPanel.Dock="Left" Style="{StaticResource Btn}" Margin="0,0,12,0" IsEnabled="False"
+              Visibility="Collapsed" ToolTip="Create a folder inside the selected folder">
+        <TextBlock><Run Text="+" FontWeight="Bold"/><Run Text="  New folder"/></TextBlock>
+      </Button>
       <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
         <Button x:Name="CancelBtn" Style="{StaticResource Btn}" Content="Cancel" Margin="0,0,8,0" IsCancel="True"/>
         <Button x:Name="SelectBtn" Style="{StaticResource PrimaryBtn}" Content="Use this folder" IsEnabled="False"/>
@@ -2380,13 +2441,18 @@ function Add-BrowseNode {
 }
 
 function Show-BrowseDialog {
-    param([string]$StartPath, [string]$Title)
+    param([string]$StartPath, [string]$Title, [switch]$AllowNewFolder)
     $dlg = New-ThemedWindow $script:BrowseXaml
     $dlg.Owner = $script:UI.Window
     $dlg.Title = $Title
     $tree = $dlg.FindName('Tree'); $goBox = $dlg.FindName('GoBox'); $goBtn = $dlg.FindName('GoBtn')
     $selBtn = $dlg.FindName('SelectBtn'); $selPath = $dlg.FindName('SelPath')
-    $state = @{ Result = $null }
+    $nfBtn = $dlg.FindName('NewFolderBtn'); $nfRow = $dlg.FindName('NewFolderRow'); $nfLabel = $dlg.FindName('NewFolderLabel')
+    $nfName = $dlg.FindName('NewFolderName'); $nfCreate = $dlg.FindName('NewFolderCreate'); $nfCancel = $dlg.FindName('NewFolderCancel')
+    $nfError = $dlg.FindName('NewFolderError')
+    if ($AllowNewFolder) { $nfBtn.Visibility = 'Visible' }
+    $state = @{ Result = $null; NewFolderParent = $null }
+    $script:BrowsePending = $null
     $folderIcon = [char]::ConvertFromUtf32(0x1F4C1)
     $driveIcon = [string][char]0x25A3
 
@@ -2430,8 +2496,21 @@ function Show-BrowseDialog {
             foreach ($n in $result.Names) {
                 [void](Add-BrowseNode $node $n ([System.IO.Path]::Combine([string]$node.Tag, $n)) ([char]::ConvertFromUtf32(0x1F4C1)))
             }
+            # Select a folder that was just created here.
+            $pending = $script:BrowsePending
+            if ($pending -and $pending.Parent -eq $node) {
+                $script:BrowsePending = $null
+                foreach ($child in $node.Items) {
+                    if ($child -is [System.Windows.Controls.TreeViewItem] -and [string]::Equals([string]$child.Tag, $pending.Path, [StringComparison]::OrdinalIgnoreCase)) {
+                        $child.IsSelected = $true
+                        $child.BringIntoView()
+                        break
+                    }
+                }
+            }
         }
     }
+    $script:BrowseLoadChildren = $loadChildren
 
     $tree.AddHandler([System.Windows.Controls.TreeViewItem]::ExpandedEvent, [System.Windows.RoutedEventHandler]{
             param($s, $e)
@@ -2443,8 +2522,71 @@ function Show-BrowseDialog {
             if ($item -is [System.Windows.Controls.TreeViewItem] -and $item.Tag) {
                 $selPath.Text = [string]$item.Tag
                 $selBtn.IsEnabled = $true
+                $nfBtn.IsEnabled = $true
             }
-            else { $selBtn.IsEnabled = $false }
+            else { $selBtn.IsEnabled = $false; $nfBtn.IsEnabled = $false }
+            if ($nfRow.Visibility -eq 'Visible' -and $item -ne $state.NewFolderParent) { & $hideNewFolder }
+        })
+
+    # --- New folder (destination only) ---
+    $hideNewFolder = {
+        $nfRow.Visibility = 'Collapsed'
+        $nfError.Visibility = 'Collapsed'
+        $nfCreate.IsEnabled = $true
+        $nfCreate.Content = 'Create'
+        $state.NewFolderParent = $null
+    }
+    $showNewFolderError = {
+        param([string]$Text)
+        $nfError.Text = $Text
+        $nfError.Visibility = 'Visible'
+        $nfCreate.IsEnabled = $true
+        $nfCreate.Content = 'Create'
+    }
+    $nfBtn.Add_Click({
+            $parent = $tree.SelectedItem
+            if (-not ($parent -is [System.Windows.Controls.TreeViewItem] -and $parent.Tag)) { return }
+            $state.NewFolderParent = $parent
+            $nfLabel.Text = "NEW FOLDER IN $([string]$parent.Tag)"
+            $nfName.Text = 'New folder'
+            $nfError.Visibility = 'Collapsed'
+            $nfRow.Visibility = 'Visible'
+            [void]$nfName.Focus()
+            $nfName.SelectAll()
+        })
+    $createFolder = {
+        $parent = $state.NewFolderParent
+        if (-not $parent) { return }
+        $name = $nfName.Text.Trim()
+        $problem = Test-FolderName $name
+        if ($problem) { & $showNewFolderError $problem; return }
+        $nfError.Visibility = 'Collapsed'
+        $nfCreate.IsEnabled = $false
+        $nfCreate.Content = 'Creating...'
+        # Created in the background: a slow or offline share must not freeze the dialog.
+        Start-BgTask -Work ${function:Invoke-NewFolder} -ArgumentList @([string]$parent.Tag, $name) -State $parent -OnDone {
+            param($result, $parentNode)
+            if (-not $result -or -not $result.Ok) {
+                $msg = 'The folder could not be created.'
+                if ($result -and $result.Error) { $msg = $result.Error }
+                & $showNewFolderError $msg
+                return
+            }
+            & $hideNewFolder
+            # Reload the parent and select the new folder once it is listed.
+            $script:BrowsePending = @{ Parent = $parentNode; Path = $result.Path }
+            $parentNode.Items.Clear()
+            [void]$parentNode.Items.Add('__loading__')
+            if ($parentNode.IsExpanded) { & $script:BrowseLoadChildren $parentNode } else { $parentNode.IsExpanded = $true }
+        }
+    }
+    $nfCreate.Add_Click($createFolder)
+    $nfCancel.Add_Click($hideNewFolder)
+    # PreviewKeyDown so Esc closes only the new-folder row, not the whole dialog.
+    $nfName.Add_PreviewKeyDown({
+            param($s, $e)
+            if ($e.Key -eq 'Return') { & $createFolder; $e.Handled = $true }
+            elseif ($e.Key -eq 'Escape') { & $hideNewFolder; $e.Handled = $true }
         })
     $go = {
         $p = $goBox.Text.Trim()
@@ -2678,7 +2820,7 @@ function Start-MigrationWindow {
             if ($p) { $script:UI.SrcBox.Text = $p }
         })
     $ui.DstBrowse.Add_Click({
-            $p = Show-BrowseDialog -StartPath $script:UI.DstBox.Text.Trim() -Title 'Choose the folder to copy into'
+            $p = Show-BrowseDialog -StartPath $script:UI.DstBox.Text.Trim() -Title 'Choose the folder to copy into' -AllowNewFolder
             if ($p) { $script:UI.DstBox.Text = $p }
         })
     $ui.MtCheck.Add_Checked({ $script:UI.MtBox.IsEnabled = $true; $script:UI.IpgBox.IsEnabled = $false })
