@@ -10,6 +10,8 @@ AD-LockoutDiagnostics/**/Case_*/
 MSP-TroubleshootingWorkbench/cases/
 MSP-TroubleshootingWorkbench/exports/
 MSP-TroubleshootingWorkbench/logs/
+RobocopyMigration/State/
+RobocopyMigration/Logs/
 *.pid
 
 # --- Local agent/tool scratch state ---
