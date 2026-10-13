@@ -141,6 +141,12 @@
 .PARAMETER NoOpen
     Do not open the HTML report when the run finishes.
 
+.PARAMETER PassThru
+    Also emit one result object per machine to the pipeline, for use by other scripts
+    (the MSP Troubleshooting Workbench passes this). Without it the script only writes the
+    report files and the console summary, so an interactive run does not end with a wall
+    of raw objects scrolling past the summary.
+
 .PARAMETER LoadFunctionsOnly
     Dot-source the script's functions without running it. Used by the Pester suite.
 
@@ -304,6 +310,8 @@ param(
     [string]$OutputPath = (Get-Location).Path,
 
     [switch]$NoOpen,
+
+    [switch]$PassThru,
 
     [switch]$LoadFunctionsOnly
 )
@@ -1442,7 +1450,11 @@ function Get-HostEvent {
         channel is queried inside its own try/catch so one permission failure or corrupt log
         cannot take the host's whole event collection with it.
 
-        Returns a hashtable: Events, Status, ErrorMessage, ChannelsQueried.
+        Returns a hashtable: Events, Status, ErrorMessage, ChannelsQueried, CappedLogs.
+
+        CappedLogs counts queries that came back with exactly -MaxEvents records. Such a log
+        almost certainly had more, so its counts are a floor, not a total - the verdict says so
+        rather than presenting a truncated number as the real one.
     #>
     [CmdletBinding()]
     param(
@@ -1469,6 +1481,7 @@ function Get-HostEvent {
     $events      = @()
     $queried     = 0
     $failures    = 0
+    $capped      = 0
     $firstError  = $null
 
     # --- Discovered channels ---------------------------------------------------------
@@ -1492,6 +1505,7 @@ function Get-HostEvent {
             $records = Invoke-EventQuery -ComputerName $ComputerName -Filter $filter `
                 -MaxEvents $MaxEvents -Credential $Credential
             $queried++
+            if (@($records).Count -ge $MaxEvents) { $capped++ }
 
             foreach ($r in $records) {
                 $events += ConvertTo-HealthEvent -Record $r -ComputerName $ComputerName `
@@ -1522,6 +1536,7 @@ function Get-HostEvent {
             $records = Invoke-EventQuery -ComputerName $ComputerName -Filter $filter `
                 -MaxEvents $MaxEvents -Credential $Credential
             $queried++
+            if (@($records).Count -ge $MaxEvents) { $capped++ }
 
             foreach ($r in $records) {
                 $events += ConvertTo-HealthEvent -Record $r -ComputerName $ComputerName `
@@ -1547,6 +1562,7 @@ function Get-HostEvent {
         Status          = $status
         ErrorMessage    = $firstError
         ChannelsQueried = $queried
+        CappedLogs      = $capped
     }
 }
 
@@ -1564,9 +1580,16 @@ function Get-HostVerdict {
         findings that produced it - phrased for someone who started in IT last month, with
         the numbers a senior engineer needs to act on.
 
-        Unreachable is reserved for a host that answered NEITHER performance nor events.
-        A host that refused WinRM but answered the event log is not unreachable; it is a
-        host with partial data, and its events still count toward its verdict.
+        Unreachable is reserved for a host that yielded NO usable evidence - neither
+        performance nor events. A host that refused WinRM but answered the event log is not
+        unreachable; it is a host with partial data, and its events still count toward its
+        verdict. But a host is never called Healthy on no evidence at all: a skipped
+        collection (-SkipPerformance / -SkipEvents) plus a failed one, or a session that
+        opened but returned no readable metric, is Unreachable too.
+
+        Coverage notes (what could not be checked) are kept separate from findings (what is
+        wrong), so the "no problems found" line can say exactly what was and was not looked
+        at instead of claiming both halves were checked.
     #>
     [CmdletBinding()]
     param(
@@ -1586,24 +1609,52 @@ function Get-HostVerdict {
         [int]$CriticalErrorCount
     )
 
-    $reasons = @()
+    $notes = @()
 
-    if ($Status.Performance -eq 'Unreachable' -and $Status.Events -eq 'Unreachable') {
+    # --- What evidence do we actually have? ------------------------------------------
+    $metricNames = [ordered]@{
+        CpuStatus = 'processor'; MemoryStatus = 'memory'; DiskStatus = 'disk'; QueueStatus = 'processor queue'
+    }
+    $unreadMetrics = @($metricNames.Keys | Where-Object { $Metric[$_] -notin @('PASS', 'WARN', 'FAIL') } |
+        ForEach-Object { $metricNames[$_] })
+
+    $perfUsable   = ($Status.Performance -eq 'Success') -and ($unreadMetrics.Count -lt $metricNames.Count)
+    $eventsUsable = $Status.Events -in @('Success', 'Partial')
+
+    if (-not $perfUsable -and -not $eventsUsable) {
+        $why = if ($Status.Performance -eq 'Unreachable' -and $Status.Events -eq 'Unreachable') {
+            'Could not be contacted for performance data or event logs.'
+        }
+        else {
+            'No usable data was collected from this machine, so its health is unknown.'
+        }
         return [PSCustomObject]@{
             Verdict = 'Unreachable'
-            Reasons = @('Could not be contacted for performance data or event logs.')
+            Reasons = @($why)
         }
     }
 
     if ($Status.Performance -eq 'Unreachable') {
-        $reasons += 'Performance data could not be collected (WinRM and DCOM both refused). Event data below is still valid.'
+        $notes += 'Performance data could not be collected (WinRM and DCOM both refused). Event data below is still valid.'
     }
+    elseif ($Status.Performance -eq 'Success' -and -not $perfUsable) {
+        $notes += 'Connected, but no performance counter could be read. Event data below is still valid.'
+    }
+    elseif ($perfUsable -and $unreadMetrics.Count -gt 0) {
+        $notes += ('Could not read: {0}.' -f ($unreadMetrics -join ', '))
+    }
+
     if ($Status.Events -eq 'Unreachable') {
-        $reasons += 'Event logs could not be read. Performance data below is still valid.'
+        $notes += 'Event logs could not be read. Performance data below is still valid.'
     }
     if ($Status.Events -eq 'Partial') {
-        $reasons += 'Some event logs could not be read, so the counts below may be incomplete.'
+        $notes += 'Some event logs could not be read, so the counts below may be incomplete.'
     }
+    if ($EventCount.CappedLogs -gt 0) {
+        $notes += ('{0} event log(s) hit the per-log limit, so the real event counts are HIGHER than shown. Re-run with a shorter window or a larger -MaxEventsPerLog.' -f $EventCount.CappedLogs)
+    }
+
+    $reasons = @()
 
     # --- Performance findings --------------------------------------------------------
     if ($Metric.CpuStatus -eq 'FAIL') {
@@ -1661,13 +1712,23 @@ function Get-HostVerdict {
         $verdict = 'Critical'
     }
 
+    # Say exactly what was checked - never claim both halves were clean when one was not
+    # looked at. Only added when nothing else was found, so it never contradicts a finding.
     if ($verdict -eq 'Healthy' -and $reasons.Count -eq 0) {
-        $reasons += 'No problems found. Resource use and event history are both within thresholds.'
+        $reasons += if ($perfUsable -and $eventsUsable) {
+            'No problems found. Resource use and event history are both within thresholds.'
+        }
+        elseif ($perfUsable) {
+            'No problems found in resource use. Event history was not checked.'
+        }
+        else {
+            'No problems found in the event history. Resource use was not checked.'
+        }
     }
 
     [PSCustomObject]@{
         Verdict = $verdict
-        Reasons = $reasons
+        Reasons = @($reasons + $notes)
     }
 }
 
@@ -1693,7 +1754,9 @@ function New-HostResult {
         [string]$EventStatus,
 
         [Parameter(Mandatory = $true)]
-        [hashtable]$Threshold
+        [hashtable]$Threshold,
+
+        [int]$CappedLogs = 0
     )
 
     $cpuStatus = Get-ResourceStatus -Value $Performance.CpuAveragePercent `
@@ -1711,6 +1774,7 @@ function New-HostResult {
         Error    = @($Event | Where-Object { $_.Level -eq 2 }).Count
         Warning  = @($Event | Where-Object { $_.Level -eq 3 }).Count
         Total    = @($Event).Count
+        CappedLogs = $CappedLogs
     }
 
     $verdict = Get-HostVerdict `
@@ -1779,6 +1843,7 @@ function New-HostResult {
         ErrorEvents          = $counts.Error
         WarningEvents        = $counts.Warning
         TotalEvents          = $counts.Total
+        EventLogsAtLimit     = $CappedLogs
         TopIssue             = $topIssue
         SampleCount          = $Performance.SampleCount
         Protocol             = $Performance.Protocol
@@ -2252,6 +2317,14 @@ else {
     Write-StatusLine -Status 'INFO' -Message ("Sampling {0} readings per machine over ~{1}s each" -f $sampleCount, $perHost)
 }
 
+# Machines are checked one at a time, so a large fleet takes a while. Say so up front
+# rather than leaving someone staring at a progress bar wondering if it hung. Only the
+# sampling time is predictable; event collection adds a variable amount on top.
+if (-not $SkipPerformance -and $SampleSeconds -gt 0 -and $targets.Count -gt 1) {
+    $samplingMinutes = [math]::Ceiling(($targets.Count * ($sampleCount - 1) * $SampleIntervalSeconds) / 60)
+    Write-StatusLine -Status 'INFO' -Message ("Machines are checked one at a time. Sampling alone will take about {0} minute(s); reading event logs adds more. Use -SampleSeconds 0 for a faster, rougher sweep." -f $samplingMinutes)
+}
+
 if (-not $SkipEvents) {
     Write-StatusLine -Status 'INFO' -Message ("Event window: {0:yyyy-MM-dd HH:mm:ss} to {1:yyyy-MM-dd HH:mm:ss}, levels {2}" -f `
         $window.Start, $window.End, (($Level | ForEach-Object { Get-LevelName -Level $_ }) -join ', '))
@@ -2315,7 +2388,7 @@ foreach ($target in $targets) {
 
     # --- Events ---
     if ($SkipEvents) {
-        $eventResult = @{ Events = @(); Status = 'Skipped'; ErrorMessage = $null; ChannelsQueried = 0 }
+        $eventResult = @{ Events = @(); Status = 'Skipped'; ErrorMessage = $null; ChannelsQueried = 0; CappedLogs = 0 }
     }
     else {
         $eventArgs = @{
@@ -2331,7 +2404,7 @@ foreach ($target in $targets) {
             $eventResult = Get-HostEvent @eventArgs
         }
         catch {
-            $eventResult = @{ Events = @(); Status = 'Unreachable'; ErrorMessage = $_.Exception.Message; ChannelsQueried = 0 }
+            $eventResult = @{ Events = @(); Status = 'Unreachable'; ErrorMessage = $_.Exception.Message; ChannelsQueried = 0; CappedLogs = 0 }
         }
 
         if ($eventResult.Status -eq 'Unreachable') {
@@ -2342,7 +2415,8 @@ foreach ($target in $targets) {
     }
 
     $row = New-HostResult -Inventory $target -Performance $perf `
-        -Event $eventResult.Events -EventStatus $eventResult.Status -Threshold $thresholds
+        -Event $eventResult.Events -EventStatus $eventResult.Status -Threshold $thresholds `
+        -CappedLogs ([int]$eventResult.CappedLogs)
 
     $results += $row
 
@@ -2454,7 +2528,8 @@ if ($htmlPath -and -not $NoOpen) {
     catch { Write-StatusLine -Status 'INFO' -Message "Open the report manually: $htmlPath" }
 }
 
-# Emit the rows so the script composes into a pipeline as well as writing files.
-return $results
+# Emit the rows only when asked. An interactive run printing 37 fields per machine after
+# the summary buries the one screen a technician actually needs to read.
+if ($PassThru) { return $results }
 
 #endregion

@@ -167,6 +167,8 @@ try {
         New-Item -ItemType Directory -Path $outputPath -Force -ErrorAction Stop | Out-Null
     }
 
+    # -PassThru makes the collector emit its per-machine rows; without it the script only
+    # writes files and this check would see zero results.
     # -NoOpen matters: the workbench runs checks in a background job, where launching a
     # browser would either fail or pop a window on the technician's desktop mid-check.
     $results = @(& $collector `
@@ -174,7 +176,8 @@ try {
         -LastDays $DaysBack `
         -SampleSeconds $SampleSeconds `
         -OutputPath $outputPath `
-        -NoOpen)
+        -NoOpen `
+        -PassThru)
 
     $report = @(Get-ChildItem -LiteralPath $outputPath -Filter "CitrixFSLogixHealth_*.html" -File -ErrorAction SilentlyContinue |
         Sort-Object -Property LastWriteTime -Descending |

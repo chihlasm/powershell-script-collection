@@ -578,3 +578,125 @@ Describe 'Event channel and provider patterns' {
         (Get-EventChannelPattern) | ForEach-Object { $_.Category | Should -Not -BeNullOrEmpty }
     }
 }
+
+Describe 'Get-HostVerdict - never Healthy on no evidence (regression)' {
+    BeforeAll {
+        function New-UnknownMetric {
+            @{
+                CpuStatus = 'UNKNOWN'; CpuAverage = $null; CpuPeak = $null
+                MemoryStatus = 'UNKNOWN'; MemoryAverage = $null; MemoryPeak = $null
+                DiskStatus = 'UNKNOWN'; DiskSummary = $null
+                QueueStatus = 'UNKNOWN'; QueueAverage = $null; QueuePerCpu = $null; LogicalProcessors = $null
+            }
+        }
+        function New-CleanMetric {
+            @{
+                CpuStatus = 'PASS'; CpuAverage = 10; CpuPeak = 15
+                MemoryStatus = 'PASS'; MemoryAverage = 30; MemoryPeak = 35
+                DiskStatus = 'PASS'; DiskSummary = 'C: 20/100GB (20%)'
+                QueueStatus = 'PASS'; QueueAverage = 1; QueuePerCpu = 0.25; LogicalProcessors = 4
+            }
+        }
+        function New-CleanCount { @{ Critical = 0; Error = 0; Warning = 0; Total = 0; CappedLogs = 0 } }
+    }
+
+    It 'calls a host Unreachable when performance was skipped and events could not be read' {
+        # v1 called this host Healthy - a verdict on zero evidence.
+        $v = Get-HostVerdict -Status @{ Performance = 'Skipped'; Events = 'Unreachable' } `
+            -Metric (New-UnknownMetric) -EventCount (New-CleanCount) -DegradedErrorCount 5 -CriticalErrorCount 25
+        $v.Verdict | Should -Be 'Unreachable'
+    }
+
+    It 'calls a host Unreachable when events were skipped and performance could not be collected' {
+        $v = Get-HostVerdict -Status @{ Performance = 'Unreachable'; Events = 'Skipped' } `
+            -Metric (New-UnknownMetric) -EventCount (New-CleanCount) -DegradedErrorCount 5 -CriticalErrorCount 25
+        $v.Verdict | Should -Be 'Unreachable'
+    }
+
+    It 'calls a host Unreachable when the CIM session opened but no counter could be read and events failed' {
+        $v = Get-HostVerdict -Status @{ Performance = 'Success'; Events = 'Unreachable' } `
+            -Metric (New-UnknownMetric) -EventCount (New-CleanCount) -DegradedErrorCount 5 -CriticalErrorCount 25
+        $v.Verdict | Should -Be 'Unreachable'
+    }
+
+    It 'says event history was not checked when events were skipped, instead of claiming both were clean' {
+        $v = Get-HostVerdict -Status @{ Performance = 'Success'; Events = 'Skipped' } `
+            -Metric (New-CleanMetric) -EventCount (New-CleanCount) -DegradedErrorCount 5 -CriticalErrorCount 25
+        $v.Verdict | Should -Be 'Healthy'
+        ($v.Reasons -join ' ') | Should -Match 'Event history was not checked'
+        ($v.Reasons -join ' ') | Should -Not -Match 'both within thresholds'
+    }
+
+    It 'says resource use was not checked when performance was skipped' {
+        $v = Get-HostVerdict -Status @{ Performance = 'Skipped'; Events = 'Success' } `
+            -Metric (New-UnknownMetric) -EventCount (New-CleanCount) -DegradedErrorCount 5 -CriticalErrorCount 25
+        $v.Verdict | Should -Be 'Healthy'
+        ($v.Reasons -join ' ') | Should -Match 'Resource use was not checked'
+    }
+
+    It 'names the individual metrics that could not be read' {
+        $m = New-CleanMetric; $m.QueueStatus = 'UNKNOWN'; $m.QueueAverage = $null
+        $v = Get-HostVerdict -Status @{ Performance = 'Success'; Events = 'Success' } `
+            -Metric $m -EventCount (New-CleanCount) -DegradedErrorCount 5 -CriticalErrorCount 25
+        ($v.Reasons -join ' ') | Should -Match 'Could not read: processor queue'
+    }
+
+    It 'warns that counts are a floor when an event log hit the per-log limit' {
+        $c = New-CleanCount; $c.CappedLogs = 2
+        $v = Get-HostVerdict -Status @{ Performance = 'Success'; Events = 'Success' } `
+            -Metric (New-CleanMetric) -EventCount $c -DegradedErrorCount 5 -CriticalErrorCount 25
+        ($v.Reasons -join ' ') | Should -Match 'HIGHER than shown'
+    }
+
+    It 'lists findings before coverage notes so the problem is read first' {
+        $m = New-CleanMetric; $m.CpuStatus = 'FAIL'; $m.CpuAverage = 97; $m.CpuPeak = 100
+        $v = Get-HostVerdict -Status @{ Performance = 'Success'; Events = 'Partial' } `
+            -Metric $m -EventCount (New-CleanCount) -DegradedErrorCount 5 -CriticalErrorCount 25
+        $v.Reasons[0] | Should -Match 'Processor is overloaded'
+    }
+}
+
+Describe 'Get-HostEvent - per-log limit detection' {
+    It 'counts a query that returned exactly -MaxEvents records as capped' {
+        Mock Get-TargetEventChannel { @([PSCustomObject]@{ LogName = 'Microsoft-FSLogix-Apps/Operational'; Category = 'FSLogix' }) }
+        Mock Resolve-EventProvider { @() }
+        Mock Invoke-EventQuery {
+            1..3 | ForEach-Object {
+                [PSCustomObject]@{ Message = 'x'; TimeCreated = (Get-Date); LogName = 'L'; ProviderName = 'P'; Id = 26; Level = 2 }
+            }
+        }
+        $r = Get-HostEvent -ComputerName 'VDA01' -Start (Get-Date).AddHours(-1) -End (Get-Date) -Level 1, 2, 3 -MaxEvents 3
+        $r.CappedLogs | Should -Be 1
+    }
+
+    It 'does not count a query below the limit as capped' {
+        Mock Get-TargetEventChannel { @([PSCustomObject]@{ LogName = 'Microsoft-FSLogix-Apps/Operational'; Category = 'FSLogix' }) }
+        Mock Resolve-EventProvider { @() }
+        Mock Invoke-EventQuery { @([PSCustomObject]@{ Message = 'x'; TimeCreated = (Get-Date); LogName = 'L'; ProviderName = 'P'; Id = 26; Level = 2 }) }
+        $r = Get-HostEvent -ComputerName 'VDA01' -Start (Get-Date).AddHours(-1) -End (Get-Date) -Level 1, 2, 3 -MaxEvents 3
+        $r.CappedLogs | Should -Be 0
+    }
+}
+
+Describe 'Script hygiene' {
+    BeforeAll { $script:ScriptFile = Join-Path $PSScriptRoot '..\Get-CitrixFSLogixHealth.ps1' }
+
+    It 'is pure ASCII, so Windows PowerShell 5.1 cannot misread it as ANSI' {
+        @([System.IO.File]::ReadAllBytes($script:ScriptFile) | Where-Object { $_ -gt 127 }).Count | Should -Be 0
+    }
+
+    It 'only emits result objects when -PassThru is given, so an interactive run ends on the summary' {
+        $text = Get-Content $script:ScriptFile -Raw
+        $text | Should -Match 'if \(\$PassThru\) \{ return \$results \}'
+        $text | Should -Not -Match '(?m)^return \$results'
+    }
+
+    It 'is called with -PassThru by the MSP workbench wrapper, which reads the result rows' {
+        $wrapper = Join-Path $PSScriptRoot '..\..\MSP-TroubleshootingWorkbench\checks\Invoke-CitrixFSLogixHealthCheck.ps1'
+        if (-not (Test-Path $wrapper)) {
+            Set-ItResult -Skipped -Because 'the workbench is not present beside this tool'
+            return
+        }
+        Get-Content $wrapper -Raw | Should -Match '-PassThru'
+    }
+}
