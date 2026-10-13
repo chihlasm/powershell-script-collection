@@ -18,6 +18,54 @@ Built for the common MSP situation where you have admin rights on the session ho
 
 Each tool runs in its own Windows PowerShell 5.1 process with its own output folder and a time limit, so one tool failing, hanging or calling `exit` never stops the rest.
 
+## What you see while it runs
+
+Servers are discovered first, then checked **one tool run per server, four servers at a time** (`-ThrottleLimit`), so you always know what is being checked where:
+
+```
+[INFO] 15 session host(s) to check in delivery group 'Shared Desktop':
+[INFO]          CTXVDA01  CTXVDA02  CTXVDA03  CTXVDA04  CTXVDA05
+[INFO]          ...
+[WARN] Not registered with Citrix (checked anyway): CTXVDA07 (Unregistered)
+
+[INFO] Plan - 4 server(s) at a time, roughly 12 minute(s):
+[INFO]    1. Server health        15 server(s) - 60 s sampling + events
+[INFO]    ...
+
+[INFO] Step 1 of 7: Server health - 15 server(s), 4 at a time, 60 s of sampling each
+[PASS]    [ 1/15] CTXVDA01  Healthy - CPU 34%, memory 61%  (1:12)
+[WARN]    [ 3/15] CTXVDA03  Degraded - Memory is running high  (1:15)
+[FAIL]    [ 7/15] CTXVDA07  Unreachable - Could not be contacted  (0:40)
+[INFO]       still running: CTXVDA09 (2:05), CTXVDA10 (2:01)
+[WARN] Leaving out of the remaining steps (unreachable): CTXVDA07
+```
+
+A progress bar at the top shows which servers are running right now. A server found unreachable in step 1 is left out of the later steps rather than timing out in each one. Unregistered session hosts are checked anyway, since an unregistered server may be the problem, and powered-off ones are listed but skipped. The time in the plan is a rough estimate.
+
+## Running it on a client server - use a kit
+
+The script runs other tools from this repository, so it needs their folders next to it. Don't copy the `.ps1` on its own - build a kit instead:
+
+```powershell
+# 1. On your workstation, from the repository root
+.\Citrix-PerfTriage\Invoke-CitrixPerfTriage.ps1 -CreateKit C:\Temp\CitrixPerfTriageKit.zip
+```
+
+2. Copy the zip to the client server (the Delivery Controller is ideal) and extract it.
+3. In an **elevated** Windows PowerShell, inside the extracted folder:
+
+```powershell
+# On a Delivery Controller - no names needed, it finds the session hosts itself
+powershell.exe -ExecutionPolicy Bypass -File .\Invoke-CitrixPerfTriage.ps1 -OutputPath C:\Temp
+
+# Narrow it to the delivery group with the complaints
+powershell.exe -ExecutionPolicy Bypass -File .\Invoke-CitrixPerfTriage.ps1 -DesktopGroupName 'Shared Desktop' -OutputPath C:\Temp
+```
+
+The kit is about 300 KB: the script, the seven tool folders (without their test suites), and a `README-FIRST.txt` with these steps. If tools are missing, the script says which and how to fix it rather than running half the checks. `-ToolRoot` points it at tool folders kept somewhere else.
+
+When run on a Delivery Controller with no `-ComputerName` or `-DeliveryController`, it detects the Citrix Broker Service and discovers the session hosts from the local Controller.
+
 ## Usage
 
 ```powershell
@@ -51,7 +99,15 @@ Run it from an **elevated** console - the profile share speed test needs it. Wit
 | `-SkipStorageBenchmark`, `-SkipHyperV` | off | Leave a step out |
 | `-Credential` | current user | For the session hosts; passed to every tool that accepts one |
 | `-HyperVCredential` | current user | For the Hyper-V hosts |
-| `-StepTimeoutSeconds` | 1800 | Per-step time limit |
+| `-ThrottleLimit` | 4 | Servers checked at the same time in each step |
+| `-StepTimeoutSeconds` | 1800 | Time limit for one tool run (one server, one step) |
+| `-CreateKit` | - | Build a portable folder or `.zip` instead of running a triage |
+| `-ToolRoot` | - | Where the tool folders are, if not next to the script |
+| `-PassThru` | off | Also return the result object (for scripting) |
+
+## The verdict
+
+The summary gives one overall result: **Critical**, **Warning**, **Healthy**, or **Incomplete**. Healthy is only given when the checks actually ran and none failed. If nothing ran, or nothing was flagged but a step failed, the result is Incomplete, not Healthy. Problems that were found are always reported, even if other steps failed.
 
 ## The profile share speed test
 
@@ -83,20 +139,22 @@ Send the folder to the Hyper-V administrators. They run one command and send bac
 Everything lands in `CitrixPerfTriage_<yyyy-MM-dd_HHmmss>\` under `-OutputPath`:
 
 ```
-Summary.html          - start here: what to look at first, what ran, links to every report
-Findings.csv          - every finding, one row each
-Steps.csv             - each step's result and report path
-Triage.log            - the console output, timestamped
-1-ServerHealth\       - health collector HTML + CSVs
-2-FSLogixSettings\    - FSLogixSettings.csv
-3-FSLogixLogs\<host>\ - parsed FSLogix log CSVs
-4-StorageEvents\      - Events.csv, Summary.csv
-5-RdsEvents\          - RDS/FSLogix event HTML + CSV
-6-StorageSpeed\       - DiskSpd HTML report
-7-HyperV\             - host diagnostic logs, Inventory\, HyperV-Handoff\
+Summary.html              - start here: what to look at first, one row per server, what ran, links
+Servers.csv               - per-server verdict, CPU, memory, disk, sessions, issue count
+Findings.csv              - every finding, one row each
+Steps.csv                 - each step's result and report path
+Triage.log                - the console output, timestamped
+0-Discovery\              - the Delivery Controller query (when discovering)
+1-ServerHealth\<server>\  - health collector HTML + CSVs
+2-FSLogixSettings\        - FSLogixSettings.csv
+3-FSLogixLogs\<server>\   - parsed FSLogix log CSVs
+4-StorageEvents\<server>\ - Events.csv, Summary.csv
+5-RdsEvents\<server>\     - RDS/FSLogix event HTML + CSV
+6-StorageSpeed\           - DiskSpd HTML report
+7-HyperV\                 - host diagnostic logs, Inventory\, HyperV-Handoff\
 ```
 
-Each step folder also holds `console.log` (the tool's full console output) for when a step fails.
+Each tool run's folder also holds `console.log` (the tool's full console output) for when something fails.
 
 Keep `-OutputPath` short (for example `C:\Temp`). Some tools nest long file names under their folder, and Windows PowerShell 5.1 cannot create paths over 260 characters. The script warns when the path is long.
 
@@ -120,7 +178,7 @@ Nothing on the session hosts or Hyper-V hosts, except:
 Invoke-Pester .\Tests\Invoke-CitrixPerfTriage.Tests.ps1
 ```
 
-40 tests (Pester 5 syntax), covering the FSLogix registry value parsing, the admin-share path mapping, the Hyper-V flag and DiskSpd result parsing, the hand-off package, HTML encoding, and the tool runner (typed parameters in, objects out, `exit` codes, thrown errors, time limits, credential file cleanup).
+65 tests (Pester 5 syntax), covering the FSLogix registry value parsing, the admin-share path mapping, the Hyper-V flag and DiskSpd result parsing, the hand-off package, HTML encoding, the overall verdict (including a regression guard: a run where nothing executed must be Incomplete, never Healthy), name-list splitting (a regression guard for `-File` passing `VDA01,VDA02` as one string), tool discovery, the kit, the tool runner (typed parameters in, objects out, `exit` codes, thrown errors, time limits, credential file cleanup), and the batch runner (result order, running in parallel, one failure not stopping the rest).
 
 ## References
 

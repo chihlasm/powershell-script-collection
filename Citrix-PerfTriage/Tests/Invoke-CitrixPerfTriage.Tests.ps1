@@ -63,6 +63,55 @@ Describe 'Get-CcdConnectionPath' {
     }
 }
 
+Describe 'Split-TriageNameList' {
+    # Regression guard: powershell.exe -File passes "-ComputerName VDA01,VDA02" as ONE string.
+    # The kit is run with -File, so without splitting every server list became a single
+    # unresolvable name.
+    It 'splits a comma list that arrived as one string' {
+        Split-TriageNameList -Value 'VDA01,VDA02' | Should -Be @('VDA01', 'VDA02')
+    }
+
+    It 'accepts semicolons, spaces and a real array, and drops blanks and duplicates' {
+        Split-TriageNameList -Value @('VDA01; VDA02', 'VDA03 VDA01', ' ') | Should -Be @('VDA01', 'VDA02', 'VDA03')
+    }
+
+    It 'returns nothing for no input' {
+        @(Split-TriageNameList -Value $null).Count | Should -Be 0
+    }
+}
+
+Describe 'ConvertTo-SafeFolderName' {
+    It 'replaces characters Windows does not allow in folder names' {
+        ConvertTo-SafeFolderName -Name 'a:b*c?' | Should -Be 'a_b_c_'
+    }
+
+    It 'leaves ordinary server names alone' {
+        ConvertTo-SafeFolderName -Name 'CTXVDA01' | Should -Be 'CTXVDA01'
+    }
+}
+
+Describe 'Format-NameColumns' {
+    It 'lays names out in aligned columns' {
+        $lines = @(Format-NameColumns -Name @('A', 'BB', 'CCC', 'D') -PerLine 3 -Indent '')
+        $lines.Count | Should -Be 2
+        $lines[0] | Should -Be 'A    BB   CCC'
+        $lines[1] | Should -Be 'D'
+    }
+}
+
+Describe 'Get-TriageEstimate' {
+    It 'grows with the number of rounds, not the number of servers' {
+        $four  = Get-TriageEstimate -ServerCount 4 -ThrottleLimit 4 -SampleSeconds 60
+        $eight = Get-TriageEstimate -ServerCount 8 -ThrottleLimit 4 -SampleSeconds 60
+        $eight | Should -BeGreaterThan $four
+        $eight | Should -BeLessThan (2 * $four + 2)
+    }
+
+    It 'is never zero' {
+        Get-TriageEstimate -ServerCount 1 -ThrottleLimit 4 -SampleSeconds 0 | Should -BeGreaterOrEqual 1
+    }
+}
+
 Describe 'Get-ShortComputerName' {
     It 'reduces <Name> to <Expected>' -ForEach @(
         @{ Name = 'VDA01';              Expected = 'VDA01' }
@@ -139,6 +188,100 @@ Describe 'Get-TriageOverallStatus' {
     It 'is Healthy with no findings' {
         Get-TriageOverallStatus -Finding @() | Should -Be 'Healthy'
     }
+
+    # Regression guard: with the tools missing every step was Skipped, and the run reported
+    # "Overall: Healthy". A triage that could not look must never say it found nothing wrong.
+    It 'is Incomplete when no step ran, not Healthy' {
+        $steps = @(
+            [pscustomobject]@{ Status = 'Skipped' }
+            [pscustomobject]@{ Status = 'Skipped' }
+            [pscustomobject]@{ Status = 'Failed' }
+        )
+        Get-TriageOverallStatus -Finding @() -Step $steps | Should -Be 'Incomplete'
+    }
+
+    It 'is Incomplete when nothing was flagged but a step failed' {
+        $steps = @([pscustomobject]@{ Status = 'Completed' }, [pscustomobject]@{ Status = 'TimedOut' })
+        Get-TriageOverallStatus -Finding @() -Step $steps | Should -Be 'Incomplete'
+    }
+
+    It 'still reports real problems when another step failed' {
+        $steps = @([pscustomobject]@{ Status = 'Completed' }, [pscustomobject]@{ Status = 'Failed' })
+        Get-TriageOverallStatus -Finding @([pscustomobject]@{ Severity = 'Warning' }) -Step $steps | Should -Be 'Warning'
+    }
+
+    It 'is Healthy when steps ran cleanly or were skipped on request' {
+        $steps = @([pscustomobject]@{ Status = 'Completed' }, [pscustomobject]@{ Status = 'Skipped' })
+        Get-TriageOverallStatus -Finding @() -Step $steps | Should -Be 'Healthy'
+    }
+}
+
+Describe 'Get-TriageToolSearchRoot' {
+    It 'searches -ToolRoot, then the script folder (kit), then its parent (repository)' {
+        Get-TriageToolSearchRoot -ToolRoot 'D:\Tools' -ScriptFolder 'C:\Repo\Citrix-PerfTriage' |
+            Should -Be @('D:\Tools', 'C:\Repo\Citrix-PerfTriage', 'C:\Repo')
+    }
+
+    It 'omits -ToolRoot when not given' {
+        Get-TriageToolSearchRoot -ToolRoot '' -ScriptFolder 'C:\Repo\Citrix-PerfTriage' |
+            Should -Be @('C:\Repo\Citrix-PerfTriage', 'C:\Repo')
+    }
+}
+
+Describe 'Resolve-TriageTool' {
+    BeforeAll {
+        $kitRoot = Join-Path $TestDrive 'kit'
+        New-Item -ItemType Directory -Path (Join-Path $kitRoot 'Parse-FSLogixLogs') -Force | Out-Null
+        Set-Content (Join-Path $kitRoot 'Parse-FSLogixLogs\Parse-FSLogixLogs.ps1') '#'
+        $flatRoot = Join-Path $TestDrive 'flat'
+        New-Item -ItemType Directory -Path $flatRoot -Force | Out-Null
+        Set-Content (Join-Path $flatRoot 'Parse-FSLogixLogs.ps1') '#'
+    }
+
+    It 'finds a tool in its own folder' {
+        Resolve-TriageTool -RelativePath 'Parse-FSLogixLogs\Parse-FSLogixLogs.ps1' -SearchRoot @($kitRoot) |
+            Should -Be (Join-Path $kitRoot 'Parse-FSLogixLogs\Parse-FSLogixLogs.ps1')
+    }
+
+    It 'finds a tool copied loose into a folder' {
+        Resolve-TriageTool -RelativePath 'Parse-FSLogixLogs\Parse-FSLogixLogs.ps1' -SearchRoot @($flatRoot) |
+            Should -Be (Join-Path $flatRoot 'Parse-FSLogixLogs.ps1')
+    }
+
+    It 'returns nothing when the tool is absent' {
+        Resolve-TriageTool -RelativePath 'Nope\Nope.ps1' -SearchRoot @($kitRoot, $flatRoot) | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'New-TriageKit' {
+    BeforeAll {
+        $tools = @{}
+        $roots = Get-TriageToolSearchRoot -ToolRoot '' -ScriptFolder (Join-Path $script:RepoRoot 'Citrix-PerfTriage')
+        foreach ($k in $script:ToolPaths.Keys) { $tools[$k] = Resolve-TriageTool -RelativePath $script:ToolPaths[$k] -SearchRoot $roots }
+        $scriptPath = Join-Path $script:RepoRoot 'Citrix-PerfTriage\Invoke-CitrixPerfTriage.ps1'
+
+        $zip = New-TriageKit -Destination (Join-Path $TestDrive 'Kit.zip') -ScriptPath $scriptPath -Tools $tools
+        $extracted = Join-Path $TestDrive 'extracted'
+        Expand-Archive -LiteralPath $zip -DestinationPath $extracted
+    }
+
+    It 'produces a kit in which every tool is found from the script''s own folder' {
+        foreach ($rel in $script:ToolPaths.Values) {
+            Resolve-TriageTool -RelativePath $rel -SearchRoot @($extracted) | Should -Not -BeNullOrEmpty
+        }
+    }
+
+    It 'includes the script, the instructions and DiskSpd''s binary and report template' {
+        Join-Path $extracted 'Invoke-CitrixPerfTriage.ps1' | Should -Exist
+        Join-Path $extracted 'README-FIRST.txt' | Should -Exist
+        Join-Path $extracted 'DiskSpdDiagnostic\diskspd.exe' | Should -Exist
+        Join-Path $extracted 'DiskSpdDiagnostic\ReportTemplate.html' | Should -Exist
+    }
+
+    It 'leaves out test suites and saved DiskSpd reports' {
+        @(Get-ChildItem -LiteralPath $extracted -Recurse -Directory -Filter 'Tests').Count | Should -Be 0
+        @(Get-ChildItem -LiteralPath $extracted -Recurse -File -Filter 'diskspd_*.html').Count | Should -Be 0
+    }
 }
 
 Describe 'Get-RelativeReportPath' {
@@ -201,6 +344,57 @@ Describe 'Invoke-ToolScript' {
         $r = Invoke-ToolScript -ScriptPath (Join-Path $tools 'hangs.ps1') -WorkFolder (Join-Path $TestDrive 'w-hang') -TimeoutSeconds 5
         $r.Status | Should -Be 'TimedOut'
         $r.Duration.TotalSeconds | Should -BeLessThan 60
+    }
+}
+
+Describe 'Invoke-ToolBatch' {
+    BeforeAll {
+        $tools = Join-Path $TestDrive 'batchtools'
+        New-Item -ItemType Directory -Path $tools | Out-Null
+        Set-Content (Join-Path $tools 'sleepy.ps1') 'param([string]$Name, [int]$Seconds) Start-Sleep -Seconds $Seconds; [pscustomobject]@{ Name = $Name }'
+        Set-Content (Join-Path $tools 'exits.ps1') 'param([string]$Name) exit 2'
+        $job = {
+            param($name, $script, $seconds)
+            [pscustomobject]@{
+                Target = $name; ScriptPath = (Join-Path $tools $script)
+                Parameters = @{ Name = $name; Seconds = $seconds }; WorkFolder = (Join-Path $TestDrive "b-$name")
+            }
+        }
+    }
+
+    It 'returns one result per job, in the order given, even when they finish out of order' {
+        $jobs = @((& $job 'slow' 'sleepy.ps1' 4), (& $job 'fast' 'sleepy.ps1' 0))
+        $r = @(Invoke-ToolBatch -Job $jobs -ThrottleLimit 2 -TimeoutSeconds 60 6>$null)
+        $r.Count | Should -Be 2
+        $r[0].Target | Should -Be 'slow'
+        $r[0].Result.Output[0].Name | Should -Be 'slow'
+        $r[1].Target | Should -Be 'fast'
+    }
+
+    It 'runs jobs at the same time up to the throttle limit' {
+        $jobs = @((& $job 'p1' 'sleepy.ps1' 5), (& $job 'p2' 'sleepy.ps1' 5), (& $job 'p3' 'sleepy.ps1' 5))
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        $null = Invoke-ToolBatch -Job $jobs -ThrottleLimit 3 -TimeoutSeconds 60 6>$null
+        # Serially this is 15 s of sleeping alone; in parallel it is ~5 s plus process start-up.
+        $timer.Elapsed.TotalSeconds | Should -BeLessThan 13
+    }
+
+    It 'reports a failing server without stopping the others' {
+        $jobs = @((& $job 'bad' 'exits.ps1' 0), (& $job 'good' 'sleepy.ps1' 0))
+        $r = @(Invoke-ToolBatch -Job $jobs -ThrottleLimit 1 -TimeoutSeconds 60 6>$null)
+        $r[0].Result.Status | Should -Be 'Failed'
+        $r[1].Result.Status | Should -Be 'Completed'
+    }
+
+    It 'passes each finished job to -Describe for its progress line' {
+        $script:described = @()
+        $describe = { param($j, $res) $script:described += $j.Target; @{ Status = 'PASS'; Text = 'ok' } }
+        $null = Invoke-ToolBatch -Job @((& $job 'd1' 'sleepy.ps1' 0)) -TimeoutSeconds 60 -Describe $describe 6>$null
+        $script:described | Should -Be @('d1')
+    }
+
+    It 'returns nothing for an empty job list' {
+        @(Invoke-ToolBatch -Job @() 6>$null).Count | Should -Be 0
     }
 }
 

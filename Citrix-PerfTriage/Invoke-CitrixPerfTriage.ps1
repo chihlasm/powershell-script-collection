@@ -79,7 +79,12 @@
     Do not check the Hyper-V hosts.
 
 .PARAMETER StepTimeoutSeconds
-    Longest any single step may run before it is stopped. Default 1800 (30 minutes).
+    Longest any single tool run (one server, one step) may take before it is stopped.
+    Default 1800 (30 minutes).
+
+.PARAMETER ThrottleLimit
+    How many servers each step checks at the same time. Default 4. Higher is faster on a big
+    site but puts more simultaneous load on this machine and the network.
 
 .PARAMETER Credential
     Credential for the session hosts. Passed to every tool that accepts one. The storage speed
@@ -92,11 +97,36 @@
 .PARAMETER OutputPath
     Folder to create the run folder in. Defaults to the current directory.
 
+.PARAMETER ToolRoot
+    Folder holding the tool folders, when they are somewhere other than next to this script
+    or next to this script's folder.
+
+.PARAMETER CreateKit
+    Build a portable kit instead of running a triage: this script plus every tool it needs,
+    as a folder or (when the path ends in .zip) a zip. Copy the kit to the server you will run
+    from, extract it, and run Invoke-CitrixPerfTriage.ps1 from inside it. Run this from the
+    repository, where all the tools are.
+
 .PARAMETER NoOpen
     Do not open the summary report when finished.
 
+.PARAMETER PassThru
+    Also return the result object (overall status, steps, findings) to the pipeline.
+
 .PARAMETER LoadFunctionsOnly
     Load the helper functions without running anything. Used by the Pester tests.
+
+.EXAMPLE
+    .\Invoke-CitrixPerfTriage.ps1 -CreateKit C:\Temp\CitrixPerfTriageKit.zip
+
+    Run from the repository: packs this script and all its tools into one zip to copy to a
+    client server.
+
+.EXAMPLE
+    .\Invoke-CitrixPerfTriage.ps1
+
+    On a Delivery Controller, with no targets given: discovers the session hosts from the
+    local Controller.
 
 .EXAMPLE
     .\Invoke-CitrixPerfTriage.ps1 -ComputerName CTXVDA01, CTXVDA02 -HyperVCluster HVCLUSTER01
@@ -191,13 +221,22 @@ param(
     [ValidateRange(60, 14400)]
     [int]$StepTimeoutSeconds = 1800,
 
+    [ValidateRange(1, 16)]
+    [int]$ThrottleLimit = 4,
+
     [System.Management.Automation.PSCredential]$Credential,
 
     [System.Management.Automation.PSCredential]$HyperVCredential,
 
     [string]$OutputPath = (Get-Location).Path,
 
+    [string]$ToolRoot,
+
+    [string]$CreateKit,
+
     [switch]$NoOpen,
+
+    [switch]$PassThru,
 
     [switch]$LoadFunctionsOnly
 )
@@ -328,6 +367,37 @@ function ConvertTo-PSLiteral {
     param([AllowEmptyString()][string]$Value)
 
     "'" + ($Value -replace "'", "''") + "'"
+}
+
+function Split-TriageNameList {
+    <#
+    .SYNOPSIS
+        Turns "VDA01,VDA02; VDA03" into three names.
+    .DESCRIPTION
+        powershell.exe -File passes -ComputerName VDA01,VDA02 to the script as ONE string,
+        "VDA01,VDA02" - the comma is only an array operator when PowerShell itself parses the
+        command line. The kit is run with -File, so every name-list parameter is split here.
+    #>
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param([AllowNull()][string[]]$Value)
+
+    if (-not $Value) { return @() }
+    @($Value | ForEach-Object { "$_" -split '[,;\s]+' } | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique)
+}
+
+function ConvertTo-SafeFolderName {
+    <#
+    .SYNOPSIS
+        Makes a server name safe to use as a folder name.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][string]$Name)
+
+    $invalid = [regex]::Escape((-join [IO.Path]::GetInvalidFileNameChars()))
+    $safe = ($Name -replace "[$invalid]", '_').Trim('. ')
+    if ($safe) { $safe } else { 'server' }
 }
 
 function Get-ShortComputerName {
@@ -484,12 +554,28 @@ function Get-DiskSpdResultFromConsole {
 }
 
 function Get-TriageOverallStatus {
+    <#
+    .SYNOPSIS
+        Rolls findings and step results up to one verdict.
+    .DESCRIPTION
+        "Healthy" is only ever returned when checks actually ran and none failed. With no
+        findings because nothing ran, or because steps failed, the verdict is "Incomplete" -
+        a triage that could not look must never report that it found nothing wrong.
+        Problems that were found are still reported as Critical/Warning even when other
+        steps failed, because those findings are real.
+    #>
     [CmdletBinding()]
     [OutputType([string])]
-    param([object[]]$Finding = @())
+    param(
+        [object[]]$Finding = @(),
+        [object[]]$Step = @()
+    )
 
+    $ran = @($Step | Where-Object { $_.Status -in 'Completed', 'Partial' }).Count
+    if ($Step.Count -and $ran -eq 0) { return 'Incomplete' }
     if (@($Finding | Where-Object Severity -eq 'Critical').Count -gt 0) { return 'Critical' }
     if (@($Finding | Where-Object Severity -eq 'Warning').Count -gt 0)  { return 'Warning' }
+    if (@($Step | Where-Object { $_.Status -in 'Failed', 'TimedOut' }).Count -gt 0) { return 'Incomplete' }
     'Healthy'
 }
 
@@ -515,14 +601,363 @@ function Get-RelativeReportPath {
 }
 
 # ---------------------------------------------------------------------------
-# Tool runner
+# Finding the tools, and packing them into a portable kit
 # ---------------------------------------------------------------------------
-function Invoke-ToolScript {
+function Get-TriageToolSearchRoot {
     <#
     .SYNOPSIS
-        Runs one repository tool in its own Windows PowerShell 5.1 process.
+        The folders searched for tool folders, most specific first.
     .DESCRIPTION
-        Parameters go in, and pipeline output comes back, through CliXml files in the step's
+        Covers the three ways the script is realistically laid out:
+          -ToolRoot            an explicit override
+          <script folder>      a kit: the tool folders sit next to the script
+          <script folder>\..   the repository: the tool folders are siblings of Citrix-PerfTriage
+    #>
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [AllowEmptyString()][string]$ToolRoot,
+        [Parameter(Mandatory)][string]$ScriptFolder
+    )
+
+    $roots = @()
+    if ($ToolRoot) { $roots += $ToolRoot }
+    $roots += $ScriptFolder
+    $parent = Split-Path -Parent $ScriptFolder
+    if ($parent) { $roots += $parent }
+    @($roots | Select-Object -Unique)
+}
+
+function Resolve-TriageTool {
+    <#
+    .SYNOPSIS
+        Finds one tool script under the search roots. Returns $null when it is not found.
+    .DESCRIPTION
+        Accepts the tool in its own folder (the normal layout) or loose in a search root, so a
+        technician who copied the .ps1 files flat into one folder is still covered.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][string]$RelativePath,
+        [string[]]$SearchRoot = @()
+    )
+
+    $leaf = Split-Path -Leaf $RelativePath
+    foreach ($root in $SearchRoot) {
+        foreach ($candidate in (Join-Path $root $RelativePath), (Join-Path $root $leaf)) {
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                return (Resolve-Path -LiteralPath $candidate).ProviderPath
+            }
+        }
+    }
+    $null
+}
+
+function New-TriageKit {
+    <#
+    .SYNOPSIS
+        Copies this script and every tool folder it uses into one portable folder or zip.
+    .DESCRIPTION
+        The kit keeps the tools in their own folders next to the script, which is the first
+        layout Resolve-TriageTool checks, so the kit runs from wherever it is extracted.
+        Test suites and DiskSpd's saved reports from earlier runs are left out.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][string]$Destination,
+        [Parameter(Mandatory)][string]$ScriptPath,
+        [Parameter(Mandatory)][hashtable]$Tools
+    )
+
+    $asZip = $Destination -match '\.zip$'
+    $staging = if ($asZip) {
+        Join-Path $env:TEMP ('CitrixPerfTriageKit_' + [guid]::NewGuid().ToString('N'))
+    } else { $Destination }
+    New-Item -ItemType Directory -Path $staging -Force | Out-Null
+
+    Copy-Item -LiteralPath $ScriptPath -Destination $staging -Force
+
+    foreach ($toolPath in $Tools.Values) {
+        $srcFolder = Split-Path -Parent $toolPath
+        $dstFolder = Join-Path $staging (Split-Path -Leaf $srcFolder)
+        $prefixLength = $srcFolder.TrimEnd('\').Length + 1
+        Get-ChildItem -LiteralPath $srcFolder -Recurse -File | Where-Object {
+            $rel = $_.FullName.Substring($prefixLength)
+            $rel -notmatch '(^|\\)Tests\\' -and $_.Name -notlike 'diskspd_*.html' -and $_.Name -ne '.gitignore'
+        } | ForEach-Object {
+            $target = Join-Path $dstFolder $_.FullName.Substring($prefixLength)
+            New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+            Copy-Item -LiteralPath $_.FullName -Destination $target -Force
+        }
+    }
+
+    $readme = @"
+Citrix performance triage kit
+=============================
+Built $(Get-Date -Format 'yyyy-MM-dd HH:mm') by $env:USERDOMAIN\$env:USERNAME.
+
+1. Copy this folder (or the zip, then extract it) to a server in the client's network -
+   the Delivery Controller is ideal.
+2. Open Windows PowerShell AS ADMINISTRATOR in this folder.
+3. Run one of:
+
+   On the Delivery Controller (finds the session hosts itself):
+     powershell.exe -ExecutionPolicy Bypass -File .\Invoke-CitrixPerfTriage.ps1 -OutputPath C:\Temp
+
+   Anywhere else, naming the session hosts:
+     powershell.exe -ExecutionPolicy Bypass -File .\Invoke-CitrixPerfTriage.ps1 -ComputerName VDA01,VDA02 -OutputPath C:\Temp
+
+   Useful extras:  -DesktopGroupName '<group>'   -HyperVCluster <name>   -SkipStorageBenchmark
+
+The summary opens when it finishes. Full help:  Get-Help .\Invoke-CitrixPerfTriage.ps1 -Full
+"@
+    Set-Content -LiteralPath (Join-Path $staging 'README-FIRST.txt') -Value $readme -Encoding UTF8
+
+    if ($asZip) {
+        $zipParent = Split-Path -Parent $Destination
+        if ($zipParent -and -not (Test-Path -LiteralPath $zipParent)) {
+            New-Item -ItemType Directory -Path $zipParent -Force | Out-Null
+        }
+        Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $Destination -Force
+        Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    $Destination
+}
+
+function Test-LocalDeliveryController {
+    <#
+    .SYNOPSIS
+        True when this machine is a Citrix Delivery Controller.
+    .DESCRIPTION
+        Checks for the Citrix Broker Service (service name CitrixBrokerService), which runs
+        only on Controllers. The Broker SDK alone is not enough - it is also installed with
+        Studio on admin workstations, where 'localhost' is not a Controller.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param()
+
+    [bool](Get-Service -Name 'CitrixBrokerService' -ErrorAction SilentlyContinue)
+}
+
+# ---------------------------------------------------------------------------
+# Discovery and the up-front plan
+# ---------------------------------------------------------------------------
+function New-TriageInventoryEntry {
+    <#
+    .SYNOPSIS
+        One session host, in the same shape the health collector's broker discovery returns.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ComputerName,
+        [string]$DeliveryGroup,
+        [string]$RegistrationState,
+        [string]$PowerState,
+        [object]$InMaintenanceMode,
+        [object]$SessionCount
+    )
+
+    [PSCustomObject]@{
+        ComputerName      = $ComputerName
+        DeliveryGroup     = $DeliveryGroup
+        RegistrationState = $RegistrationState
+        PowerState        = $PowerState
+        InMaintenanceMode = $InMaintenanceMode
+        SessionCount      = $SessionCount
+    }
+}
+
+function Get-TriageInventory {
+    <#
+    .SYNOPSIS
+        Asks a Delivery Controller for its session hosts, before any checks start.
+    .DESCRIPTION
+        Uses the health collector's own discovery (Import-CitrixBrokerSdk + Get-VDAInventory,
+        loaded with -LoadFunctionsOnly) so the list is exactly what the collector would have
+        found, including its handling of the broker's 250-record default. Runs in a Windows
+        PowerShell 5.1 process because the Citrix snap-ins do not load in PowerShell 7.
+
+        Unregistered machines are kept - an unregistered session host may well be the problem.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$CollectorPath,
+        [Parameter(Mandatory)][string]$DeliveryController,
+        [string]$DesktopGroupName,
+        [Parameter(Mandatory)][string]$WorkFolder,
+        [int]$TimeoutSeconds = 300
+    )
+
+    New-Item -ItemType Directory -Path $WorkFolder -Force | Out-Null
+    # Dot-sourcing the collector binds ITS parameters (DeliveryController, DesktopGroupName...)
+    # into this scope, so this script's own parameters use names the collector does not have.
+    $discovery = @'
+param([string]$TriageCollector, [string]$TriageController, [string]$TriageGroup)
+. $TriageCollector -LoadFunctionsOnly
+if (-not (Import-CitrixBrokerSdk)) {
+    throw 'The Citrix Broker PowerShell SDK is not available on this machine. Run this on a Delivery Controller, or name the servers with -ComputerName.'
+}
+Get-VDAInventory -DeliveryController $TriageController -DesktopGroupName $TriageGroup -MaxRecordCount ([int]::MaxValue)
+'@
+    $discoveryPath = Join-Path $WorkFolder 'Discover-SessionHosts.ps1'
+    Set-Content -LiteralPath $discoveryPath -Value $discovery -Encoding UTF8
+
+    $run = Invoke-ToolScript -ScriptPath $discoveryPath -WorkFolder $WorkFolder -TimeoutSeconds $TimeoutSeconds -Label 'Discovery' `
+        -Parameters @{ TriageCollector = $CollectorPath; TriageController = $DeliveryController; TriageGroup = "$DesktopGroupName" }
+
+    $machines = @($run.Output | Where-Object { $_.PSObject.Properties['ComputerName'] } | ForEach-Object {
+        New-TriageInventoryEntry -ComputerName $_.ComputerName -DeliveryGroup $_.DeliveryGroup `
+            -RegistrationState $_.RegistrationState -PowerState $_.PowerState `
+            -InMaintenanceMode $_.InMaintenanceMode -SessionCount $_.SessionCount
+    } | Sort-Object ComputerName)
+
+    [PSCustomObject]@{
+        Machines = $machines
+        Error    = if ($run.Status -ne 'Completed') { $run.Error } else { '' }
+    }
+}
+
+function Format-NameColumns {
+    <#
+    .SYNOPSIS
+        Lays a list of names out in aligned columns, a few per line.
+    #>
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [string[]]$Name = @(),
+        [int]$PerLine = 5,
+        [string]$Indent = '         '
+    )
+
+    if (-not $Name.Count) { return @() }
+    $width = ($Name | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum + 2
+    for ($i = 0; $i -lt $Name.Count; $i += $PerLine) {
+        $chunk = $Name[$i..([math]::Min($i + $PerLine, $Name.Count) - 1)]
+        $Indent + (($chunk | ForEach-Object { $_.PadRight($width) }) -join '').TrimEnd()
+    }
+}
+
+function Show-TriageInventory {
+    [CmdletBinding()]
+    param(
+        [object[]]$Inventory = @(),
+        [object[]]$PoweredOff = @()
+    )
+
+    if (-not $Inventory.Count) { return }
+    $groups = @($Inventory | ForEach-Object { $_.DeliveryGroup } | Where-Object { $_ } | Select-Object -Unique)
+    $groupText = if ($groups.Count -eq 1) { " in delivery group '$($groups[0])'" } elseif ($groups.Count) { " in $($groups.Count) delivery groups" } else { '' }
+    Write-TriageLine -Status INFO -Message "$($Inventory.Count) session host(s) to check$($groupText):"
+    foreach ($line in (Format-NameColumns -Name @($Inventory | ForEach-Object { $_.ComputerName }))) { Write-TriageLine -Status INFO -Message $line }
+
+    $unreg = @($Inventory | Where-Object { $_.RegistrationState -and $_.RegistrationState -ne 'Registered' })
+    if ($unreg.Count) {
+        Write-TriageLine -Status WARN -Message ("Not registered with Citrix (checked anyway): {0}" -f (($unreg | ForEach-Object { "$($_.ComputerName) ($($_.RegistrationState))" }) -join ', '))
+    }
+    $maint = @($Inventory | Where-Object { $_.InMaintenanceMode -eq $true })
+    if ($maint.Count) {
+        Write-TriageLine -Status INFO -Message ("In maintenance mode: {0}" -f (($maint | ForEach-Object { $_.ComputerName }) -join ', '))
+    }
+    if ($PoweredOff.Count) {
+        Write-TriageLine -Status INFO -Message ("Powered off, not checked: {0}" -f (($PoweredOff | ForEach-Object { $_.ComputerName }) -join ', '))
+    }
+}
+
+function Get-TriageEstimate {
+    <#
+    .SYNOPSIS
+        A rough run-time estimate, in minutes, for the plan shown before the checks start.
+    .DESCRIPTION
+        Deliberately rough and stated as such: per-server figures are typical times for a
+        reachable server, and every step runs -ThrottleLimit servers at once.
+    #>
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory)][int]$ServerCount,
+        [Parameter(Mandatory)][int]$ThrottleLimit,
+        [Parameter(Mandatory)][int]$SampleSeconds,
+        [switch]$Benchmark,
+        [int]$HyperVHostCount = 0
+    )
+
+    $rounds = [math]::Ceiling($ServerCount / [double]$ThrottleLimit)
+    $seconds  = $rounds * ($SampleSeconds + 30)   # health: sampling plus event reads
+    $seconds += $ServerCount * 3                  # FSLogix settings, one server at a time
+    $seconds += $rounds * (20 + 30 + 30)          # FSLogix logs, storage events, RDS events
+    if ($Benchmark) { $seconds += 60 }
+    $seconds += $HyperVHostCount * 180            # host diagnostics per host
+    if ($HyperVHostCount) { $seconds += 300 }     # inventory, incl. Windows Update query
+    [int][math]::Max(1, [math]::Ceiling($seconds / 60))
+}
+
+function Show-TriagePlan {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][int]$ServerCount,
+        [Parameter(Mandatory)][int]$ThrottleLimit,
+        [Parameter(Mandatory)][int]$SampleSeconds,
+        [Parameter(Mandatory)][hashtable]$Tool,
+        [switch]$SkipStorageBenchmark,
+        [bool]$IsAdmin,
+        [string]$ProfileSharePath,
+        [string]$HyperVText
+    )
+
+    $n = "$ServerCount server(s)"
+    $bench = if ($SkipStorageBenchmark) { 'skipped (-SkipStorageBenchmark)' }
+             elseif (-not $IsAdmin) { 'skipped (needs an elevated console)' }
+             elseif ($ProfileSharePath) { "from the first server to $ProfileSharePath" }
+             else { 'from the first server to the profile share found in step 2' }
+    $hv = if ($HyperVText) { $HyperVText } else { 'skipped (no -HyperVHost / -HyperVCluster)' }
+    # An ordered dictionary, not an array of two-element arrays: @( @('a','b') ... ) unrolls
+    # into one flat list of strings.
+    $rows = [ordered]@{
+        '1. Server health'       = $(if ($Tool.Health)        { "$n - $SampleSeconds s sampling + events" } else { 'skipped (tool not found)' })
+        '2. FSLogix settings'    = $n
+        '3. FSLogix logs'        = $(if ($Tool.FSLogixLogs)   { 'servers with FSLogix' } else { 'skipped (tool not found)' })
+        '4. Storage events'      = $(if ($Tool.StorageEvents) { $n } else { 'skipped (tool not found)' })
+        '5. RDS events'          = $(if ($Tool.RdsEvents)     { $n } else { 'skipped (tool not found)' })
+        '6. Profile share speed' = $(if ($Tool.DiskSpd)       { $bench } else { 'skipped (tool not found)' })
+        '7. Hyper-V hosts'       = $hv
+    }
+    $hvCount = if ($HyperVText) { [math]::Max(1, @($HyperVText -split ',').Count) } else { 0 }
+    $minutes = Get-TriageEstimate -ServerCount $ServerCount -ThrottleLimit $ThrottleLimit -SampleSeconds $SampleSeconds `
+        -Benchmark:(-not $SkipStorageBenchmark -and $IsAdmin -and [bool]$Tool.DiskSpd) -HyperVHostCount $hvCount
+
+    Write-Host ''
+    Write-TriageLine -Status INFO -Message "Plan - $ThrottleLimit server(s) at a time, roughly $minutes minute(s):"
+    foreach ($r in $rows.GetEnumerator()) { Write-TriageLine -Status INFO -Message ("   {0,-24}{1}" -f $r.Key, $r.Value) }
+}
+
+function Write-TriageStepHeader {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][int]$Number,
+        [Parameter(Mandatory)][string]$Name,
+        [string]$Detail
+    )
+
+    Write-Host ''
+    $text = "Step $Number of 7: $Name"
+    if ($Detail) { $text += " - $Detail" }
+    Write-TriageLine -Status INFO -Message $text
+}
+
+# ---------------------------------------------------------------------------
+# Tool runner
+# ---------------------------------------------------------------------------
+function Start-ToolProcess {
+    <#
+    .SYNOPSIS
+        Starts one repository tool in its own Windows PowerShell 5.1 process and returns a
+        handle for Complete-ToolProcess.
+    .DESCRIPTION
+        Parameters go in, and pipeline output comes back, through CliXml files in the tool's
         work folder, so real objects (and PSCredentials - protected with DPAPI for this user
         on this machine) cross the process boundary intact. The child's console output is
         captured with a transcript.
@@ -530,15 +965,13 @@ function Invoke-ToolScript {
         A separate process gives three guarantees the tools cannot give in-process: a hung
         tool can be stopped at the time limit, a tool calling 'exit' or changing preference
         variables cannot affect this script, and the Citrix snap-ins always load (they are
-        Windows PowerShell only).
+        Windows PowerShell only). It also lets several tools run at once.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$ScriptPath,
         [hashtable]$Parameters = @{},
-        [Parameter(Mandatory)][string]$WorkFolder,
-        [ValidateRange(1, 86400)][int]$TimeoutSeconds = 1800,
-        [string]$Label = (Split-Path -Leaf $ScriptPath)
+        [Parameter(Mandatory)][string]$WorkFolder
     )
 
     if (-not (Test-Path -LiteralPath $WorkFolder)) {
@@ -593,54 +1026,68 @@ finally {
     $psi.CreateNoWindow   = $true
     $psi.WorkingDirectory = $WorkFolder
 
-    $timer = [Diagnostics.Stopwatch]::StartNew()
-    $timedOut = $false
-    $proc = [Diagnostics.Process]::Start($psi)
-    $nextNotice = 60
-    while (-not $proc.WaitForExit(5000)) {
-        if ($timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
-            $timedOut = $true
-            try { $proc.Kill() } catch { }
-            [void]$proc.WaitForExit(10000)
-            break
-        }
-        if ($timer.Elapsed.TotalSeconds -ge $nextNotice) {
-            Write-TriageLine -Status INFO -Message ("  {0} still running ({1:mm\:ss} elapsed)" -f $Label, $timer.Elapsed)
-            $nextNotice += 60
-        }
+    [PSCustomObject]@{
+        Process     = [Diagnostics.Process]::Start($psi)
+        Timer       = [Diagnostics.Stopwatch]::StartNew()
+        ParamFile   = $paramFile
+        OutputFile  = $outputFile
+        StatusFile  = $statusFile
+        ConsoleFile = $consoleFile
     }
-    $timer.Stop()
+}
+
+function Complete-ToolProcess {
+    <#
+    .SYNOPSIS
+        Collects a finished (or timed-out) tool process's results. Kills it first if it is
+        still running.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Handle,
+        [switch]$TimedOut,
+        [int]$TimeoutSeconds = 0
+    )
+
+    $proc = $Handle.Process
+    if (-not $proc.HasExited) {
+        try { $proc.Kill() } catch { }
+        [void]$proc.WaitForExit(10000)
+    }
+    $Handle.Timer.Stop()
 
     # The parameter file can hold a DPAPI-protected credential. Only this user on this machine
     # can decrypt it, but run folders get zipped onto tickets - it has no reason to outlive the run.
-    Remove-Item -LiteralPath $paramFile -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $Handle.ParamFile -Force -ErrorAction SilentlyContinue
 
     $status = $null
-    if (Test-Path -LiteralPath $statusFile) {
-        try { $status = Get-Content -LiteralPath $statusFile -Raw | ConvertFrom-Json } catch { }
+    if (Test-Path -LiteralPath $Handle.StatusFile) {
+        try { $status = Get-Content -LiteralPath $Handle.StatusFile -Raw | ConvertFrom-Json } catch { }
     }
     $output = @()
-    if (Test-Path -LiteralPath $outputFile) {
-        try { $output = @(Import-Clixml -LiteralPath $outputFile) } catch { }
+    if (Test-Path -LiteralPath $Handle.OutputFile) {
+        try { $output = @(Import-Clixml -LiteralPath $Handle.OutputFile) } catch { }
     }
     $console = ''
-    if (Test-Path -LiteralPath $consoleFile) {
-        $console = Get-Content -LiteralPath $consoleFile -Raw -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $Handle.ConsoleFile) {
+        $console = Get-Content -LiteralPath $Handle.ConsoleFile -Raw -ErrorAction SilentlyContinue
     }
 
     $result = 'Completed'
     $errorText = ''
-    if ($timedOut) {
+    if ($TimedOut) {
         $result = 'TimedOut'
         $errorText = "Stopped after $TimeoutSeconds seconds."
     }
     elseif (-not $status -or -not $status.Finished) {
         $result = 'Failed'
-        $errorText = if ($status -and $status.Error) { $status.Error } else { "The tool process ended without reporting a result (exit code $($proc.ExitCode))." }
+        $exitCode = '?'
+        try { $exitCode = $proc.ExitCode } catch { }
+        $errorText = if ($status -and $status.Error) { $status.Error } else { "The tool process ended without reporting a result (exit code $exitCode)." }
     }
     elseif ($status.ToolExitCode -and $status.ToolExitCode -ne 0) {
         $result = 'Failed'
-        $errorText = "The tool exited with code $($status.ToolExitCode). See $consoleFile."
+        $errorText = "The tool exited with code $($status.ToolExitCode). See $($Handle.ConsoleFile)."
     }
 
     [PSCustomObject]@{
@@ -648,9 +1095,137 @@ finally {
         Output      = $output
         Error       = $errorText
         ConsoleText = $console
-        ConsoleFile = $consoleFile
-        Duration    = $timer.Elapsed
+        ConsoleFile = $Handle.ConsoleFile
+        Duration    = $Handle.Timer.Elapsed
     }
+}
+
+function Invoke-ToolScript {
+    <#
+    .SYNOPSIS
+        Runs one repository tool in its own process and waits for it. See Start-ToolProcess.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ScriptPath,
+        [hashtable]$Parameters = @{},
+        [Parameter(Mandatory)][string]$WorkFolder,
+        [ValidateRange(1, 86400)][int]$TimeoutSeconds = 1800,
+        [string]$Label = (Split-Path -Leaf $ScriptPath)
+    )
+
+    $handle = Start-ToolProcess -ScriptPath $ScriptPath -Parameters $Parameters -WorkFolder $WorkFolder
+    $timedOut = $false
+    $nextNotice = 60
+    while (-not $handle.Process.WaitForExit(2000)) {
+        if ($handle.Timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) { $timedOut = $true; break }
+        if ($handle.Timer.Elapsed.TotalSeconds -ge $nextNotice) {
+            Write-TriageLine -Status INFO -Message ("      {0} still running ({1:mm\:ss})" -f $Label, $handle.Timer.Elapsed)
+            $nextNotice += 60
+        }
+    }
+    Complete-ToolProcess -Handle $handle -TimedOut:$timedOut -TimeoutSeconds $TimeoutSeconds
+}
+
+function Format-Elapsed {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([TimeSpan]$Elapsed)
+
+    if ($Elapsed.TotalHours -ge 1) { return '{0}:{1:mm\:ss}' -f [int][math]::Floor($Elapsed.TotalHours), $Elapsed }
+    '{0:m\:ss}' -f $Elapsed
+}
+
+function Invoke-ToolBatch {
+    <#
+    .SYNOPSIS
+        Runs one tool against many servers, a few at a time, reporting each server as it
+        finishes.
+    .DESCRIPTION
+        Each job is { Target; ScriptPath; Parameters; WorkFolder }. Up to -ThrottleLimit tool
+        processes run at once. As each finishes, one console line reports that server's
+        result, using -Describe to turn the tool's output into a short verdict. A progress
+        bar shows what is still running, and a heartbeat line every minute names any server
+        that is taking a while - so a 15-server run is never a silent wait.
+
+        Returns one { Target; Result; Job } per job, in the order they were given.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Job,
+        [ValidateRange(1, 32)][int]$ThrottleLimit = 4,
+        [ValidateRange(1, 86400)][int]$TimeoutSeconds = 1800,
+        [string]$Activity = 'Running',
+        [scriptblock]$Describe
+    )
+
+    $total = $Job.Count
+    if ($total -eq 0) { return @() }
+
+    $width   = [math]::Max(8, ($Job | ForEach-Object { "$($_.Target)".Length } | Measure-Object -Maximum).Maximum)
+    $digits  = "$total".Length
+    $pending = New-Object System.Collections.Queue
+    $index   = 0
+    foreach ($j in $Job) { $index++; $pending.Enqueue([PSCustomObject]@{ Index = $index; Job = $j }) }
+    $running = New-Object System.Collections.Generic.List[object]
+    $results = @{}
+    $done = 0
+    $lastActivity = [Diagnostics.Stopwatch]::StartNew()
+
+    while ($pending.Count -or $running.Count) {
+        while ($running.Count -lt $ThrottleLimit -and $pending.Count) {
+            $item = $pending.Dequeue()
+            try {
+                $handle = Start-ToolProcess -ScriptPath $item.Job.ScriptPath -Parameters $item.Job.Parameters -WorkFolder $item.Job.WorkFolder
+                $running.Add([PSCustomObject]@{ Item = $item; Handle = $handle })
+            }
+            catch {
+                $done++
+                $results[$item.Index] = [PSCustomObject]@{
+                    Target = $item.Job.Target; Job = $item.Job
+                    Result = [PSCustomObject]@{ Status = 'Failed'; Output = @(); Error = $_.Exception.Message; ConsoleText = ''; ConsoleFile = ''; Duration = [TimeSpan]::Zero }
+                }
+                Write-TriageLine -Status FAIL -Message ("   [{0}/{1}] {2}  could not start: {3}" -f "$($item.Index)".PadLeft($digits), $total, "$($item.Job.Target)".PadRight($width), $_.Exception.Message)
+            }
+        }
+
+        Start-Sleep -Milliseconds 500
+
+        foreach ($r in $running.ToArray()) {
+            $timedOut = -not $r.Handle.Process.HasExited -and $r.Handle.Timer.Elapsed.TotalSeconds -ge $TimeoutSeconds
+            if (-not $r.Handle.Process.HasExited -and -not $timedOut) { continue }
+
+            $result = Complete-ToolProcess -Handle $r.Handle -TimedOut:$timedOut -TimeoutSeconds $TimeoutSeconds
+            [void]$running.Remove($r)
+            $done++
+            $lastActivity.Restart()
+            $results[$r.Item.Index] = [PSCustomObject]@{ Target = $r.Item.Job.Target; Job = $r.Item.Job; Result = $result }
+
+            $line = switch ($result.Status) {
+                'TimedOut' { @{ Status = 'FAIL'; Text = "timed out after $(Format-Elapsed ([TimeSpan]::FromSeconds($TimeoutSeconds)))" } }
+                'Failed'   { @{ Status = 'FAIL'; Text = "failed: $($result.Error)" } }
+                default {
+                    $d = if ($Describe) { & $Describe $r.Item.Job $result } else { $null }
+                    if ($d) { $d } else { @{ Status = 'PASS'; Text = 'done' } }
+                }
+            }
+            Write-TriageLine -Status $line.Status -Message ("   [{0}/{1}] {2}  {3}  ({4})" -f `
+                "$($r.Item.Index)".PadLeft($digits), $total, "$($r.Item.Job.Target)".PadRight($width), $line.Text, (Format-Elapsed $result.Duration))
+        }
+
+        $names = ($running | ForEach-Object { $_.Item.Job.Target }) -join ', '
+        $statusText = if ($names) { "$done of $total done - running: $names" } else { "$done of $total done" }
+        Write-Progress -Activity $Activity -Status $statusText -PercentComplete ([int](100 * $done / $total))
+
+        if ($running.Count -and $lastActivity.Elapsed.TotalSeconds -ge 60) {
+            $slow = ($running | ForEach-Object { '{0} ({1})' -f $_.Item.Job.Target, (Format-Elapsed $_.Handle.Timer.Elapsed) }) -join ', '
+            Write-TriageLine -Status INFO -Message "      still running: $slow"
+            $lastActivity.Restart()
+        }
+    }
+    Write-Progress -Activity $Activity -Completed
+
+    foreach ($i in 1..$total) { $results[$i] }
 }
 
 function Get-NewestFile {
@@ -1051,22 +1626,50 @@ function New-TriageHtmlReport {
         [Parameter(Mandatory)][hashtable]$Context,
         [object[]]$Step = @(),
         [object[]]$Finding = @(),
+        [object[]]$Server = @(),
         [object[]]$VmConfig = @(),
         [object]$Benchmark
     )
 
     $h = { param($v) ConvertTo-HtmlText $v }
-    $overall = Get-TriageOverallStatus -Finding $Finding
+
+    $verdictClass = @{ Healthy = 'pass'; Degraded = 'warn'; Critical = 'fail'; Unreachable = 'fail' }
+    $serverHtml = ''
+    if ($Server.Count) {
+        $pct = { param($v) if ($null -eq $v -or "$v" -eq '') { '' } else { '{0}%' -f $v } }
+        $serverRows = ($Server | Sort-Object @{ Expression = { switch ($_.Verdict) { 'Critical' { 0 } 'Unreachable' { 1 } 'Degraded' { 2 } 'Healthy' { 3 } default { 4 } } } }, Server | ForEach-Object {
+            $cls = if ($verdictClass.ContainsKey("$($_.Verdict)")) { $verdictClass["$($_.Verdict)"] } else { 'unknown' }
+            $link = if ($_.Report) {
+                $rel = (Get-RelativeReportPath -RunFolder $Context.RunFolder -Path $_.Report) -replace '\\', '/'
+                "<a href='{0}'>details</a>" -f (& $h $rel)
+            } else { '' }
+            $reg = if ($_.Registration -and $_.Registration -ne 'Registered') { "<span class='pill warn'>$(& $h $_.Registration)</span>" } else { & $h $_.Registration }
+            "<tr><td class='mono'>{0}</td><td><span class='pill {1}'>{2}</span></td><td>{3}</td><td class='num'>{4}</td><td class='num'>{5}</td><td class='num'>{6}</td><td class='num'>{7}</td><td class='num'>{8}</td><td class='num'>{9}</td><td>{10}</td></tr>" -f `
+                (& $h $_.Server), $cls, (& $h $_.Verdict), $reg, (& $h (& $pct $_.CpuAvg)), (& $h (& $pct $_.CpuPeak)),
+                (& $h (& $pct $_.MemoryAvg)), (& $h (& $pct $_.FullestDisk)), (& $h $_.Sessions), (& $h $_.Issues), $link
+        }) -join "`n"
+        $serverHtml = @"
+<section>
+  <h2>Servers</h2>
+  <table>
+    <thead><tr><th>Server</th><th>Health</th><th>Citrix</th><th class='num'>CPU avg</th><th class='num'>CPU peak</th><th class='num'>Memory avg</th><th class='num'>Fullest disk</th><th class='num'>Sessions</th><th class='num'>Issues</th><th>Report</th></tr></thead>
+    <tbody>$serverRows</tbody>
+  </table>
+</section>
+"@
+    }
+    $overall = Get-TriageOverallStatus -Finding $Finding -Step $Step
     $crit = @($Finding | Where-Object Severity -eq 'Critical').Count
     $warn = @($Finding | Where-Object Severity -eq 'Warning').Count
     $info = @($Finding | Where-Object Severity -eq 'Info').Count
 
     $overallText = switch ($overall) {
-        'Critical' { 'Serious problems found' }
-        'Warning'  { 'Problems worth looking at' }
-        default    { 'Nothing wrong found' }
+        'Critical'   { 'Serious problems found' }
+        'Warning'    { 'Problems worth looking at' }
+        'Incomplete' { 'Checks did not finish - no verdict. See What ran below.' }
+        default      { 'Nothing wrong found' }
     }
-    $overallClass = switch ($overall) { 'Critical' { 'fail' } 'Warning' { 'warn' } default { 'pass' } }
+    $overallClass = switch ($overall) { 'Critical' { 'fail' } 'Warning' { 'warn' } 'Incomplete' { 'fail' } default { 'pass' } }
 
     $sevClass = @{ Critical = 'fail'; Warning = 'warn'; Info = 'unknown' }
     $sevOrder = @{ Critical = 0; Warning = 1; Info = 2 }
@@ -1142,6 +1745,8 @@ function New-TriageHtmlReport {
 
     $attentionHtml = if ($attention.Count) {
         "<table><thead><tr><th>Severity</th><th>Area</th><th>Machine</th><th>What was found</th><th>Evidence</th></tr></thead><tbody>$(& $findingRows $attention)</tbody></table>"
+    } elseif ($overall -eq 'Incomplete') {
+        "<p class='muted'>Nothing was flagged, but not every check ran, so this is not a clean bill of health. The steps below show what failed or was skipped.</p>"
     } else {
         "<p class='muted'>No problems were flagged by any of the checks that ran. Check the steps below for anything that was skipped.</p>"
     }
@@ -1225,6 +1830,7 @@ footer { color:var(--muted); font-size:12px; margin-top:24px; }
   $attentionHtml
 </section>
 
+$serverHtml
 $handoffHtml
 $benchHtml
 $vmHtml
@@ -1253,8 +1859,56 @@ if ($LoadFunctionsOnly) { return }
 # ===========================================================================
 # MAIN
 # ===========================================================================
+if ($ComputerName) { $ComputerName = Split-TriageNameList $ComputerName }
+if ($HyperVHost)   { $HyperVHost   = Split-TriageNameList $HyperVHost }
+if ($VMName)       { $VMName       = Split-TriageNameList $VMName }
+
+$searchRoots = Get-TriageToolSearchRoot -ToolRoot $ToolRoot -ScriptFolder $PSScriptRoot
+$tool = @{}
+$missingTools = @()
+foreach ($k in $script:ToolPaths.Keys) {
+    $found = Resolve-TriageTool -RelativePath $script:ToolPaths[$k] -SearchRoot $searchRoots
+    if ($found) { $tool[$k] = $found } else { $missingTools += (Split-Path -Parent $script:ToolPaths[$k]) }
+}
+
+$kitHint = @(
+    'This script needs its tool folders next to it. The easy way is a kit - on your workstation, from the repository:'
+    ''
+    '    .\Citrix-PerfTriage\Invoke-CitrixPerfTriage.ps1 -CreateKit C:\Temp\CitrixPerfTriageKit.zip'
+    ''
+    'Copy that zip here, extract it, and run Invoke-CitrixPerfTriage.ps1 from inside the extracted folder.'
+) -join "`r`n"
+
+# --- Kit mode: pack everything up and stop --------------------------------------------------
+if ($CreateKit) {
+    if ($missingTools.Count) {
+        throw "Cannot build a kit - these tool folders were not found: $($missingTools -join ', '). Run -CreateKit from the repository copy of this script."
+    }
+    $kit = New-TriageKit -Destination $CreateKit -ScriptPath $PSCommandPath -Tools $tool
+    Write-TriageLine -Status PASS -Message "Kit created: $kit"
+    Write-TriageLine -Status INFO -Message 'Copy it to the server you will run from (the Delivery Controller is ideal), extract it, and follow README-FIRST.txt.'
+    return
+}
+
+if ($tool.Count -eq 0) {
+    Write-TriageLine -Status FAIL -Message "None of the tools this script runs were found. Looked in: $($searchRoots -join '; ')"
+    Write-Host ''
+    Write-Host $kitHint -ForegroundColor Yellow
+    return
+}
+
+# --- Targets: named hosts, a named Controller, or this machine if it is a Controller ------
 if (-not $ComputerName -and -not $DeliveryController) {
-    throw 'Specify the session hosts with -ComputerName, or a Citrix Delivery Controller with -DeliveryController.'
+    if (Test-LocalDeliveryController) {
+        $DeliveryController = 'localhost'
+        Write-TriageLine -Status INFO -Message 'This server is a Citrix Delivery Controller - discovering session hosts from it.'
+    }
+    else {
+        throw 'Tell me which servers to check: -ComputerName VDA01,VDA02 - or run this on a Delivery Controller, or pass -DeliveryController <name>.'
+    }
+}
+if (-not $ComputerName -and -not $tool.Health) {
+    throw "Discovering session hosts from Citrix needs the Citrix-FSLogix-HealthCollector tool, which was not found. Pass -ComputerName instead, or use a kit.`r`n`r`n$kitHint"
 }
 
 $runStamp    = Get-Date -Format 'yyyy-MM-dd_HHmmss'
@@ -1274,65 +1928,113 @@ if ($runFolder.Length -gt 150) {
     Write-TriageLine -Status WARN -Message "The output path is $($runFolder.Length) characters long. Some tools may fail with 'path too long'; a short -OutputPath such as C:\Temp avoids this."
 }
 Write-TriageLine -Status INFO -Message ("Time window: {0:yyyy-MM-dd HH:mm} to {1:yyyy-MM-dd HH:mm} ({2} hours)" -f $windowStart, $windowEnd, $LookbackHours)
-
-$tool = @{}
-foreach ($k in $script:ToolPaths.Keys) {
-    $full = Join-Path $script:RepoRoot $script:ToolPaths[$k]
-    if (Test-Path -LiteralPath $full -PathType Leaf) { $tool[$k] = $full }
-    else { Write-TriageLine -Status WARN -Message "Tool not found, its step will be skipped: $full" }
+if ($missingTools.Count) {
+    Write-TriageLine -Status WARN -Message "Not found, so their steps will be skipped: $($missingTools -join ', '). Use a kit (-CreateKit) to get everything in one copy."
 }
 
-$targets = @()
-if ($ComputerName) { $targets = @($ComputerName | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique) }
+# ---------------------------------------------------------------------------
+# Discovery - who are we checking?
+# ---------------------------------------------------------------------------
+$inventory = @()
+if ($ComputerName) {
+    $inventory = @($ComputerName | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique |
+        ForEach-Object { New-TriageInventoryEntry -ComputerName $_ })
+}
+else {
+    $groupText = if ($DesktopGroupName) { " (delivery group '$DesktopGroupName')" } else { ' (all delivery groups)' }
+    Write-TriageLine -Status INFO -Message "Asking Delivery Controller '$DeliveryController' for session hosts$groupText..."
+    $disc = Get-TriageInventory -CollectorPath $tool.Health -DeliveryController $DeliveryController `
+        -DesktopGroupName $DesktopGroupName -WorkFolder (Join-Path $runFolder '0-Discovery') -TimeoutSeconds 300
+    if ($disc.Error) {
+        Write-TriageLine -Status FAIL -Message "Discovery failed: $($disc.Error)"
+    }
+    $inventory = @($disc.Machines)
+}
+
+$poweredOff = @($inventory | Where-Object { $_.PowerState -eq 'Off' })
+$inventory  = @($inventory | Where-Object { $_.PowerState -ne 'Off' })
+$allTargets = @($inventory | ForEach-Object { $_.ComputerName })
+$targets    = $allTargets
+
+Show-TriageInventory -Inventory $inventory -PoweredOff $poweredOff
+foreach ($m in ($inventory | Where-Object { $_.RegistrationState -and $_.RegistrationState -ne 'Registered' })) {
+    Add-TriageFinding -Severity Warning -Area 'Citrix' -Target $m.ComputerName `
+        -Finding "Not registered with Citrix (state: $($m.RegistrationState)) - no new sessions can be sent to it, so the other servers carry its share of users." `
+        -Evidence "Delivery group: $($m.DeliveryGroup)"
+}
+
+if (-not $allTargets.Count) {
+    Write-TriageLine -Status FAIL -Message 'No session hosts to check. Check the Delivery Controller name and delivery group, or pass -ComputerName.'
+}
+else {
+    Show-TriagePlan -ServerCount $allTargets.Count -ThrottleLimit $ThrottleLimit -SampleSeconds $SampleSeconds `
+        -Tool $tool -SkipStorageBenchmark:$SkipStorageBenchmark -IsAdmin $isAdmin -ProfileSharePath $ProfileSharePath `
+        -HyperVText $(if ($SkipHyperV) { '' } else { @(@($HyperVCluster) + @($HyperVHost) | Where-Object { $_ }) -join ', ' })
+}
 
 # ---------------------------------------------------------------------------
 # Step 1 - Server health
 # ---------------------------------------------------------------------------
+$healthRows = @{}
+$healthReports = @{}
 $stepName = 'Server health (CPU, memory, disk, events)'
 if (-not $tool.Health) {
     Add-TriageStep -Step $stepName -Status Skipped -Detail 'Citrix-FSLogix-HealthCollector was not found.'
 }
+elseif (-not $targets.Count) {
+    Add-TriageStep -Step $stepName -Status Skipped -Detail 'No session hosts.'
+}
 else {
-    Write-TriageLine -Status INFO -Message "$stepName - sampling for $SampleSeconds s per server..."
-    $dir = Join-Path $runFolder '1-ServerHealth'
-    $p = @{ LastHours = $LookbackHours; SampleSeconds = $SampleSeconds; OutputPath = $dir; NoOpen = $true }
-    if ($targets.Count) { $p.ComputerName = $targets }
-    else {
-        $p.DeliveryController = $DeliveryController
-        if ($DesktopGroupName) { $p.DesktopGroupName = $DesktopGroupName }
+    Write-TriageStepHeader -Number 1 -Name 'Server health' -Detail "$($targets.Count) server(s), $ThrottleLimit at a time, $SampleSeconds s of sampling each"
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    $stepDir = Join-Path $runFolder '1-ServerHealth'
+    $jobs = foreach ($t in $targets) {
+        $p = @{ ComputerName = @($t); LastHours = $LookbackHours; SampleSeconds = $SampleSeconds; NoOpen = $true
+                OutputPath = (Join-Path $stepDir (ConvertTo-SafeFolderName (Get-ShortComputerName $t))) }
+        if ($Credential) { $p.Credential = $Credential }
+        [PSCustomObject]@{ Target = $t; ScriptPath = $tool.Health; Parameters = $p; WorkFolder = $p.OutputPath }
     }
-    if ($Credential) { $p.Credential = $Credential }
-
-    $run = Invoke-ToolScript -ScriptPath $tool.Health -Parameters $p -WorkFolder $dir -TimeoutSeconds $StepTimeoutSeconds -Label 'Health collector'
-    $rows = @($run.Output | Where-Object { $_.PSObject.Properties['Verdict'] })
-
-    if (-not $targets.Count) {
-        $targets = @($rows | ForEach-Object { $_.ComputerName } | Where-Object { $_ } | Select-Object -Unique)
-    }
-
-    foreach ($r in $rows) {
-        $sev = switch ($r.Verdict) {
-            'Healthy'  { $null }
-            'Degraded' { 'Warning' }
-            default    { 'Critical' }
+    $describe = {
+        param($job, $result)
+        $row = @($result.Output | Where-Object { $_.PSObject.Properties['Verdict'] }) | Select-Object -First 1
+        if (-not $row) { return @{ Status = 'FAIL'; Text = 'no result returned' } }
+        $numbers = 'CPU {0}%, memory {1}%' -f $row.CpuAveragePercent, $row.MemoryAveragePercent
+        $why = if ("$($row.TopIssue)".Trim()) { $row.TopIssue } else { $row.Reasons }
+        switch ($row.Verdict) {
+            'Healthy'  { @{ Status = 'PASS'; Text = "Healthy - $numbers" } }
+            'Degraded' { @{ Status = 'WARN'; Text = "Degraded - $why" } }
+            default    { @{ Status = 'FAIL'; Text = "$($row.Verdict) - $why" } }
         }
+    }
+    $batch = @(Invoke-ToolBatch -Job @($jobs) -ThrottleLimit $ThrottleLimit -TimeoutSeconds $StepTimeoutSeconds -Activity 'Server health' -Describe $describe)
+    $timer.Stop()
+
+    foreach ($b in $batch) {
+        $row = @($b.Result.Output | Where-Object { $_.PSObject.Properties['Verdict'] }) | Select-Object -First 1
+        $report = Get-NewestFile -Folder $b.Job.WorkFolder -Filter 'CitrixFSLogixHealth_*.html'
+        if ($report) { $healthReports[$b.Target] = $report.FullName }
+        if (-not $row) { continue }
+        $healthRows[$b.Target] = $row
+        $sev = switch ($row.Verdict) { 'Healthy' { $null } 'Degraded' { 'Warning' } default { 'Critical' } }
         if ($sev) {
             $evidence = 'CPU avg {0}% / peak {1}%, memory avg {2}%, fullest disk {3}%; events: {4} critical, {5} errors' -f `
-                $r.CpuAveragePercent, $r.CpuPeakPercent, $r.MemoryAveragePercent, $r.MaxDiskUsedPercent, $r.CriticalEvents, $r.ErrorEvents
-            Add-TriageFinding -Severity $sev -Area 'Server health' -Target $r.ComputerName -Finding ("{0}: {1}" -f $r.Verdict, $r.Reasons) -Evidence $evidence
+                $row.CpuAveragePercent, $row.CpuPeakPercent, $row.MemoryAveragePercent, $row.MaxDiskUsedPercent, $row.CriticalEvents, $row.ErrorEvents
+            Add-TriageFinding -Severity $sev -Area 'Server health' -Target $b.Target -Finding ("{0}: {1}" -f $row.Verdict, $row.Reasons) -Evidence $evidence
         }
     }
 
-    $report = Get-NewestFile -Folder $dir -Filter 'CitrixFSLogixHealth_*.html'
-    $healthy = @($rows | Where-Object Verdict -eq 'Healthy').Count
-    $status = if ($run.Status -ne 'Completed') { $run.Status } elseif (-not $rows.Count) { 'Failed' } else { 'Completed' }
-    $detail = if ($rows.Count) { "$($rows.Count) server(s) checked, $healthy healthy." } else { "No servers were checked. $($run.Error)" }
-    if ($run.Error -and $rows.Count) { $detail += " $($run.Error)" }
-    Add-TriageStep -Step $stepName -Status $status -Detail $detail -Duration $run.Duration -ReportPath $(if ($report) { $report.FullName } else { $run.ConsoleFile })
-}
+    $checked = $healthRows.Count
+    $healthy = @($healthRows.Values | Where-Object Verdict -eq 'Healthy').Count
+    $status = if ($checked -eq $targets.Count) { 'Completed' } elseif ($checked) { 'Partial' } else { 'Failed' }
+    Add-TriageStep -Step $stepName -Status $status -Detail "$checked of $($targets.Count) server(s) checked, $healthy healthy." -Duration $timer.Elapsed -ReportPath $stepDir
 
-if (-not $targets.Count) {
-    Write-TriageLine -Status FAIL -Message 'No session hosts to check - discovery returned nothing. Check the Delivery Controller name and the Citrix Broker SDK, or pass -ComputerName.'
+    # A server that answered neither performance nor event queries will not answer the later
+    # steps either - skipping it saves a connection timeout per server per step.
+    $unreachable = @($healthRows.Keys | Where-Object { $healthRows[$_].Verdict -eq 'Unreachable' })
+    if ($unreachable.Count) {
+        $targets = @($targets | Where-Object { $_ -notin $unreachable })
+        Write-TriageLine -Status WARN -Message "Leaving out of the remaining steps (unreachable): $($unreachable -join ', ')"
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -1341,9 +2043,24 @@ if (-not $targets.Count) {
 $configs = @()
 $stepName = 'FSLogix settings'
 if ($targets.Count) {
-    Write-TriageLine -Status INFO -Message "$stepName - reading registry on $($targets.Count) server(s)..."
+    Write-TriageStepHeader -Number 2 -Name 'FSLogix settings' -Detail "reading the registry on $($targets.Count) server(s)"
     $timer = [Diagnostics.Stopwatch]::StartNew()
-    $configs = @(foreach ($t in $targets) { Get-FSLogixHostConfig -ComputerName $t -Credential $Credential })
+    $digits = "$($targets.Count)".Length
+    $width = [math]::Max(8, ($targets | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum)
+    $i = 0
+    $configs = @(foreach ($t in $targets) {
+        $i++
+        $c = Get-FSLogixHostConfig -ComputerName $t -Credential $Credential
+        $text = if ($c.Source -eq 'Default') { 'could not read settings - will try the default log folder' }
+                elseif ($c.Installed -eq $false) { 'FSLogix not installed' }
+                else {
+                    $share = @($c.VHDLocations + $c.CCDLocations) | Select-Object -First 1
+                    "profile share $(if ($share) { $share } else { '(none set)' }), logs kept $($c.LogKeepDays) day(s)"
+                }
+        $lineStatus = if ($c.Source -eq 'Default') { 'WARN' } else { 'PASS' }
+        Write-TriageLine -Status $lineStatus -Message ("   [{0}/{1}] {2}  {3}" -f "$i".PadLeft($digits), $targets.Count, $t.PadRight($width), $text)
+        $c
+    })
     $timer.Stop()
 
     $dir = Join-Path $runFolder '2-FSLogixSettings'
@@ -1386,7 +2103,8 @@ else {
 # ---------------------------------------------------------------------------
 # Step 3 - FSLogix logs
 # ---------------------------------------------------------------------------
-$reattachTimes = @()
+$reattachByHost = @{}
+$reattachTotal = 0
 $stepName = 'FSLogix logs (profile load, re-attach loops)'
 if (-not $tool.FSLogixLogs) {
     Add-TriageStep -Step $stepName -Status Skipped -Detail 'Parse-FSLogixLogs was not found.'
@@ -1395,77 +2113,101 @@ elseif (-not $configs.Count) {
     Add-TriageStep -Step $stepName -Status Skipped -Detail 'No session hosts.'
 }
 else {
-    Write-TriageLine -Status INFO -Message "$stepName - reading log files..."
-    $timer = [Diagnostics.Stopwatch]::StartNew()
-    $parsedFiles = 0
-    $failedHosts = @()
-    $stepDir = Join-Path $runFolder '3-FSLogixLogs'
-
-    $checkedHosts = 0
-    foreach ($c in $configs) {
-        # Installed is $false only when the registry was read and FSLogix is definitely absent;
-        # $null (settings unreadable) still tries the default log folder.
-        if ($c.Installed -eq $false) { continue }
-        $checkedHosts++
-        if (-not $c.LogDirUnc) {
-            $failedHosts += "$($c.ComputerName) (log folder '$($c.LogDir)' is not reachable from here)"
-            continue
-        }
-        # FSLogix writes one log per component per day: Logs\Profile\Profile-yyyyMMdd.log and
-        # Logs\ODFC\ODFC-yyyyMMdd.log. Only files touched inside the window are read, so a host
-        # keeping months of logs does not turn a 24-hour triage into an hour of parsing.
-        # https://learn.microsoft.com/fslogix/troubleshooting-vhd-disk-compaction#log-files
-        $files = @()
-        $profileFolderError = $null
-        foreach ($sub in 'Profile', 'ODFC') {
-            $folder = Join-Path $c.LogDirUnc $sub
-            try {
-                $files += @(Get-ChildItem -LiteralPath $folder -Filter "$sub*.log" -File -ErrorAction Stop |
-                    Where-Object { $_.LastWriteTime -ge $windowStart } |
-                    ForEach-Object { $_.FullName })
-            }
-            catch {
-                # ODFC logging is off by default, so a missing ODFC folder is normal.
-                if ($sub -eq 'Profile') { $profileFolderError = $_.Exception.Message }
-            }
-        }
-        if ($profileFolderError -and -not $files.Count) {
-            $failedHosts += "$($c.ComputerName) ($profileFolderError)"
-            continue
-        }
-        if (-not $files.Count) {
-            Add-TriageFinding -Severity Info -Area 'FSLogix logs' -Target $c.ComputerName `
-                -Finding 'No FSLogix log files were written during the time window.' -Evidence $c.LogDirUnc
-            continue
-        }
-
-        $hostDir = Join-Path $stepDir (Get-ShortComputerName $c.ComputerName)
-        $p = @{ Path = $files; StartTime = $windowStart; EndTime = $windowEnd; ExportPath = $hostDir }
-        $run = Invoke-ToolScript -ScriptPath $tool.FSLogixLogs -Parameters $p -WorkFolder $hostDir -TimeoutSeconds $StepTimeoutSeconds -Label "FSLogix logs on $($c.ComputerName)"
-        if ($run.Status -ne 'Completed') {
-            $failedHosts += "$($c.ComputerName) ($($run.Error))"
-            continue
-        }
-
-        foreach ($log in @($run.Output | Where-Object { $_.PSObject.Properties['Findings'] })) {
-            $parsedFiles++
-            foreach ($f in @($log.Findings)) {
-                Add-TriageFinding -Severity (ConvertFrom-FSLogixLogSeverity $f.Severity) -Area 'FSLogix logs' -Target $c.ComputerName `
-                    -Finding ("{0}: {1}" -f $f.Type, $f.Detail) -Evidence (Split-Path -Leaf "$($f.FilePath)")
-            }
-            $reattachTimes += @($log.Reattaches | ForEach-Object { $_.Timestamp } | Where-Object { $_ -is [datetime] })
-        }
+    # Installed is $false only when the registry was read and FSLogix is definitely absent;
+    # $null (settings unreadable) still tries the default log folder.
+    $fslHosts = @($configs | Where-Object { $_.Installed -ne $false })
+    if (-not $fslHosts.Count) {
+        Add-TriageStep -Step $stepName -Status Skipped -Detail 'FSLogix is not installed on any of the servers.'
     }
-    $timer.Stop()
+    else {
+        Write-TriageStepHeader -Number 3 -Name 'FSLogix logs' -Detail "$($fslHosts.Count) server(s), $ThrottleLimit at a time"
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        $stepDir = Join-Path $runFolder '3-FSLogixLogs'
+        $failedHosts = @()
+        $jobs = @()
 
-    $reattachTimes = @($reattachTimes | Sort-Object -Unique)
-    foreach ($fh in $failedHosts) {
-        Add-TriageFinding -Severity Info -Area 'FSLogix logs' -Target (($fh -split ' ')[0]) -Finding "FSLogix logs could not be read: $fh"
+        foreach ($c in $fslHosts) {
+            if (-not $c.LogDirUnc) {
+                $failedHosts += "$($c.ComputerName) (log folder '$($c.LogDir)' is not reachable from here)"
+                continue
+            }
+            # FSLogix writes one log per component per day: Logs\Profile\Profile-yyyyMMdd.log and
+            # Logs\ODFC\ODFC-yyyyMMdd.log. Only files touched inside the window are read, so a host
+            # keeping months of logs does not turn a 24-hour triage into an hour of parsing.
+            # https://learn.microsoft.com/fslogix/troubleshooting-vhd-disk-compaction#log-files
+            $files = @()
+            $profileFolderError = $null
+            foreach ($sub in 'Profile', 'ODFC') {
+                try {
+                    $folder = Join-Path $c.LogDirUnc $sub -ErrorAction Stop
+                    $files += @(Get-ChildItem -LiteralPath $folder -Filter "$sub*.log" -File -ErrorAction Stop |
+                        Where-Object { $_.LastWriteTime -ge $windowStart } |
+                        ForEach-Object { $_.FullName })
+                }
+                catch {
+                    # ODFC logging is off by default, so a missing ODFC folder is normal.
+                    if ($sub -eq 'Profile') { $profileFolderError = $_.Exception.Message }
+                }
+            }
+            if ($profileFolderError -and -not $files.Count) {
+                $failedHosts += "$($c.ComputerName) ($profileFolderError)"
+                continue
+            }
+            if (-not $files.Count) {
+                Add-TriageFinding -Severity Info -Area 'FSLogix logs' -Target $c.ComputerName `
+                    -Finding 'No FSLogix log files were written during the time window.' -Evidence $c.LogDirUnc
+                Write-TriageLine -Status INFO -Message "   $($c.ComputerName)  no FSLogix log files written in the window"
+                continue
+            }
+            $hostDir = Join-Path $stepDir (ConvertTo-SafeFolderName (Get-ShortComputerName $c.ComputerName))
+            $jobs += [PSCustomObject]@{
+                Target = $c.ComputerName; ScriptPath = $tool.FSLogixLogs; WorkFolder = $hostDir
+                Parameters = @{ Path = $files; StartTime = $windowStart; EndTime = $windowEnd; ExportPath = $hostDir }
+            }
+        }
+        foreach ($fh in $failedHosts) {
+            Write-TriageLine -Status WARN -Message "   could not read logs: $fh"
+        }
+
+        $describe = {
+            param($job, $result)
+            $logs = @($result.Output | Where-Object { $_.PSObject.Properties['Findings'] })
+            $re = @($logs | ForEach-Object { @($_.Reattaches) } | Where-Object { $_ }).Count
+            $issues = @($logs | ForEach-Object { @($_.Findings) } | Where-Object { $_ -and $_.Severity -in 'High', 'Medium' }).Count
+            $s = if ($issues) { 'WARN' } else { 'PASS' }
+            @{ Status = $s; Text = "$($logs.Count) log file(s), $re re-attach(es), $issues issue(s)" }
+        }
+        $batch = @(Invoke-ToolBatch -Job @($jobs) -ThrottleLimit $ThrottleLimit -TimeoutSeconds $StepTimeoutSeconds -Activity 'FSLogix logs' -Describe $describe)
+        $timer.Stop()
+
+        $parsedFiles = 0
+        foreach ($b in $batch) {
+            if ($b.Result.Status -ne 'Completed') {
+                $failedHosts += "$($b.Target) ($($b.Result.Error))"
+                continue
+            }
+            $times = @()
+            foreach ($log in @($b.Result.Output | Where-Object { $_.PSObject.Properties['Findings'] })) {
+                $parsedFiles++
+                foreach ($f in @($log.Findings)) {
+                    Add-TriageFinding -Severity (ConvertFrom-FSLogixLogSeverity $f.Severity) -Area 'FSLogix logs' -Target $b.Target `
+                        -Finding ("{0}: {1}" -f $f.Type, $f.Detail) -Evidence (Split-Path -Leaf "$($f.FilePath)")
+                }
+                $times += @($log.Reattaches | ForEach-Object { $_.Timestamp } | Where-Object { $_ -is [datetime] })
+            }
+            if ($times.Count) {
+                $reattachByHost[$b.Target] = @($times | Sort-Object -Unique)
+                $reattachTotal += $reattachByHost[$b.Target].Count
+            }
+        }
+        foreach ($fh in $failedHosts) {
+            Add-TriageFinding -Severity Info -Area 'FSLogix logs' -Target (($fh -split ' ')[0]) -Finding "FSLogix logs could not be read: $fh"
+        }
+
+        $status = if (-not $failedHosts.Count) { 'Completed' } elseif ($parsedFiles) { 'Partial' } else { 'Failed' }
+        Add-TriageStep -Step $stepName -Status $status -Detail "$parsedFiles log file(s) read; $reattachTotal profile re-attach(es) found." `
+            -Duration $timer.Elapsed -ReportPath $(if (Test-Path -LiteralPath $stepDir) { $stepDir } else { '' })
     }
-    $status = if (-not $checkedHosts) { 'Skipped' } elseif (-not $failedHosts.Count) { 'Completed' } elseif ($parsedFiles) { 'Partial' } else { 'Failed' }
-    $detail = if (-not $checkedHosts) { 'FSLogix is not installed on any of the servers.' } else { "$parsedFiles log file(s) read; $($reattachTimes.Count) profile re-attach(es) found." }
-    Add-TriageStep -Step $stepName -Status $status -Detail $detail `
-        -Duration $timer.Elapsed -ReportPath $(if (Test-Path -LiteralPath $stepDir) { $stepDir } else { '' })
 }
 
 # ---------------------------------------------------------------------------
@@ -1479,37 +2221,51 @@ elseif (-not $targets.Count) {
     Add-TriageStep -Step $stepName -Status Skipped -Detail 'No session hosts.'
 }
 else {
-    Write-TriageLine -Status INFO -Message "$stepName - collecting from $($targets.Count) server(s)..."
-    $dir = Join-Path $runFolder '4-StorageEvents'
-    $p = @{ ComputerName = $targets; StartTime = $windowStart; EndTime = $windowEnd; ExportPath = $dir }
-    if ($reattachTimes.Count) { $p.CorrelateWith = $reattachTimes }
-    if ($Credential) { $p.Credential = $Credential }
-
-    $run = Invoke-ToolScript -ScriptPath $tool.StorageEvents -Parameters $p -WorkFolder $dir -TimeoutSeconds $StepTimeoutSeconds -Label 'Storage events'
-    $events = @($run.Output | Where-Object { $_.PSObject.Properties['NearReference'] })
-
-    # Level is a localized display name in this tool's output, so severity is not inferred
-    # from it. The time relationship to a re-attach is the signal that matters here.
-    foreach ($grp in ($events | Where-Object { $_.NearReference } | Group-Object Computer)) {
-        $cats = ($grp.Group | Group-Object Category | Sort-Object Count -Descending |
-            ForEach-Object { "$($_.Name) x$($_.Count)" }) -join ', '
-        Add-TriageFinding -Severity Warning -Area 'Storage events' -Target $grp.Name `
-            -Finding "$($grp.Count) storage/network/profile event(s) logged within 60 seconds of a profile re-attach - likely what triggered it." `
-            -Evidence $cats
+    Write-TriageStepHeader -Number 4 -Name 'Storage and network events' -Detail "$($targets.Count) server(s), $ThrottleLimit at a time"
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    $stepDir = Join-Path $runFolder '4-StorageEvents'
+    $jobs = foreach ($t in $targets) {
+        $hostDir = Join-Path $stepDir (ConvertTo-SafeFolderName (Get-ShortComputerName $t))
+        $p = @{ ComputerName = @($t); StartTime = $windowStart; EndTime = $windowEnd; ExportPath = $hostDir }
+        # Each server's events are lined up against that server's own re-attaches.
+        if ($reattachByHost.ContainsKey($t)) { $p.CorrelateWith = $reattachByHost[$t] }
+        if ($Credential) { $p.Credential = $Credential }
+        [PSCustomObject]@{ Target = $t; ScriptPath = $tool.StorageEvents; Parameters = $p; WorkFolder = $hostDir }
     }
-    foreach ($grp in ($events | Group-Object Computer)) {
-        $cats = ($grp.Group | Group-Object Category | Sort-Object Count -Descending |
-            ForEach-Object { "$($_.Name) x$($_.Count)" }) -join ', '
-        Add-TriageFinding -Severity Info -Area 'Storage events' -Target $grp.Name -Finding "$($grp.Count) storage/network/profile event(s) in the window." -Evidence $cats
+    $describe = {
+        param($job, $result)
+        $ev = @($result.Output | Where-Object { $_.PSObject.Properties['NearReference'] })
+        $near = @($ev | Where-Object { $_.NearReference }).Count
+        if ($near) { @{ Status = 'WARN'; Text = "$($ev.Count) event(s), $near right next to a profile re-attach" } }
+        else { @{ Status = 'PASS'; Text = "$($ev.Count) event(s)" } }
+    }
+    $batch = @(Invoke-ToolBatch -Job @($jobs) -ThrottleLimit $ThrottleLimit -TimeoutSeconds $StepTimeoutSeconds -Activity 'Storage and network events' -Describe $describe)
+    $timer.Stop()
+
+    $eventTotal = 0
+    foreach ($b in $batch) {
+        $events = @($b.Result.Output | Where-Object { $_.PSObject.Properties['NearReference'] })
+        $eventTotal += $events.Count
+        # Level is a localized display name in this tool's output, so severity is not inferred
+        # from it. The time relationship to a re-attach is the signal that matters here.
+        $near = @($events | Where-Object { $_.NearReference })
+        if ($near.Count) {
+            $cats = ($near | Group-Object Category | Sort-Object Count -Descending | ForEach-Object { "$($_.Name) x$($_.Count)" }) -join ', '
+            Add-TriageFinding -Severity Warning -Area 'Storage events' -Target $b.Target `
+                -Finding "$($near.Count) storage/network/profile event(s) logged within 60 seconds of a profile re-attach - likely what triggered it." `
+                -Evidence $cats
+        }
+        if ($events.Count) {
+            $cats = ($events | Group-Object Category | Sort-Object Count -Descending | ForEach-Object { "$($_.Name) x$($_.Count)" }) -join ', '
+            Add-TriageFinding -Severity Info -Area 'Storage events' -Target $b.Target -Finding "$($events.Count) storage/network/profile event(s) in the window." -Evidence $cats
+        }
     }
 
-    $csv = Join-Path $dir 'Events.csv'
-    $status = $run.Status
-    $detail = "$($events.Count) event(s) collected"
-    if ($reattachTimes.Count) { $detail += ", lined up against $($reattachTimes.Count) re-attach(es)" }
-    $detail += '.'
-    if ($run.Error) { $detail += " $($run.Error)" }
-    Add-TriageStep -Step $stepName -Status $status -Detail $detail -Duration $run.Duration -ReportPath $(if (Test-Path -LiteralPath $csv) { $csv } else { $run.ConsoleFile })
+    $ok = @($batch | Where-Object { $_.Result.Status -eq 'Completed' }).Count
+    $status = if ($ok -eq $batch.Count) { 'Completed' } elseif ($ok) { 'Partial' } else { 'Failed' }
+    $detail = "$eventTotal event(s) from $ok of $($batch.Count) server(s)"
+    if ($reattachTotal) { $detail += ", lined up against $reattachTotal re-attach(es)" }
+    Add-TriageStep -Step $stepName -Status $status -Detail "$detail." -Duration $timer.Elapsed -ReportPath $stepDir
 }
 
 # ---------------------------------------------------------------------------
@@ -1523,29 +2279,47 @@ elseif (-not $targets.Count) {
     Add-TriageStep -Step $stepName -Status Skipped -Detail 'No session hosts.'
 }
 else {
-    Write-TriageLine -Status INFO -Message "$stepName - exporting..."
-    $dir = Join-Path $runFolder '5-RdsEvents'
-    $p = @{ ComputerName = $targets; LastHours = $LookbackHours; OutputPath = $dir }
-    if ($Credential) { $p.Credential = $Credential }
-
-    $run = Invoke-ToolScript -ScriptPath $tool.RdsEvents -Parameters $p -WorkFolder $dir -TimeoutSeconds $StepTimeoutSeconds -Label 'RDS event export'
-    $html = Get-NewestFile -Folder $dir -Filter 'RDS-FSLogix-Events_*.html'
-    $csvFile = Get-NewestFile -Folder $dir -Filter 'RDS-FSLogix-Events_*.csv'
-
-    $detail = 'Export written.'
-    if ($csvFile) {
-        $rows = @(Import-Csv -LiteralPath $csvFile.FullName)
-        # Level is the numeric standard event level (1 = Critical), which is locale-independent.
-        # https://learn.microsoft.com/dotnet/api/system.diagnostics.eventing.reader.standardeventlevel
-        foreach ($grp in ($rows | Where-Object { $_.Level -eq '1' } | Group-Object MachineName)) {
-            $ids = ($grp.Group | Group-Object Id | Sort-Object Count -Descending | Select-Object -First 5 |
-                ForEach-Object { "ID $($_.Name) x$($_.Count)" }) -join ', '
-            Add-TriageFinding -Severity Warning -Area 'RDS events' -Target $grp.Name -Finding "$($grp.Count) critical RDS/FSLogix event(s) in the window." -Evidence $ids
-        }
-        $detail = "$($rows.Count) event(s) exported."
+    Write-TriageStepHeader -Number 5 -Name 'RDS and FSLogix events' -Detail "$($targets.Count) server(s), $ThrottleLimit at a time"
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    $stepDir = Join-Path $runFolder '5-RdsEvents'
+    $jobs = foreach ($t in $targets) {
+        $hostDir = Join-Path $stepDir (ConvertTo-SafeFolderName (Get-ShortComputerName $t))
+        $p = @{ ComputerName = @($t); LastHours = $LookbackHours; OutputPath = $hostDir }
+        if ($Credential) { $p.Credential = $Credential }
+        [PSCustomObject]@{ Target = $t; ScriptPath = $tool.RdsEvents; Parameters = $p; WorkFolder = $hostDir }
     }
-    if ($run.Error) { $detail += " $($run.Error)" }
-    Add-TriageStep -Step $stepName -Status $run.Status -Detail $detail -Duration $run.Duration -ReportPath $(if ($html) { $html.FullName } else { $run.ConsoleFile })
+    # Level is the numeric standard event level (1 = Critical), which is locale-independent.
+    # https://learn.microsoft.com/dotnet/api/system.diagnostics.eventing.reader.standardeventlevel
+    $readRows = {
+        param($folder)
+        $csvFile = Get-NewestFile -Folder $folder -Filter 'RDS-FSLogix-Events_*.csv'
+        if ($csvFile) { @(Import-Csv -LiteralPath $csvFile.FullName) } else { @() }
+    }
+    $describe = {
+        param($job, $result)
+        $rows = @(& $readRows $job.WorkFolder)
+        $crit = @($rows | Where-Object { $_.Level -eq '1' }).Count
+        if ($crit) { @{ Status = 'WARN'; Text = "$($rows.Count) event(s), $crit critical" } }
+        else { @{ Status = 'PASS'; Text = "$($rows.Count) event(s)" } }
+    }
+    $batch = @(Invoke-ToolBatch -Job @($jobs) -ThrottleLimit $ThrottleLimit -TimeoutSeconds $StepTimeoutSeconds -Activity 'RDS and FSLogix events' -Describe $describe)
+    $timer.Stop()
+
+    $rowTotal = 0
+    foreach ($b in $batch) {
+        $rows = @(& $readRows $b.Job.WorkFolder)
+        $rowTotal += $rows.Count
+        $critRows = @($rows | Where-Object { $_.Level -eq '1' })
+        if ($critRows.Count) {
+            $ids = ($critRows | Group-Object Id | Sort-Object Count -Descending | Select-Object -First 5 |
+                ForEach-Object { "ID $($_.Name) x$($_.Count)" }) -join ', '
+            Add-TriageFinding -Severity Warning -Area 'RDS events' -Target $b.Target -Finding "$($critRows.Count) critical RDS/FSLogix event(s) in the window." -Evidence $ids
+        }
+    }
+
+    $ok = @($batch | Where-Object { $_.Result.Status -eq 'Completed' }).Count
+    $status = if ($ok -eq $batch.Count) { 'Completed' } elseif ($ok) { 'Partial' } else { 'Failed' }
+    Add-TriageStep -Step $stepName -Status $status -Detail "$rowTotal event(s) exported from $ok of $($batch.Count) server(s)." -Duration $timer.Elapsed -ReportPath $stepDir
 }
 
 # ---------------------------------------------------------------------------
@@ -1578,7 +2352,7 @@ elseif (-not $benchFrom) {
     Add-TriageStep -Step $stepName -Status Skipped -Detail 'No session host to run the test from.'
 }
 else {
-    Write-TriageLine -Status INFO -Message "$stepName - $BenchmarkWorkload from $benchFrom to $shareTarget (this loads the share while it runs)..."
+    Write-TriageStepHeader -Number 6 -Name 'Profile share speed' -Detail "$BenchmarkWorkload test from $benchFrom to $shareTarget (loads the share while it runs, about a minute)"
     if ($Credential) {
         Write-TriageLine -Status WARN -Message 'The speed test runs as the current user; DiskSpdDiagnostic has no -Credential parameter.'
     }
@@ -1611,7 +2385,9 @@ else {
 $vmConfig = @()
 $handoffFolder = $null
 $stepName = 'Hyper-V hosts'
-$vmNames = if ($VMName) { @($VMName) } else { @($targets | ForEach-Object { Get-ShortComputerName $_ } | Select-Object -Unique) }
+# All discovered servers, including any left out as unreachable - an unreachable session host
+# is exactly the VM worth looking at from the Hyper-V side.
+$vmNames = if ($VMName) { @($VMName) } else { @($allTargets | ForEach-Object { Get-ShortComputerName $_ } | Select-Object -Unique) }
 
 if ($SkipHyperV) {
     Add-TriageStep -Step $stepName -Status Skipped -Detail 'Skipped with -SkipHyperV.'
@@ -1623,7 +2399,7 @@ elseif (-not $tool.HyperVHost) {
     Add-TriageStep -Step $stepName -Status Skipped -Detail 'HyperV-Host-Diagnostics was not found.'
 }
 else {
-    Write-TriageLine -Status INFO -Message "$stepName - checking access..."
+    Write-TriageStepHeader -Number 7 -Name 'Hyper-V hosts' -Detail 'checking access first'
     $timer = [Diagnostics.Stopwatch]::StartNew()
     $dir = Join-Path $runFolder '7-HyperV'
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
@@ -1652,14 +2428,35 @@ else {
     }
     $hvHosts = @($hvHosts | Select-Object -Unique)
 
-    $access = @(foreach ($h in $hvHosts) { Test-HyperVHostAccess -ComputerName $h -Credential $HyperVCredential })
+    $accessText = @{
+        NoRemoting     = 'no access - remote PowerShell refused (not an admin there)'
+        NoHyperVRights = 'no access - Hyper-V refused to list VMs'
+        Unreachable    = 'unreachable over WinRM'
+        NotHyperV      = 'not a Hyper-V host'
+    }
+    $hvDigits = "$($hvHosts.Count)".Length
+    $hvWidth = [math]::Max(8, ($hvHosts | ForEach-Object { "$_".Length } | Measure-Object -Maximum).Maximum)
+    $i = 0
+    $access = @(foreach ($h in $hvHosts) {
+        $i++
+        $a = Test-HyperVHostAccess -ComputerName $h -Credential $HyperVCredential
+        if ($a.State -eq 'OK') {
+            $ours = @($a.VMs | Where-Object { $vmNames -contains $_ })
+            $text = "OK - $(@($a.VMs).Count) VM(s)" + $(if ($ours.Count) { ", ours: $($ours -join ', ')" } else { ', none of ours' })
+            Write-TriageLine -Status PASS -Message ("   [{0}/{1}] {2}  {3}" -f "$i".PadLeft($hvDigits), $hvHosts.Count, "$h".PadRight($hvWidth), $text)
+        }
+        else {
+            Write-TriageLine -Status WARN -Message ("   [{0}/{1}] {2}  {3}" -f "$i".PadLeft($hvDigits), $hvHosts.Count, "$h".PadRight($hvWidth), $accessText[$a.State])
+        }
+        $a
+    })
     $ok = @($access | Where-Object State -eq 'OK')
     $blocked += @($access | Where-Object { $_.State -notin 'OK', 'NotHyperV' })
     foreach ($a in ($access | Where-Object State -eq 'NotHyperV')) {
         Add-TriageFinding -Severity Info -Area 'Hyper-V' -Target $a.ComputerName -Finding 'Not a Hyper-V host (no Hyper-V PowerShell module).'
     }
-    foreach ($b in $blocked) {
-        Write-TriageLine -Status WARN -Message "  $($b.ComputerName): $($b.State) - $($b.Detail)"
+    foreach ($b in ($blocked | Where-Object State -eq 'ClusterLookup')) {
+        Write-TriageLine -Status WARN -Message "   Could not read the node list of cluster $($b.ComputerName): $($b.Detail)"
     }
 
     $hostScript = Get-Content -LiteralPath $tool.HyperVHost -Raw
@@ -1672,7 +2469,8 @@ else {
         if ($mine.Count) { $runs = $mine }
         foreach ($vm in $runs) {
             $label = if ($vm) { "$($a.ComputerName) / $vm" } else { "$($a.ComputerName) (host-wide)" }
-            Write-TriageLine -Status INFO -Message "  Host diagnostics: $label"
+            Write-TriageLine -Status INFO -Message "   Host diagnostics: $label - reading $HyperVDaysBack day(s) of host logs..."
+            $diagTimer = [Diagnostics.Stopwatch]::StartNew()
             try {
                 $text = Invoke-HyperVHostDiagnosticRemote -ComputerName $a.ComputerName -ScriptText $hostScript -TargetVM $vm `
                     -DaysBack $HyperVDaysBack -TimeoutSeconds $StepTimeoutSeconds -Credential $HyperVCredential
@@ -1680,12 +2478,16 @@ else {
                 $logPath = Join-Path $dir "$($name)_HyperVHostDiagnostics.log"
                 Set-Content -LiteralPath $logPath -Value $text -Encoding UTF8
                 $diagCount++
-                foreach ($flag in (Get-HyperVFlagFromLog -Text $text)) {
+                $flags = @(Get-HyperVFlagFromLog -Text $text)
+                foreach ($flag in $flags) {
                     Add-TriageFinding -Severity Warning -Area 'Hyper-V host' -Target $a.ComputerName -Finding $flag -Evidence (Split-Path -Leaf $logPath)
                 }
+                $lineStatus = if ($flags.Count) { 'WARN' } else { 'PASS' }
+                Write-TriageLine -Status $lineStatus -Message ("   Host diagnostics: {0} - {1} item(s) flagged  ({2})" -f $label, $flags.Count, (Format-Elapsed $diagTimer.Elapsed))
             }
             catch {
                 Add-TriageFinding -Severity Info -Area 'Hyper-V host' -Target $a.ComputerName -Finding "Host diagnostics failed: $($_.Exception.Message)"
+                Write-TriageLine -Status FAIL -Message ("   Host diagnostics: {0} - failed: {1}  ({2})" -f $label, $_.Exception.Message, (Format-Elapsed $diagTimer.Elapsed))
             }
         }
     }
@@ -1694,7 +2496,10 @@ else {
         $invDir = Join-Path $dir 'Inventory'
         $p = @{ ComputerName = @($ok | ForEach-Object { $_.ComputerName }); OutputPath = $invDir }
         if ($HyperVCredential) { $p.Credential = $HyperVCredential }
+        Write-TriageLine -Status INFO -Message "   Hyper-V inventory: $($ok.Count) host(s) - includes a Windows Update check, can take a few minutes..."
         $run = Invoke-ToolScript -ScriptPath $tool.HyperVInventory -Parameters $p -WorkFolder $invDir -TimeoutSeconds $StepTimeoutSeconds -Label 'Hyper-V inventory'
+        $invStatus = if ($run.Status -eq 'Completed') { 'PASS' } else { 'FAIL' }
+        Write-TriageLine -Status $invStatus -Message ("   Hyper-V inventory: {0}  ({1})" -f $(if ($run.Status -eq 'Completed') { 'done' } else { "$($run.Status): $($run.Error)" }), (Format-Elapsed $run.Duration))
 
         $vmCsv = Join-Path $invDir 'VirtualMachines.csv'
         $hostCsv = Join-Path $invDir 'Hosts.csv'
@@ -1743,7 +2548,27 @@ else {
 # throws "Argument types do not match" (reproduced while building this script).
 $findings = $script:Findings.ToArray()
 $steps    = $script:Steps.ToArray()
-$overall  = Get-TriageOverallStatus -Finding $findings
+$overall  = Get-TriageOverallStatus -Finding $findings -Step $steps
+
+$servers = @(foreach ($m in $inventory) {
+    $row = $healthRows[$m.ComputerName]
+    [PSCustomObject]@{
+        Server       = $m.ComputerName
+        DeliveryGroup = $m.DeliveryGroup
+        Registration = $m.RegistrationState
+        Verdict      = if ($row) { $row.Verdict } else { 'Not checked' }
+        CpuAvg       = if ($row) { $row.CpuAveragePercent } else { $null }
+        CpuPeak      = if ($row) { $row.CpuPeakPercent } else { $null }
+        MemoryAvg    = if ($row) { $row.MemoryAveragePercent } else { $null }
+        FullestDisk  = if ($row) { $row.MaxDiskUsedPercent } else { $null }
+        Sessions     = $m.SessionCount
+        Issues       = @($findings | Where-Object { $_.Target -eq $m.ComputerName -and $_.Severity -ne 'Info' }).Count
+        Report       = $healthReports[$m.ComputerName]
+    }
+})
+$servers | Select-Object Server, DeliveryGroup, Registration, Verdict, CpuAvg, CpuPeak, MemoryAvg, FullestDisk, Sessions, Issues,
+    @{ n = 'Report'; e = { Get-RelativeReportPath -RunFolder $runFolder -Path $_.Report } } |
+    Export-Csv -LiteralPath (Join-Path $runFolder 'Servers.csv') -NoTypeInformation -Encoding UTF8
 
 $findings | Export-Csv -LiteralPath (Join-Path $runFolder 'Findings.csv') -NoTypeInformation -Encoding UTF8
 $steps | Select-Object Step, Status, Detail, @{ n = 'Duration'; e = { '{0:hh\:mm\:ss}' -f $_.Duration } },
@@ -1754,7 +2579,7 @@ $hvText = @(@($HyperVCluster) + @($HyperVHost) | Where-Object { $_ }) -join ', '
 if (-not $hvText) { $hvText = 'not checked' }
 $context = @{
     RunFolder     = $runFolder
-    Targets       = $targets
+    Targets       = $allTargets
     WindowStart   = $windowStart
     WindowEnd     = $windowEnd
     HyperVText    = $hvText
@@ -1762,7 +2587,7 @@ $context = @{
     HandoffFolder = $handoffFolder
 }
 $htmlPath = Join-Path $runFolder 'Summary.html'
-New-TriageHtmlReport -Context $context -Step $steps -Finding $findings -VmConfig $vmConfig -Benchmark $benchmark |
+New-TriageHtmlReport -Context $context -Step $steps -Finding $findings -Server $servers -VmConfig $vmConfig -Benchmark $benchmark |
     Set-Content -LiteralPath $htmlPath -Encoding UTF8
 
 Write-Host ''
@@ -1770,9 +2595,10 @@ $crit = @($findings | Where-Object Severity -eq 'Critical').Count
 $warn = @($findings | Where-Object Severity -eq 'Warning').Count
 $line = "Overall: $overall - $crit serious, $warn to review. Summary: $htmlPath"
 switch ($overall) {
-    'Critical' { Write-TriageLine -Status FAIL -Message $line }
-    'Warning'  { Write-TriageLine -Status WARN -Message $line }
-    default    { Write-TriageLine -Status PASS -Message $line }
+    'Critical'   { Write-TriageLine -Status FAIL -Message $line }
+    'Warning'    { Write-TriageLine -Status WARN -Message $line }
+    'Incomplete' { Write-TriageLine -Status FAIL -Message "Overall: Incomplete - the checks did not finish, so there is no verdict. See 'What ran' in $htmlPath" }
+    default      { Write-TriageLine -Status PASS -Message $line }
 }
 if ($handoffFolder) {
     Write-TriageLine -Status WARN -Message "Send this folder to the Hyper-V administrators: $handoffFolder"
@@ -1782,10 +2608,12 @@ if (-not $NoOpen) {
     try { Start-Process -FilePath $htmlPath } catch { }
 }
 
-[PSCustomObject]@{
-    Overall   = $overall
-    RunFolder = $runFolder
-    Summary   = $htmlPath
-    Steps     = $steps
-    Findings  = $findings
+if ($PassThru) {
+    [PSCustomObject]@{
+        Overall   = $overall
+        RunFolder = $runFolder
+        Summary   = $htmlPath
+        Steps     = $steps
+        Findings  = $findings
+    }
 }
