@@ -18,3 +18,24 @@ graphify-out/
 
 # --- Packaged distribution zips (rebuildable from source) ---
 *.zip
+
+# --- Site-specific inventories and credentials. Never commit. ---
+JunOS - Info/devices.csv
+**/devices.csv
+*.secret*
+.env
+.env.*
+
+# --- Local tool/editor state ---
+.claude/settings.local.json
+
+# --- Runtime logs, transcripts and local databases ---
+NetworkLog-*.txt
+*.transcript.txt
+*.db
+*.sqlite
+*.sqlite3
+
+# --- Python build artifacts ---
+__pycache__/
+*.py[cod]

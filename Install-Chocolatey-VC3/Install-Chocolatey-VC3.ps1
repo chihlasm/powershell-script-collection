@@ -9,19 +9,41 @@
     - Removes the legacy "streamedapps" source if present
     - Validates connectivity to the VC3 feed
 
+.PARAMETER FeedUrl
+    Full authenticated URL of the private MyGet feed, including its auth token
+    (https://www.myget.org/F/<feed>/auth/<token>/api/v2). If omitted, the value of the
+    CHOCO_PRIVATE_FEED_URL environment variable is used. The URL is a credential: keep it
+    in your password manager or RMM secure variables, never in this script or in Git.
+
+.EXAMPLE
+    .\Install-Chocolatey-VC3.ps1 -FeedUrl 'https://www.myget.org/F/<feed>/auth/<token>/api/v2'
+
+.EXAMPLE
+    $env:CHOCO_PRIVATE_FEED_URL = '<feed url from password manager>'
+    .\Install-Chocolatey-VC3.ps1
+
 .NOTES
     Run this script in an elevated (Administrator) PowerShell session.
-    Updated: 2026-03-12
+    Updated: 2026-10-12 - feed URL is now supplied at runtime instead of hardcoded.
 #>
 
 [CmdletBinding()]
-param()
+param(
+    [string]$FeedUrl = $env:CHOCO_PRIVATE_FEED_URL
+)
 
 $ErrorActionPreference = 'Stop'
 
+if ([string]::IsNullOrWhiteSpace($FeedUrl)) {
+    throw 'No feed URL supplied. Pass -FeedUrl or set the CHOCO_PRIVATE_FEED_URL environment variable.'
+}
+if ($FeedUrl -notmatch '^https://') {
+    throw 'The feed URL must start with https://'
+}
+
 # --- Configuration ---
 $VC3SourceName     = 'vc3protected'
-$VC3SourceUrl      = 'https://www.myget.org/F/vc3-choco-protected/auth/REDACTED-TOKEN/api/v2'
+$VC3SourceUrl      = $FeedUrl
 $VC3SourcePriority = 20
 $LegacySource      = 'streamedapps'
 $ChocoExePath      = 'C:\ProgramData\Chocolatey\bin\choco.exe'

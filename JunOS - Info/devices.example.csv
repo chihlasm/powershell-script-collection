@@ -1,0 +1,5 @@
+name,host,location,model_expected,type,port
+SITE-HQ-SRX340-01,192.0.2.1,Headquarters,SRX340,srx,22
+SITE-BR1-SRX300-01,192.0.2.33,Branch Office 1,SRX300,srx,22
+SITE-HQ-EX3400-01,198.51.100.1,Headquarters,EX3400,ex,
+SITE-BR1-EX2300-01,198.51.100.10,Branch Office 1,EX2300,ex,

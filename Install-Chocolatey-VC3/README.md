@@ -11,11 +11,20 @@ Installs Chocolatey CLI and configures the VC3 private MyGet repository source.
 
 ## Usage
 
-Run as Administrator:
+Run as Administrator, supplying the authenticated feed URL at runtime:
 
 ```powershell
+.\Install-Chocolatey-VC3.ps1 -FeedUrl '<authenticated feed URL>'
+```
+
+Or set it once in the session (or as an RMM secure variable) and run without parameters:
+
+```powershell
+$env:CHOCO_PRIVATE_FEED_URL = '<authenticated feed URL>'
 .\Install-Chocolatey-VC3.ps1
 ```
+
+The feed URL contains an access token, so treat it as a password: keep it in a password manager or your RMM's secure variables, and never commit it to this repository.
 
 ## Requirements
 
