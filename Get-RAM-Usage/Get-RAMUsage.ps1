@@ -3,13 +3,19 @@
     Breaks down RAM usage by user and process on a Citrix VDA (or any multi-session) server.
 
 .DESCRIPTION
-    Collects all running processes with their owning user, calculates Private Working Set
-    (matching Task Manager's "Memory" column), and produces:
+    Collects all running processes with their owning user, measures each process's Private
+    Working Set (the "Working Set - Private" counter, which Task Manager shows as private
+    working set), and produces:
       - Console summary of per-user RAM usage
       - Interactive HTML report with click-to-expand user drill-down, search, and sorting
+      - Optional CSV with one row per process
+
+    Read-only. Nothing on the target server is changed.
 
 .PARAMETER ComputerName
-    Target server(s) to query. Defaults to the local machine.
+    Target server(s) to query. Defaults to the local machine. The names '.', 'localhost',
+    this computer's name, and its FQDN are all treated as the local machine and queried
+    without PowerShell remoting.
 
 .PARAMETER Credential
     Optional PSCredential for remote server authentication.
@@ -17,33 +23,61 @@
 .PARAMETER Top
     Number of top processes to show per user in console output. Default: 15. Use 0 for all.
 
+.PARAMETER OutputPath
+    Folder the HTML report (and CSV, when -ExportCSV is a bare file name) is written to.
+    Defaults to the current directory. Created if it does not exist.
+
 .PARAMETER ExportCSV
-    Path to export detailed results as CSV.
+    Also export one row per process to CSV. A bare file name (e.g. ram.csv) is written into
+    -OutputPath; a full path is used as-is.
 
 .PARAMETER ExportHTML
-    Path to export the interactive HTML report. Defaults to script directory.
+    Full path for the HTML report, overriding the default
+    <OutputPath>\RAMUsage_<yyyy-MM-dd_HHmmss>.html.
 
 .PARAMETER SkipBrowserOpen
     Don't auto-open the HTML report after generation.
 
 .PARAMETER IncludeSystemProcesses
-    Include SYSTEM / LOCAL SERVICE / NETWORK SERVICE in the per-user breakdown.
+    Also break down SYSTEM, LOCAL SERVICE, NETWORK SERVICE, and other service / system
+    accounts per account in the console (by default they are summarised in one line), and
+    open the HTML report with system accounts already shown.
+
+.PARAMETER LoadFunctionsOnly
+    Define the script's functions and return without collecting anything. Used by the
+    Pester tests.
 
 .EXAMPLE
     .\Get-RAMUsage.ps1
-    Shows RAM breakdown for all users on the local server.
+    Shows RAM breakdown for all users on the local server and opens the HTML report.
 
 .EXAMPLE
-    .\Get-RAMUsage.ps1 -ComputerName CTXVDA01, CTXVDA02
+    .\Get-RAMUsage.ps1 -ComputerName CTXVDA01, CTXVDA02 -OutputPath C:\Reports
+    Compares two VDAs in one report saved to C:\Reports.
 
 .EXAMPLE
-    .\Get-RAMUsage.ps1 -ExportCSV "C:\Reports\ram.csv" -SkipBrowserOpen
+    .\Get-RAMUsage.ps1 -ExportCSV ram.csv -SkipBrowserOpen
+    Writes the HTML report and ram.csv to the current directory without opening a browser.
+
+.EXAMPLE
+    .\Get-RAMUsage.ps1 -IncludeSystemProcesses
+    Also itemises service and system accounts - useful when the RAM is not going to users.
 
 .NOTES
-    Author  : Auto-generated
-    Requires: PowerShell 5.1+, admin rights (Get-Process -IncludeUserName requires elevation)
-    Version : 1.1.0
+    Requires: Windows PowerShell 5.1+, run as Administrator. For remote servers,
+              PowerShell remoting (WinRM) for the process list and CIM for the counters.
+    Version : 1.2.0
+
+    REFERENCES
+    - Get-Process (5.1): -IncludeUserName requires Run as administrator; the local computer
+      can be named by computer name, '.', or 'localhost'.
+      https://learn.microsoft.com/powershell/module/microsoft.powershell.management/get-process?view=powershell-5.1
+    - Memory Performance Information: the "Working Set - Private" counter maps to Task
+      Manager's Private Working Set; Private Bytes (PrivateMemorySize64) maps to Commit Size.
+      https://learn.microsoft.com/windows/win32/memory/memory-performance-information
 #>
+
+#Requires -Version 5.1
 
 [CmdletBinding()]
 param(
@@ -52,7 +86,10 @@ param(
 
     [PSCredential]$Credential,
 
+    [ValidateRange(0, 100000)]
     [int]$Top = 15,
+
+    [string]$OutputPath = '',
 
     [string]$ExportCSV,
 
@@ -60,11 +97,19 @@ param(
 
     [switch]$SkipBrowserOpen,
 
-    [switch]$IncludeSystemProcesses
+    [switch]$IncludeSystemProcesses,
+
+    [switch]$LoadFunctionsOnly
 )
 
-$ScriptVersion = '1.1.0'
+$ScriptVersion = '1.2.0'
 $ErrorActionPreference = 'Continue'
+
+# This file is deliberately pure ASCII. Windows PowerShell 5.1 reads a BOM-less file as
+# ANSI, and a UTF-8 em-dash decodes to a sequence ending in U+201D - which PowerShell
+# treats as a closing double quote, silently ending the string and breaking the whole
+# script (65 parse errors in v1.1.0). Non-ASCII glyphs are built from char codes or
+# CSS/JS escapes instead. The Tests folder enforces this.
 
 #region Helper Functions
 function Format-Bytes {
@@ -75,17 +120,69 @@ function Format-Bytes {
     return "$Bytes B"
 }
 
+function Test-IsLocalComputer {
+    # Get-Process documents '.', 'localhost', and the computer name as the local machine.
+    # The FQDN is included too, so none of them fall through to Invoke-Command, which
+    # would need WinRM just to query the machine the script is already running on.
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $true }
+    $n = $Name.Trim()
+    if ($n -eq '.' -or $n -eq 'localhost' -or $n -eq '127.0.0.1' -or $n -eq '::1') { return $true }
+    if ($n -eq $env:COMPUTERNAME) { return $true }
+    if ($n -like "$($env:COMPUTERNAME).*") { return $true }
+    return $false
+}
+
+function Resolve-OutputFolder {
+    # Blank means "current directory", resolved at run time rather than as a param default
+    # so the value is correct however the script is launched.
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return (Get-Location).ProviderPath }
+    return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+}
+
+function Resolve-ExportFilePath {
+    # A bare file name lands in the output folder; anything with a folder part is used as-is.
+    param([string]$Path, [string]$Folder)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    if ([string]::IsNullOrEmpty((Split-Path $Path -Parent))) { return (Join-Path $Folder $Path) }
+    return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+}
+
+function ConvertTo-JsString {
+    # Quoted JavaScript string literal. '<' is escaped so a process or user name can never
+    # close the report's <script> block.
+    param([string]$Text)
+    if ($null -eq $Text) { $Text = '' }
+    $escaped = $Text.Replace('\', '\\').Replace('"', '\"').Replace('<', '\u003c').Replace("`r", '\r').Replace("`n", '\n')
+    return '"' + $escaped + '"'
+}
+
+function ConvertTo-JsNumber {
+    # Invariant-culture number; missing values become 0 so one unreadable process cannot
+    # produce "pws:," and break the whole report's JavaScript.
+    param($Value)
+    if ($null -eq $Value -or "$Value" -eq '') { return '0' }
+    return ([double]$Value).ToString([System.Globalization.CultureInfo]::InvariantCulture)
+}
+
 function Get-ServerMemoryInfo {
     param([string]$Server, [PSCredential]$Cred)
 
-    $cimParams = @{ ErrorAction = 'Stop' }
-    if ($Server -ne $env:COMPUTERNAME) {
+    $cimParams = @{ ClassName = 'Win32_OperatingSystem'; ErrorAction = 'Stop' }
+    if (-not (Test-IsLocalComputer $Server)) {
         $cimParams['ComputerName'] = $Server
-        if ($Cred) { $cimParams['Credential'] = $Cred }
     }
 
     try {
-        $os = Get-CimInstance -ClassName Win32_OperatingSystem @cimParams
+        if ($cimParams.ContainsKey('ComputerName') -and $Cred) {
+            $session = New-CimSession -ComputerName $Server -Credential $Cred -ErrorAction Stop
+            try { $os = Get-CimInstance -CimSession $session -ClassName Win32_OperatingSystem -ErrorAction Stop }
+            finally { Remove-CimSession $session -ErrorAction SilentlyContinue }
+        }
+        else {
+            $os = Get-CimInstance @cimParams
+        }
         return [PSCustomObject]@{
             TotalPhysicalMB = [math]::Round($os.TotalVisibleMemorySize / 1024, 0)
             FreePhysicalMB  = [math]::Round($os.FreePhysicalMemory / 1024, 0)
@@ -94,7 +191,7 @@ function Get-ServerMemoryInfo {
         }
     }
     catch {
-        Write-Warning "Could not retrieve memory info from $Server : $_"
+        Write-Host "  [WARN] Could not retrieve memory totals from $Server : $_" -ForegroundColor Yellow
         return $null
     }
 }
@@ -103,10 +200,11 @@ function Get-ProcessesByUser {
     param([string]$Server, [PSCredential]$Cred)
 
     $results = [System.Collections.Generic.List[object]]::new()
+    $isLocal = Test-IsLocalComputer $Server
 
-    # Step 1: Get processes with username
+    # Step 1: processes with their owning user. -IncludeUserName requires elevation.
     try {
-        if ($Server -eq $env:COMPUTERNAME) {
+        if ($isLocal) {
             $procs = Get-Process -IncludeUserName -ErrorAction Stop
         }
         else {
@@ -118,40 +216,49 @@ function Get-ProcessesByUser {
         }
     }
     catch {
-        Write-Warning "Could not retrieve processes from $Server : $_"
-        Write-Warning "Ensure you are running as Administrator."
+        Write-Host "  [FAIL] Could not retrieve processes from $Server : $_" -ForegroundColor Red
+        if ($isLocal) {
+            Write-Host "  [INFO] Run PowerShell as Administrator - the process owner list requires it." -ForegroundColor Cyan
+        }
+        else {
+            Write-Host "  [INFO] Check that PowerShell remoting (WinRM) is enabled on $Server and you are an admin there." -ForegroundColor Cyan
+        }
         return $results
     }
 
-    # Step 2: Get Private Working Set from performance counters (matches Task Manager)
+    # Step 2: Private Working Set per PID from the performance counter class.
     $privateWSMap = @{}
     try {
-        $cimParams = @{ ErrorAction = 'SilentlyContinue' }
-        if ($Server -ne $env:COMPUTERNAME) {
-            $cimParams['ComputerName'] = $Server
-            if ($Cred) { $cimParams['Credential'] = $Cred }
+        if (-not $isLocal -and $Cred) {
+            $session = New-CimSession -ComputerName $Server -Credential $Cred -ErrorAction Stop
+            try { $perfData = Get-CimInstance -CimSession $session -ClassName Win32_PerfRawData_PerfProc_Process -ErrorAction Stop }
+            finally { Remove-CimSession $session -ErrorAction SilentlyContinue }
         }
-        $perfData = Get-CimInstance -ClassName Win32_PerfRawData_PerfProc_Process @cimParams |
-            Where-Object { $_.Name -ne '_Total' -and $_.Name -ne 'Idle' }
+        elseif (-not $isLocal) {
+            $perfData = Get-CimInstance -ComputerName $Server -ClassName Win32_PerfRawData_PerfProc_Process -ErrorAction Stop
+        }
+        else {
+            $perfData = Get-CimInstance -ClassName Win32_PerfRawData_PerfProc_Process -ErrorAction Stop
+        }
 
-        foreach ($perf in $perfData) {
-            # Performance counter names append #N for duplicate process names
-            $privateWSMap[$perf.IDProcess] = [long]$perf.WorkingSetPrivate
+        foreach ($perf in ($perfData | Where-Object { $_.Name -ne '_Total' -and $_.Name -ne 'Idle' })) {
+            # Keyed by PID, so duplicate process names (chrome#1, chrome#2) do not collide.
+            $privateWSMap[[int]$perf.IDProcess] = [long]$perf.WorkingSetPrivate
         }
     }
     catch {
-        Write-Warning "Could not retrieve private working set data — falling back to PrivateMemorySize64"
+        Write-Host "  [WARN] Could not read private working set counters from $Server - using commit size (PrivateMemorySize64) instead, which reads higher." -ForegroundColor Yellow
     }
 
     foreach ($proc in $procs) {
         $userName = if ($proc.UserName) { $proc.UserName } else { 'UNKNOWN' }
 
-        # Use private working set from perf counters if available, else fall back
-        $privateWS = if ($privateWSMap.ContainsKey($proc.Id)) {
-            $privateWSMap[$proc.Id]
-        } else {
-            # PrivateMemorySize64 = commit size (closest fallback)
-            $proc.PrivateMemorySize64
+        $privateWS = if ($privateWSMap.ContainsKey([int]$proc.Id)) {
+            $privateWSMap[[int]$proc.Id]
+        }
+        else {
+            # PrivateMemorySize64 is Private Bytes, which Task Manager calls Commit Size.
+            [long]$proc.PrivateMemorySize64
         }
 
         $results.Add([PSCustomObject]@{
@@ -174,15 +281,16 @@ function Get-ProcessesByUser {
     return $results
 }
 
-$systemAccounts = @(
-    'NT AUTHORITY\SYSTEM',
-    'NT AUTHORITY\LOCAL SERVICE',
-    'NT AUTHORITY\NETWORK SERVICE',
-    'SYSTEM', 'LOCAL SERVICE', 'NETWORK SERVICE', 'UNKNOWN'
-)
-
 function Test-IsSystemAccount {
     param([string]$UserName)
+    # Kept inside the function so the check never depends on a script-scope variable
+    # being visible from wherever it is called.
+    $systemAccounts = @(
+        'NT AUTHORITY\SYSTEM',
+        'NT AUTHORITY\LOCAL SERVICE',
+        'NT AUTHORITY\NETWORK SERVICE',
+        'SYSTEM', 'LOCAL SERVICE', 'NETWORK SERVICE', 'UNKNOWN'
+    )
     if ([string]::IsNullOrWhiteSpace($UserName)) { return $true }
     foreach ($sa in $systemAccounts) {
         if ($UserName -eq $sa -or $UserName.StartsWith($sa)) { return $true }
@@ -191,10 +299,46 @@ function Test-IsSystemAccount {
     return $false
 }
 
-function Escape-HtmlText {
-    param([string]$Text)
-    if ([string]::IsNullOrEmpty($Text)) { return '' }
-    return [System.Security.SecurityElement]::Escape($Text)
+function Get-AccountGroups {
+    # Groups one server's processes by account, largest private working set first.
+    param([object[]]$Processes, [switch]$SystemAccounts)
+    $selected = @($Processes | Where-Object { [bool](Test-IsSystemAccount $_.UserName) -eq [bool]$SystemAccounts })
+    if ($selected.Count -eq 0) { return @() }
+    return @($selected | Group-Object UserName |
+        Sort-Object { ($_.Group | Measure-Object -Property PrivateWorkingSet -Sum).Sum } -Descending)
+}
+
+function Write-AccountBreakdown {
+    param([object[]]$Groups, [string]$Heading, [int]$TopCount)
+
+    Write-Host ""
+    Write-Host "  $Heading ($($Groups.Count) accounts) - Private Working Set" -ForegroundColor White
+
+    $rank = 0
+    foreach ($group in $Groups) {
+        $rank++
+        $procs = $group.Group
+        $totalBytes = ($procs | Measure-Object -Property PrivateWorkingSet -Sum).Sum
+        $sessIds = ($procs | Select-Object -ExpandProperty SessionId -Unique | Sort-Object) -join ','
+        $usageColor = if ($totalBytes -ge 4GB) { 'Red' } elseif ($totalBytes -ge 2GB) { 'Yellow' } else { 'Green' }
+
+        Write-Host ""
+        Write-Host "  $rank. " -NoNewline -ForegroundColor DarkGray
+        Write-Host "$($group.Name)" -NoNewline -ForegroundColor White
+        Write-Host " (Session $sessIds)" -ForegroundColor DarkGray
+        Write-Host "     Total: " -NoNewline -ForegroundColor DarkGray
+        Write-Host "$(Format-Bytes $totalBytes)" -NoNewline -ForegroundColor $usageColor
+        Write-Host "  ($(@($procs).Count) processes)" -ForegroundColor DarkGray
+
+        $topProcs = $procs | Sort-Object PrivateWorkingSet -Descending
+        if ($TopCount -gt 0) { $topProcs = $topProcs | Select-Object -First $TopCount }
+        foreach ($tp in $topProcs) {
+            Write-Host "       $($tp.ProcessName.PadRight(30)) $((Format-Bytes $tp.PrivateWorkingSet).PadLeft(12))   PID: $($tp.PID)" -ForegroundColor Gray
+        }
+        if ($TopCount -gt 0 -and @($procs).Count -gt $TopCount) {
+            Write-Host "       ... +$(@($procs).Count - $TopCount) more" -ForegroundColor DarkGray
+        }
+    }
 }
 #endregion
 
@@ -203,30 +347,38 @@ function Export-InteractiveHTMLReport {
     param(
         [System.Collections.Generic.List[object]]$AllData,
         [hashtable]$ServerMemory,
-        [string]$OutputFile
+        [string]$OutputFile,
+        [string[]]$Servers,
+        [switch]$ShowSystemByDefault
     )
 
     $reportDate = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $serverList = [System.Security.SecurityElement]::Escape(($Servers -join ', '))
+    $initialShowSystem = if ($ShowSystemByDefault) { 'true' } else { 'false' }
+    $initialSysLabel = if ($ShowSystemByDefault) { 'Hide System Accounts' } else { 'Show System Accounts' }
+    $initialSysClass = if ($ShowSystemByDefault) { 'toggle-btn active' } else { 'toggle-btn' }
 
-    # Build JSON data for JavaScript
+    # Build the data array for JavaScript
     $jsonRecords = [System.Collections.Generic.List[string]]::new()
     foreach ($proc in $AllData) {
-        $user = ($proc.UserName -replace '\\', '\\\\' -replace '"', '\"')
-        $pname = ($proc.ProcessName -replace '\\', '\\\\' -replace '"', '\"')
-        $server = ($proc.Server -replace '\\', '\\\\' -replace '"', '\"')
         $isSystem = if (Test-IsSystemAccount $proc.UserName) { 'true' } else { 'false' }
-        $startStr = if ($proc.StartTime) { $proc.StartTime.ToString('yyyy-MM-dd HH:mm:ss') } else { '' }
+        $startStr = if ($proc.StartTime) { ([datetime]$proc.StartTime).ToString('yyyy-MM-dd HH:mm:ss') } else { '' }
 
-        $jsonRecords.Add("{s:`"$server`",u:`"$user`",p:`"$pname`",pid:$($proc.PID),sid:$($proc.SessionId),pws:$($proc.PrivateWorkingSet),ws:$($proc.WorkingSetBytes),cpu:$($proc.CPU_Seconds),h:$($proc.HandleCount),t:$($proc.ThreadCount),st:`"$startStr`",sys:$isSystem}")
+        $jsonRecords.Add(('{{s:{0},u:{1},p:{2},pid:{3},sid:{4},pws:{5},ws:{6},cpu:{7},h:{8},t:{9},st:{10},sys:{11}}}' -f
+            (ConvertTo-JsString $proc.Server), (ConvertTo-JsString $proc.UserName), (ConvertTo-JsString $proc.ProcessName),
+            (ConvertTo-JsNumber $proc.PID), (ConvertTo-JsNumber $proc.SessionId), (ConvertTo-JsNumber $proc.PrivateWorkingSet),
+            (ConvertTo-JsNumber $proc.WorkingSetBytes), (ConvertTo-JsNumber $proc.CPU_Seconds), (ConvertTo-JsNumber $proc.HandleCount),
+            (ConvertTo-JsNumber $proc.ThreadCount), (ConvertTo-JsString $startStr), $isSystem))
     }
     $jsonData = "[`n" + ($jsonRecords -join ",`n") + "`n]"
 
-    # Build server memory JSON
+    # Build server memory data
     $memEntries = [System.Collections.Generic.List[string]]::new()
     foreach ($server in $ServerMemory.Keys) {
         $m = $ServerMemory[$server]
-        $sEsc = $server -replace '\\', '\\\\' -replace '"', '\"'
-        $memEntries.Add("`"$sEsc`":{total:$($m.TotalPhysicalMB),used:$($m.UsedPhysicalMB),free:$($m.FreePhysicalMB),pct:$($m.PercentUsed)}")
+        $memEntries.Add(('{0}:{{total:{1},used:{2},free:{3},pct:{4}}}' -f (ConvertTo-JsString $server),
+            (ConvertTo-JsNumber $m.TotalPhysicalMB), (ConvertTo-JsNumber $m.UsedPhysicalMB),
+            (ConvertTo-JsNumber $m.FreePhysicalMB), (ConvertTo-JsNumber $m.PercentUsed)))
     }
     $memJson = "{" + ($memEntries -join ",") + "}"
 
@@ -235,7 +387,7 @@ function Export-InteractiveHTMLReport {
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>RAM Usage Report — $($ComputerName -join ', ')</title>
+<title>RAM Usage Report &mdash; $serverList</title>
 <style>
 :root { --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a; --text: #e2e4e9; --muted: #7a7f8d;
         --blue: #3b82f6; --green: #22c55e; --yellow: #eab308; --red: #ef4444; --orange: #f97316; }
@@ -281,8 +433,8 @@ h1 { font-size: 28px; font-weight: 700; margin-bottom: 4px; }
                  font-weight: 600; position: sticky; top: 0; z-index: 10; }
 .user-table th:hover { color: var(--text); }
 .user-table th .sort-arrow { margin-left: 4px; font-size: 10px; }
-.user-table th.sorted-asc .sort-arrow::after { content: ' ▲'; }
-.user-table th.sorted-desc .sort-arrow::after { content: ' ▼'; }
+.user-table th.sorted-asc .sort-arrow::after { content: ' \25B2'; }
+.user-table th.sorted-desc .sort-arrow::after { content: ' \25BC'; }
 .user-row { cursor: pointer; transition: background 0.15s; }
 .user-row td { padding: 14px 16px; border-bottom: 1px solid var(--border); }
 .user-row:hover { background: rgba(59,130,246,0.08); }
@@ -323,14 +475,14 @@ h1 { font-size: 28px; font-weight: 700; margin-bottom: 4px; }
 <body>
 <div class="container">
     <h1>RAM Usage Report</h1>
-    <p class="subtitle">Generated $reportDate | Servers: $($ComputerName -join ', ')</p>
+    <p class="subtitle">Generated $reportDate | Servers: $serverList</p>
 
     <div id="mem-cards" class="mem-cards"></div>
     <div id="stats" class="stats"></div>
 
     <div class="controls">
         <input type="text" class="search-box" id="userSearch" placeholder="Search users..." oninput="filterUsers()">
-        <button class="toggle-btn" id="sysToggle" onclick="toggleSystem()">Show System Accounts</button>
+        <button class="$initialSysClass" id="sysToggle" onclick="toggleSystem()">$initialSysLabel</button>
         <button class="toggle-btn" id="expandAll" onclick="expandAllUsers()">Expand All</button>
         <button class="toggle-btn" id="collapseAll" onclick="collapseAllUsers()">Collapse All</button>
     </div>
@@ -358,7 +510,7 @@ h1 { font-size: 28px; font-weight: 700; margin-bottom: 4px; }
 const rawData = $jsonData;
 const serverMem = $memJson;
 
-let showSystem = false;
+let showSystem = $initialShowSystem;
 let sortCol = 'ram';
 let sortDir = 'desc';
 
@@ -390,7 +542,7 @@ function renderMemCards() {
     let html = '';
     for (const [srv, m] of Object.entries(serverMem)) {
         const cls = pctClass(m.pct);
-        html += '<div class="mem-card"><h3>' + srv + '</h3>' +
+        html += '<div class="mem-card"><h3>' + escHtml(srv) + '</h3>' +
             '<div class="pct pct-' + cls + '">' + m.pct + '%</div>' +
             '<div class="detail">' + formatBytes(m.used * 1048576) + ' used of ' + formatBytes(m.total * 1048576) + ' (' + formatBytes(m.free * 1048576) + ' free)</div>' +
             '<div class="mem-bar"><div class="mem-bar-fill fill-' + cls + '" style="width:' + m.pct + '%"></div></div></div>';
@@ -447,7 +599,7 @@ function renderUserTable() {
         const sysClass = g.isSystem ? ' sys-account' : '';
 
         html += '<tr class="user-row' + sysClass + '" onclick="toggleDetail(' + idx + ')" id="ur' + idx + '">' +
-            '<td><span class="expand-icon">▶</span></td>' +
+            '<td><span class="expand-icon">\u25B6</span></td>' +
             '<td class="user-name">' + escHtml(g.user) + '</td>' +
             '<td>' + sessStr + '</td>' +
             '<td class="ram-val">' + formatBytes(g.totalPWS) + '</td>' +
@@ -595,44 +747,47 @@ renderUserTable();
 
 #region Main
 function Start-RAMReport {
+    $divider = ([string][char]0x2501) * 44
+
     Write-Host ""
     Write-Host "============================================" -ForegroundColor Cyan
     Write-Host "  RAM Usage Report v$ScriptVersion" -ForegroundColor Cyan
     Write-Host "============================================" -ForegroundColor Cyan
     Write-Host ""
 
+    $outputFolder = Resolve-OutputFolder $OutputPath
     $allProcessData = [System.Collections.Generic.List[object]]::new()
     $serverMemory = @{}
 
     foreach ($server in $ComputerName) {
-        Write-Host "Querying $server..." -ForegroundColor Yellow
+        Write-Host "[INFO] Querying $server..." -ForegroundColor Cyan
         $memInfo = Get-ServerMemoryInfo -Server $server -Cred $Credential
         if ($memInfo) { $serverMemory[$server] = $memInfo }
 
         $procs = Get-ProcessesByUser -Server $server -Cred $Credential
         if ($procs.Count -gt 0) {
             foreach ($p in $procs) { $allProcessData.Add($p) }
-            Write-Host "  Found $($procs.Count) processes on $server" -ForegroundColor Green
+            Write-Host "[PASS] Found $($procs.Count) processes on $server" -ForegroundColor Green
         }
         else {
-            Write-Host "  No process data returned from $server" -ForegroundColor Red
+            Write-Host "[FAIL] No process data returned from $server" -ForegroundColor Red
         }
     }
 
     if ($allProcessData.Count -eq 0) {
-        Write-Host "`nNo data collected. Ensure you are running as Administrator." -ForegroundColor Red
+        Write-Host "`n[FAIL] No data collected from any server. See the messages above." -ForegroundColor Red
         return
     }
 
     # Console display
     foreach ($server in $ComputerName) {
-        $serverProcs = $allProcessData | Where-Object { $_.Server -eq $server }
-        if (-not $serverProcs) { continue }
+        $serverProcs = @($allProcessData | Where-Object { $_.Server -eq $server })
+        if ($serverProcs.Count -eq 0) { continue }
 
         Write-Host ""
-        Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
+        Write-Host $divider -ForegroundColor Cyan
         Write-Host "  Server: $server" -ForegroundColor Cyan
-        Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
+        Write-Host $divider -ForegroundColor Cyan
 
         if ($serverMemory.ContainsKey($server)) {
             $mem = $serverMemory[$server]
@@ -648,76 +803,57 @@ function Start-RAMReport {
             Write-Host "($(Format-Bytes ($mem.UsedPhysicalMB * 1MB)) / $(Format-Bytes ($mem.TotalPhysicalMB * 1MB)))"
         }
 
-        $userProcs = $serverProcs | Where-Object { -not (Test-IsSystemAccount $_.UserName) }
-        $sysProcs = $serverProcs | Where-Object { Test-IsSystemAccount $_.UserName }
-
-        $userGroups = $userProcs | Group-Object UserName |
-            Sort-Object { ($_.Group | Measure-Object -Property PrivateWorkingSet -Sum).Sum } -Descending
+        $userGroups = Get-AccountGroups -Processes $serverProcs
+        $sysGroups = Get-AccountGroups -Processes $serverProcs -SystemAccounts
 
         if ($userGroups.Count -gt 0) {
-            Write-Host ""
-            Write-Host "  User Sessions ($($userGroups.Count) users) — Private Working Set" -ForegroundColor White
+            Write-AccountBreakdown -Groups $userGroups -Heading 'User Sessions' -TopCount $Top
 
-            $rank = 0
-            foreach ($userGroup in $userGroups) {
-                $rank++
-                $uName = $userGroup.Name
-                $uProcs = $userGroup.Group
-                $totalBytes = ($uProcs | Measure-Object -Property PrivateWorkingSet -Sum).Sum
-                $sessIds = ($uProcs | Select-Object -ExpandProperty SessionId -Unique | Sort-Object) -join ','
-                $usageColor = if ($totalBytes -ge 4GB) { 'Red' } elseif ($totalBytes -ge 2GB) { 'Yellow' } else { 'Green' }
-
-                Write-Host ""
-                Write-Host "  $rank. " -NoNewline -ForegroundColor DarkGray
-                Write-Host "$uName" -NoNewline -ForegroundColor White
-                Write-Host " (Session $sessIds)" -ForegroundColor DarkGray
-                Write-Host "     Total: " -NoNewline -ForegroundColor DarkGray
-                Write-Host "$(Format-Bytes $totalBytes)" -NoNewline -ForegroundColor $usageColor
-                Write-Host "  ($($uProcs.Count) processes)" -ForegroundColor DarkGray
-
-                $topProcs = $uProcs | Sort-Object PrivateWorkingSet -Descending
-                if ($Top -gt 0) { $topProcs = $topProcs | Select-Object -First $Top }
-                foreach ($tp in $topProcs) {
-                    Write-Host "       $($tp.ProcessName.PadRight(30)) $($(Format-Bytes $tp.PrivateWorkingSet).PadLeft(12))   PID: $($tp.PID)" -ForegroundColor Gray
-                }
-                if ($Top -gt 0 -and $uProcs.Count -gt $Top) {
-                    Write-Host "       ... +$($uProcs.Count - $Top) more" -ForegroundColor DarkGray
-                }
-            }
-
-            $totalUserBytes = ($userProcs | Measure-Object -Property PrivateWorkingSet -Sum).Sum
+            $totalUserBytes = ($userGroups | ForEach-Object { $_.Group } | Measure-Object -Property PrivateWorkingSet -Sum).Sum
             Write-Host ""
             Write-Host "  Total User RAM: " -NoNewline -ForegroundColor White
             Write-Host "$(Format-Bytes $totalUserBytes)" -ForegroundColor Cyan
         }
 
+        if ($IncludeSystemProcesses -and $sysGroups.Count -gt 0) {
+            Write-AccountBreakdown -Groups $sysGroups -Heading 'System / Service Accounts' -TopCount $Top
+        }
+
+        $sysProcs = @($sysGroups | ForEach-Object { $_.Group })
         $totalSysBytes = ($sysProcs | Measure-Object -Property PrivateWorkingSet -Sum).Sum
+        Write-Host ""
         Write-Host "  System/Service: " -NoNewline -ForegroundColor DarkGray
-        Write-Host "$(Format-Bytes $totalSysBytes) ($($sysProcs.Count) processes)" -ForegroundColor DarkGray
+        Write-Host "$(Format-Bytes $totalSysBytes) ($($sysProcs.Count) processes)" -NoNewline -ForegroundColor DarkGray
+        if (-not $IncludeSystemProcesses) { Write-Host "  - add -IncludeSystemProcesses to itemise" -ForegroundColor DarkGray } else { Write-Host "" }
     }
+
+    if (-not (Test-Path -LiteralPath $outputFolder)) {
+        New-Item -Path $outputFolder -ItemType Directory -Force | Out-Null
+    }
+    $timestamp = Get-Date -Format 'yyyy-MM-dd_HHmmss'
 
     # CSV export
-    if ($ExportCSV) {
-        $csvDir = Split-Path $ExportCSV -Parent
-        if ($csvDir -and -not (Test-Path $csvDir)) { New-Item -Path $csvDir -ItemType Directory -Force | Out-Null }
+    $csvPath = Resolve-ExportFilePath -Path $ExportCSV -Folder $outputFolder
+    if ($csvPath) {
+        $csvDir = Split-Path $csvPath -Parent
+        if ($csvDir -and -not (Test-Path -LiteralPath $csvDir)) { New-Item -Path $csvDir -ItemType Directory -Force | Out-Null }
         $allProcessData | Select-Object Server, UserName, ProcessName, PID, SessionId,
             PrivateWSMB, WorkingSetMB, CPU_Seconds, HandleCount, ThreadCount, StartTime |
-            Export-Csv -Path $ExportCSV -NoTypeInformation -Encoding UTF8
-        Write-Host "`nCSV exported to: $ExportCSV" -ForegroundColor Green
+            Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
+        Write-Host "`n[PASS] CSV exported to: $csvPath" -ForegroundColor Green
     }
 
-    # HTML report (default: script directory)
-    $htmlPath = $ExportHTML
-    if (-not $htmlPath) {
-        $htmlPath = Join-Path (Split-Path $MyInvocation.ScriptName -Parent) "RAMUsage-$(Get-Date -Format 'yyyyMMdd-HHmmss').html"
-    }
+    # HTML report
+    $htmlPath = Resolve-ExportFilePath -Path $ExportHTML -Folder $outputFolder
+    if (-not $htmlPath) { $htmlPath = Join-Path $outputFolder "RAMUsage_$timestamp.html" }
     $htmlDir = Split-Path $htmlPath -Parent
-    if ($htmlDir -and -not (Test-Path $htmlDir)) { New-Item -Path $htmlDir -ItemType Directory -Force | Out-Null }
+    if ($htmlDir -and -not (Test-Path -LiteralPath $htmlDir)) { New-Item -Path $htmlDir -ItemType Directory -Force | Out-Null }
 
-    Export-InteractiveHTMLReport -AllData $allProcessData -ServerMemory $serverMemory -OutputFile $htmlPath
-    Write-Host "`nHTML report: $htmlPath" -ForegroundColor Green
+    Export-InteractiveHTMLReport -AllData $allProcessData -ServerMemory $serverMemory -OutputFile $htmlPath `
+        -Servers $ComputerName -ShowSystemByDefault:$IncludeSystemProcesses
+    Write-Host "[PASS] HTML report: $htmlPath" -ForegroundColor Green
 
-    if (-not $SkipBrowserOpen -and (Test-Path $htmlPath)) {
+    if (-not $SkipBrowserOpen -and (Test-Path -LiteralPath $htmlPath)) {
         Start-Process $htmlPath
     }
 
@@ -730,5 +866,7 @@ function Start-RAMReport {
     return $allProcessData
 }
 
-$results = Start-RAMReport
+if (-not $LoadFunctionsOnly) {
+    $results = Start-RAMReport
+}
 #endregion
