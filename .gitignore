@@ -41,3 +41,6 @@ NetworkLog-*.txt
 # --- Python build artifacts ---
 __pycache__/
 *.py[cod]
+
+# --- Generated bundles (ServiceDesk-Toolkit/Build-ServiceDeskToolkit.ps1) ---
+dist/

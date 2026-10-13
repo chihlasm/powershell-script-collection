@@ -24,6 +24,7 @@ Collection of useful PowerShell scripts for automation and system administration
 - [AD-GroupPolicy-Audit](#ad-groupolicy-audit)
 - [Get-CitrixSessions](#get-citrixsessions)
 - [RDS-FSLogix-EventExport](#rds-fslogix-eventexport)
+- [ServiceDesk-Toolkit](#servicedesk-toolkit)
 
 ## AD Export
 
@@ -220,6 +221,19 @@ To run it on a client server, build a portable kit first: `.\Citrix-PerfTriage\I
 
 For a combined performance *and* event view across a fleet, use [Citrix-FSLogix-HealthCollector](#citrix-fslogix-healthcollector) instead.
 
+## ServiceDesk-Toolkit
+
+**Description**: Builds the Service Desk Escalation Toolkit, a bundle of about ten tools from this repository (lockouts, drive maps, Citrix/RDS/FSLogix, GAL hiding, M365 sign-in blocking, the workbench) with one START HERE page for service desk staff. The bundle is generated from the tool folders, not kept in git, so it always matches the current tools.
+
+**Files**:
+- `Build-ServiceDeskToolkit.ps1` - Copies the git-tracked tool files into the bundle (no tests, no local run output)
+- `README.md` - The START HERE page shipped as the bundle's README
+
+**Usage**:
+```powershell
+# Build dist\ServiceDesk-Toolkit plus a zip for SharePoint
+.\ServiceDesk-Toolkit\Build-ServiceDeskToolkit.ps1 -Zip -Force
+```
 
 ## CitrixVDADiagnostics
 
