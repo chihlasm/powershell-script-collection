@@ -15,6 +15,7 @@ Collection of useful PowerShell scripts for automation and system administration
 - [FileCopyMoveGUI](#filecopymoveguips1)
 - [FolderPermissionManager](#folderpermissionmanager)
 - [FSLogix-Profile-Backup](#fslogix-profile-backup)
+- [Get-AzureFilesFSLogixProfiles](#get-azurefilesfslogixprofiles)
 - [HideFromGal](#hidefromgal)
 - [Install-TeamsOnVirtualDesktop](#install-teamsonvirtualdesktop)
 - [LocalAdminManager](#localadminmanager)
@@ -166,7 +167,7 @@ Also registered in the MSP Troubleshooting Workbench as the `citrix.fslogix.heal
 
 **Files Included**:
 - `Invoke-CitrixPerfTriage.ps1` - Orchestrator
-- `Tests/Invoke-CitrixPerfTriage.Tests.ps1` - Pester suite (40 tests)
+- `Tests/Invoke-CitrixPerfTriage.Tests.ps1` - Pester suite (65 tests)
 - `README.md` - Full documentation
 
 **Key behaviours**:
@@ -181,8 +182,24 @@ Also registered in the MSP Troubleshooting Workbench as the `citrix.fslogix.heal
 .\Invoke-CitrixPerfTriage.ps1 -DeliveryController DDC01 -LookbackHours 72
 ```
 
-Requires the sibling tool folders from this repository.
+To run it on a client server, build a portable kit first: `.\Citrix-PerfTriage\Invoke-CitrixPerfTriage.ps1 -CreateKit C:\Temp\CitrixPerfTriageKit.zip`, then copy, extract and run it there. On a Delivery Controller it finds the session hosts by itself.
 
+## Get-AzureFilesFSLogixProfiles
+
+**Description**: Lists every FSLogix profile/ODFC container (`.vhd`/`.vhdx`) on Azure Files shares with user name, SID, size and last-modified date, all through the Azure APIs. You don't need to map the share or connect to a file server. Given only a tenant, it finds the subscriptions, storage accounts and shares itself.
+
+**Files**:
+- `Get-AzureFilesFSLogixProfiles.ps1` - Main script
+- `README.md` - Step-by-step guide for ASTs, including the permissions required
+
+**Usage**:
+```powershell
+# Discover everything in the client tenant
+.\Get-AzureFilesFSLogixProfiles.ps1 -TenantId contoso.onmicrosoft.com
+
+# One known share
+.\Get-AzureFilesFSLogixProfiles.ps1 -TenantId contoso.com -StorageAccountName stavdprofiles01 -ShareName fslogix
+```
 ## RDS-FSLogix-EventExport
 
 **Description**: Exports RDS- and FSLogix-related Windows event log entries for a time window to CSV plus a self-contained HTML report. Collects from **one or many** session hosts.
