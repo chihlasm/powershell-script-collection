@@ -40,14 +40,26 @@
 
 .NOTES
     Author  : VC3 Scripts Collection
-    Requires: PowerShell 5.1, ActiveDirectory RSAT module, read access to the directory.
-              Administrator rights are NOT required.
+    Requires: PowerShell 3.0 or later, ActiveDirectory RSAT module, read access to the
+              directory. Administrator rights are NOT required. Runs on Windows Server
+              2012 / 2012 R2 as shipped.
+
+    REFERENCES
+    - PowerShell Support Lifecycle (3.0 shipped with Windows Server 2012, 4.0 with 2012 R2)
+      https://learn.microsoft.com/powershell/scripting/install/powershell-support-lifecycle
+    - ZipFile.CreateFromDirectory (fallback when Compress-Archive is unavailable; it is the
+      same System.IO.Compression API that Compress-Archive uses)
+      https://learn.microsoft.com/dotnet/api/system.io.compression.zipfile.createfromdirectory
+    - Install Remote Server Administration Tools (Install-WindowsFeature on Server)
+      https://learn.microsoft.com/windows-server/administration/install-remote-server-administration-tools
 
     This is a front end only. All directory work is done by Export-ADGroupMembership.ps1
     in the same folder; see its help for the full parameter set.
 #>
 
-#Requires -Version 5.1
+# 3.0, not 5.1, so the tool runs on Server 2012 (PS 3.0) and 2012 R2 (PS 4.0) - see the
+# matching note in Export-ADGroupMembership.ps1. Tests\Compatibility.Tests.ps1 enforces it.
+#Requires -Version 3.0
 
 [CmdletBinding()]
 param(
@@ -170,7 +182,8 @@ function Test-Prerequisite {
         Stop-WithMessage -Problem 'The Active Directory tools (RSAT) are not installed on this computer.' -WhatToDo @(
             'Ask your IT administrator to install the Remote Server Administration Tools.',
             'They can do this by running, as administrator:',
-            '    Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0',
+            '    On a server:     Install-WindowsFeature RSAT-AD-Tools -IncludeAllSubFeature',
+            '    On Windows 10/11: Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0',
             'Alternatively, run this report from a domain controller or an admin workstation.'
         )
     }
@@ -446,6 +459,35 @@ function Invoke-Report {
     return ((Get-Date) - $started)
 }
 
+function New-ReportArchive {
+    <#
+        Zips the report folder's contents (not the folder itself) into ZipPath.
+
+        Compress-Archive arrived with PowerShell 5.0, so it is missing on Server 2012 and
+        2012 R2 as shipped. There the .NET ZipFile class is used directly - it is the same
+        System.IO.Compression API Compress-Archive wraps, and it ships with .NET 4.5. The
+        cmdlet is detected rather than the version number, so a 2012 box with WMF 5.1
+        installed takes the normal path.
+        https://learn.microsoft.com/dotnet/api/system.io.compression.zipfile.createfromdirectory
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Folder,
+        [Parameter(Mandatory)][string]$ZipPath
+    )
+
+    if (Test-Path -LiteralPath $ZipPath) { Remove-Item -LiteralPath $ZipPath -Force }
+
+    if (Get-Command -Name Compress-Archive -ErrorAction SilentlyContinue) {
+        Compress-Archive -Path (Join-Path $Folder '*') -DestinationPath $ZipPath -ErrorAction Stop
+    }
+    else {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+        # $false = store the files at the zip root, matching Compress-Archive '<folder>\*'.
+        [System.IO.Compression.ZipFile]::CreateFromDirectory(
+            $Folder, $ZipPath, [System.IO.Compression.CompressionLevel]::Optimal, $false)
+    }
+}
+
 function Complete-Report {
     <#
         Confirms real content landed, then packages it. The size check is the same one the
@@ -502,8 +544,7 @@ function Complete-Report {
     if (Confirm-YesNo -Question 'Package everything into one file for sending?' -DefaultYes $true) {
         $zipPath = Join-Path (Split-Path $Folder -Parent) ("ADAccessReport_" + (Split-Path $Folder -Leaf) + '.zip')
         try {
-            if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
-            Compress-Archive -Path (Join-Path $Folder '*') -DestinationPath $zipPath -ErrorAction Stop
+            New-ReportArchive -Folder $Folder -ZipPath $zipPath
             $zipSize = (Get-Item -LiteralPath $zipPath).Length
             if ($zipSize -eq 0) { throw 'The packaged file came out empty.' }
             Write-Host ''

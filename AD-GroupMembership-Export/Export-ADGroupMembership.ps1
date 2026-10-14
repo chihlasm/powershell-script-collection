@@ -131,10 +131,18 @@
 
 .NOTES
     Author  : VC3 Scripts Collection
-    Requires: PowerShell 5.1, ActiveDirectory RSAT module, read access to the directory.
-              Administrator rights are NOT required - directory read is enough.
+    Requires: PowerShell 3.0 or later, ActiveDirectory RSAT module, read access to the
+              directory. Administrator rights are NOT required - directory read is enough.
+              Runs on Windows Server 2012 (PS 3.0) and 2012 R2 (PS 4.0) as shipped; no
+              WMF upgrade is needed.
 
     REFERENCES
+    - PowerShell Support Lifecycle (Windows PowerShell release history: 3.0 shipped with
+      Windows Server 2012, 4.0 with Windows Server 2012 R2, 5.1 with Windows Server 2016)
+      https://learn.microsoft.com/powershell/scripting/install/powershell-support-lifecycle
+    - Install Remote Server Administration Tools (Install-WindowsFeature on Windows
+      Server; Add-WindowsCapability is the Windows client method)
+      https://learn.microsoft.com/windows-server/administration/install-remote-server-administration-tools
     - Get-ADGroupMember (-Recursive returns only members "that do not contain child
       objects"; members "can be users, groups, and computers"; fails on cross-forest
       members without AD Web Service)
@@ -148,7 +156,13 @@
       https://learn.microsoft.com/windows/win32/adschema/a-primarygroupid
 #>
 
-#Requires -Version 5.1
+# 3.0, not 5.1: Server 2012 ships PowerShell 3.0 and 2012 R2 ships 4.0, and a 5.1
+# requirement blocks the script before any code runs on those servers. Nothing here needs
+# more than 3.0 ([Parameter(Mandatory)] and [PSCustomObject] are the 3.0 floor). Keep it
+# that way: no '::new()', no class/enum, no 5.x-only cmdlets. Tests\Compatibility.Tests.ps1
+# enforces this.
+# https://learn.microsoft.com/powershell/scripting/install/powershell-support-lifecycle
+#Requires -Version 3.0
 
 [CmdletBinding()]
 param(
@@ -291,7 +305,10 @@ try {
 }
 catch {
     Write-Host "[FAIL] Could not load the ActiveDirectory module: $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host "[INFO] Install RSAT: Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0" -ForegroundColor Cyan
+    # Add-WindowsCapability does not exist on Windows Server; servers use Install-WindowsFeature.
+    # https://learn.microsoft.com/windows-server/administration/install-remote-server-administration-tools
+    Write-Host "[INFO] Install RSAT on Windows Server : Install-WindowsFeature RSAT-AD-Tools -IncludeAllSubFeature" -ForegroundColor Cyan
+    Write-Host "[INFO] Install RSAT on Windows 10/11  : Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0" -ForegroundColor Cyan
     exit 1
 }
 

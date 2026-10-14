@@ -81,7 +81,17 @@ Every script must have a comment-based help block with `.SYNOPSIS`, `.DESCRIPTIO
 
 ### Requirements Declarations
 
-Use runtime `Import-Module` with try/catch instead of `#Requires -Modules` — the `#Requires` directive blocks execution before the script starts if the module isn't in the standard path, which fails on many servers where RSAT cmdlets are available but not formally registered. Do use `#Requires -Version 5.1` and `#Requires -RunAsAdministrator` where appropriate.
+Use runtime `Import-Module` with try/catch instead of `#Requires -Modules` — the `#Requires` directive blocks execution before the script starts if the module isn't in the standard path, which fails on many servers where RSAT cmdlets are available but not formally registered. Do use `#Requires -RunAsAdministrator` where appropriate.
+
+**Declare the PowerShell version the script actually needs, not a blanket 5.1.** `#Requires -Version` blocks the script before any code runs, so an inflated requirement is the same failure as `#Requires -Modules`: a script that would have worked refuses to start. Windows Server 2012 ships PowerShell 3.0 and 2012 R2 ships 4.0 ([release history](https://learn.microsoft.com/powershell/scripting/install/powershell-support-lifecycle)), and old servers are exactly the ones an MSP is asked to audit before migrating them.
+
+- **`#Requires -Version 3.0`** — the default for read-only audit, diagnostic, and collection scripts that may run on servers. 3.0 is the practical floor: `[Parameter(Mandatory)]` and `[PSCustomObject]@{}` both need it. Add a compatibility test (see `AD-GroupMembership-Export/Tests/Compatibility.Tests.ps1`) so the floor cannot silently creep up.
+- **`#Requires -Version 4.0`** — when the script uses the `.ForEach()` / `.Where()` collection methods (or rewrite them as pipelines and stay on 3.0).
+- **`#Requires -Version 5.1`** — when the script genuinely depends on 5.x: classes/enums, `::new()`, `using namespace`, 5.x-only cmdlets (`Compress-Archive`, `Get-ComputerInfo`, `Get-LocalUser`, `ConvertFrom-SddlString`, …), `-NoNewline` / `-Depth` parameters, or modules that require 5.1 (Microsoft.Graph, ExchangeOnlineManagement, Az). Also for tools that only run on admin workstations, such as the browser-GUI tools.
+
+On 3.0/4.0 targets, prefer feature detection with a fallback over raising the floor for one optional step — e.g. `Get-Command Compress-Archive` with a `System.IO.Compression.ZipFile` fallback. Note that 3.0/4.0 also lack `::new()` — use `New-Object`.
+
+Version sources: [What's new in 5.0 (incl. 4.0 and 3.0 sections)](https://learn.microsoft.com/powershell/scripting/whats-new/what-s-new-in-windows-powershell-50) — classes/enums, `-NoNewline`, `Get-ChildItem -Depth`, `New-TemporaryFile`, `Get-ItemPropertyValue`, `Format-Hex`, clipboard cmdlets are 5.0; `.Where()`/`.ForEach()` are 4.0. [about_Windows_PowerShell_5.1](https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_windows_powershell_5.1) — local user/group cmdlets and `Get-ComputerInfo` are 5.1. [ConvertFrom-SddlString](https://learn.microsoft.com/powershell/module/microsoft.powershell.utility/convertfrom-sddlstring) — 5.0.
 
 ### Error Handling
 

@@ -32,7 +32,7 @@ What the launcher handles for them:
 - **Never closes on an error.** Every failure path ends with what to do next and waits for Enter.
 - **Offers to open the report** in the default browser when it is done.
 
-Requirements are the same as the script's: PowerShell 5.1, RSAT, and directory read access. Administrator rights are not needed.
+Requirements are the same as the script's: PowerShell 3.0 or later (so Server 2012 / 2012 R2 work as shipped), RSAT, and directory read access. Administrator rights are not needed.
 
 ## Quick start
 
@@ -189,9 +189,12 @@ The flat shape is designed for Excel. Insert a PivotTable, put `GroupName` in Ro
 
 ## Requirements
 
-- PowerShell 5.1
+- PowerShell 3.0 or later. Windows Server 2012 (PS 3.0) and 2012 R2 (PS 4.0) run it as shipped — no WMF upgrade needed. On those versions the launcher's zip step uses the .NET `ZipFile` class instead of `Compress-Archive`, which only exists from PS 5.0.
 - `ActiveDirectory` RSAT module — imported at runtime, so the script starts even where the module isn't formally registered:
   ```powershell
+  # Windows Server
+  Install-WindowsFeature RSAT-AD-Tools -IncludeAllSubFeature
+  # Windows 10 / 11
   Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0
   ```
 - Directory **read** access. Administrator rights are not required.
