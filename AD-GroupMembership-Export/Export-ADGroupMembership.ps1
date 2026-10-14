@@ -378,7 +378,7 @@ function Get-TargetGroup {
     $searchParams = @{ Filter = '*' } + $ADParams
     $searchParams['Properties'] = @(
         'Description', 'GroupCategory', 'GroupScope', 'Created', 'Modified',
-        'ManagedBy', 'mail', 'info'
+        'ManagedBy', 'mail', 'info', 'MemberOf'
     )
     if ($SearchBase) { $searchParams['SearchBase'] = $SearchBase }
 
@@ -503,6 +503,49 @@ function Get-UserDetail {
     return $detail
 }
 
+# Group-in-group links seen anywhere in the walk, for the report's Nesting tab:
+# parentDN -> @{ childDN = $true }. Hashtable keys ignore case, so a DN seen with different
+# casing from two roots is stored once.
+$script:NestEdges = @{}
+$script:NestNames = @{}
+
+function Add-NestEdge {
+    # Records "ChildDN is a direct member of ParentDN".
+    param(
+        [Parameter(Mandatory)][hashtable]$Edges,
+        [Parameter(Mandatory)][string]$ParentDN,
+        [Parameter(Mandatory)][string]$ChildDN
+    )
+    if (-not $Edges.ContainsKey($ParentDN)) { $Edges[$ParentDN] = @{} }
+    $Edges[$ParentDN][$ChildDN] = $true
+}
+
+function Test-ProtectedGroupSid {
+    <#
+        Microsoft's protected groups (Appendix C), matched by SID so a renamed or localised
+        group is still recognised. Domain-relative groups match by RID on any S-1-5-21 SID,
+        which also catches forest-root groups (Schema/Enterprise Admins) seen from a child
+        domain. The Administrator and Krbtgt accounts are on the list too but are not groups.
+        https://learn.microsoft.com/windows-server/identity/ad-ds/plan/security-best-practices/appendix-c--protected-accounts-and-groups-in-active-directory
+        https://learn.microsoft.com/windows-server/identity/ad-ds/manage/understand-security-identifiers
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$Sid)
+    if (-not $Sid) { return $false }
+    if ($Sid -match '^S-1-5-32-(544|548|549|550|551|552)$') { return $true }
+    if ($Sid -match '^S-1-5-21-\d+-\d+-\d+-(512|516|518|519|521|526|527)$') { return $true }
+    return $false
+}
+
+function Test-BuiltinGroup {
+    # Built-in: in CN=Builtin, a BUILTIN (S-1-5-32) SID, or a well-known RID below 1000 -
+    # the same rule -ExcludeBuiltin uses.
+    param([AllowEmptyString()][string]$DistinguishedName, [AllowEmptyString()][AllowNull()][string]$Sid)
+    if ($DistinguishedName -match '(?i),CN=Builtin,') { return $true }
+    if ($Sid -match '^S-1-5-32-') { return $true }
+    if ($Sid -match '^S-1-5-21-.*-(\d+)$' -and [int]$Matches[1] -lt 1000) { return $true }
+    return $false
+}
+
 function Resolve-GroupMembership {
     <#
         Walks a group's membership tree.
@@ -548,6 +591,11 @@ function Resolve-GroupMembership {
         $membershipType = if ($Depth -eq 0) { 'Direct' } else { 'Nested' }
 
         if ($member.objectClass -eq 'group') {
+            # Recorded before the cycle check below, so a loop's closing link is kept too.
+            Add-NestEdge -Edges $script:NestEdges -ParentDN $Group.DistinguishedName -ChildDN $member.DistinguishedName
+            $script:NestNames[$Group.DistinguishedName] = $Group.Name
+            $script:NestNames[$member.DistinguishedName] = $member.Name
+
             # Record the nested group itself as a member unless the caller asked for users
             # only. Omitting this is what makes a container group look empty.
             if (-not $UserMembersOnly) {
