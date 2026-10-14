@@ -976,7 +976,12 @@ function ConvertTo-GroupAccessModel {
     $groupIndex = @{}
     $work = New-Object System.Collections.Generic.List[object]
 
-    foreach ($g in @($Groups)) {
+    # Plain 'foreach ($x in $List)', never 'foreach ($x in @($List))': $Rows is the main
+    # flow's List[object], and @() on a List[object] throws "Argument types do not match"
+    # on PowerShell 5.1.26100 and 7.6 (observed on a real run; plain arrays and List[string]
+    # are unaffected, which is why tests passing arrays missed it). foreach over $null runs
+    # zero times on PS 3.0+. Tests\EndToEnd.Tests.ps1 runs the whole script to catch this.
+    foreach ($g in $Groups) {
         if (-not $g -or -not $g.DistinguishedName -or $groupIndex.ContainsKey($g.DistinguishedName)) { continue }
         $groupIndex[$g.DistinguishedName] = $work.Count
         $work.Add([PSCustomObject]@{
@@ -987,7 +992,7 @@ function ConvertTo-GroupAccessModel {
         })
     }
 
-    foreach ($r in @($Rows)) {
+    foreach ($r in $Rows) {
         if (-not $r -or -not $r.MemberDN -or $r.MembershipType -eq 'EmptyGroup') { continue }
         if (-not $groupIndex.ContainsKey($r.GroupDN)) { continue }
         $entry = $work[$groupIndex[$r.GroupDN]]
@@ -2293,6 +2298,9 @@ if ($UserReport) {
         # The group CSV is already on disk and is the primary artifact; a failure here must
         # not discard it or change the exit code.
         Write-Status "User report failed: $($_.Exception.Message)" 'FAIL'
+        # The message alone ("Argument types do not match") rarely says where; the stack
+        # trace in the log lets a failure on a client server be fixed without a repro.
+        $script:LogLines.Add("[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [FAIL] Stack: $($_.ScriptStackTrace -replace '\r?\n', ' <- ')")
     }
 }
 
