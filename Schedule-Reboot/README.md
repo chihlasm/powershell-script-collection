@@ -34,5 +34,5 @@ Creates a one-time Windows scheduled task to reboot a server at a specified date
 
 ## Requirements
 
-- PowerShell 5.1+
+- PowerShell 4.0+ (Server 2012 R2 works as shipped; 4.0 is the minimum for `#Requires -RunAsAdministrator`)
 - Run as Administrator

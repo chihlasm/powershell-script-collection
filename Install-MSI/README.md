@@ -33,6 +33,6 @@ Discovers and installs MSI packages from a network share. Copies the MSI locally
 
 ## Requirements
 
-- PowerShell 5.1+
+- PowerShell 4.0+ (Server 2012 R2 works as shipped; 4.0 is the minimum for `#Requires -RunAsAdministrator`)
 - Run as Administrator
 - Network access to the share path

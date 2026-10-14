@@ -1,4 +1,5 @@
-#Requires -Version 5.1
+# 3.0 so this runs on Server 2012 (PS 3.0) / 2012 R2 (PS 4.0) as shipped; Tests\PSVersionFloor.Tests.ps1 guards it.
+#Requires -Version 3.0
 
 <#
 .SYNOPSIS
@@ -81,7 +82,7 @@
 
 .NOTES
     Author: VC3
-    Requires: PowerShell 5.1, Citrix Broker SDK, WinRM reachable on the VDAs.
+    Requires: PowerShell 3.0 or later (runs on Server 2012 / 2012 R2 as shipped), Citrix Broker SDK, WinRM reachable on the VDAs.
 
     REFERENCES
     - Get-BrokerMachine (properties and filter parameters):

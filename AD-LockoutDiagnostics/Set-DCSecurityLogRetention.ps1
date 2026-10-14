@@ -1,4 +1,5 @@
-﻿#Requires -Version 5.1
+﻿# 3.0 so this runs on Server 2012 (PS 3.0) / 2012 R2 (PS 4.0) as shipped; Tests\PSVersionFloor.Tests.ps1 guards it.
+#Requires -Version 3.0
 
 <#
 .SYNOPSIS
@@ -253,10 +254,12 @@ function Set-DCLogSize {
     )
     # The *-EventLog cmdlets (including Limit-EventLog) were REMOVED in PowerShell 7 -
     # they rely on APIs that are not supported on .NET Core. Calling it there fails with
-    # "not recognized", so prefer it only on Windows PowerShell 5.1 and fall back to
+    # "not recognized", so prefer it only on Windows PowerShell (any version) and fall back to
     # wevtutil (present on every Windows Server) everywhere else.
     # https://learn.microsoft.com/powershell/scripting/whats-new/differences-from-windows-powershell
     # https://learn.microsoft.com/powershell/module/microsoft.powershell.management/limit-eventlog
+    # PSEdition does not exist before 5.1; $null -ne 'Core' is true there, which is
+    # correct - PS 3.0/4.0 are Windows PowerShell and have Limit-EventLog.
     $useLimitEventLog = ($PSVersionTable.PSEdition -ne 'Core') -and
                         (Get-Command -Name 'Limit-EventLog' -ErrorAction SilentlyContinue)
 
