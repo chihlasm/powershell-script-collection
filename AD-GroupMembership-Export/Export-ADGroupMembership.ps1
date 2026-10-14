@@ -23,9 +23,12 @@
     2. PRIMARY GROUP MEMBERSHIP IS RECONSTRUCTED.
        A user's primary group (normally "Domain Users") is stored in the user's
        primaryGroupID attribute and is NOT written to the group's member attribute.
-       Get-ADGroupMember therefore reports Domain Users as empty on a healthy domain.
-       This script reconstructs those members by SID and marks them MembershipType
-       'Primary'. Suppress with -SkipPrimaryGroupMembers on very large domains.
+       Microsoft does not document whether Get-ADGroupMember adds them back, and in
+       practice it can, so neither source alone is reliable. This script queries
+       primaryGroupID directly, marks those members MembershipType 'Primary', and
+       merges them with Get-ADGroupMember's output so each appears once - not as a
+       false "duplicate access" Direct + Primary pair. Suppress with
+       -SkipPrimaryGroupMembers on very large domains.
 
     3. NON-USER MEMBERS ARE KEPT.
        Groups can contain users, groups, and computers. Filtering to users only makes a
@@ -633,11 +636,57 @@ function Get-PrimaryGroupMember {
             -MembershipType 'Primary' -NestingDepth 0 -NestedVia '' -UserDetail $u))
     }
 
-    if ($rows.Count -gt 0) {
-        Write-Status "  + $($rows.Count) primary-group member(s) not present in the member attribute."
+    return $rows
+}
+
+function Merge-PrimaryGroupRows {
+    <#
+        Combines a group's member rows with its primary-group rows so each primary member
+        appears once.
+
+        Get-ADGroupMember can return users whose primaryGroupID points at the group, even
+        though they are not in its 'member' attribute (Microsoft does not document this
+        either way). Adding the Get-PrimaryGroupMember rows on top then gave those users a
+        Direct row AND a Primary row for the same group, and the user report flagged them
+        "1 duplicate - 1 extra path". That is false: AD only allows a primary group the
+        user is already a member of, so it is one membership, not two removable routes.
+
+        The Primary row is kept (it says how the access is held) and the depth-0 Direct
+        row for the same member is dropped. Nested rows are kept: reaching the group again
+        through a nested group IS a separate route that has to be removed on its own.
+        When Get-ADGroupMember does not return primary members, nothing overlaps and the
+        output is unchanged.
+        https://learn.microsoft.com/windows/win32/adschema/a-primarygroupid
+    #>
+    param(
+        [AllowEmptyCollection()][object[]]$MemberRows,
+        [AllowEmptyCollection()][object[]]$PrimaryRows
+    )
+
+    $merged = New-Object System.Collections.Generic.List[object]
+    $primaryDns = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($p in @($PrimaryRows)) { if ($p -and $p.MemberDN) { [void]$primaryDns.Add($p.MemberDN) } }
+
+    $collapsed = 0
+    foreach ($r in @($MemberRows)) {
+        if (-not $r) { continue }
+        if ($r.MembershipType -eq 'Direct' -and $r.MemberDN -and $primaryDns.Contains($r.MemberDN)) {
+            $collapsed++
+            continue
+        }
+        $merged.Add($r)
     }
 
-    return $rows
+    $added = 0
+    foreach ($p in @($PrimaryRows)) { if ($p) { $merged.Add($p); $added++ } }
+
+    if ($added -gt 0) {
+        $note = if ($collapsed -gt 0) { " ($collapsed already returned by Get-ADGroupMember; counted once)" } else { '' }
+        Write-Status "  + $added primary-group member(s)$note."
+    }
+
+    # Unrolls on return; callers wrap the call in @() as everywhere else in this script.
+    return $merged.ToArray()
 }
 
 #endregion
@@ -1181,8 +1230,12 @@ foreach ($group in $groups) {
         if ($directRows.Count -gt 0) { $rows.AddRange([object[]]$directRows) }
 
         if (-not $SkipPrimaryGroupMembers) {
+            # Merged rather than appended: Get-ADGroupMember may already have returned
+            # these users, and appending made them look like duplicate access.
             $primaryRows = @(Get-PrimaryGroupMember -Group $group -Context $context)
-            if ($primaryRows.Count -gt 0) { $rows.AddRange([object[]]$primaryRows) }
+            $merged = @(Merge-PrimaryGroupRows -MemberRows $rows.ToArray() -PrimaryRows $primaryRows)
+            $rows = New-Object System.Collections.Generic.List[object]
+            if ($merged.Count -gt 0) { $rows.AddRange([object[]]$merged) }
         }
 
         if ($rows.Count -gt 0) {
