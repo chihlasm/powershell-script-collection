@@ -64,7 +64,8 @@ Describe 'Export-ADGroupMembership.ps1 -UserReport, end to end' {
         }
 
         It 'embeds the group data, with builtin groups excluded' {
-            @($script:Data.groups).Count | Should -Be 8
+            # 9 original groups - Domain Users + IT-Admins + Chain-01..10 (Administrators is built-in, excluded)
+            @($script:Data.groups).Count | Should -Be 19
             Find-G 'Domain Users' | Should -BeNullOrEmpty
         }
 
@@ -81,6 +82,32 @@ Describe 'Export-ADGroupMembership.ps1 -UserReport, end to end' {
             @((Find-G 'HR-Share-RW').k).Count | Should -BeGreaterThan 0
             @((Find-G 'HR-Share-RW').o | ForEach-Object { $_[1] }) | Should -Contain 'foreignSecurityPrincipal'
             @((Find-G 'Kiosks').o | ForEach-Object { $_[1] }) | Should -Contain 'computer'
+        }
+
+        It 'embeds the nesting data, following a chain into a built-in protected group outside the export' {
+            $text = [System.IO.File]::ReadAllText($script:Html.FullName)
+            $m = [regex]::Match($text, '<script type="application/json" id="nest-data">(.*?)</script>', 'Singleline')
+            $m.Success | Should -BeTrue
+            $nest = ConvertFrom-Json $m.Groups[1].Value
+            $names = @($nest.nodes | ForEach-Object { $_.n })
+            $admins = [array]::IndexOf($names, 'Administrators')
+            $admins | Should -BeGreaterOrEqual 0
+            $nest.nodes[$admins].p | Should -BeTrue
+            $nest.nodes[$admins].x | Should -BeFalse -Because 'excluded as built-in, fetched to complete the chain'
+            @($nest.down[$admins]) | Should -Contain ([array]::IndexOf($names, 'IT-Admins'))
+        }
+
+        It 'records a 10-deep chain and both directions of the loop' {
+            $text = [System.IO.File]::ReadAllText($script:Html.FullName)
+            $nest = ConvertFrom-Json ([regex]::Match($text, '<script type="application/json" id="nest-data">(.*?)</script>', 'Singleline').Groups[1].Value)
+            $names = @($nest.nodes | ForEach-Object { $_.n })
+            for ($i = 1; $i -le 9; $i++) {
+                $p = [array]::IndexOf($names, ('Chain-{0:D2}' -f $i)); $c = [array]::IndexOf($names, ('Chain-{0:D2}' -f ($i + 1)))
+                @($nest.down[$p]) | Should -Contain $c
+            }
+            $a = [array]::IndexOf($names, 'Cycle-A'); $b = [array]::IndexOf($names, 'Cycle-B')
+            @($nest.down[$a]) | Should -Contain $b
+            @($nest.down[$b]) | Should -Contain $a
         }
 
         It 'keeps a member whose details could not be read, and leaves out the disabled user' {

@@ -2881,10 +2881,27 @@ if ($UserReport) {
             # disagree with the People tab about who is in scope.
             $groupModel = ConvertTo-GroupAccessModel -Rows $allRows -Groups $groups -IncludeDisabled:$IncludeDisabled
 
+            # Nesting tab: complete the group graph upward. Isolated so a failure here costs
+            # only the tab, never the rest of the report.
+            $nestModel = $null
+            try {
+                $nestGraph = Resolve-NestGraph -Groups $groups -Edges $script:NestEdges -Names $script:NestNames -Lookup {
+                    param($dn)
+                    Get-ADGroup -Identity $dn @ADParams -Properties MemberOf, GroupCategory, GroupScope, SID -ErrorAction Stop
+                }
+                $nestModel = ConvertTo-NestModel -Graph $nestGraph -Edges $script:NestEdges -NestedExpanded:$IncludeNested
+                $capNote = if ($nestGraph.CapReached) { '; lookup limit reached, upward chains may be incomplete' } else { '' }
+                Write-Status "Nesting: $($nestModel.Nodes.Count) group(s) involved, $($nestGraph.Lookups) extra lookup(s)$capNote."
+            }
+            catch {
+                Write-Status "Nesting tab skipped: $($_.Exception.Message)" 'WARN'
+                $script:LogLines.Add("[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [WARN] Stack: $($_.ScriptStackTrace -replace '\r?\n', ' <- ')")
+            }
+
             $html = New-UserAccessHtml -Users $userModel -DomainName $context.DnsRoot `
                 -ScopeNote $scopeNote -ScopeIsNarrowed:$scopeIsNarrowed `
                 -IncludeDisabled:$IncludeDisabled -NestedExpanded:$IncludeNested `
-                -GroupsProcessed $groups.Count -GroupModel $groupModel
+                -GroupsProcessed $groups.Count -GroupModel $groupModel -NestModel $nestModel
 
             $html | Out-File -FilePath $userHtmlFile -Encoding UTF8
             # A valid report is tens of KB at minimum; anything smaller means the write was

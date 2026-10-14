@@ -67,6 +67,7 @@ The HTML report has three views of the same data. No extra AD queries are made; 
 | **People** | What does this person have access to, and how? | One card per user (described above). |
 | **Groups** | Who is in this group, and how did they get in? | Group list on the left (sorted by size or name, with *dup* and *empty* markers); details on the right: type, location, owner, and every member with *direct*, *primary group*, or *via &lt;group&gt;*. Computers and nested groups are listed too. |
 | **Overlap** | Which groups share people? | Three sub-views, below. |
+| **Nesting** | Which groups are inside which, and how deep? | Every group that is inside another group or contains one, including built-in and out-of-scope parents fetched from AD (shown dashed). Select one to see an **Is inside** tree up to the top, a **Contains** tree down to the bottom, and every complete path, with **Copy paths** for tickets. Loops are marked where they close; nesting into protected groups (Domain Admins, Administrators, and the rest of Microsoft's protected list, recognised by SID so renamed groups still count) is highlighted. |
 
 #### Overlap sub-views
 
@@ -80,6 +81,8 @@ The HTML report has three views of the same data. No extra AD queries are made; 
 - **Check a combination** — pick 2–5 groups and list everyone who holds *all* of them, e.g. two groups that should never go together.
 
 **Filters shared by Groups and Overlap:** search (matches group names *and* member names/usernames), type, scope, and an **Effective / Direct** toggle — Effective counts everyone with the group's access including through nesting; Direct counts only people added to the group itself (including those with it as their primary group). On Overlap, *Hide groups with 90%+ of users* (on by default) keeps All Staff–style groups from overlapping with everything.
+
+**About the Nesting tab:** parent groups outside the export are found by reading each group's `memberOf` and looking up any parent not already exported (read-only, at most 1,000 extra lookups; the report says if the limit was reached). Full downward chains need `-IncludeNested` (the launcher always uses it). `memberOf` is read from the domain controller that was queried, so nesting into groups in other domains of a multi-domain forest may not appear.
 
 Overlap counts people (user accounts) only and follows the same enabled/disabled rule as the People tab. The report works in Internet Explorer 10/11, the built-in browser on Server 2012 / 2012 R2, as well as current browsers.
 

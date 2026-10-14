@@ -8,7 +8,8 @@ function New-Sid([int]$Rid) { New-Object System.Security.Principal.SecurityIdent
 function Grp($Name, $Rid, $Scope = 'Global', $Cat = 'Security', $Ou = 'OU=Groups', $ManagedBy = $null) {
     [PSCustomObject]@{ Name = $Name; SamAccountName = $Name; DistinguishedName = "CN=$Name,$Ou,$script:Base"
         GroupCategory = $Cat; GroupScope = $Scope; SID = (New-Sid $Rid); objectClass = 'group'
-        Description = "Group $Name"; Created = (Get-Date); Modified = (Get-Date); ManagedBy = $ManagedBy; mail = $null; info = $null }
+        Description = "Group $Name"; Created = (Get-Date); Modified = (Get-Date); ManagedBy = $ManagedBy; mail = $null; info = $null
+        MemberOf = @() }
 }
 function Usr($Sam, $Rid, $PrimaryRid = 513, $Enabled = $true, $Dept = 'IT') {
     [PSCustomObject]@{ Name = $Sam; SamAccountName = $Sam; DistinguishedName = "CN=$Sam,OU=Staff,$script:Base"
@@ -27,7 +28,12 @@ $script:Groups = @(
     (Grp 'Kiosks' 1110)
     (Grp 'Old-Empty' 1111 'Universal' 'Distribution')
     (Grp 'App-Admins' 1112 'DomainLocal')
+    (Grp 'Administrators' 544 'DomainLocal' 'Security' 'CN=Builtin')   # protected built-in; SID fixed below
+    (Grp 'IT-Admins' 1120)
 )
+# Chain-01 contains Chain-02 ... contains Chain-10: a 10-deep chain.
+$script:Groups += @(1..10 | ForEach-Object { Grp ('Chain-{0:D2}' -f $_) (1200 + $_) })
+($script:Groups | Where-Object Name -eq 'Administrators').SID = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544'
 $script:Users = @(
     (Usr 'alice' 2001 1105)          # primary group RDS-Users (the observed quirk)
     (Usr 'bob' 2002)
@@ -56,6 +62,17 @@ $script:Members = @{
     'Old-Empty'   = @()
     'App-Admins'  = @($gmsa, (U 'dave'))
     'Domain Users'= @((U 'bob'), (U 'carol'), (U 'dave'))
+    'IT-Admins'   = @((G 'HR-Staff'))
+    'Administrators' = @((G 'IT-Admins'))
+    'Chain-10'    = @((U 'dave'))
+}
+for ($i = 1; $i -le 9; $i++) { $script:Members[('Chain-{0:D2}' -f $i)] = @((G ('Chain-{0:D2}' -f ($i + 1)))) }
+# memberOf is the back-link of member: derive it so both views of the directory agree.
+foreach ($parentName in @($script:Members.Keys)) {
+    $parent = G $parentName
+    foreach ($m in $script:Members[$parentName]) {
+        if ($m -and $m.objectClass -eq 'group') { $m.MemberOf = @($m.MemberOf) + @($parent.DistinguishedName) }
+    }
 }
 
 function Get-ADDomain {
@@ -65,7 +82,11 @@ function Get-ADDomain {
 }
 function Get-ADGroup {
     [CmdletBinding()] param($Filter, $Properties, $SearchBase, $Server, $Credential, [Parameter(Position = 0)]$Identity)
-    if ($Identity) { return G $Identity }
+    if ($Identity) {
+        $g = $script:Groups | Where-Object { $_.DistinguishedName -eq $Identity -or $_.Name -eq $Identity }
+        if (-not $g) { throw "Cannot find an object with identity: '$Identity'" }
+        return $g
+    }
     $script:Groups
 }
 function Get-ADGroupMember {
