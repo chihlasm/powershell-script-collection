@@ -31,6 +31,7 @@ What the launcher handles for them:
 - **Verifies the files are not empty**, then offers to zip them. A zip cannot arrive as a half-synced placeholder — it transfers whole or fails loudly — so it is the recommended handoff format.
 - **Never closes on an error.** Every failure path ends with what to do next and waits for Enter.
 - **Offers to open the report** in the default browser when it is done.
+- **Shows you where the files are.** As the last step it opens File Explorer with the zip selected (or the report folder, if you skipped zipping), so nobody has to hunt for the output. Where Explorer is unavailable (remote PowerShell, Server Core) it prints the path instead.
 
 Requirements are the same as the script's: PowerShell 3.0 or later (so Server 2012 / 2012 R2 work as shipped), RSAT, and directory read access. Administrator rights are not needed.
 

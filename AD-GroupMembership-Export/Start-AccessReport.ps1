@@ -586,8 +586,40 @@ function Complete-Report {
         catch { Write-Step "Could not open it automatically. Double-click: $($html.FullName)" 'WARN' }
     }
 
+    # The paths above scroll away once the browser opens, and people closed the window
+    # without knowing where the files went. Showing them in Explorer as the last step
+    # removes the hunt.
+    Open-ReportLocation -Folder $Folder -ZipPath $zipPath
+
     Write-Host ''
     Read-Host '   Press Enter to close'
+}
+
+function Open-ReportLocation {
+    <#
+        Opens File Explorer on the report: with the zip selected when one was made (the
+        file to send), otherwise inside the report folder. Explorer is unavailable in a
+        remote PowerShell session or on Server Core, so a failure only prints the path.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Folder,
+        [AllowEmptyString()][AllowNull()][string]$ZipPath
+    )
+
+    $target = if ($ZipPath -and (Test-Path -LiteralPath $ZipPath)) { $ZipPath } else { $Folder }
+    try {
+        if ($target -eq $ZipPath) {
+            # /select, opens the parent folder with the file highlighted.
+            Start-Process -FilePath 'explorer.exe' -ArgumentList "/select,`"$target`"" -ErrorAction Stop
+        }
+        else {
+            Start-Process -FilePath 'explorer.exe' -ArgumentList "`"$target`"" -ErrorAction Stop
+        }
+        Write-Step "Opened the report location in File Explorer: $target" 'PASS'
+    }
+    catch {
+        Write-Step "Could not open File Explorer. The files are in: $target" 'WARN'
+    }
 }
 
 #endregion
