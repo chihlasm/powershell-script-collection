@@ -1529,6 +1529,143 @@ if (typeof module !== 'undefined' && module.exports) { module.exports = OverlapC
 '@
 }
 
+function Get-NestCoreScript {
+    <#
+        Nesting-tab logic as browser JavaScript with no DOM access, unit-tested with Node
+        (Tests\NestCore.Tests.ps1). ES5 only, for Internet Explorer on Server 2012 / 2012 R2.
+
+        Loops are found as strongly connected components (Tarjan). Depth is measured on the
+        graph with each loop collapsed to one node, so a longest chain is well defined even
+        when groups loop. Trees mark a group already on the current branch as a loop and a
+        group already expanded elsewhere in the same tree as "shown above", which keeps
+        cross-nested domains from multiplying.
+    #>
+    return @'
+var NestCore = (function () {
+  'use strict';
+
+  function byName(nest) { return function (a, b) { var x = nest.nodes[a].n.toLowerCase(), y = nest.nodes[b].n.toLowerCase(); return x < y ? -1 : (x > y ? 1 : a - b); }; }
+
+  function indexOfInt(arr, v) { var i; for (i = 0; i < arr.length; i++) { if (arr[i] === v) { return i; } } return -1; }
+
+  function analyze(nest) {
+    var n = nest.nodes.length, index = [], low = [], onStack = [], stack = [], comp = [], counter = 0, compCount = 0, i, j;
+    for (i = 0; i < n; i++) { index.push(-1); low.push(0); onStack.push(false); comp.push(-1); }
+    function strong(v) {
+      var k, w;
+      index[v] = low[v] = counter++; stack.push(v); onStack[v] = true;
+      for (k = 0; k < nest.down[v].length; k++) {
+        w = nest.down[v][k];
+        if (index[w] === -1) { strong(w); low[v] = Math.min(low[v], low[w]); }
+        else if (onStack[w]) { low[v] = Math.min(low[v], index[w]); }
+      }
+      if (low[v] === index[v]) {
+        do { w = stack.pop(); onStack[w] = false; comp[w] = compCount; } while (w !== v);
+        compCount++;
+      }
+    }
+    for (i = 0; i < n; i++) { if (index[i] === -1) { strong(i); } }
+
+    var size = [], selfLoop = [], inLoop = [], loopComp = [], loops = 0, c;
+    for (c = 0; c < compCount; c++) { size.push(0); }
+    for (i = 0; i < n; i++) { size[comp[i]]++; selfLoop.push(indexOfInt(nest.down[i], i) > -1); }
+    for (c = 0; c < compCount; c++) { loopComp.push(size[c] > 1); }
+    for (i = 0; i < n; i++) { if (selfLoop[i]) { loopComp[comp[i]] = true; } }
+    for (c = 0; c < compCount; c++) { if (loopComp[c]) { loops++; } }
+    for (i = 0; i < n; i++) { inLoop.push(loopComp[comp[i]]); }
+
+    // Component DAG edges, deduplicated.
+    var cUp = [], cDown = [], cProt = [], seen = {}, a, b, key;
+    for (c = 0; c < compCount; c++) { cUp.push([]); cDown.push([]); cProt.push(false); }
+    for (i = 0; i < n; i++) {
+      if (nest.nodes[i].p) { cProt[comp[i]] = true; }
+      for (j = 0; j < nest.down[i].length; j++) {
+        a = comp[i]; b = comp[nest.down[i][j]];
+        if (a === b) { continue; }
+        key = a + '|' + b;
+        if (!seen[key]) { seen[key] = true; cDown[a].push(b); cUp[b].push(a); }
+      }
+    }
+    var memoUp = [], memoDown = [], memoProt = [];
+    for (c = 0; c < compCount; c++) { memoUp.push(-1); memoDown.push(-1); memoProt.push(-1); }
+    function depthUp(cc) {
+      if (memoUp[cc] > -1) { return memoUp[cc]; }
+      var best = 0, k;
+      for (k = 0; k < cUp[cc].length; k++) { best = Math.max(best, 1 + depthUp(cUp[cc][k])); }
+      memoUp[cc] = best; return best;
+    }
+    function depthDown(cc) {
+      if (memoDown[cc] > -1) { return memoDown[cc]; }
+      var best = 0, k;
+      for (k = 0; k < cDown[cc].length; k++) { best = Math.max(best, 1 + depthDown(cDown[cc][k])); }
+      memoDown[cc] = best; return best;
+    }
+    function protAbove(cc) {
+      if (memoProt[cc] > -1) { return memoProt[cc] === 1; }
+      var hit = false, k;
+      for (k = 0; k < cUp[cc].length && !hit; k++) { hit = cProt[cUp[cc][k]] || protAbove(cUp[cc][k]); }
+      memoProt[cc] = hit ? 1 : 0; return hit;
+    }
+    var upDepth = [], downDepth = [], chain = [], toProtected = [], deepest = 0;
+    for (i = 0; i < n; i++) {
+      upDepth.push(depthUp(comp[i])); downDepth.push(depthDown(comp[i]));
+      chain.push(upDepth[i] + downDepth[i]);
+      deepest = Math.max(deepest, chain[i]);
+      // Inside a protected group, or in a loop together with one.
+      toProtected.push(protAbove(comp[i]) || (loopComp[comp[i]] && cProt[comp[i]] && !nest.nodes[i].p));
+    }
+    return { comp: comp, inLoop: inLoop, selfLoop: selfLoop, upDepth: upDepth, downDepth: downDepth,
+             chain: chain, toProtected: toProtected, loops: loops, deepest: deepest };
+  }
+
+  function tree(nest, id, dir, maxChildren) {
+    var edges = dir === 'up' ? nest.up : nest.down, onPath = {}, expanded = {}, sorter = byName(nest);
+    function build(v, level) {
+      var node = { id: v, level: level, kind: 'node', children: [], more: 0 }, list = edges[v].slice(0).sort(sorter), i, c;
+      onPath[v] = true; expanded[v] = true;
+      for (i = 0; i < list.length && i < maxChildren; i++) {
+        c = list[i];
+        if (onPath[c]) { node.children.push({ id: c, level: level + 1, kind: 'loop', children: [], more: 0 }); }
+        else if (expanded[c]) { node.children.push({ id: c, level: level + 1, kind: 'seen', children: [], more: 0 }); }
+        else { node.children.push(build(c, level + 1)); }
+      }
+      if (list.length > maxChildren) { node.more = list.length - maxChildren; }
+      onPath[v] = false;
+      return node;
+    }
+    return build(id, 0);
+  }
+
+  // Complete routes from id to a top (dir 'up') or bottom (dir 'down') group. Counting stops
+  // at 10,000 so a heavily cross-nested domain cannot hang the page.
+  function paths(nest, id, dir, limit) {
+    var edges = dir === 'up' ? nest.up : nest.down, out = { list: [], more: 0, capped: false }, onPath = {}, route = [], total = 0;
+    function record(isLoop) {
+      total++;
+      if (out.list.length < limit) { out.list.push({ ids: route.slice(0), loop: isLoop }); } else { out.more++; }
+      if (total >= 10000) { out.capped = true; }
+    }
+    function walk(v) {
+      var next = edges[v], i, c;
+      route.push(v); onPath[v] = true;
+      if (!next.length && route.length > 1) { record(false); }
+      for (i = 0; i < next.length && !out.capped; i++) {
+        c = next[i];
+        if (onPath[c]) { route.push(c); record(true); route.pop(); }
+        else { walk(c); }
+      }
+      onPath[v] = false; route.pop();
+    }
+    walk(id);
+    return out;
+  }
+
+  return { analyze: analyze, tree: tree, paths: paths };
+}());
+if (typeof module !== 'undefined' && module.exports) { module.exports = NestCore; }
+'@
+}
+
 function New-UserAccessHtml {
     <#
         Renders the user-centric access report as one self-contained HTML file: no external
