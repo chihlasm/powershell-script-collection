@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 
 # Run with: Invoke-Pester -Path .\DiskSpdDiagnostic\Tests
 # Requires Pester 5.x: Install-Module Pester -MinimumVersion 5.0 -Force

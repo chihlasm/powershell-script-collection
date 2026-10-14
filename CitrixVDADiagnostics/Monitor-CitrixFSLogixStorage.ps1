@@ -1,4 +1,4 @@
-# Monitor-CitrixFSLogixStorage.ps1
+﻿# Monitor-CitrixFSLogixStorage.ps1
 # Monitors storage space on Citrix VDAs and FSLogix storage servers
 
 param(

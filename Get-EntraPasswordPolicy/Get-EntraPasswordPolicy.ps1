@@ -123,7 +123,9 @@ ForEach-Object {
         UpnDomain              = $domain
         EffectiveExpiration    = $effective
         LastPasswordChange     = $lastChange
-        PasswordAgeDays        = if ($lastChange) { [int]($now - $lastChange).TotalDays }
+        # The explicit else is required: without it, Windows PowerShell 5.1 keeps reading the
+        # next line looking for one and fails to parse the whole script (7.x does not).
+        PasswordAgeDays        = if ($lastChange) { [int]($now - $lastChange).TotalDays } else { $null }
         PasswordExpiresOn      = $expiresOn
         CurrentlyExpired       = if ($expiresOn) { $expiresOn -lt $now } else { $false }
     }

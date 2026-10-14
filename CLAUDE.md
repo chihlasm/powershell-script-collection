@@ -93,6 +93,11 @@ On 3.0/4.0 targets, prefer feature detection with a fallback over raising the fl
 
 `Tests/PSVersionFloor.Tests.ps1` checks every script that declares `#Requires -Version` against the features its code uses (static analysis in `Tests/PSVersionFloor.Analyzer.ps1`). Run it after touching a 3.0/4.0 script.
 
+Two Windows PowerShell (3.0–5.1) traps that PowerShell 7 hides, so they pass on a dev box and fail on a server:
+
+- **Save any script containing a non-ASCII character as UTF-8 *with* BOM.** Without a BOM, Windows PowerShell decodes the file as ANSI; an em dash's last byte becomes a curly quote that terminates strings, and the whole script fails to parse. `Tests/ScriptEncoding.Tests.ps1` enforces this — run it under `powershell.exe` to also get the parse check.
+- **Wrap filtered results in `@()` before using `.Count`.** On Windows PowerShell a single `[PSCustomObject]` has no `.Count` (`$null`), so `($x | Where-Object …).Count -gt 0` is false for exactly one match.
+
 Version sources: [What's new in 5.0 (incl. 4.0 and 3.0 sections)](https://learn.microsoft.com/powershell/scripting/whats-new/what-s-new-in-windows-powershell-50) — classes/enums, `-NoNewline`, `Get-ChildItem -Depth`, `New-TemporaryFile`, `Get-ItemPropertyValue`, `Format-Hex`, clipboard cmdlets are 5.0; `.Where()`/`.ForEach()` are 4.0. [about_Windows_PowerShell_5.1](https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_windows_powershell_5.1) — local user/group cmdlets and `Get-ComputerInfo` are 5.1. [ConvertFrom-SddlString](https://learn.microsoft.com/powershell/module/microsoft.powershell.utility/convertfrom-sddlstring) — 5.0.
 
 ### Error Handling

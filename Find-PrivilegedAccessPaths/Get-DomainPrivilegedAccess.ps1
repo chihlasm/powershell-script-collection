@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Domain-wide Privileged Access Audit — finds every user with any form of admin
     access and explains exactly HOW they got it.

@@ -1,4 +1,4 @@
-#description: Installs/Updates MS Teams and WebRTC Service with newest versions. Enables Teams WVD Optimization mode. Recommend to run regularly on Desktop Images.
+﻿#description: Installs/Updates MS Teams and WebRTC Service with newest versions. Enables Teams WVD Optimization mode. Recommend to run regularly on Desktop Images.
 #execution mode: IndividualWithRestart
 #tags: Nerdio, Apps install
 <# 

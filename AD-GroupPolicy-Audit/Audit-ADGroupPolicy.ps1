@@ -1,4 +1,4 @@
-#Requires -Modules GroupPolicy, ActiveDirectory
+﻿#Requires -Modules GroupPolicy, ActiveDirectory
 
 <#
 .SYNOPSIS
