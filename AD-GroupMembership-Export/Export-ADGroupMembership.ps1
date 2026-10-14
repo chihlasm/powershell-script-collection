@@ -1247,6 +1247,103 @@ function ConvertTo-ReportJson {
     return $sb.ToString()
 }
 
+function ConvertTo-NestModel {
+    <#
+        Compact nesting data for the Nesting tab: only groups with at least one group-in-group
+        link, indexed, with direct parents (Up) and direct children (Down). Loops, depth and
+        paths are worked out in the browser (NestCore).
+    #>
+    param(
+        [Parameter(Mandatory)]$Graph,
+        [Parameter(Mandatory)][hashtable]$Edges,
+        [switch]$NestedExpanded
+    )
+
+    $involved = @{}
+    foreach ($parent in [string[]]$Edges.Keys) {
+        $involved[$parent] = $true
+        foreach ($child in [string[]]$Edges[$parent].Keys) { $involved[$child] = $true }
+    }
+
+    $dns = [string[]]($involved.Keys | Sort-Object {
+        if ($Graph.Nodes.ContainsKey($_)) { $Graph.Nodes[$_].Name } else { $_ }
+    })
+    $ids = @{}
+    $nodesOut = New-Object System.Collections.Generic.List[object]
+    foreach ($dn in $dns) {
+        $ids[$dn] = $nodesOut.Count
+        $n = if ($Graph.Nodes.ContainsKey($dn)) { $Graph.Nodes[$dn] } else {
+            [PSCustomObject]@{ DN = $dn; Name = (Get-DnFirstValue $dn); Sam = ''; Category = ''; Scope = ''; Sid = ''; InExport = $false; Unresolved = $true }
+        }
+        $nodesOut.Add([PSCustomObject]@{
+            n  = [string]$n.Name
+            s  = [string]$n.Sam
+            c  = [string]$n.Category
+            sc = [string]$n.Scope
+            ou = ConvertTo-OuPath $dn
+            x  = [bool]$n.InExport
+            p  = (Test-ProtectedGroupSid $n.Sid)
+            b  = (Test-BuiltinGroup -DistinguishedName $dn -Sid $n.Sid)
+            u  = [bool]$n.Unresolved
+        })
+    }
+
+    $up = New-Object 'object[]' $nodesOut.Count
+    $down = New-Object 'object[]' $nodesOut.Count
+    for ($i = 0; $i -lt $nodesOut.Count; $i++) {
+        $up[$i] = New-Object System.Collections.Generic.List[int]
+        $down[$i] = New-Object System.Collections.Generic.List[int]
+    }
+    foreach ($parent in [string[]]$Edges.Keys) {
+        foreach ($child in [string[]]$Edges[$parent].Keys) {
+            $down[$ids[$parent]].Add($ids[$child])
+            $up[$ids[$child]].Add($ids[$parent])
+        }
+    }
+    for ($i = 0; $i -lt $nodesOut.Count; $i++) {
+        $up[$i] = $up[$i].ToArray()
+        $down[$i] = $down[$i].ToArray()
+    }
+
+    return [PSCustomObject]@{
+        Nodes = $nodesOut.ToArray(); Up = $up; Down = $down
+        NestedExpanded = [bool]$NestedExpanded; CapReached = [bool]$Graph.CapReached
+    }
+}
+
+function ConvertTo-NestJson {
+    # Serialises ConvertTo-NestModel output; strings via ConvertTo-JsonText (safe in <script>).
+    param([Parameter(Mandatory)]$Model)
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append('{"nodes":[')
+    for ($i = 0; $i -lt $Model.Nodes.Count; $i++) {
+        $n = $Model.Nodes[$i]
+        if ($i) { [void]$sb.Append(',') }
+        [void]$sb.Append('{"n":').Append((ConvertTo-JsonText $n.n))
+        [void]$sb.Append(',"s":').Append((ConvertTo-JsonText $n.s))
+        [void]$sb.Append(',"c":').Append((ConvertTo-JsonText $n.c))
+        [void]$sb.Append(',"sc":').Append((ConvertTo-JsonText $n.sc))
+        [void]$sb.Append(',"ou":').Append((ConvertTo-JsonText $n.ou))
+        foreach ($flag in 'x', 'p', 'b', 'u') {
+            [void]$sb.Append(',"').Append($flag).Append('":').Append($(if ($n.$flag) { 'true' } else { 'false' }))
+        }
+        [void]$sb.Append('}')
+    }
+    [void]$sb.Append('],"up":[')
+    for ($i = 0; $i -lt $Model.Up.Count; $i++) {
+        if ($i) { [void]$sb.Append(',') }
+        [void]$sb.Append('[').Append(([string[]]$Model.Up[$i] -join ',')).Append(']')
+    }
+    [void]$sb.Append('],"down":[')
+    for ($i = 0; $i -lt $Model.Down.Count; $i++) {
+        if ($i) { [void]$sb.Append(',') }
+        [void]$sb.Append('[').Append(([string[]]$Model.Down[$i] -join ',')).Append(']')
+    }
+    [void]$sb.Append('],"flags":{"nestedExpanded":').Append($(if ($Model.NestedExpanded) { 'true' } else { 'false' }))
+    [void]$sb.Append(',"capReached":').Append($(if ($Model.CapReached) { 'true' } else { 'false' })).Append('}}')
+    return $sb.ToString()
+}
+
 #endregion
 
 #region User-report HTML

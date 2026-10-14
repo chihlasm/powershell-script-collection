@@ -134,3 +134,56 @@ Describe 'Resolve-NestGraph' {
         $r.Nodes[(DN 'Sid1')].Sid | Should -Be 'S-1-5-32-544'
     }
 }
+
+Describe 'ConvertTo-NestModel and ConvertTo-NestJson' {
+    BeforeAll {
+        $edges = @{}
+        Add-NestEdge -Edges $edges -ParentDN (DN 'IT-Admins') -ChildDN (DN 'IT-Staff')
+        Add-NestEdge -Edges $edges -ParentDN (DN 'Administrators' 'CN=Builtin') -ChildDN (DN 'IT-Admins')
+        $nodes = @{}
+        foreach ($n in @(
+            [PSCustomObject]@{ DN = (DN 'IT-Staff'); Name = 'IT-Staff'; Sam = 'IT-Staff'; Category = 'Security'; Scope = 'Global'; Sid = 'S-1-5-21-1-2-3-1201'; InExport = $true; Unresolved = $false }
+            [PSCustomObject]@{ DN = (DN 'IT-Admins'); Name = 'IT-Admins'; Sam = 'IT-Admins'; Category = 'Security'; Scope = 'Global'; Sid = 'S-1-5-21-1-2-3-1202'; InExport = $true; Unresolved = $false }
+            [PSCustomObject]@{ DN = (DN 'Administrators' 'CN=Builtin'); Name = 'Administrators'; Sam = 'Administrators'; Category = 'Security'; Scope = 'DomainLocal'; Sid = 'S-1-5-32-544'; InExport = $false; Unresolved = $false }
+            [PSCustomObject]@{ DN = (DN 'Lonely'); Name = 'Lonely'; Sam = 'Lonely'; Category = 'Security'; Scope = 'Global'; Sid = 'S-1-5-21-1-2-3-1999'; InExport = $true; Unresolved = $false }
+        )) { $nodes[$n.DN] = $n }
+        $script:Graph = [PSCustomObject]@{ Nodes = $nodes; CapReached = $false; Lookups = 1 }
+        $script:Model = ConvertTo-NestModel -Graph $script:Graph -Edges $edges -NestedExpanded
+        function Id([string]$Name) { for ($i = 0; $i -lt $script:Model.Nodes.Count; $i++) { if ($script:Model.Nodes[$i].n -eq $Name) { return $i } }; -1 }
+    }
+
+    It 'includes only groups with at least one nesting link' {
+        $script:Model.Nodes.Count | Should -Be 3
+        Id 'Lonely' | Should -Be -1
+    }
+    It 'stores direct parents and children by index' {
+        @($script:Model.Up[(Id 'IT-Staff')]) | Should -Be @((Id 'IT-Admins'))
+        @($script:Model.Down[(Id 'Administrators')]) | Should -Be @((Id 'IT-Admins'))
+        @($script:Model.Up[(Id 'Administrators')]).Count | Should -Be 0
+    }
+    It 'flags protected, built-in and fetched-only groups' {
+        $a = $script:Model.Nodes[(Id 'Administrators')]
+        $a.p | Should -BeTrue; $a.b | Should -BeTrue; $a.x | Should -BeFalse
+        $script:Model.Nodes[(Id 'IT-Staff')].p | Should -BeFalse
+        $script:Model.Nodes[(Id 'IT-Staff')].x | Should -BeTrue
+    }
+    It 'serialises to JSON that parses back, with flags' {
+        $j = ConvertFrom-Json (ConvertTo-NestJson -Model $script:Model)
+        @($j.nodes).Count | Should -Be 3
+        $j.flags.nestedExpanded | Should -BeTrue
+        $j.flags.capReached | Should -BeFalse
+        @($j.up[(Id 'IT-Staff')]) | Should -Be @((Id 'IT-Admins'))
+    }
+    It 'escapes hostile names' {
+        $edges = @{}
+        Add-NestEdge -Edges $edges -ParentDN 'CN=P,DC=x' -ChildDN 'CN=C,DC=x'
+        $nodes = @{
+            'CN=P,DC=x' = [PSCustomObject]@{ DN = 'CN=P,DC=x'; Name = '</script><img src=x onerror=alert(1)>'; Sam = ''; Category = ''; Scope = ''; Sid = ''; InExport = $true; Unresolved = $false }
+            'CN=C,DC=x' = [PSCustomObject]@{ DN = 'CN=C,DC=x'; Name = '"q"'; Sam = ''; Category = ''; Scope = ''; Sid = ''; InExport = $true; Unresolved = $false }
+        }
+        $json = ConvertTo-NestJson -Model (ConvertTo-NestModel -Graph ([PSCustomObject]@{ Nodes = $nodes; CapReached = $true }) -Edges $edges)
+        $json | Should -Not -Match '<'
+        (ConvertFrom-Json $json).flags.capReached | Should -BeTrue
+        @((ConvertFrom-Json $json).nodes | ForEach-Object { $_.n }) | Should -Contain '</script><img src=x onerror=alert(1)>'
+    }
+}
