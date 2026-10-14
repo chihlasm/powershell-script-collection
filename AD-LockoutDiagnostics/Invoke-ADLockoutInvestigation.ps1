@@ -149,13 +149,28 @@ function Write-Status {
     }
 }
 
+function Import-ReferenceDataFile {
+    # Import-PowerShellDataFile is PowerShell 5.0+. On 3.0/4.0 (Server 2012 / 2012 R2) it
+    # is missing, and the try/catch around every caller would silently fall back to the
+    # script's built-in copy of the constants - the drift-prone copies the shared .psd1
+    # exists to replace. Import-LocalizedData reads the same file the same way (restricted
+    # language, no code executed) and exists on every version.
+    # https://learn.microsoft.com/powershell/module/microsoft.powershell.utility/import-localizeddata
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+    if (Get-Command -Name Import-PowerShellDataFile -ErrorAction SilentlyContinue) {
+        return Import-PowerShellDataFile -LiteralPath $Path -ErrorAction Stop
+    }
+    $full = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).ProviderPath
+    Import-LocalizedData -BaseDirectory (Split-Path -Parent $full) -FileName (Split-Path -Leaf $full) -ErrorAction Stop
+}
 function Get-LockoutReference {
     # Loads the shared constants. Returns $null when unavailable - callers must degrade
     # rather than fail, since every tool also carries its own built-in copy.
     param([string]$ScriptRoot)
     $path = Join-Path $ScriptRoot 'LockoutReference.psd1'
     if (-not (Test-Path -LiteralPath $path)) { return $null }
-    try { return Import-PowerShellDataFile -Path $path -ErrorAction Stop }
+    try { return Import-ReferenceDataFile -Path $path -ErrorAction Stop }
     catch { return $null }
 }
 

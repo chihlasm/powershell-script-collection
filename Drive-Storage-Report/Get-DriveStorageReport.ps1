@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Generates an HTML report of local drive and folder storage usage.
 
@@ -49,14 +49,15 @@
 .NOTES
     Author:   Michael Chihlas
     Version:  1.0.0
-    Requires: PowerShell 5.1+
+    Requires: PowerShell 3.0+ (runs on Server 2012 / 2012 R2 as shipped)
 
     Run elevated for best coverage. Without admin, more system folders will
     land in the "Unreadable folders" section and contribute 0 bytes to
     totals.
 #>
 
-#Requires -Version 5.1
+# 3.0 so this runs on Server 2012 (PS 3.0) / 2012 R2 (PS 4.0) as shipped; Tests\PSVersionFloor.Tests.ps1 guards it.
+#Requires -Version 3.0
 
 [CmdletBinding()]
 param(
@@ -135,8 +136,8 @@ function Get-TargetDrive {
 
 function New-WalkState {
     [PSCustomObject]@{
-        Records     = [System.Collections.Generic.List[object]]::new()
-        Unreadable  = [System.Collections.Generic.List[string]]::new()
+        Records     = (New-Object 'System.Collections.Generic.List[object]')
+        Unreadable  = (New-Object 'System.Collections.Generic.List[string]')
         FolderCount = 0
         RootBytes   = 0L
     }
@@ -162,16 +163,13 @@ function Invoke-FolderWalk {
     )
 
     # Per-folder direct byte counts (files directly in that folder).
-    $direct = [System.Collections.Generic.Dictionary[string, long]]::new(
-        [System.StringComparer]::OrdinalIgnoreCase)
+    $direct = (New-Object 'System.Collections.Generic.Dictionary[string, long]' -ArgumentList ([System.StringComparer]::OrdinalIgnoreCase))
     # Parent -> children map so we can roll up post-order without recursion.
-    $children = [System.Collections.Generic.Dictionary[string, [System.Collections.Generic.List[string]]]]::new(
-        [System.StringComparer]::OrdinalIgnoreCase)
+    $children = (New-Object 'System.Collections.Generic.Dictionary[string, [System.Collections.Generic.List[string]]]' -ArgumentList ([System.StringComparer]::OrdinalIgnoreCase))
     # Depth of every folder we visit (including the root at depth 0).
-    $depthMap = [System.Collections.Generic.Dictionary[string, int]]::new(
-        [System.StringComparer]::OrdinalIgnoreCase)
+    $depthMap = (New-Object 'System.Collections.Generic.Dictionary[string, int]' -ArgumentList ([System.StringComparer]::OrdinalIgnoreCase))
     # Visit order so we can do a reverse-order rollup (deepest first).
-    $visited = [System.Collections.Generic.List[string]]::new()
+    $visited = (New-Object 'System.Collections.Generic.List[string]')
 
     $reparseFlag = [System.IO.FileAttributes]::ReparsePoint
 
@@ -186,7 +184,7 @@ function Invoke-FolderWalk {
     $depthMap[$rootNorm] = 0
     $visited.Add($rootNorm) | Out-Null
 
-    $stack = [System.Collections.Generic.Stack[string]]::new()
+    $stack = (New-Object 'System.Collections.Generic.Stack[string]')
     $stack.Push($rootNorm)
 
     $progressEvery = 2000
@@ -198,10 +196,12 @@ function Invoke-FolderWalk {
 
         $currentDepth = $depthMap[$current]
         $directBytes  = 0L
-        $kidList      = [System.Collections.Generic.List[string]]::new()
+        $kidList      = [Activator]::CreateInstance([System.Collections.Generic.List[string]])
 
         try {
-            $di = [System.IO.DirectoryInfo]::new($current)
+            # A cast, not New-Object: this runs once per folder, and New-Object is ~100x
+            # slower than a cast. Casts work on every PowerShell version (::new is 5.0+).
+            $di = [System.IO.DirectoryInfo]$current
             # Single enumeration returns files and dirs together with
             # .Length/.Attributes already populated from WIN32_FIND_DATA.
             $enum = $di.EnumerateFileSystemInfos('*', [System.IO.SearchOption]::TopDirectoryOnly)
@@ -250,8 +250,7 @@ function Invoke-FolderWalk {
     }
 
     # Post-order rollup: deepest-first so parents always find child totals ready.
-    $totals = [System.Collections.Generic.Dictionary[string, long]]::new(
-        [System.StringComparer]::OrdinalIgnoreCase)
+    $totals = (New-Object 'System.Collections.Generic.Dictionary[string, long]' -ArgumentList ([System.StringComparer]::OrdinalIgnoreCase))
 
     for ($i = $visited.Count - 1; $i -ge 0; $i--) {
         $p = $visited[$i]
@@ -292,7 +291,7 @@ function Merge-SmallFolders {
         [string]$DriveRootPath
     )
 
-    $kept = [System.Collections.Generic.List[object]]::new()
+    $kept = (New-Object 'System.Collections.Generic.List[object]')
 
     $byParent = $Records | Group-Object -Property ParentPath
 
@@ -300,8 +299,11 @@ function Merge-SmallFolders {
         $parent = $g.Name
         $children = $g.Group
 
-        $big   = $children | Where-Object { $_.SizeBytes -ge $ThresholdBytes }
-        $small = $children | Where-Object { $_.SizeBytes -lt $ThresholdBytes }
+        # @() is required: on Windows PowerShell (3.0-5.1) a single [PSCustomObject] has no
+        # .Count, so one small folder made '$small.Count -gt 0' false and its bytes vanished
+        # from the report. PowerShell 7 hid this by giving every object a .Count.
+        $big   = @($children | Where-Object { $_.SizeBytes -ge $ThresholdBytes })
+        $small = @($children | Where-Object { $_.SizeBytes -lt $ThresholdBytes })
 
         foreach ($b in $big) { $kept.Add($b) | Out-Null }
 
@@ -440,12 +442,12 @@ function Sort-FolderRecords {
     $byParent = @{}
     foreach ($r in $Records) {
         if (-not $byParent.ContainsKey($r.ParentPath)) {
-            $byParent[$r.ParentPath] = [System.Collections.Generic.List[object]]::new()
+            $byParent[$r.ParentPath] = [Activator]::CreateInstance([System.Collections.Generic.List[object]])
         }
         $byParent[$r.ParentPath].Add($r) | Out-Null
     }
 
-    $ordered = [System.Collections.Generic.List[object]]::new()
+    $ordered = (New-Object 'System.Collections.Generic.List[object]')
 
     $emit = {
         param($parent)
@@ -656,7 +658,7 @@ if (-not (Test-Path -LiteralPath $OutputPath)) {
 $fileName = "DriveStorageReport_{0}_{1}.html" -f $env:COMPUTERNAME, (Get-Date -Format 'yyyy-MM-dd_HHmmss')
 $reportPath = Join-Path $OutputPath $fileName
 
-$sb = [System.Text.StringBuilder]::new()
+$sb = (New-Object 'System.Text.StringBuilder')
 [void]$sb.Append((New-HtmlHead))
 [void]$sb.Append((New-HtmlHeaderBlock -HostName $env:COMPUTERNAME `
     -Started $scanStart -Elapsed $overall.Elapsed `

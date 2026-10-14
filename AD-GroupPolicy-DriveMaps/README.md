@@ -46,7 +46,7 @@ Audits all drive mappings configured via Group Policy Preferences across the dom
 
 ## Requirements
 
-- PowerShell 5.1+
+- PowerShell 3.0+ (Server 2012 / 2012 R2 work as shipped)
 - RSAT: `GroupPolicy` and `ActiveDirectory` modules
 - Domain-joined machine (or `-Domain` / `-Credential` for remote access)
 

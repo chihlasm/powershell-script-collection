@@ -44,6 +44,9 @@ $script:PSFloorCommands = @{
     'Get-Runspace' = '5.0'; 'Debug-Runspace' = '5.0'; 'Get-RunspaceDebug' = '5.0'
     'Enable-RunspaceDebug' = '5.0'; 'Disable-RunspaceDebug' = '5.0'
     'Enter-PSHostProcess' = '5.0'; 'Exit-PSHostProcess' = '5.0'
+    # Learn does not state a version for this one; it shipped with WMF 5.0. Treated as 5.0 -
+    # guarded uses (Get-Command check + Import-LocalizedData fallback) pass regardless.
+    'Import-PowerShellDataFile' = '5.0'
     # 5.1
     'Get-ComputerInfo' = '5.1'; 'Get-TimeZone' = '5.1'; 'Set-TimeZone' = '5.1'
     'Get-LocalUser' = '5.1'; 'New-LocalUser' = '5.1'; 'Set-LocalUser' = '5.1'

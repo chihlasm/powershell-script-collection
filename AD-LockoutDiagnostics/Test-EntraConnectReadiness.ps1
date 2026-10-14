@@ -1,4 +1,5 @@
-﻿#Requires -Version 5.1
+﻿# 3.0 so this runs on Server 2012 (PS 3.0) / 2012 R2 (PS 4.0) as shipped; Tests\PSVersionFloor.Tests.ps1 guards it.
+#Requires -Version 3.0
 
 <#
 .SYNOPSIS
@@ -64,7 +65,7 @@ param(
     [string]$OutputPath
 )
 
-$script:Lines = [System.Collections.Generic.List[string]]::new()
+$script:Lines = (New-Object 'System.Collections.Generic.List[string]')
 $script:Fails = 0
 $script:Warns = 0
 

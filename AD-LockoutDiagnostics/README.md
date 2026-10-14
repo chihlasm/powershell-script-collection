@@ -338,7 +338,7 @@ Investigates why an Active Directory account keeps locking out and traces the **
 
 ### Requirements
 
-- **PowerShell** 5.1 or 7.x
+- **PowerShell** 3.0 or later, including 7.x (Server 2012 / 2012 R2 work as shipped)
 - **RSAT Active Directory tools** (ActiveDirectory module)
 - **Domain-joined machine** — run from a domain controller or a management workstation with RSAT
 - Permission to **read the Security event log** on the domain controllers (the script reads 4740/4625/4771/4724 events remotely via `Get-WinEvent`)

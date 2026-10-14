@@ -482,9 +482,14 @@ function New-ReportArchive {
     }
     else {
         Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+        # .NET resolves relative paths against the process directory, not the PowerShell
+        # location (-OutputRoot may be relative), so resolve through PowerShell first.
+        $folderFull = (Resolve-Path -LiteralPath $Folder).ProviderPath
+        $zipFull    = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ZipPath)
         # $false = store the files at the zip root, matching Compress-Archive '<folder>\*'.
+        # The report folder is flat, so the pre-4.6.1 '\' entry-separator issue cannot apply.
         [System.IO.Compression.ZipFile]::CreateFromDirectory(
-            $Folder, $ZipPath, [System.IO.Compression.CompressionLevel]::Optimal, $false)
+            $folderFull, $zipFull, [System.IO.Compression.CompressionLevel]::Optimal, $false)
     }
 }
 

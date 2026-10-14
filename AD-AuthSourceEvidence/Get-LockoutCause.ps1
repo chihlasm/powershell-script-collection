@@ -189,6 +189,21 @@ function ConvertTo-HtmlSafe {
     return [System.Net.WebUtility]::HtmlEncode([string]$Text)
 }
 
+function Import-ReferenceDataFile {
+    # Import-PowerShellDataFile is PowerShell 5.0+. On 3.0/4.0 (Server 2012 / 2012 R2) it
+    # is missing, and the try/catch around every caller would silently fall back to the
+    # script's built-in copy of the constants - the drift-prone copies the shared .psd1
+    # exists to replace. Import-LocalizedData reads the same file the same way (restricted
+    # language, no code executed) and exists on every version.
+    # https://learn.microsoft.com/powershell/module/microsoft.powershell.utility/import-localizeddata
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+    if (Get-Command -Name Import-PowerShellDataFile -ErrorAction SilentlyContinue) {
+        return Import-PowerShellDataFile -LiteralPath $Path -ErrorAction Stop
+    }
+    $full = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).ProviderPath
+    Import-LocalizedData -BaseDirectory (Split-Path -Parent $full) -FileName (Split-Path -Leaf $full) -ErrorAction Stop
+}
 function Get-ReportCss {
     # Prefer the shared stylesheet so every report in the toolkit looks like one family;
     # fall back to an inline copy so this script still renders standalone.
@@ -199,7 +214,7 @@ function Get-ReportCss {
     foreach ($p in $refPaths) {
         if (Test-Path -LiteralPath $p) {
             try {
-                $ref = Import-PowerShellDataFile -LiteralPath $p -ErrorAction Stop
+                $ref = Import-ReferenceDataFile -Path $p -ErrorAction Stop
                 if ($ref.ReportCss) { return $ref.ReportCss }
             } catch { }
         }

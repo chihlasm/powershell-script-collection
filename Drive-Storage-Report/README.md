@@ -5,7 +5,7 @@ Generates a dark-themed HTML report showing local drive totals, free space, and 
 ## Requirements
 
 - Windows Server / Windows 10+
-- PowerShell 5.1 or later
+- PowerShell 3.0 or later (Server 2012 / 2012 R2 work as shipped)
 - No external modules
 
 ## Usage

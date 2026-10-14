@@ -1,4 +1,5 @@
-#Requires -Version 5.1
+# 3.0 so this runs on Server 2012 (PS 3.0) / 2012 R2 (PS 4.0) as shipped; Tests\PSVersionFloor.Tests.ps1 guards it.
+#Requires -Version 3.0
 
 <#
 .SYNOPSIS
@@ -158,7 +159,7 @@ function Test-Prerequisites {
     Write-AuditLog "Checking prerequisites..." -Level Info
 
     $modules = @('GroupPolicy', 'ActiveDirectory')
-    $missing = [System.Collections.Generic.List[string]]::new()
+    $missing = (New-Object 'System.Collections.Generic.List[string]')
 
     foreach ($module in $modules) {
         if (-not (Get-Module -ListAvailable -Name $module)) {
@@ -248,8 +249,8 @@ function Get-ItemLevelTargeting {
         [System.Xml.XmlElement]$DriveElement
     )
 
-    $filters = [System.Collections.Generic.List[string]]::new()
-    $filterObjects = [System.Collections.Generic.List[object]]::new()
+    $filters = (New-Object 'System.Collections.Generic.List[string]')
+    $filterObjects = (New-Object 'System.Collections.Generic.List[object]')
 
     $filtersNode = $DriveElement.Filters
     if (-not $filtersNode) {
@@ -340,7 +341,7 @@ function Get-FilterCollectionSummary {
         [System.Xml.XmlElement]$CollectionNode
     )
 
-    $parts = [System.Collections.Generic.List[string]]::new()
+    $parts = (New-Object 'System.Collections.Generic.List[string]')
 
     foreach ($child in $CollectionNode.ChildNodes) {
         if ($child.NodeType -ne 'Element') { continue }
@@ -377,7 +378,7 @@ function Get-AllDriveMaps {
 
     Write-AuditLog "Extracting drive map preferences from all GPOs..." -Level Info
 
-    $allDriveMaps = [System.Collections.Generic.List[object]]::new()
+    $allDriveMaps = (New-Object 'System.Collections.Generic.List[object]')
     $count = 0
 
     foreach ($gpo in $GPOs) {
@@ -525,7 +526,7 @@ function Test-UNCPaths {
 
     Write-AuditLog "Validating $($uniquePaths.Count) unique UNC paths..." -Level Info
 
-    $results = [System.Collections.Generic.List[object]]::new()
+    $results = (New-Object 'System.Collections.Generic.List[object]')
     $count = 0
 
     foreach ($path in $uniquePaths) {
@@ -583,8 +584,8 @@ function Find-DriveMapConflicts {
 
     Write-AuditLog "Analyzing for drive map conflicts and duplicates..." -Level Info
 
-    $conflicts = [System.Collections.Generic.List[object]]::new()
-    $duplicates = [System.Collections.Generic.List[object]]::new()
+    $conflicts = (New-Object 'System.Collections.Generic.List[object]')
+    $duplicates = (New-Object 'System.Collections.Generic.List[object]')
 
     if ($DriveMaps.Count -eq 0) {
         Write-AuditLog "No drive maps to analyze" -Level Info
@@ -633,7 +634,7 @@ function Find-DriveMapConflicts {
 
         # Build per-mapping detail: which GPO maps which path with which ILT/action.
         # Include Delete items too so the report shows the full picture for the letter.
-        $mappingDetails = [System.Collections.Generic.List[object]]::new()
+        $mappingDetails = [Activator]::CreateInstance([System.Collections.Generic.List[object]])
         foreach ($map in $allMaps) {
             $mappingDetails.Add([PSCustomObject]@{
                 GPOName    = $map.GPOName
@@ -777,11 +778,11 @@ function Find-StaleHosts {
         [array]$PathValidation = @()
     )
 
-    $staleHostFindings = [System.Collections.Generic.List[object]]::new()
+    $staleHostFindings = (New-Object 'System.Collections.Generic.List[object]')
     if (-not $PathValidation -or $PathValidation.Count -eq 0) { return $staleHostFindings }
 
     # Determine which hosts have any unreachable path.
-    $unreachableHosts = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $unreachableHosts = (New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase))
     foreach ($pv in $PathValidation) {
         if (-not $pv.Reachable) {
             $h = Get-UNCHost -UNCPath $pv.UNCPath
@@ -839,7 +840,7 @@ function Find-GroupMembershipOverlap {
         [hashtable]$ADParams = @{}
     )
 
-    $overlapFindings = [System.Collections.Generic.List[object]]::new()
+    $overlapFindings = (New-Object 'System.Collections.Generic.List[object]')
 
     if (-not (Get-Module -ListAvailable -Name ActiveDirectory)) {
         Write-AuditLog "CheckGroupOverlap requested but ActiveDirectory module is unavailable - skipping" -Level Warning
@@ -866,7 +867,7 @@ function Find-GroupMembershipOverlap {
     $resolveMembers = {
         param($groupName)
         if ($memberCache.ContainsKey($groupName)) { return $memberCache[$groupName] }
-        $members = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        $members = (New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase))
         try {
             # Recursive membership; -Recursive returns only user/computer leaf objects.
             $result = Get-ADGroupMember -Identity $groupName -Recursive @ADParams -ErrorAction Stop
@@ -897,7 +898,7 @@ function Find-GroupMembershipOverlap {
         foreach ($map in $competing) {
             foreach ($g in (& $getGroupsForMap $map)) {
                 if (-not $groupToPaths.ContainsKey($g)) {
-                    $groupToPaths[$g] = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+                    $groupToPaths[$g] = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase)
                 }
                 if ($map.UNCPath) { [void]$groupToPaths[$g].Add($map.UNCPath) }
             }
@@ -913,7 +914,7 @@ function Find-GroupMembershipOverlap {
             $members = & $resolveMembers $gName
             foreach ($user in $members) {
                 if (-not $userToGroups.ContainsKey($user)) {
-                    $userToGroups[$user] = [System.Collections.Generic.List[string]]::new()
+                    $userToGroups[$user] = [Activator]::CreateInstance([System.Collections.Generic.List[string]])
                 }
                 $userToGroups[$user].Add($gName)
             }
@@ -923,9 +924,9 @@ function Find-GroupMembershipOverlap {
         if ($overlappingUsers.Count -eq 0) { continue }
 
         # Build a readable per-user detail list (user -> which groups -> which paths).
-        $userDetails = [System.Collections.Generic.List[object]]::new()
+        $userDetails = [Activator]::CreateInstance([System.Collections.Generic.List[object]])
         foreach ($entry in $overlappingUsers) {
-            $paths = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+            $paths = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase)
             foreach ($gName in $entry.Value) {
                 foreach ($p in $groupToPaths[$gName]) { [void]$paths.Add($p) }
             }
@@ -984,7 +985,7 @@ function Build-DriveMapMatrix {
 
     # Letters that are "shared" - letters whose distinct competing (non-Delete) UNC paths
     # number > 1 across ALL groups. Covers both cross-group and same-group multi-path.
-    $sharedLetters = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $sharedLetters = (New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase))
     $nonDeleteMaps = $DriveMaps | Where-Object {
         $_.DriveLetter -and $_.DriveLetter.Trim() -ne '' -and $_.DriveLetter -ne 'NOCHANGE' -and
         "$($_.ActionName)" -ne 'Delete'
@@ -1007,7 +1008,7 @@ function Build-DriveMapMatrix {
         foreach ($gName in (& $groupsForMap $map)) {
             if (-not $rows.ContainsKey($gName)) { $rows[$gName] = @{} }
             if (-not $rows[$gName].ContainsKey($letter)) {
-                $rows[$gName][$letter] = [System.Collections.Generic.List[object]]::new()
+                $rows[$gName][$letter] = [Activator]::CreateInstance([System.Collections.Generic.List[object]])
             }
             $rows[$gName][$letter].Add([PSCustomObject]@{
                 path   = $path
@@ -1138,7 +1139,7 @@ function Get-EffectiveDriveMaps {
     }
 
     # Recursive group memberships (tokenGroups gives the full transitive set as SIDs)
-    $userGroups = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $userGroups = (New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase))
     try {
         $userObj = Get-ADUser -Identity $UserName -Properties tokenGroups @adParams -ErrorAction Stop
         foreach ($sid in $userObj.tokenGroups) {
@@ -1165,7 +1166,7 @@ function Get-EffectiveDriveMaps {
     Write-AuditLog "User '$UserName' is in $($userGroups.Count) groups" -Level Info
 
     # --- Resolve Computer (optional) ---
-    $computerGroups = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $computerGroups = (New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase))
     $computerDN = $null
 
     if ($ComputerName) {
@@ -1189,7 +1190,7 @@ function Get-EffectiveDriveMaps {
     # --- Build OU chain helper (child -> parent -> domain) ---
     function Get-OUChain {
         param([string]$DN)
-        $chain = [System.Collections.Generic.List[string]]::new()
+        $chain = (New-Object 'System.Collections.Generic.List[string]')
         $parts = $DN -split ',(?=(?:OU|DC)=)'
         for ($i = 1; $i -lt $parts.Count; $i++) {
             $chain.Add(($parts[$i..($parts.Count - 1)]) -join ',')
@@ -1209,9 +1210,11 @@ function Get-EffectiveDriveMaps {
             [hashtable]$ADParams
         )
 
-        $ordered = [System.Collections.Generic.List[object]]::new()
+        $ordered = (New-Object 'System.Collections.Generic.List[object]')
 
-        $chainReversed = [System.Collections.Generic.List[string]]::new($OUChain)
+        # (,$OUChain) passes the list whole to the copy constructor; a bare collection
+        # would be spread into separate constructor arguments by New-Object.
+        $chainReversed = New-Object 'System.Collections.Generic.List[string]' -ArgumentList (,$OUChain)
         $chainReversed.Reverse()
 
         $domainDNSRoot = (Get-ADDomain @ADParams).DNSRoot
@@ -1327,7 +1330,7 @@ function Get-EffectiveDriveMaps {
 
     # When loopback applies, only User-scope (not Computer-scope) drive maps from
     # computer-linked GPOs are re-targeted to the user - Computer-scope maps apply regardless.
-    $computerGpoIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $computerGpoIds = (New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase))
     foreach ($g in $computerOrderedGPOs) { [void]$computerGpoIds.Add($g.GPOId.ToString()) }
 
     # --- Evaluate each drive mapping ---
@@ -1397,7 +1400,7 @@ function Get-EffectiveDriveMaps {
         }
     }
 
-    $effective = [System.Collections.Generic.List[object]]::new()
+    $effective = (New-Object 'System.Collections.Generic.List[object]')
     foreach ($val in $effectiveMaps.Values) { $effective.Add($val) }
     $effective = $effective | Sort-Object DriveLetter
 
@@ -1439,7 +1442,7 @@ function Test-ILTMatch {
 
     # Evaluate each filter - simplified evaluation
     # For AND logic, all must pass. For OR logic, any must pass.
-    $results = [System.Collections.Generic.List[bool]]::new()
+    $results = (New-Object 'System.Collections.Generic.List[bool]')
 
     foreach ($filter in $Mapping.ILTFilters) {
         $match = $false
@@ -2398,7 +2401,7 @@ function Start-DriveMapAudit {
         Domain          = $domainInfo.DNSRoot
         AuditDate       = $AuditDate.ToString('yyyy-MM-dd HH:mm:ss')
         TotalGPOs       = 0
-        AllDriveMaps    = [System.Collections.Generic.List[object]]::new()
+        AllDriveMaps    = (New-Object 'System.Collections.Generic.List[object]')
         Issues          = @{ Conflicts = @(); Duplicates = @() }
         PathValidation  = @()
         StaleHosts      = @()
