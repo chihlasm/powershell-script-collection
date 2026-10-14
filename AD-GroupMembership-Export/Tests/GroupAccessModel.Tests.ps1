@@ -213,3 +213,34 @@ Describe 'New-UserAccessHtml with the group model' {
         $html | Should -Not -Match 'report-data'
     }
 }
+
+Describe 'New-UserAccessHtml with a nesting model' {
+    BeforeAll {
+        $edges = @{}
+        Add-NestEdge -Edges $edges -ParentDN 'CN=P,DC=x' -ChildDN 'CN=C,DC=x'
+        $nodes = @{
+            'CN=P,DC=x' = [PSCustomObject]@{ DN = 'CN=P,DC=x'; Name = '</script><img src=x onerror=alert(1)>'; Sam = 'P'; Category = 'Security'; Scope = 'Global'; Sid = 'S-1-5-32-544'; InExport = $false; Unresolved = $false }
+            'CN=C,DC=x' = [PSCustomObject]@{ DN = 'CN=C,DC=x'; Name = 'Child'; Sam = 'C'; Category = 'Security'; Scope = 'Global'; Sid = ''; InExport = $true; Unresolved = $false }
+        }
+        $nest = ConvertTo-NestModel -Graph ([PSCustomObject]@{ Nodes = $nodes; CapReached = $false }) -Edges $edges -NestedExpanded
+        $model = ConvertTo-GroupAccessModel -Rows $script:Rows -Groups $script:Groups
+        $script:NestHtml = New-UserAccessHtml -Users @() -DomainName 'contoso.com' -ScopeNote 'test' -NestedExpanded `
+            -GroupsProcessed 5 -GroupModel $model -NestModel $nest
+    }
+    It 'adds the Nesting tab and its data' {
+        $script:NestHtml | Should -Match 'id="tb-nesting"'
+        $script:NestHtml | Should -Match 'id="tab-nesting"'
+        $m = [regex]::Match($script:NestHtml, '<script type="application/json" id="nest-data">(.*?)</script>', 'Singleline')
+        $m.Success | Should -BeTrue
+        @((ConvertFrom-Json $m.Groups[1].Value).nodes).Count | Should -Be 2
+    }
+    It 'cannot be broken out of by a hostile group name' {
+        # people, group data, nest data, overlap core, nest core, overlap UI, nest UI
+        ([regex]::Matches($script:NestHtml, '</script>')).Count | Should -Be 7
+        $script:NestHtml | Should -Not -Match '<img src=x'
+    }
+    It 'omits the tab when no nesting model is passed' {
+        $html = New-UserAccessHtml -Users @() -DomainName 'contoso.com' -ScopeNote 'test' -GroupsProcessed 0
+        $html | Should -Not -Match 'tab-nesting'
+    }
+}

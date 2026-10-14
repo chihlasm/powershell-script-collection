@@ -136,12 +136,17 @@ Describe 'Report scripts' {
         $grp = [PSCustomObject]@{ Name = 'G1'; SamAccountName = 'G1'; GroupCategory = 'Security'; GroupScope = 'Global'
                                   Description = ''; DistinguishedName = 'CN=G1,OU=Groups,DC=contoso,DC=com'; ManagedBy = $null }
         $model = ConvertTo-GroupAccessModel -Rows @() -Groups @($grp)
-        $html = New-UserAccessHtml -Users @() -DomainName 'contoso.com' -ScopeNote 'test' -GroupsProcessed 1 -GroupModel $model
+        $edges = @{}
+        Add-NestEdge -Edges $edges -ParentDN 'CN=P,DC=x' -ChildDN 'CN=G1,OU=Groups,DC=contoso,DC=com'
+        $nodes = @{ 'CN=P,DC=x' = [PSCustomObject]@{ DN = 'CN=P,DC=x'; Name = 'P'; Sam = 'P'; Category = 'Security'; Scope = 'Global'; Sid = ''; InExport = $false; Unresolved = $false } }
+        $nest = ConvertTo-NestModel -Graph ([PSCustomObject]@{ Nodes = $nodes; CapReached = $false }) -Edges $edges -NestedExpanded
+        $html = New-UserAccessHtml -Users @() -DomainName 'contoso.com' -ScopeNote 'test' -GroupsProcessed 1 -GroupModel $model -NestModel $nest
         $script:Scripts = @([regex]::Matches($html, '<script>(.*?)</script>', 'Singleline') | ForEach-Object { $_.Groups[1].Value })
     }
 
-    It 'generates the three executable script blocks' {
-        $script:Scripts.Count | Should -Be 3
+    It 'generates the executable script blocks' {
+        # people, overlap core, nest core, overlap UI, nest UI
+        $script:Scripts.Count | Should -Be 5
     }
 
     It 'uses only syntax Internet Explorer 10/11 can run' {

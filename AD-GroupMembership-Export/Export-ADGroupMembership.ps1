@@ -1666,6 +1666,208 @@ if (typeof module !== 'undefined' && module.exports) { module.exports = NestCore
 '@
 }
 
+function Get-NestUiScript {
+    # Nesting-tab rendering. ES5 (see Get-NestCoreScript). Uses eachEl/hasCls/setCls from
+    # the People script and its own esc() for everything put into innerHTML.
+    return @'
+<script>
+(function () {
+  var el = document.getElementById('nest-data');
+  if (!el) { return; }
+  var nest = JSON.parse(el.text || el.textContent);
+  var A = NestCore.analyze(nest), MAX_CHILDREN = 50, MAX_PATHS = 100;
+  var st = { q: '', loops: false, prot: false, sort: 'deep', sel: -1, pinned: false }, timer = null;
+  var bySam = {}, i;
+  for (i = 0; i < nest.nodes.length; i++) { if (nest.nodes[i].s) { bySam[nest.nodes[i].s.toLowerCase()] = i; } }
+
+  function $(id) { return document.getElementById(id); }
+  function esc(s) {
+    return String(s === null || s === undefined ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  function name(id) { return nest.nodes[id].n; }
+  function link(id, extra) {
+    var n = nest.nodes[id], cls = 'nlink' + (n.x ? '' : ' ext') + (n.p ? ' prot' : '') + (extra || '');
+    return '<span class="' + cls + '" data-n="' + id + '" title="' + esc(n.n) + (n.x ? '' : ' (not in export)') + (n.p ? ' - protected group' : '') + '">' + esc(n.n) + '</span>';
+  }
+  function levels(n) { return n + ' level' + (n === 1 ? '' : 's'); }
+  function indexOfInt(arr, v) { var k; for (k = 0; k < arr.length; k++) { if (arr[k] === v) { return k; } } return -1; }
+
+  function renderSummary() {
+    var prot = 0, j;
+    for (j = 0; j < nest.nodes.length; j++) { if (A.toProtected[j]) { prot++; } }
+    $('nsum').innerHTML =
+      '<div class="stat"><div class="n">' + nest.nodes.length + '</div><div class="l">Groups in nesting</div></div>' +
+      '<div class="stat"><div class="n">' + A.deepest + '</div><div class="l">Deepest chain (levels)</div></div>' +
+      '<div class="stat click' + (A.loops ? ' alert' : '') + '" data-f="loops" title="Show only groups in a loop"><div class="n">' + A.loops + '</div><div class="l">Loops</div></div>' +
+      '<div class="stat click' + (prot ? ' alert' : '') + '" data-f="prot" title="Show only groups nested into protected groups"><div class="n">' + prot + '</div><div class="l">Nested into protected groups</div></div>';
+  }
+
+  function renderList() {
+    var ids = [], j, html = [], n;
+    for (j = 0; j < nest.nodes.length; j++) {
+      if (st.q && nest.nodes[j].n.toLowerCase().indexOf(st.q) < 0) { continue; }
+      if (st.loops && !A.inLoop[j]) { continue; }
+      if (st.prot && !A.toProtected[j]) { continue; }
+      ids.push(j);
+    }
+    ids.sort(function (a, b) {
+      if (st.sort === 'deep' && A.chain[b] !== A.chain[a]) { return A.chain[b] - A.chain[a]; }
+      var x = name(a).toLowerCase(), y = name(b).toLowerCase(); return x < y ? -1 : (x > y ? 1 : 0);
+    });
+    if (st.sel < 0 || (indexOfInt(ids, st.sel) < 0 && !st.pinned)) { st.sel = ids.length ? ids[0] : -1; }
+    for (j = 0; j < ids.length; j++) {
+      n = nest.nodes[ids[j]];
+      html.push('<div class="gl-item' + (ids[j] === st.sel ? ' on' : '') + (n.x ? '' : ' ext') + '" data-n="' + ids[j] + '">' +
+        '<span class="nm2" title="' + esc(n.n) + '">' + esc(n.n) + '</span>' +
+        (A.inLoop[ids[j]] ? '<span class="mk loop">loop</span>' : '') +
+        (A.toProtected[ids[j]] ? '<span class="mk prot">&rarr; protected</span>' : '') +
+        '<span class="n">' + levels(A.chain[ids[j]]) + '</span></div>');
+    }
+    if (!ids.length) { html.push('<div class="hint">No groups match this filter.</div>'); }
+    $('nlist').innerHTML = html.join('');
+    renderDetail();
+  }
+
+  function treeHtml(node, out) {
+    var k, pad = node.level * 22, glyph = node.level ? '<span class="glyph">&#9492;&#9472;</span> ' : '';
+    if (node.kind === 'loop') {
+      out.push('<div class="row" style="padding-left:' + pad + 'px">' + glyph + '<span class="loopm">&#8635; ' + esc(name(node.id)) + ' &mdash; loops back</span><span class="lv">level ' + node.level + '</span></div>');
+      return;
+    }
+    if (node.kind === 'seen') {
+      out.push('<div class="row" style="padding-left:' + pad + 'px">' + glyph + link(node.id) + ' <span class="seen">&#8599; shown above</span><span class="lv">level ' + node.level + '</span></div>');
+      return;
+    }
+    out.push('<div class="row" style="padding-left:' + pad + 'px">' + glyph + link(node.id, node.level ? '' : ' sel') +
+      (node.level ? '<span class="lv">level ' + node.level + '</span>' : '') + '</div>');
+    for (k = 0; k < node.children.length; k++) { treeHtml(node.children[k], out); }
+    if (node.more) { out.push('<div class="row seen" style="padding-left:' + (pad + 22) + 'px">+ ' + node.more + ' more</div>'); }
+  }
+
+  function pathHtml(p, dir) {
+    var ids = dir === 'up' ? p.ids.slice(0).reverse() : p.ids, parts = [], k, isLoopEnd;
+    for (k = 0; k < ids.length; k++) {
+      isLoopEnd = p.loop && ((dir === 'down' && k === ids.length - 1) || (dir === 'up' && k === 0));
+      parts.push(isLoopEnd ? '<span class="loopm">&#8635; ' + esc(name(ids[k])) + '</span>' : link(ids[k], ids[k] === st.sel ? ' sel' : ''));
+    }
+    return '<div class="npath">' + parts.join('<span class="sep">&rsaquo;</span>') + (p.loop ? '<span class="badge3">LOOP</span>' : '') + '</div>';
+  }
+
+  function pathText(p, dir) {
+    var ids = dir === 'up' ? p.ids.slice(0).reverse() : p.ids, parts = [], k;
+    for (k = 0; k < ids.length; k++) { parts.push(name(ids[k])); }
+    return '  ' + parts.join(' > ') + (p.loop ? '  (loop)' : '');
+  }
+
+  function copyText(pu, pd) {
+    var lines = ['Nesting for ' + name(st.sel)], k;
+    lines.push('Is inside:');
+    for (k = 0; k < pu.list.length; k++) { lines.push(pathText(pu.list[k], 'up')); }
+    if (!pu.list.length) { lines.push('  (none)'); }
+    lines.push('Contains:');
+    for (k = 0; k < pd.list.length; k++) { lines.push(pathText(pd.list[k], 'down')); }
+    if (!pd.list.length) { lines.push('  (none)'); }
+    return lines.join('\r\n');
+  }
+
+  function renderDetail() {
+    var d = $('ndetail');
+    if (st.sel < 0) { d.innerHTML = '<div class="hint">No group selected.</div>'; return; }
+    var n = nest.nodes[st.sel], h = [], up = NestCore.tree(nest, st.sel, 'up', MAX_CHILDREN), down = NestCore.tree(nest, st.sel, 'down', MAX_CHILDREN);
+    var pu = NestCore.paths(nest, st.sel, 'up', MAX_PATHS), pd = NestCore.paths(nest, st.sel, 'down', MAX_PATHS), k;
+    if (nest.flags.capReached) { h.push('<div class="notice">Upward chains may be incomplete: the export stopped looking up parent groups at its limit.</div>'); }
+    h.push('<h2>' + esc(n.n) + '</h2>');
+    h.push('<div class="badges">' +
+      (n.p ? '<span class="badge2 dup">Protected group</span>' : '') +
+      (n.b && !n.p ? '<span class="badge2">Built-in</span>' : '') +
+      (n.x ? '' : '<span class="badge2">Not in the export &mdash; fetched to complete the chain</span>') +
+      (n.u ? '<span class="badge2">Could not be read from AD</span>' : '') +
+      (A.inLoop[st.sel] ? '<span class="badge2 dup">Part of a loop</span>' : '') + '</div>');
+    h.push('<div class="kv">' + (n.c ? '<b>Type</b><span>' + esc(n.c) + ' &middot; ' + esc(n.sc) + '</span>' : '') +
+      (n.ou ? '<b>Where</b><span>' + esc(n.ou) + '</span>' : '') +
+      '<b>Chain</b><span>' + levels(A.upDepth[st.sel]) + ' above, ' + levels(A.downDepth[st.sel]) + ' below</span></div>');
+    h.push('<div class="h3">Is inside (its members get these groups&rsquo; access)</div><div class="tree">');
+    if (up.children.length) { treeHtml(up, h); } else { h.push('<div class="seen">Not inside any other group.</div>'); }
+    h.push('</div><div class="h3">Contains (members of these groups get its access)</div><div class="tree">');
+    if (down.children.length) { treeHtml(down, h); } else { h.push('<div class="seen">Contains no groups.</div>'); }
+    if (!nest.flags.nestedExpanded) { h.push('<div class="notice">Nested groups were not expanded in this run, so only one level down is shown. Re-run with -IncludeNested.</div>'); }
+    h.push('</div><div class="h3">All paths <button class="btn" id="ncopy" style="margin-left:10px;font-size:11.5px;padding:3px 9px">Copy paths</button> <span id="ncopied" class="off"></span></div>');
+    for (k = 0; k < pu.list.length; k++) { h.push(pathHtml(pu.list[k], 'up')); }
+    if (pu.more) { h.push('<div class="seen">+ ' + pu.more + (pu.capped ? '+' : '') + ' more upward paths</div>'); }
+    for (k = 0; k < pd.list.length; k++) { h.push(pathHtml(pd.list[k], 'down')); }
+    if (pd.more) { h.push('<div class="seen">+ ' + pd.more + (pd.capped ? '+' : '') + ' more downward paths</div>'); }
+    if (!pu.list.length && !pd.list.length) { h.push('<div class="seen">No paths.</div>'); }
+    h.push('<p class="off" style="font-size:12px;margin-top:14px">Nesting into groups in other domains of the forest may not appear: group parents are read from the domain controller that was queried.</p>');
+    d.innerHTML = h.join('');
+    d.setAttribute('data-copy', copyText(pu, pd));
+  }
+
+  function copy(text) {
+    var ok = false, ta;
+    if (window.clipboardData && window.clipboardData.setData) { ok = window.clipboardData.setData('Text', text); }
+    if (!ok) {
+      ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.left = '-9999px';
+      document.body.appendChild(ta); ta.select();
+      try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+      document.body.removeChild(ta);
+    }
+    $('ncopied').innerHTML = ok ? 'Copied.' : 'Copy blocked by the browser &mdash; select the paths and press Ctrl+C.';
+  }
+
+  function select(id) {
+    st.sel = id; st.pinned = true;
+    eachEl('#nlist .gl-item', function (it) { setCls(it, 'on', parseInt(it.getAttribute('data-n'), 10) === id); });
+    renderDetail();
+  }
+
+  window.renderNesting = function () { renderSummary(); renderList(); };
+  window.nestSummaryFor = function (sam) {
+    var id = sam ? bySam[sam.toLowerCase()] : undefined;
+    if (id === undefined) { return null; }
+    return { up: nest.up[id].length, down: nest.down[id].length };
+  };
+  window.showNesting = function (sam) {
+    var id = sam ? bySam[sam.toLowerCase()] : undefined;
+    if (id === undefined) { return; }
+    st.q = ''; $('nq').value = ''; st.loops = false; $('nloops').checked = false; st.prot = false; $('nprot').checked = false;
+    st.sel = id; st.pinned = true;
+    window.showTab('nesting');
+  };
+
+  $('nq').oninput = $('nq').onkeyup = function () {
+    var v = this.value;
+    if (timer) { clearTimeout(timer); }
+    timer = setTimeout(function () { st.q = v.toLowerCase().replace(/^\s+|\s+$/g, ''); st.pinned = false; renderList(); }, 200);
+  };
+  $('nloops').onclick = function () { st.loops = this.checked; st.pinned = false; renderList(); };
+  $('nprot').onclick = function () { st.prot = this.checked; st.pinned = false; renderList(); };
+  $('nsort').onchange = function () { st.sort = this.value; renderList(); };
+  $('nsum').onclick = function (e) {
+    var t = (e || window.event).target || (e || window.event).srcElement;
+    while (t && t !== this && !(t.getAttribute && t.getAttribute('data-f'))) { t = t.parentNode; }
+    if (!t || t === this) { return; }
+    if (t.getAttribute('data-f') === 'loops') { st.loops = !st.loops; $('nloops').checked = st.loops; }
+    else { st.prot = !st.prot; $('nprot').checked = st.prot; }
+    st.pinned = false; renderList();
+  };
+  $('nlist').onclick = function (e) {
+    var t = (e || window.event).target || (e || window.event).srcElement;
+    while (t && t !== this && !(t.className && hasCls(t, 'gl-item'))) { t = t.parentNode; }
+    if (t && t !== this) { select(parseInt(t.getAttribute('data-n'), 10)); }
+  };
+  $('ndetail').onclick = function (e) {
+    var t = (e || window.event).target || (e || window.event).srcElement;
+    if (t.id === 'ncopy') { copy(this.getAttribute('data-copy') || ''); return; }
+    if (t.getAttribute && t.getAttribute('data-n') !== null) { select(parseInt(t.getAttribute('data-n'), 10)); }
+  };
+
+  if ((location.hash || '') === '#nesting') { window.showTab('nesting'); }
+}());
+</script>
+'@
+}
+
 function New-UserAccessHtml {
     <#
         Renders the user-centric access report as one self-contained HTML file: no external
@@ -1681,11 +1883,14 @@ function New-UserAccessHtml {
         [switch]$NestedExpanded,
         [Parameter(Mandatory)][int]$GroupsProcessed,
         # From ConvertTo-GroupAccessModel. When omitted the report is the People view only.
-        $GroupModel
+        $GroupModel,
+        # From ConvertTo-NestModel. When omitted (or empty) there is no Nesting tab.
+        $NestModel
     )
 
     $generated = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $hasGroups = $null -ne $GroupModel
+    $hasNest = $hasGroups -and $null -ne $NestModel -and $NestModel.Nodes.Count -gt 0
     $totalUsers = @($Users).Count
     $usersWithRedundancy = @($Users | Where-Object { $_.RedundantCount -gt 0 }).Count
     $totalSurplus = (@($Users | Measure-Object -Property SurplusPathCount -Sum).Sum)
@@ -1877,6 +2082,25 @@ table.gx td:not(.z):not(.self):hover{outline:2px solid var(--accent)}
 .chip button:hover{color:var(--text)}
 .result{font-size:14px;margin:10px 0}
 .result b{color:var(--warn)}
+/* ---- Nesting tab ---- */
+.nsum{display:flex;gap:26px;flex-wrap:wrap;margin-bottom:14px}
+.nsum .stat.click{cursor:pointer}.nsum .stat.click:hover .l{color:var(--accent)}
+.mk.loop{background:var(--warn-bg);border-color:var(--warn-line);color:var(--warn);font-weight:600}
+.mk.prot{border-color:var(--warn-line);color:var(--warn)}
+.gl-item.ext .nm2{font-style:italic;color:var(--muted)}
+.tree{font-family:var(--mono);font-size:12.5px;line-height:1.9;margin:4px 0 14px}
+.tree .row{display:flex;align-items:center;gap:8px;white-space:nowrap}
+.tree .lv{color:var(--dim);font-size:11px;margin-left:auto;padding-left:20px}
+.tree .glyph{color:var(--accent-dim)}
+.nlink{cursor:pointer;border-bottom:1px dotted var(--accent-dim)}.nlink:hover{color:var(--accent)}
+.nlink.sel{background:var(--accent);color:#0d1116;border-radius:3px;padding:0 5px;font-weight:700;border:0}
+.nlink.ext{border:1px dashed var(--dim);border-radius:3px;padding:0 4px;font-style:italic}
+.nlink.prot{color:var(--warn)}
+.tree .loopm,.npath .loopm{color:var(--warn);font-weight:700}.tree .seen,.seen{color:var(--dim)}
+.npath{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:5px 9px;background:var(--panel);border:1px solid var(--line);border-radius:5px;margin-bottom:5px;font-size:12.5px}
+.npath .sep{color:var(--accent-dim)}
+.npath .badge3{margin-left:auto;font-size:10px;padding:1px 7px;border-radius:9px;border:1px solid var(--warn-line);background:var(--warn-bg);color:var(--warn);font-weight:600}
+.notice{font-size:12.5px;color:var(--muted);border-left:3px solid var(--warn);background:var(--warn-bg);padding:7px 10px;border-radius:4px;margin-bottom:10px}
 @media(max-width:760px){
   .gl-wrap{flex-direction:column}.gl-list{width:auto;max-width:none;max-height:40vh;border-right:0;border-bottom:1px solid var(--line)}
   .uhead{flex-wrap:wrap}.tags{width:100%;justify-content:flex-start}
@@ -1901,6 +2125,9 @@ table.gx td:not(.z):not(.self):hover{outline:2px solid var(--accent)}
         $null = $sb.AppendLine("<button class=""tabbtn on"" id=""tb-people"" onclick=""showTab('people')"">People<span class=""cnt"">$totalUsers</span></button>")
         $null = $sb.AppendLine("<button class=""tabbtn"" id=""tb-groups"" onclick=""showTab('groups')"">Groups<span class=""cnt"">$groupCount</span></button>")
         $null = $sb.AppendLine('<button class="tabbtn" id="tb-overlap" onclick="showTab(''overlap'')">Overlap<span class="cnt" id="ovCount"></span></button>')
+        if ($hasNest) {
+            $null = $sb.AppendLine("<button class=""tabbtn"" id=""tb-nesting"" onclick=""showTab('nesting')"">Nesting<span class=""cnt"">$($NestModel.Nodes.Count)</span></button>")
+        }
         $null = $sb.AppendLine('</nav>')
     }
     $null = $sb.AppendLine('</header>')
@@ -2029,6 +2256,20 @@ table.gx td:not(.z):not(.self):hover{outline:2px solid var(--accent)}
 <div id="ovbody"></div>
 </section>
 '@)
+        if ($hasNest) {
+            $null = $sb.AppendLine(@'
+<section class="tabpane" id="tab-nesting">
+<div class="nsum" id="nsum"></div>
+<div class="fbar" style="display:flex">
+<input type="search" id="nq" placeholder="Filter groups by name...">
+<label class="chk" style="display:flex"><input type="checkbox" id="nloops"> Only loops</label>
+<label class="chk" style="display:flex"><input type="checkbox" id="nprot"> Only nested into protected groups</label>
+<select id="nsort"><option value="deep">Sort: deepest chain first</option><option value="name">Sort: name</option></select>
+</div>
+<div class="gl-wrap"><div class="gl-list" id="nlist"></div><div class="gd" id="ndetail"></div></div>
+</section>
+'@)
+        }
     }
 
     $null = $sb.AppendLine('</main>')
@@ -2073,9 +2314,19 @@ function toggleTheme() {
         $null = $sb.Append('<script type="application/json" id="report-data">')
         $null = $sb.Append((ConvertTo-ReportJson -Model $GroupModel))
         $null = $sb.AppendLine('</script>')
+        if ($hasNest) {
+            $null = $sb.Append('<script type="application/json" id="nest-data">')
+            $null = $sb.Append((ConvertTo-NestJson -Model $NestModel))
+            $null = $sb.AppendLine('</script>')
+        }
         $null = $sb.AppendLine('<script>')
         $null = $sb.AppendLine((Get-OverlapCoreScript))
         $null = $sb.AppendLine('</script>')
+        if ($hasNest) {
+            $null = $sb.AppendLine('<script>')
+            $null = $sb.AppendLine((Get-NestCoreScript))
+            $null = $sb.AppendLine('</script>')
+        }
         $null = $sb.AppendLine(@'
 <script>
 (function () {
@@ -2203,6 +2454,11 @@ function toggleTheme() {
       if (g.k.length) { h.push('<span class="badge2">Contains ' + g.k.length + ' group' + (g.k.length === 1 ? '' : 's') + '</span>'); }
       h.push('</div>');
     }
+    var ns = window.nestSummaryFor ? window.nestSummaryFor(g.s) : null;
+    if (ns && (ns.up || ns.down)) {
+      h.push('<p style="font-size:12.5px;margin:0 0 12px">Nesting: inside ' + ns.up + ' group' + (ns.up === 1 ? '' : 's') +
+        ', contains ' + ns.down + ' group' + (ns.down === 1 ? '' : 's') + ' &mdash; <button class="badge2" data-nestgo="' + esc(g.s) + '" style="cursor:pointer">View chain</button></p>');
+    }
     if (rows.length) {
       h.push('<div class="h3">People</div><table class="mt"><tr><th>Name</th><th>Username</th><th>How</th><th>Department</th></tr>' + rows.join('') + '</table>');
     }
@@ -2257,7 +2513,9 @@ function toggleTheme() {
         '<span class="gn" title="' + esc(a.n) + ' / ' + esc(b.n) + '">' + esc(a.n) + '<span class="x">' + (p.label === 'contains' ? 'contains' : '&times;') + '</span>' + esc(b.n) + '</span>' +
         '<span class="ct">' + fmt(p.shared) + ' shared &middot; ' + fmt(p.sizeA) + ' / ' + fmt(p.sizeB) + '</span>' +
         '<div class="meter"><i style="width:' + pc + '%"></i></div><span class="pct">' + pc + '%</span>' +
-        '<span class="lab ' + p.label + '">' + LABELS[p.label] + '</span></div><div class="ov-body"></div></div>');
+        (p.label === 'contains' && window.showNesting
+          ? '<span class="lab contains" data-nestgo="' + esc(a.s) + '" title="View the nesting chain" style="cursor:pointer">' + LABELS[p.label] + '</span>'
+          : '<span class="lab ' + p.label + '">' + LABELS[p.label] + '</span>') + '</div><div class="ov-body"></div></div>');
     }
     if (pairs.length > st.shown) {
       h.push('<button class="btn more" data-act="more">Show more (' + fmt(pairs.length - st.shown) + ' remaining)</button>');
@@ -2367,19 +2625,20 @@ function toggleTheme() {
   function render() {
     if (st.tab === 'groups') { renderGroups(); }
     else if (st.tab === 'overlap') { renderOverlap(); }
+    else if (st.tab === 'nesting' && window.renderNesting) { window.renderNesting(); }
   }
 
   window.showTab = function (name) {
-    var tabs = ['people', 'groups', 'overlap'], i, fbar = $('fbar');
+    var tabs = ['people', 'groups', 'overlap', 'nesting'], i, fbar = $('fbar');
     st.tab = name;
     for (i = 0; i < tabs.length; i++) { setCls($('tab-' + tabs[i]), 'on', tabs[i] === name); setCls($('tb-' + tabs[i]), 'on', tabs[i] === name); }
-    fbar.style.display = name === 'people' ? 'none' : '';
+    fbar.style.display = (name === 'groups' || name === 'overlap') ? '' : 'none';
     // Groups and Overlap use the full window (list + detail, wide grids); People keeps
     // its comfortable reading width.
     setCls(document.getElementsByTagName('main')[0], 'wide', name !== 'people');
     fbar.className = 'fbar' + (name === 'groups' ? ' show-gr' : (name === 'overlap' ? ' show-ov' : ''));
     // The filter bar lives outside the panes; move it to the top of the active pane.
-    if (name !== 'people') { $('tab-' + name).insertBefore(fbar, $('tab-' + name).firstChild); }
+    if (name === 'groups' || name === 'overlap') { $('tab-' + name).insertBefore(fbar, $('tab-' + name).firstChild); }
     render();
   };
 
@@ -2419,10 +2678,12 @@ function toggleTheme() {
   };
   $('gdetail').onclick = function (e) {
     var t = (e || window.event).target || (e || window.event).srcElement;
+    if (t && t.getAttribute && t.getAttribute('data-nestgo') !== null && window.showNesting) { window.showNesting(t.getAttribute('data-nestgo')); return; }
     if (t && t.getAttribute && t.getAttribute('data-goto') !== null) { gotoPair(st.sel); }
   };
   $('ovbody').onclick = function (e) {
     var t = (e || window.event).target || (e || window.event).srcElement, act = t.getAttribute ? t.getAttribute('data-act') : null, pair, body, a, b;
+    if (t.getAttribute && t.getAttribute('data-nestgo') !== null && window.showNesting) { window.showNesting(t.getAttribute('data-nestgo')); return; }
     if (act === 'more') { st.shown += PAGE; renderPairs($('ovbody')); return; }
     if (act === 'unfocus') { st.focus = -1; st.shown = PAGE; renderPairs($('ovbody')); return; }
     if (act === 'cadd') { addCombo(); return; }
@@ -2457,6 +2718,7 @@ function toggleTheme() {
 }());
 </script>
 '@)
+        if ($hasNest) { $null = $sb.AppendLine((Get-NestUiScript)) }
     }
     $null = $sb.AppendLine('</body></html>')
 
