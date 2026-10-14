@@ -65,3 +65,72 @@ Describe 'Protected and built-in detection' {
         Test-BuiltinGroup -DistinguishedName 'CN=X,OU=Groups,DC=contoso,DC=com' -Sid 'S-1-5-21-1-2-3-1105' | Should -BeFalse
     }
 }
+
+Describe 'Resolve-NestGraph' {
+    BeforeAll {
+        # Directory: Helpdesk -> IT-Staff -> IT-Admins -> Administrators (builtin, not exported)
+        $script:Dir = @{}
+        foreach ($g in @(
+            (G 'IT-Staff' 'S-1-5-21-1-2-3-1201' @((DN 'IT-Admins')))
+            (G 'IT-Admins' 'S-1-5-21-1-2-3-1202' @((DN 'Administrators' 'CN=Builtin')))
+            (G 'Administrators' 'S-1-5-32-544' @() 'CN=Builtin')
+        )) { $script:Dir[$g.DistinguishedName] = $g }
+        $script:Lookup = { param($dn) if ($script:Dir.ContainsKey($dn)) { $script:Dir[$dn] } else { throw "not found: $dn" } }
+    }
+
+    It 'follows parents outside the export up to the top' {
+        $edges = @{}
+        $helpdesk = G 'Helpdesk' 'S-1-5-21-1-2-3-1200' @((DN 'IT-Staff'))
+        $r = Resolve-NestGraph -Groups @($helpdesk) -Edges $edges -Lookup $script:Lookup
+        $r.Nodes.ContainsKey((DN 'Administrators' 'CN=Builtin')) | Should -BeTrue
+        $r.Nodes[(DN 'Administrators' 'CN=Builtin')].InExport | Should -BeFalse
+        $r.Nodes[(DN 'Helpdesk')].InExport | Should -BeTrue
+        $edges[(DN 'IT-Admins')].ContainsKey((DN 'IT-Staff')) | Should -BeTrue
+        $edges[(DN 'Administrators' 'CN=Builtin')].ContainsKey((DN 'IT-Admins')) | Should -BeTrue
+        $r.Lookups | Should -Be 3
+        $r.CapReached | Should -BeFalse
+    }
+
+    It 'never looks up the same group twice' {
+        $edges = @{}
+        $a = G 'A1' 'S-1-5-21-1-2-3-1301' @((DN 'IT-Staff'))
+        $b = G 'B1' 'S-1-5-21-1-2-3-1302' @((DN 'IT-Staff'))
+        $r = Resolve-NestGraph -Groups @($a, $b) -Edges $edges -Lookup $script:Lookup
+        $r.Lookups | Should -Be 3
+    }
+
+    It 'records an unreadable parent as unresolved and carries on' {
+        $edges = @{}
+        $x = G 'X1' 'S-1-5-21-1-2-3-1401' @('CN=Gone,OU=Old,DC=contoso,DC=com', (DN 'IT-Staff'))
+        $r = Resolve-NestGraph -Groups @($x) -Edges $edges -Lookup $script:Lookup
+        $r.Nodes['CN=Gone,OU=Old,DC=contoso,DC=com'].Unresolved | Should -BeTrue
+        $r.Nodes['CN=Gone,OU=Old,DC=contoso,DC=com'].Name | Should -Be 'Gone'
+        $r.Nodes.ContainsKey((DN 'Administrators' 'CN=Builtin')) | Should -BeTrue
+    }
+
+    It 'stops at the lookup cap and marks the rest unresolved' {
+        $edges = @{}
+        $helpdesk = G 'Helpdesk' 'S-1-5-21-1-2-3-1200' @((DN 'IT-Staff'))
+        $r = Resolve-NestGraph -Groups @($helpdesk) -Edges $edges -Lookup $script:Lookup -Cap 1
+        $r.CapReached | Should -BeTrue
+        $r.Lookups | Should -Be 1
+        $r.Nodes[(DN 'IT-Admins')].Unresolved | Should -BeTrue
+    }
+
+    It 'resolves children seen in the walk that were not exported' {
+        $edges = @{}
+        Add-NestEdge -Edges $edges -ParentDN (DN 'Helpdesk') -ChildDN (DN 'IT-Staff')
+        $helpdesk = G 'Helpdesk' 'S-1-5-21-1-2-3-1200'
+        $r = Resolve-NestGraph -Groups @($helpdesk) -Edges $edges -Lookup $script:Lookup
+        $r.Nodes[(DN 'IT-Staff')].Unresolved | Should -BeFalse
+        $r.Nodes[(DN 'IT-Staff')].Sid | Should -Be 'S-1-5-21-1-2-3-1201'
+    }
+
+    It 'accepts a SecurityIdentifier object as the SID' {
+        $edges = @{}
+        $g = G 'Sid1'
+        $g.SID = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544'
+        $r = Resolve-NestGraph -Groups @($g) -Edges $edges -Lookup $script:Lookup
+        $r.Nodes[(DN 'Sid1')].Sid | Should -Be 'S-1-5-32-544'
+    }
+}

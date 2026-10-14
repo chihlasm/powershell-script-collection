@@ -546,6 +546,76 @@ function Test-BuiltinGroup {
     return $false
 }
 
+function Resolve-NestGraph {
+    <#
+        Completes the nesting graph upward, for the report's Nesting tab.
+
+        Exported groups bring their memberOf (requested in Get-TargetGroup, no extra query).
+        Any group not in the export - a parent found through memberOf, or a child group the
+        walk saw - is looked up once with Get-ADGroup (via -Lookup), and its own memberOf is
+        followed, until nothing new appears. memberOf is a back-link held on the DC queried,
+        so nesting into groups in other domains of a forest may not appear.
+        https://learn.microsoft.com/windows/win32/adschema/a-memberof
+
+        Bounded: each DN is looked up at most once, and at most -Cap lookups are made. A
+        lookup that fails (deleted, no rights, other forest) and anything left past the cap
+        become 'unresolved' nodes, so every edge still points at a node and the run continues.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()]$Groups,
+        [Parameter(Mandatory)][hashtable]$Edges,
+        [Parameter(Mandatory)][scriptblock]$Lookup,
+        [hashtable]$Names = @{},
+        [int]$Cap = 1000
+    )
+
+    $nodes = @{}
+    $queue = New-Object 'System.Collections.Generic.Queue[string]'
+    $lookups = 0
+    $capReached = $false
+
+    function Add-ResolvedNode($Group, [bool]$InExport) {
+        $sid = ''
+        if ($Group.SID -is [string]) { $sid = $Group.SID }
+        elseif ($Group.SID) { $sid = [string]$Group.SID.Value }
+        $nodes[[string]$Group.DistinguishedName] = [PSCustomObject]@{
+            DN = [string]$Group.DistinguishedName; Name = [string]$Group.Name; Sam = [string]$Group.SamAccountName
+            Category = [string]$Group.GroupCategory; Scope = [string]$Group.GroupScope; Sid = $sid
+            InExport = $InExport; Unresolved = $false
+        }
+        foreach ($parent in $Group.MemberOf) {
+            if (-not $parent) { continue }
+            Add-NestEdge -Edges $Edges -ParentDN ([string]$parent) -ChildDN ([string]$Group.DistinguishedName)
+            if (-not $nodes.ContainsKey([string]$parent)) { $queue.Enqueue([string]$parent) }
+        }
+    }
+    function Add-UnresolvedNode([string]$DN) {
+        $name = if ($Names.ContainsKey($DN)) { [string]$Names[$DN] } else { Get-DnFirstValue $DN }
+        $nodes[$DN] = [PSCustomObject]@{ DN = $DN; Name = $name; Sam = ''; Category = ''; Scope = ''; Sid = ''
+            InExport = $false; Unresolved = $true }
+    }
+
+    foreach ($g in $Groups) { if ($g) { Add-ResolvedNode $g $true } }
+    foreach ($parent in [string[]]$Edges.Keys) {
+        if (-not $nodes.ContainsKey($parent)) { $queue.Enqueue($parent) }
+        foreach ($child in [string[]]$Edges[$parent].Keys) {
+            if (-not $nodes.ContainsKey($child)) { $queue.Enqueue($child) }
+        }
+    }
+
+    while ($queue.Count -gt 0) {
+        $dn = $queue.Dequeue()
+        if ($nodes.ContainsKey($dn)) { continue }
+        if ($lookups -ge $Cap) { $capReached = $true; Add-UnresolvedNode $dn; continue }
+        $lookups++
+        $found = $null
+        try { $found = & $Lookup $dn } catch { $found = $null }
+        if ($found) { Add-ResolvedNode $found $false } else { Add-UnresolvedNode $dn }
+    }
+
+    return [PSCustomObject]@{ Nodes = $nodes; CapReached = $capReached; Lookups = $lookups }
+}
+
 function Resolve-GroupMembership {
     <#
         Walks a group's membership tree.
