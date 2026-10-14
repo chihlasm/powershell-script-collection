@@ -58,6 +58,31 @@ Answers "what does this person have access to, and how did they get it?" — the
 
 **One CSV**, one row per user, for pivoting and filtering in Excel.
 
+### Three tabs: People, Groups, Overlap
+
+The HTML report has three views of the same data. No extra AD queries are made; the Groups and Overlap tabs are worked out in the browser from data embedded in the file, so filtering is instant and nothing needs re-running.
+
+| Tab | Answers | How it looks |
+|---|---|---|
+| **People** | What does this person have access to, and how? | One card per user (described above). |
+| **Groups** | Who is in this group, and how did they get in? | Group list on the left (sorted by size or name, with *dup* and *empty* markers); details on the right: type, location, owner, and every member with *direct*, *primary group*, or *via &lt;group&gt;*. Computers and nested groups are listed too. |
+| **Overlap** | Which groups share people? | Three sub-views, below. |
+
+#### Overlap sub-views
+
+- **Overlapping pairs** — every pair of groups sharing at least 2 people, ranked. Percent is shared people ÷ the smaller group's size. Each pair is labelled:
+  - **Near-duplicate** — 90%+ of even the larger group is shared: candidates to merge or retire.
+  - **Subset** — everyone in the smaller group is also in the larger one.
+  - **Contains** — one group is nested inside the other, so the overlap is by design; shown greyed and listed last.
+  - **Partial** — everything else.
+  Click a pair to list the shared people. Default minimum overlap is 50% (25/50/75/90% selectable).
+- **Grid** — a heat map of shared people, shown when the filter leaves 40 groups or fewer (type part of a group name, or someone's username, to narrow it). Click a cell to see who.
+- **Check a combination** — pick 2–5 groups and list everyone who holds *all* of them, e.g. two groups that should never go together.
+
+**Filters shared by Groups and Overlap:** search (matches group names *and* member names/usernames), type, scope, and an **Effective / Direct** toggle — Effective counts everyone with the group's access including through nesting; Direct counts only people added to the group itself (including those with it as their primary group). On Overlap, *Hide groups with 90%+ of users* (on by default) keeps All Staff–style groups from overlapping with everything.
+
+Overlap counts people (user accounts) only and follows the same enabled/disabled rule as the People tab. The report works in Internet Explorer 10/11, the built-in browser on Server 2012 / 2012 R2, as well as current browsers.
+
 ### Duplicate access paths are the headline finding
 
 Nesting routinely grants the same group by several routes at once — directly *and* through a nested chain, or through two branches that both lead to the same place. A report that quietly de-duplicates hides this, and the cost is a failed access removal: the account is pulled from one group, the ticket closes, and the user still has the access through the route nobody saw.
@@ -116,9 +141,9 @@ This script walks the tree one level at a time and records `MembershipType`, `Ne
 
 A user's primary group is stored in the **user's** `primaryGroupID` attribute — *"the relative identifier (RID) for the primary group of the user. By default, this is the RID for the Domain Users group."* It is **not a linked attribute**, so it is never written into the group's `member` attribute.
 
-The practical result: `Get-ADGroupMember "Domain Users"` returns essentially nothing on a perfectly healthy domain. A report that says "Domain Users: 0 members" looks like a finding and is actually a bug.
+Whether `Get-ADGroupMember` adds primary-group members back is not documented by Microsoft, and in practice it can — so neither the `member` attribute nor the cmdlet alone is a reliable answer.
 
-This script reconstructs those members by matching `primaryGroupID` against the group's RID and tags them `MembershipType = Primary`. Disable with `-SkipPrimaryGroupMembers` on very large domains where the extra query is expensive.
+This script queries `primaryGroupID` directly, tags those members `MembershipType = Primary`, and merges them with the cmdlet's results so each person appears once. (An earlier version simply appended them, which made primary-group members show up as false "duplicate access".) Disable with `-SkipPrimaryGroupMembers` on very large domains where the extra query is expensive.
 
 ### 3. Non-user members get silently dropped
 

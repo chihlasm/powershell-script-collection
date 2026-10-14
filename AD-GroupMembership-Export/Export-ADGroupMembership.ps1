@@ -900,6 +900,232 @@ function ConvertTo-UserAccessCsvRow {
 
 #endregion
 
+#region Group-centric model (Groups and Overlap tabs)
+# Like the user model above, a pure transform over rows already collected - no AD queries.
+# The result is embedded in the HTML as JSON and the browser computes overlap from it, so
+# filtering and the Effective/Direct toggle need no re-run.
+
+function ConvertFrom-DnEscape {
+    # Undoes DN escaping in one RDN value: '\,' -> ',' and '\2C' -> ','.
+    param([AllowEmptyString()][string]$Value)
+    $Value = [regex]::Replace($Value, '\\([0-9A-Fa-f]{2})', {
+        param($m) [string][char][Convert]::ToInt32($m.Groups[1].Value, 16)
+    })
+    return ($Value -replace '\\(.)', '$1')
+}
+
+function Get-DnRdnList {
+    # Splits a DN into its RDNs, respecting escaped commas ('CN=Doe\, Jane,OU=Staff').
+    param([AllowEmptyString()][string]$DistinguishedName)
+    $list = New-Object System.Collections.Generic.List[object]
+    if (-not $DistinguishedName) { return $list.ToArray() }
+    foreach ($m in [regex]::Matches($DistinguishedName, '(?:^|,)\s*([A-Za-z0-9-]+)=((?:\\.|[^,\\])*)')) {
+        $list.Add([PSCustomObject]@{ Type = $m.Groups[1].Value; Value = (ConvertFrom-DnEscape $m.Groups[2].Value) })
+    }
+    return $list.ToArray()
+}
+
+function Get-DnFirstValue {
+    # 'CN=Doe\, Jane,OU=Staff,DC=contoso,DC=com' -> 'Doe, Jane'. Used for ManagedBy, which
+    # holds a DN; showing the name avoids an extra AD lookup per group.
+    param([AllowEmptyString()][string]$DistinguishedName)
+    $rdns = @(Get-DnRdnList $DistinguishedName)
+    if ($rdns.Count -gt 0) { return $rdns[0].Value }
+    return $DistinguishedName
+}
+
+function ConvertTo-OuPath {
+    # 'CN=HR-Staff,OU=Groups,OU=HR,DC=contoso,DC=com' -> 'HR / Groups': where the object
+    # lives, top-down, without the domain components.
+    param([AllowEmptyString()][string]$DistinguishedName)
+    $rdns = @(Get-DnRdnList $DistinguishedName)
+    $names = New-Object System.Collections.Generic.List[string]
+    for ($i = $rdns.Count - 1; $i -ge 1; $i--) {
+        if ($rdns[$i].Type -ne 'DC') { $names.Add($rdns[$i].Value) }
+    }
+    return ($names.ToArray() -join ' / ')
+}
+
+function ConvertTo-GroupAccessModel {
+    <#
+        Builds the per-group data behind the Groups and Overlap tabs.
+
+        People: users only, with the same enabled/disabled rule as the People tab, so the
+        three tabs never disagree about who is in scope. Each person is stored once and
+        referenced by index; a 500-group domain stays well under a megabyte.
+
+        Groups: one entry per exported group, including empty ones. For every person the
+        strongest route is kept with a 'how' code - 0 direct, 1 primary group, 2 nested -
+        so the browser derives both views from one list: Direct = codes 0 and 1 (membership
+        configured on the group itself, which includes the primary group), Effective = all.
+        Computers and nested groups are kept separately: they are real members worth
+        listing, but overlap is about people.
+
+        'k' lists the exported groups this group contains at any depth, so the Overlap tab
+        can label a parent/child pair "Contains" instead of reporting it as a suspicious
+        100% overlap.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()]$Rows,
+        [Parameter(Mandatory)][AllowEmptyCollection()]$Groups,
+        [switch]$IncludeDisabled
+    )
+
+    $people = New-Object System.Collections.Generic.List[object]
+    $personIndex = @{}
+    $groupIndex = @{}
+    $work = New-Object System.Collections.Generic.List[object]
+
+    foreach ($g in @($Groups)) {
+        if (-not $g -or -not $g.DistinguishedName -or $groupIndex.ContainsKey($g.DistinguishedName)) { continue }
+        $groupIndex[$g.DistinguishedName] = $work.Count
+        $work.Add([PSCustomObject]@{
+            Group    = $g
+            People   = @{}
+            Others   = @{}
+            Contains = @{}
+        })
+    }
+
+    foreach ($r in @($Rows)) {
+        if (-not $r -or -not $r.MemberDN -or $r.MembershipType -eq 'EmptyGroup') { continue }
+        if (-not $groupIndex.ContainsKey($r.GroupDN)) { continue }
+        $entry = $work[$groupIndex[$r.GroupDN]]
+
+        $how = switch ($r.MembershipType) { 'Direct' { 0 } 'Primary' { 1 } default { 2 } }
+        $via = if ($how -eq 2) { [string]$r.NestedVia } else { '' }
+        $rank = Get-StrongestPathRank -MembershipType $r.MembershipType -NestingDepth $r.NestingDepth
+
+        if ($r.MemberType -eq 'user') {
+            # Enabled is $null when detail could not be read; unknown is not disabled.
+            if (-not $IncludeDisabled -and $r.Enabled -eq $false) { continue }
+            if (-not $personIndex.ContainsKey($r.MemberDN)) {
+                $personIndex[$r.MemberDN] = $people.Count
+                $people.Add([PSCustomObject]@{
+                    n = if ($r.DisplayName) { [string]$r.DisplayName } else { [string]$r.MemberName }
+                    s = [string]$r.MemberSamAccountName
+                    d = [string]$r.Department
+                    t = [string]$r.Title
+                    e = ($r.Enabled -ne $false)
+                })
+            }
+            $personId = $personIndex[$r.MemberDN]
+            if (-not $entry.People.ContainsKey($personId) -or $rank -lt $entry.People[$personId].Rank) {
+                $entry.People[$personId] = @{ Rank = $rank; How = $how; Via = $via }
+            }
+        }
+        else {
+            if ($r.MemberType -eq 'group' -and $groupIndex.ContainsKey($r.MemberDN)) {
+                $childId = $groupIndex[$r.MemberDN]
+                if ($childId -ne $groupIndex[$r.GroupDN]) { $entry.Contains[$childId] = $true }
+            }
+            if (-not $entry.Others.ContainsKey($r.MemberDN) -or $rank -lt $entry.Others[$r.MemberDN].Rank) {
+                $entry.Others[$r.MemberDN] = @{
+                    Rank = $rank; How = $how; Via = $via
+                    Name = [string]$r.MemberName; Type = [string]$r.MemberType
+                }
+            }
+        }
+    }
+
+    $groupsOut = New-Object System.Collections.Generic.List[object]
+    foreach ($entry in $work) {
+        $g = $entry.Group
+        $members = New-Object System.Collections.Generic.List[object]
+        foreach ($personId in ($entry.People.Keys | Sort-Object { $entry.People[$_].How }, { $people[$_].n })) {
+            $p = $entry.People[$personId]
+            $members.Add(@([int]$personId, [int]$p.How, [string]$p.Via))
+        }
+        $others = New-Object System.Collections.Generic.List[object]
+        foreach ($dn in ($entry.Others.Keys | Sort-Object { $entry.Others[$_].Type }, { $entry.Others[$_].Name })) {
+            $o = $entry.Others[$dn]
+            $others.Add(@([string]$o.Name, [string]$o.Type, [int]$o.How, [string]$o.Via))
+        }
+
+        $groupsOut.Add([PSCustomObject]@{
+            n  = [string]$g.Name
+            s  = [string]$g.SamAccountName
+            c  = [string]$g.GroupCategory
+            sc = [string]$g.GroupScope
+            ds = [string]$g.Description
+            ou = ConvertTo-OuPath $g.DistinguishedName
+            ow = if ($g.ManagedBy) { Get-DnFirstValue ([string]$g.ManagedBy) } else { '' }
+            m  = $members.ToArray()
+            o  = $others.ToArray()
+            k  = @($entry.Contains.Keys | ForEach-Object { [int]$_ } | Sort-Object)
+        })
+    }
+
+    return [PSCustomObject]@{
+        People = $people.ToArray()
+        Groups = $groupsOut.ToArray()
+    }
+}
+
+function ConvertTo-JsonText {
+    <#
+        JSON string literal that is safe inside <script type="application/json">.
+
+        Hand-rolled rather than ConvertTo-Json so the escaping is identical on PowerShell
+        3.0 through 7: '<', '>' and '&' become < etc., so a group named '</script>'
+        cannot end the data block early, and everything outside printable ASCII is \u-escaped
+        so the data survives whatever encoding the file is opened with.
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$Value)
+    if (-not $Value) { return '""' }
+    if ($Value -notmatch '[^\x20-\x7E]|["\\<>&]') { return '"' + $Value + '"' }
+
+    $sb = New-Object System.Text.StringBuilder ($Value.Length + 16)
+    [void]$sb.Append('"')
+    foreach ($ch in $Value.ToCharArray()) {
+        $code = [int]$ch
+        if ($code -eq 34)     { [void]$sb.Append('\"') }
+        elseif ($code -eq 92) { [void]$sb.Append('\\') }
+        elseif ($code -lt 32 -or $code -gt 126 -or $code -eq 60 -or $code -eq 62 -or $code -eq 38) {
+            [void]$sb.Append(('\u{0:x4}' -f $code))
+        }
+        else { [void]$sb.Append($ch) }
+    }
+    [void]$sb.Append('"')
+    return $sb.ToString()
+}
+
+function ConvertTo-ReportJson {
+    # Serialises the group model compactly; see ConvertTo-JsonText for the escaping rules.
+    param([Parameter(Mandatory)]$Model)
+
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append('{"people":[')
+    $first = $true
+    foreach ($p in @($Model.People)) {
+        if (-not $first) { [void]$sb.Append(',') }; $first = $false
+        [void]$sb.Append('{"n":').Append((ConvertTo-JsonText $p.n))
+        [void]$sb.Append(',"s":').Append((ConvertTo-JsonText $p.s))
+        [void]$sb.Append(',"d":').Append((ConvertTo-JsonText $p.d))
+        [void]$sb.Append(',"t":').Append((ConvertTo-JsonText $p.t))
+        [void]$sb.Append(',"e":').Append($(if ($p.e) { 'true' } else { 'false' })).Append('}')
+    }
+    [void]$sb.Append('],"groups":[')
+    $first = $true
+    foreach ($g in @($Model.Groups)) {
+        if (-not $first) { [void]$sb.Append(',') }; $first = $false
+        [void]$sb.Append('{')
+        foreach ($key in 'n', 's', 'c', 'sc', 'ds', 'ou', 'ow') {
+            if ($key -ne 'n') { [void]$sb.Append(',') }
+            [void]$sb.Append('"').Append($key).Append('":').Append((ConvertTo-JsonText $g.$key))
+        }
+        $members = @($g.m | ForEach-Object { '[' + $_[0] + ',' + $_[1] + ',' + (ConvertTo-JsonText $_[2]) + ']' })
+        $others  = @($g.o | ForEach-Object { '[' + (ConvertTo-JsonText $_[0]) + ',' + (ConvertTo-JsonText $_[1]) + ',' + $_[2] + ',' + (ConvertTo-JsonText $_[3]) + ']' })
+        [void]$sb.Append(',"m":[').Append(($members -join ',')).Append(']')
+        [void]$sb.Append(',"o":[').Append(($others -join ',')).Append(']')
+        [void]$sb.Append(',"k":[').Append((@($g.k) -join ',')).Append(']}')
+    }
+    [void]$sb.Append(']}')
+    return $sb.ToString()
+}
+
+#endregion
+
 #region User-report HTML
 
 function ConvertTo-HtmlSafe {
@@ -911,6 +1137,176 @@ function ConvertTo-HtmlSafe {
     param([AllowNull()][string]$Text)
     if ($null -eq $Text) { return '' }
     return [System.Net.WebUtility]::HtmlEncode($Text)
+}
+
+function Get-OverlapCoreScript {
+    <#
+        The overlap math, as browser JavaScript with no DOM access, so it is unit-tested with
+        Node (Tests\OverlapCore.Tests.ps1) exactly as the report runs it.
+
+        ES5 only - no arrow functions, let/const, Map/Set or NodeList.forEach - because the
+        report is opened on Server 2012 / 2012 R2, whose built-in browser is Internet
+        Explorer 10/11.
+
+        Pairs are counted from each person's list of groups rather than by comparing every
+        group with every other, so the cost is the sum over people of k(k-1)/2 for the k
+        groups they hold. estimateWork reports that sum so the page can ask for a narrower
+        filter instead of freezing on a pathological selection.
+    #>
+    return @'
+var OverlapCore = (function () {
+  'use strict';
+  var RANK = { duplicate: 0, subset: 1, partial: 2, contains: 3 };
+
+  function members(g, mode) {
+    var out = [], m = g.m, i;
+    for (i = 0; i < m.length; i++) {
+      if (mode !== 'direct' || m[i][1] < 2) { out.push(m[i][0]); }
+    }
+    return out;
+  }
+
+  function sizeOf(data, mode, gid) { return members(data.groups[gid], mode).length; }
+
+  function personGroups(data, mode, ids) {
+    var byPerson = {}, i, j, list, p;
+    for (i = 0; i < ids.length; i++) {
+      list = members(data.groups[ids[i]], mode);
+      for (j = 0; j < list.length; j++) {
+        p = list[j];
+        if (!byPerson.hasOwnProperty(p)) { byPerson[p] = []; }
+        byPerson[p].push(ids[i]);
+      }
+    }
+    return byPerson;
+  }
+
+  function estimateWork(byPerson) {
+    var w = 0, p, k;
+    for (p in byPerson) {
+      if (byPerson.hasOwnProperty(p)) { k = byPerson[p].length; w += k * (k - 1) / 2; }
+    }
+    return w;
+  }
+
+  function countPairs(byPerson) {
+    var counts = {}, p, gs, i, j, a, b, key;
+    for (p in byPerson) {
+      if (!byPerson.hasOwnProperty(p)) { continue; }
+      gs = byPerson[p];
+      for (i = 0; i < gs.length; i++) {
+        for (j = i + 1; j < gs.length; j++) {
+          a = gs[i]; b = gs[j];
+          key = a < b ? a + '|' + b : b + '|' + a;
+          counts[key] = (counts[key] || 0) + 1;
+        }
+      }
+    }
+    return counts;
+  }
+
+  function containsMap(data) {
+    var map = {}, i, j, k;
+    for (i = 0; i < data.groups.length; i++) {
+      k = data.groups[i].k || [];
+      for (j = 0; j < k.length; j++) { map[i + '|' + k[j]] = true; }
+    }
+    return map;
+  }
+
+  // Near-duplicate: shared people are 90%+ of the LARGER group, so both groups are
+  // almost the same people. Subset: every person in the smaller group is in the larger.
+  // Contains: one group is nested in the other, so overlap is expected, not a finding.
+  function label(shared, sizeA, sizeB, nested) {
+    var small = Math.min(sizeA, sizeB), big = Math.max(sizeA, sizeB);
+    if (nested) { return 'contains'; }
+    if (big > 0 && shared / big >= 0.9) { return 'duplicate'; }
+    if (shared === small) { return 'subset'; }
+    return 'partial';
+  }
+
+  function computePairs(data, opts) {
+    var byPerson = personGroups(data, opts.mode, opts.ids);
+    var work = estimateWork(byPerson);
+    if (opts.maxWork && work > opts.maxWork) { return { tooLarge: true, work: work, pairs: [] }; }
+    var counts = countPairs(byPerson), cmap = containsMap(data), size = {}, pairs = [];
+    var minShared = opts.minShared || 1, minPct = opts.minPct || 0;
+    var i, key, parts, a, b, t, shared, small, pct, lab, nestedAB, nestedBA;
+    for (i = 0; i < opts.ids.length; i++) { size[opts.ids[i]] = sizeOf(data, opts.mode, opts.ids[i]); }
+    for (key in counts) {
+      if (!counts.hasOwnProperty(key)) { continue; }
+      parts = key.split('|'); a = +parts[0]; b = +parts[1]; shared = counts[key];
+      small = Math.min(size[a], size[b]);
+      pct = small ? shared / small : 0;
+      if (shared < minShared || pct < minPct) { continue; }
+      nestedAB = !!cmap[a + '|' + b]; nestedBA = !!cmap[b + '|' + a];
+      lab = label(shared, size[a], size[b], nestedAB || nestedBA);
+      // Display order: the container first for 'contains', otherwise the larger group.
+      if ((lab === 'contains' && nestedBA && !nestedAB) || (lab !== 'contains' && size[b] > size[a])) {
+        t = a; a = b; b = t;
+      }
+      pairs.push({ a: a, b: b, shared: shared, pct: pct, label: lab, sizeA: size[a], sizeB: size[b] });
+    }
+    pairs.sort(function (x, y) {
+      if (RANK[x.label] !== RANK[y.label]) { return RANK[x.label] - RANK[y.label]; }
+      if (y.pct !== x.pct) { return y.pct - x.pct; }
+      if (y.shared !== x.shared) { return y.shared - x.shared; }
+      return data.groups[x.a].n < data.groups[y.a].n ? -1 : 1;
+    });
+    return { tooLarge: false, work: work, pairs: pairs };
+  }
+
+  function grid(data, opts) {
+    var byPerson = personGroups(data, opts.mode, opts.ids);
+    var work = estimateWork(byPerson);
+    if (opts.maxWork && work > opts.maxWork) { return { tooLarge: true, work: work }; }
+    var size = {}, i;
+    for (i = 0; i < opts.ids.length; i++) { size[opts.ids[i]] = sizeOf(data, opts.mode, opts.ids[i]); }
+    return { tooLarge: false, work: work, ids: opts.ids, size: size, counts: countPairs(byPerson) };
+  }
+
+  function sharedCount(gridResult, a, b) {
+    if (a === b) { return gridResult.size[a]; }
+    return gridResult.counts[a < b ? a + '|' + b : b + '|' + a] || 0;
+  }
+
+  // People who hold every group in ids (the combination check, and the "who are they"
+  // list behind a pair or a grid cell).
+  function intersect(data, mode, ids) {
+    if (!ids.length) { return []; }
+    var seen = {}, i, j, list, p, out = [];
+    for (i = 0; i < ids.length; i++) {
+      list = members(data.groups[ids[i]], mode);
+      for (j = 0; j < list.length; j++) {
+        p = list[j];
+        if (i === 0) { seen[p] = 1; } else if (seen[p] === i) { seen[p] = i + 1; }
+      }
+    }
+    for (p in seen) {
+      if (seen.hasOwnProperty(p) && seen[p] === ids.length) { out.push(+p); }
+    }
+    return out;
+  }
+
+  // Groups holding at least the threshold share of everyone in the report (All Staff and the like).
+  // They overlap with everything, so they are hidden from overlap by default.
+  function largeGroupIds(data, mode, threshold) {
+    var total = data.people.length, out = [], i;
+    if (!total) { return out; }
+    for (i = 0; i < data.groups.length; i++) {
+      if (sizeOf(data, mode, i) >= threshold * total && sizeOf(data, mode, i) >= 2) { out.push(i); }
+    }
+    return out;
+  }
+
+  return {
+    members: members, sizeOf: sizeOf, personGroups: personGroups, estimateWork: estimateWork,
+    countPairs: countPairs, label: label, computePairs: computePairs, grid: grid,
+    sharedCount: sharedCount, intersect: intersect, largeGroupIds: largeGroupIds
+  };
+}());
+if (typeof module !== 'undefined' && module.exports) { module.exports = OverlapCore; }
+'@
 }
 
 function New-UserAccessHtml {
@@ -926,10 +1322,13 @@ function New-UserAccessHtml {
         [switch]$ScopeIsNarrowed,
         [switch]$IncludeDisabled,
         [switch]$NestedExpanded,
-        [Parameter(Mandatory)][int]$GroupsProcessed
+        [Parameter(Mandatory)][int]$GroupsProcessed,
+        # From ConvertTo-GroupAccessModel. When omitted the report is the People view only.
+        $GroupModel
     )
 
     $generated = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $hasGroups = $null -ne $GroupModel
     $totalUsers = @($Users).Count
     $usersWithRedundancy = @($Users | Where-Object { $_.RedundantCount -gt 0 }).Count
     $totalSurplus = (@($Users | Measure-Object -Property SurplusPathCount -Sum).Sum)
@@ -981,6 +1380,7 @@ input[type=search]{flex:1;min-width:220px;background:var(--panel-2);border:1px s
   color:var(--text);border-radius:5px;padding:8px 12px;font-size:13px;font-family:inherit}
 input[type=search]:focus{outline:none;border-color:var(--accent)}
 main{padding:22px 28px 60px;max-width:1180px}
+main.wide{max-width:none}
 .note{background:var(--warn-bg);border:1px solid var(--warn-line);border-left:3px solid var(--warn);
   border-radius:4px;padding:12px 15px;margin-bottom:20px;font-size:12.5px;color:var(--text)}
 .note b{color:var(--warn)}
@@ -1025,7 +1425,103 @@ main{padding:22px 28px 60px;max-width:1180px}
 .empty{text-align:center;color:var(--dim);padding:50px 20px}
 footer{color:var(--dim);font-size:11.5px;padding:20px 28px;border-top:1px solid var(--line)}
 mark{background:var(--accent);color:#0d1116;border-radius:2px}
+/* ---- tabs ---- */
+.tabs{display:flex;gap:2px;margin-top:14px}
+.tabbtn{background:none;border:1px solid transparent;border-bottom:0;color:var(--muted);font:inherit;
+  font-size:13px;padding:7px 15px;border-radius:6px 6px 0 0;cursor:pointer}
+.tabbtn:hover{color:var(--text)}
+.tabbtn.on{background:var(--bg);border-color:var(--line);color:var(--text);font-weight:600}
+.tabbtn .cnt{color:var(--dim);font-weight:400;margin-left:5px;font-variant-numeric:tabular-nums}
+header.tabbed{padding-bottom:0}
+.tabpane{display:none}.tabpane.on{display:block}
+.pbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:16px}
+.pbar input[type=search]{flex:1;min-width:220px}
+/* ---- shared filter bar (Groups / Overlap) ---- */
+.fbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+.fbar input[type=search]{flex:1;min-width:200px}
+.fbar select,.fbar label.chk{background:var(--panel-2);border:1px solid var(--line);color:var(--text);
+  border-radius:5px;padding:6px 8px;font:inherit;font-size:12.5px}
+.fbar label.chk{gap:6px;align-items:center;cursor:pointer}
+.seg{display:flex;border:1px solid var(--line);border-radius:5px;overflow:hidden}
+.seg button{background:var(--panel-2);border:0;color:var(--muted);font:inherit;font-size:12.5px;padding:6px 11px;cursor:pointer}
+.seg button.on{background:var(--accent);color:#0d1116;font-weight:600}
+.fbar .only-ov,.fbar .only-gr{display:none}
+.fbar.show-ov .only-ov,.fbar.show-gr .only-gr{display:flex}
+.focus{display:flex;gap:10px;align-items:center;font-size:13px;margin-bottom:10px;color:var(--muted)}
+.focus b{color:var(--text)}
+/* ---- Groups tab: list + detail ---- */
+.gl-wrap{display:flex;border:1px solid var(--line);border-radius:7px;overflow:hidden;min-height:420px;background:var(--panel)}
+.gl-list{width:38%;max-width:420px;border-right:1px solid var(--line);overflow-y:auto;max-height:70vh}
+.gl-item{display:flex;align-items:center;gap:7px;padding:8px 12px;border-bottom:1px solid var(--line);cursor:pointer;font-size:13px}
+.gl-item:hover{background:var(--panel-2)}
+.gl-item.on{background:var(--panel-2);box-shadow:inset 3px 0 0 var(--accent)}
+.gl-item .nm2{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gl-item .n{color:var(--dim);font-variant-numeric:tabular-nums;font-size:12px}
+.gl-item.empty .nm2{color:var(--off)}
+.mk{font-size:10px;padding:1px 6px;border-radius:9px;border:1px solid var(--line);color:var(--muted)}
+.mk.dup{background:var(--warn-bg);border-color:var(--warn-line);color:var(--warn);font-weight:600}
+.mk.emp{border-style:dashed;color:var(--off)}
+.gd{flex:1;padding:16px 20px;min-width:0;overflow-y:auto;max-height:70vh}
+.gd h2{margin:0;font-size:18px}
+.gd .sam{margin-left:8px}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 14px;font-size:12.5px;margin:10px 0 12px;color:var(--muted)}
+.kv b{color:var(--dim);font-weight:600}
+.badges{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+.badge2{font-size:11px;padding:3px 9px;border-radius:12px;border:1px solid var(--line);color:var(--muted);background:none;font-family:inherit}
+.badge2.dup{background:var(--warn-bg);border-color:var(--warn-line);color:var(--warn);font-weight:600;cursor:pointer}
+.badge2.dup:hover{text-decoration:underline}
+table.mt{width:100%;border-collapse:collapse;font-size:12.5px;margin-bottom:16px}
+table.mt th{text-align:left;color:var(--dim);font-weight:600;font-size:10.5px;text-transform:uppercase;
+  letter-spacing:.5px;padding:5px 8px;border-bottom:1px solid var(--line)}
+table.mt td{padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+table.mt .how{font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+.off{color:var(--off)}
+.h3{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim);margin:6px 0 6px;font-weight:600}
+.hint{color:var(--dim);font-size:12.5px;padding:30px 10px;text-align:center}
+/* ---- Overlap tab ---- */
+.subtabs{display:flex;gap:18px;border-bottom:1px solid var(--line);margin-bottom:14px}
+.subtabs button{background:none;border:0;border-bottom:2px solid transparent;color:var(--muted);font:inherit;
+  font-size:13px;padding:6px 0;cursor:pointer;margin-bottom:-1px}
+.subtabs button.on{color:var(--text);border-bottom-color:var(--accent);font-weight:600}
+.ov-pair{background:var(--panel);border:1px solid var(--line);border-radius:6px;margin-bottom:6px}
+.ov-ph{display:flex;align-items:center;gap:10px;padding:8px 12px;cursor:pointer}
+.ov-ph:hover{background:var(--panel-2)}
+.ov-ph .gn{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ov-ph .x{color:var(--dim);margin:0 6px}
+.ov-ph .ct{color:var(--dim);font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.meter{width:70px;height:6px;background:var(--line);border-radius:3px;overflow:hidden;flex-shrink:0}
+.meter i{display:block;height:100%;background:var(--accent)}
+.pct{width:44px;text-align:right;font-variant-numeric:tabular-nums}
+.lab{font-size:10.5px;padding:2px 8px;border-radius:10px;border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+.lab.duplicate{background:var(--warn-bg);border-color:var(--warn-line);color:var(--warn);font-weight:600}
+.lab.subset{color:var(--accent);border-color:var(--accent-dim)}
+.lab.contains{color:var(--off);border-style:dashed}
+.ov-pair.contains .gn{color:var(--muted)}
+.ov-body{display:none;border-top:1px solid var(--line);padding:8px 12px;background:var(--panel-2)}
+.ov-pair.open .ov-body{display:block}
+.plist{font-size:12.5px;columns:3 220px;column-gap:20px}
+.plist div{break-inside:avoid;padding:2px 0}
+.more{margin:10px auto;display:block}
+.gridwrap{overflow:auto;max-height:70vh;border:1px solid var(--line);border-radius:6px;background:var(--panel)}
+table.gx{border-collapse:separate;border-spacing:2px;font-size:11.5px}
+table.gx th{color:var(--muted);font-weight:500;white-space:nowrap;padding:3px 6px;text-align:left;
+  position:sticky;background:var(--panel)}
+table.gx thead th{top:0;height:120px;vertical-align:bottom}
+table.gx thead th span{display:inline-block;writing-mode:vertical-rl;transform:rotate(180deg);max-height:115px;overflow:hidden;text-overflow:ellipsis}
+table.gx tbody th{left:0;max-width:200px;overflow:hidden;text-overflow:ellipsis}
+table.gx td{width:30px;min-width:30px;height:26px;text-align:center;border-radius:3px;cursor:pointer;font-variant-numeric:tabular-nums}
+table.gx td.z{color:var(--dim);cursor:default}
+table.gx td.self{background:var(--line);color:var(--muted);cursor:default}
+table.gx td:not(.z):not(.self):hover{outline:2px solid var(--accent)}
+.combo{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.chip{display:inline-flex;gap:6px;align-items:center;background:var(--panel-2);border:1px solid var(--accent-dim);
+  color:var(--accent);border-radius:14px;padding:3px 6px 3px 11px;font-size:12.5px}
+.chip button{background:none;border:0;color:var(--muted);cursor:pointer;font-size:14px;line-height:1;padding:0 3px}
+.chip button:hover{color:var(--text)}
+.result{font-size:14px;margin:10px 0}
+.result b{color:var(--warn)}
 @media(max-width:760px){
+  .gl-wrap{flex-direction:column}.gl-list{width:auto;max-width:none;max-height:40vh;border-right:0;border-bottom:1px solid var(--line)}
   .uhead{flex-wrap:wrap}.tags{width:100%;justify-content:flex-start}
   main,header{padding-left:16px;padding-right:16px}
 }
@@ -1034,16 +1530,37 @@ mark{background:var(--accent);color:#0d1116;border-radius:2px}
     $null = $sb.AppendLine('</head><body>')
 
     # ---- header ----
-    $null = $sb.AppendLine('<header><div class="htop"><div>')
+    $headerClass = if ($hasGroups) { ' class="tabbed"' } else { '' }
+    $null = $sb.AppendLine("<header$headerClass><div class=""htop""><div>")
     $null = $sb.AppendLine("<h1>Who has access to what &mdash; <span class=""dom"">$(ConvertTo-HtmlSafe $DomainName)</span></h1>")
     $null = $sb.AppendLine("<div class=""sub"">Generated $generated &middot; $(ConvertTo-HtmlSafe $ScopeNote)</div>")
     $null = $sb.AppendLine('</div><div style="display:flex;gap:8px">')
     $null = $sb.AppendLine('<button class="btn" id="tgTheme" onclick="toggleTheme()">Light mode</button>')
-    $null = $sb.AppendLine('<button class="btn" onclick="setAll(true)">Expand all</button>')
-    $null = $sb.AppendLine('<button class="btn" onclick="setAll(false)">Collapse all</button>')
     $null = $sb.AppendLine('</div></div>')
 
-    $null = $sb.AppendLine('<div class="stats">')
+    if ($hasGroups) {
+        $groupCount = @($GroupModel.Groups).Count
+        $null = $sb.AppendLine('<nav class="tabs" role="tablist">')
+        $null = $sb.AppendLine("<button class=""tabbtn on"" id=""tb-people"" onclick=""showTab('people')"">People<span class=""cnt"">$totalUsers</span></button>")
+        $null = $sb.AppendLine("<button class=""tabbtn"" id=""tb-groups"" onclick=""showTab('groups')"">Groups<span class=""cnt"">$groupCount</span></button>")
+        $null = $sb.AppendLine('<button class="tabbtn" id="tb-overlap" onclick="showTab(''overlap'')">Overlap<span class="cnt" id="ovCount"></span></button>')
+        $null = $sb.AppendLine('</nav>')
+    }
+    $null = $sb.AppendLine('</header>')
+
+    $null = $sb.AppendLine('<main>')
+
+    # Scope notes apply to every tab, so they sit above the tab panes.
+    if ($ScopeIsNarrowed) {
+        $null = $sb.AppendLine('<div class="note"><b>Partial view.</b> This run was limited to a subset of groups, so each person&rsquo;s list below covers only the groups that were scanned &mdash; it is not their complete domain membership.</div>')
+    }
+    if (-not $NestedExpanded) {
+        $null = $sb.AppendLine('<div class="note"><b>Direct membership only.</b> Nested groups were not expanded, so inherited access is missing and duplicate paths cannot be detected. Re-run with <code>-IncludeNested</code> for an access review.</div>')
+    }
+
+    # ---- People tab ----
+    $null = $sb.AppendLine('<section class="tabpane on" id="tab-people">')
+    $null = $sb.AppendLine('<div class="stats" style="margin:0 0 16px;border:0;padding:0">')
     $null = $sb.AppendLine("<div class=""stat""><div class=""n"">$totalUsers</div><div class=""l"">Users</div></div>")
     $null = $sb.AppendLine("<div class=""stat""><div class=""n"">$GroupsProcessed</div><div class=""l"">Groups scanned</div></div>")
     $alertCls = if ($usersWithRedundancy -gt 0) { ' alert' } else { '' }
@@ -1051,19 +1568,13 @@ mark{background:var(--accent);color:#0d1116;border-radius:2px}
     $null = $sb.AppendLine("<div class=""stat$alertCls""><div class=""n"">$totalSurplus</div><div class=""l"">Extra access paths</div></div>")
     $null = $sb.AppendLine('</div>')
 
-    $null = $sb.AppendLine('<div class="controls">')
+    $null = $sb.AppendLine('<div class="pbar">')
     $null = $sb.AppendLine('<input type="search" id="q" placeholder="Filter by name, username, department, or group..." oninput="applyFilter()">')
     $null = $sb.AppendLine('<button class="btn" id="tgRed" onclick="toggleRedundant()">Show only duplicate access</button>')
-    $null = $sb.AppendLine('</div></header>')
+    $null = $sb.AppendLine('<button class="btn" onclick="setAll(true)">Expand all</button>')
+    $null = $sb.AppendLine('<button class="btn" onclick="setAll(false)">Collapse all</button>')
+    $null = $sb.AppendLine('</div>')
 
-    $null = $sb.AppendLine('<main>')
-
-    if ($ScopeIsNarrowed) {
-        $null = $sb.AppendLine('<div class="note"><b>Partial view.</b> This run was limited to a subset of groups, so each person&rsquo;s list below covers only the groups that were scanned &mdash; it is not their complete domain membership.</div>')
-    }
-    if (-not $NestedExpanded) {
-        $null = $sb.AppendLine('<div class="note"><b>Direct membership only.</b> Nested groups were not expanded, so inherited access is missing and duplicate paths cannot be detected. Re-run with <code>-IncludeNested</code> for an access review.</div>')
-    }
     if ($usersWithRedundancy -gt 0) {
         $null = $sb.AppendLine("<div class=""note""><b>$usersWithRedundancy user(s) hold the same group through more than one path.</b> Removing one path will not remove their access &mdash; every route has to go. These are listed first and marked <b>DUPLICATE</b> below.</div>")
     }
@@ -1137,36 +1648,459 @@ mark{background:var(--accent);color:#0d1116;border-radius:2px}
         $null = $sb.AppendLine('</div></div>')
     }
 
+    $null = $sb.AppendLine('<div class="empty" id="noMatch" style="display:none">No users match this filter.</div>')
+    $null = $sb.AppendLine('</section>')
+
+    if ($hasGroups) {
+        # ---- shared filter bar + Groups and Overlap tabs (rendered by script from the data) ----
+        $null = $sb.AppendLine(@'
+<div class="fbar" id="fbar" style="display:none">
+<input type="search" id="gq" placeholder="Filter by group name, or by a person's name or username...">
+<select id="gtype" title="Group type"><option value="">All types</option><option value="Security">Security</option><option value="Distribution">Distribution</option></select>
+<select id="gscope" title="Group scope"><option value="">All scopes</option><option value="DomainLocal">Domain local</option><option value="Global">Global</option><option value="Universal">Universal</option></select>
+<div class="seg" title="Effective: everyone with the group's access, including through nested groups. Direct: only people added to the group itself (including those with it as their primary group).">
+<button id="mEff" class="on">Effective</button><button id="mDir">Direct</button></div>
+<select id="gsort" class="only-gr"><option value="size">Sort: largest first</option><option value="name">Sort: name</option></select>
+<select id="gmin" class="only-ov" title="Only show pairs where at least this share of the smaller group is in both"><option value="0.25">Min overlap 25%</option><option value="0.5" selected>Min overlap 50%</option><option value="0.75">Min overlap 75%</option><option value="0.9">Min overlap 90%</option></select>
+<label class="chk only-ov" title="Groups like All Staff overlap with everything and drown out real findings"><input type="checkbox" id="ghide" checked> Hide groups with 90%+ of users</label>
+</div>
+<section class="tabpane" id="tab-groups">
+<div class="gl-wrap"><div class="gl-list" id="glist"></div><div class="gd" id="gdetail"></div></div>
+</section>
+<section class="tabpane" id="tab-overlap">
+<div class="subtabs"><button id="st-pairs" class="on">Overlapping pairs</button><button id="st-grid">Grid</button><button id="st-combo">Check a combination</button></div>
+<div id="ovbody"></div>
+</section>
+'@)
+    }
+
     $null = $sb.AppendLine('</main>')
     $disabledNote = if ($IncludeDisabled) { 'Disabled accounts included.' } else { 'Enabled accounts only - re-run with -IncludeDisabled to include disabled users.' }
     $null = $sb.AppendLine("<footer>$(ConvertTo-HtmlSafe $disabledNote) Generated by Export-ADGroupMembership.ps1 -UserReport on $generated.</footer>")
 
+    # ES5 throughout (see Get-OverlapCoreScript): no NodeList.forEach, classList.toggle(x, bool)
+    # or dataset, none of which work in Internet Explorer on Server 2012 / 2012 R2.
     $null = $sb.AppendLine(@'
 <script>
-function setAll(open){document.querySelectorAll('.card').forEach(function(c){
-  if(c.style.display!=='none')c.classList.toggle('open',open);});}
-var redOnly=false;
-function toggleRedundant(){redOnly=!redOnly;
-  document.getElementById('tgRed').classList.toggle('on',redOnly);applyFilter();}
-function applyFilter(){
-  var q=document.getElementById('q').value.toLowerCase().trim(),shown=0;
-  document.querySelectorAll('.card').forEach(function(c){
-    var okQ=!q||c.dataset.h.indexOf(q)>-1;
-    var okR=!redOnly||parseInt(c.dataset.r,10)>0;
-    var vis=okQ&&okR;c.style.display=vis?'':'none';if(vis)shown++;
-    if(vis&&q&&!c.classList.contains('open'))c.classList.add('open');});
-  var e=document.getElementById('noMatch');
-  if(e)e.style.display=shown?'none':'';}
-function toggleTheme(){
-  var r=document.documentElement,to=r.getAttribute('data-theme')==='light'?'dark':'light';
-  r.setAttribute('data-theme',to);
-  document.getElementById('tgTheme').textContent=to==='light'?'Dark mode':'Light mode';}
-document.addEventListener('DOMContentLoaded',function(){
-  var m=document.createElement('div');m.id='noMatch';m.className='empty';
-  m.style.display='none';m.textContent='No users match this filter.';
-  document.querySelector('main').appendChild(m);});
+function eachEl(sel, fn) { var l = document.querySelectorAll(sel), i; for (i = 0; i < l.length; i++) { fn(l[i]); } }
+function hasCls(el, c) { return (' ' + el.className + ' ').indexOf(' ' + c + ' ') > -1; }
+function setCls(el, c, on) {
+  if (!el) { return; }
+  var has = hasCls(el, c);
+  if (on && !has) { el.className = (el.className ? el.className + ' ' : '') + c; }
+  else if (!on && has) { el.className = (' ' + el.className + ' ').replace(' ' + c + ' ', ' ').replace(/^\s+|\s+$/g, ''); }
+}
+function setAll(open) { eachEl('#tab-people .card', function (c) { if (c.style.display !== 'none') { setCls(c, 'open', open); } }); }
+var redOnly = false;
+function toggleRedundant() { redOnly = !redOnly; setCls(document.getElementById('tgRed'), 'on', redOnly); applyFilter(); }
+function applyFilter() {
+  var q = document.getElementById('q').value.toLowerCase().replace(/^\s+|\s+$/g, ''), shown = 0;
+  eachEl('#tab-people .card', function (c) {
+    var okQ = !q || (c.getAttribute('data-h') || '').indexOf(q) > -1;
+    var okR = !redOnly || parseInt(c.getAttribute('data-r'), 10) > 0;
+    var vis = okQ && okR;
+    c.style.display = vis ? '' : 'none';
+    if (vis) { shown++; if (q) { setCls(c, 'open', true); } }
+  });
+  document.getElementById('noMatch').style.display = shown ? 'none' : '';
+}
+function toggleTheme() {
+  var r = document.documentElement, to = r.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+  r.setAttribute('data-theme', to);
+  document.getElementById('tgTheme').textContent = to === 'light' ? 'Dark mode' : 'Light mode';
+}
 </script>
 '@)
+
+    if ($hasGroups) {
+        $null = $sb.Append('<script type="application/json" id="report-data">')
+        $null = $sb.Append((ConvertTo-ReportJson -Model $GroupModel))
+        $null = $sb.AppendLine('</script>')
+        $null = $sb.AppendLine('<script>')
+        $null = $sb.AppendLine((Get-OverlapCoreScript))
+        $null = $sb.AppendLine('</script>')
+        $null = $sb.AppendLine(@'
+<script>
+(function () {
+  var dataEl = document.getElementById('report-data');
+  var data = JSON.parse(dataEl.text || dataEl.textContent);
+  var C = OverlapCore;
+  var MAX_WORK = 3000000, GRID_MAX = 40, PAGE = 200, LARGE = 0.9, COMBO_MAX = 5;
+  var LABELS = { duplicate: 'Near-duplicate', subset: 'Subset', partial: 'Partial', contains: 'Contains' };
+  var st = { tab: 'people', mode: 'effective', q: '', type: '', scope: '', sort: 'size', minPct: 0.5,
+             hide: true, sel: -1, sub: 'pairs', shown: PAGE, combo: [], focus: -1 };
+  var dupCache = {}, largeCache = {}, timer = null;
+
+  function $(id) { return document.getElementById(id); }
+  function esc(s) {
+    return String(s === null || s === undefined ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  function fmt(n) { return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+  function closest(el, cls, stop) { while (el && el !== stop) { if (el.className && hasCls(el, cls)) { return el; } el = el.parentNode; } return null; }
+  function indexOf(arr, v) { var i; for (i = 0; i < arr.length; i++) { if (arr[i] === v) { return i; } } return -1; }
+  function byName(a, b) { var x = data.groups[a].n.toLowerCase(), y = data.groups[b].n.toLowerCase(); return x < y ? -1 : (x > y ? 1 : 0); }
+  function size(gid) { return C.sizeOf(data, st.mode, gid); }
+  function howText(how, via) { return how === 0 ? 'direct' : (how === 1 ? 'primary group' : 'via ' + via); }
+  function personLabel(p) { return esc(p.n || p.s) + (p.e ? '' : ' <span class="off">&middot; disabled</span>'); }
+
+  // ---- filtering ----
+  function passesType(gid) {
+    var g = data.groups[gid];
+    return (!st.type || g.c === st.type) && (!st.scope || g.sc === st.scope);
+  }
+  function passesQuery(gid) {
+    var g = data.groups[gid], q = st.q, i, p;
+    if (!q) { return true; }
+    if ((g.n + ' ' + g.s).toLowerCase().indexOf(q) > -1) { return true; }
+    for (i = 0; i < g.m.length; i++) {
+      if (st.mode === 'direct' && g.m[i][1] === 2) { continue; }
+      p = data.people[g.m[i][0]];
+      if ((p.n + ' ' + p.s).toLowerCase().indexOf(q) > -1) { return true; }
+    }
+    for (i = 0; i < g.o.length; i++) { if (g.o[i][0].toLowerCase().indexOf(q) > -1) { return true; } }
+    return false;
+  }
+  function largeSet() {
+    if (!largeCache[st.mode]) {
+      var ids = C.largeGroupIds(data, st.mode, LARGE), set = {}, i;
+      for (i = 0; i < ids.length; i++) { set[ids[i]] = true; }
+      largeCache[st.mode] = set;
+    }
+    return largeCache[st.mode];
+  }
+  function collect(useQuery, useHide) {
+    var out = [], i, large = useHide && st.hide ? largeSet() : {};
+    for (i = 0; i < data.groups.length; i++) {
+      if (passesType(i) && (!useQuery || passesQuery(i)) && !large[i]) { out.push(i); }
+    }
+    return out;
+  }
+
+  // Near-duplicate partners for the Groups tab badges, across all groups, per mode.
+  function dupPartners() {
+    if (dupCache[st.mode]) { return dupCache[st.mode]; }
+    var all = [], map = {}, i, res, p;
+    for (i = 0; i < data.groups.length; i++) { all.push(i); }
+    res = C.computePairs(data, { mode: st.mode, ids: all, minPct: 0.9, minShared: 2, maxWork: MAX_WORK });
+    for (i = 0; i < res.pairs.length; i++) {
+      p = res.pairs[i];
+      if (p.label !== 'duplicate') { continue; }
+      (map[p.a] = map[p.a] || []).push(p);
+      (map[p.b] = map[p.b] || []).push(p);
+    }
+    dupCache[st.mode] = map;
+    return map;
+  }
+
+  // ---- Groups tab ----
+  function renderGroups() {
+    var ids = collect(true, false), dups = dupPartners(), html = [], i, gid, g, empty;
+    ids.sort(function (a, b) { return st.sort === 'name' ? byName(a, b) : (size(b) - size(a) || byName(a, b)); });
+    if (indexOf(ids, st.sel) < 0) { st.sel = ids.length ? ids[0] : -1; }
+    for (i = 0; i < ids.length; i++) {
+      gid = ids[i]; g = data.groups[gid]; empty = !g.m.length && !g.o.length;
+      html.push('<div class="gl-item' + (gid === st.sel ? ' on' : '') + (empty ? ' empty' : '') + '" data-g="' + gid + '">' +
+        '<span class="nm2" title="' + esc(g.n) + '">' + esc(g.n) + '</span>' +
+        (dups[gid] ? '<span class="mk dup" title="Near-duplicate of another group">dup</span>' : '') +
+        (empty ? '<span class="mk emp">empty</span>' : '') +
+        '<span class="n">' + fmt(size(gid)) + '</span></div>');
+    }
+    if (!ids.length) { html.push('<div class="hint">No groups match this filter.</div>'); }
+    $('glist').innerHTML = html.join('');
+    renderDetail();
+  }
+
+  function renderDetail() {
+    var el = $('gdetail');
+    if (st.sel < 0) { el.innerHTML = '<div class="hint">No group selected.</div>'; return; }
+    var g = data.groups[st.sel], h = [], rows = [], other = [], i, m, p, o, n = [0, 0, 0], parts = [], dups = dupPartners()[st.sel] || [];
+    for (i = 0; i < g.m.length; i++) {
+      m = g.m[i];
+      if (st.mode === 'direct' && m[1] === 2) { continue; }
+      n[m[1]]++; p = data.people[m[0]];
+      rows.push('<tr><td>' + personLabel(p) + '</td><td class="how">' + esc(p.s) + '</td><td class="how">' +
+        esc(howText(m[1], m[2])) + '</td><td>' + esc(p.d) + '</td></tr>');
+    }
+    for (i = 0; i < g.o.length; i++) {
+      o = g.o[i];
+      if (st.mode === 'direct' && o[2] === 2) { continue; }
+      other.push('<tr><td>' + esc(o[0]) + '</td><td>' + esc(o[1]) + '</td><td class="how">' + esc(howText(o[2], o[3])) + '</td></tr>');
+    }
+    if (n[0]) { parts.push(n[0] + ' direct'); }
+    if (n[1]) { parts.push(n[1] + ' by primary group'); }
+    if (n[2]) { parts.push(n[2] + ' through nested groups'); }
+    h.push('<h2>' + esc(g.n) + (g.s && g.s !== g.n ? '<span class="sam">' + esc(g.s) + '</span>' : '') + '</h2>');
+    h.push('<div class="kv"><b>Type</b><span>' + esc(g.c) + ' &middot; ' + esc(g.sc) + '</span>' +
+      (g.ou ? '<b>Where</b><span>' + esc(g.ou) + '</span>' : '') +
+      '<b>Owner</b><span>' + (g.ow ? esc(g.ow) : '<span class="off">not set</span>') + '</span>' +
+      (g.ds ? '<b>Description</b><span>' + esc(g.ds) + '</span>' : '') +
+      '<b>People</b><span>' + (rows.length ? rows.length + (parts.length ? ' (' + parts.join(', ') + ')' : '') : 'none') + '</span></div>');
+    if (dups.length || g.k.length) {
+      h.push('<div class="badges">');
+      for (i = 0; i < dups.length; i++) {
+        o = dups[i].a === st.sel ? dups[i].b : dups[i].a;
+        h.push('<button class="badge2 dup" data-goto="' + o + '" title="Show this group\'s overlaps on the Overlap tab">Near-duplicate of ' +
+          esc(data.groups[o].n) + ': ' + fmt(dups[i].shared) + ' of ' + fmt(Math.max(dups[i].sizeA, dups[i].sizeB)) + ' people in common</button>');
+      }
+      if (g.k.length) { h.push('<span class="badge2">Contains ' + g.k.length + ' group' + (g.k.length === 1 ? '' : 's') + '</span>'); }
+      h.push('</div>');
+    }
+    if (rows.length) {
+      h.push('<div class="h3">People</div><table class="mt"><tr><th>Name</th><th>Username</th><th>How</th><th>Department</th></tr>' + rows.join('') + '</table>');
+    }
+    if (other.length) {
+      h.push('<div class="h3">Groups and computers</div><table class="mt"><tr><th>Name</th><th>Type</th><th>How</th></tr>' + other.join('') + '</table>');
+    }
+    if (!rows.length && !other.length) {
+      h.push('<div class="hint">' + (st.mode === 'direct' && g.m.length ? 'No members were added to this group directly. Switch to Effective to see members through nested groups.' : 'This group has no members.') + '</div>');
+    }
+    el.innerHTML = h.join('');
+  }
+
+  // ---- Overlap tab ----
+  function setPairCount(text) { $('ovCount').innerHTML = text ? esc(text) : ''; }
+
+  function peopleList(ids) {
+    var ppl = C.intersect(data, st.mode, ids), out = [], i;
+    ppl.sort(function (a, b) { var x = (data.people[a].n || '').toLowerCase(), y = (data.people[b].n || '').toLowerCase(); return x < y ? -1 : (x > y ? 1 : 0); });
+    for (i = 0; i < ppl.length; i++) { out.push('<div>' + personLabel(data.people[ppl[i]]) + ' <span class="how off">' + esc(data.people[ppl[i]].s) + '</span></div>'); }
+    return '<div class="plist">' + (out.length ? out.join('') : '<div class="off">Nobody.</div>') + '</div>';
+  }
+
+  function renderPairs(body) {
+    // Pairs come from every group passing the type/scope filters; the search then keeps
+    // pairs where EITHER group matches, so searching one group shows all of its partners.
+    var ids = collect(false, true);
+    var res = C.computePairs(data, { mode: st.mode, ids: ids, minPct: st.minPct, minShared: 2, maxWork: MAX_WORK });
+    if (res.tooLarge) {
+      setPairCount('');
+      body.innerHTML = '<div class="hint">This selection is too large to compare quickly (' + fmt(res.work) + ' group combinations). Turn on &ldquo;Hide groups with 90%+ of users&rdquo; or narrow the type and scope filters.</div>';
+      return;
+    }
+    var pairs = [], i, p, a, b, pc, h = [];
+    for (i = 0; i < res.pairs.length; i++) {
+      p = res.pairs[i];
+      if (st.focus >= 0) { if (p.a === st.focus || p.b === st.focus) { pairs.push(p); } }
+      else if (!st.q || passesQuery(p.a) || passesQuery(p.b)) { pairs.push(p); }
+    }
+    setPairCount(st.focus >= 0 ? '' : fmt(pairs.length));
+    if (st.focus >= 0) {
+      h.push('<div class="focus">Showing pairs that include <b>' + esc(data.groups[st.focus].n) + '</b>' +
+        '<button class="btn" data-act="unfocus">Show all pairs</button></div>');
+    }
+    if (!pairs.length) {
+      body.innerHTML = h.join('') + '<div class="hint">No pairs of groups share ' + Math.round(st.minPct * 100) + '% or more of their people' +
+        (st.q || st.focus >= 0 ? ' for this selection' : '') + '. Try a lower minimum overlap.</div>';
+      return;
+    }
+    for (i = 0; i < pairs.length && i < st.shown; i++) {
+      p = pairs[i]; a = data.groups[p.a]; b = data.groups[p.b]; pc = Math.round(p.pct * 100);
+      h.push('<div class="ov-pair ' + p.label + '" data-a="' + p.a + '" data-b="' + p.b + '"><div class="ov-ph">' +
+        '<span class="gn" title="' + esc(a.n) + ' / ' + esc(b.n) + '">' + esc(a.n) + '<span class="x">' + (p.label === 'contains' ? 'contains' : '&times;') + '</span>' + esc(b.n) + '</span>' +
+        '<span class="ct">' + fmt(p.shared) + ' shared &middot; ' + fmt(p.sizeA) + ' / ' + fmt(p.sizeB) + '</span>' +
+        '<div class="meter"><i style="width:' + pc + '%"></i></div><span class="pct">' + pc + '%</span>' +
+        '<span class="lab ' + p.label + '">' + LABELS[p.label] + '</span></div><div class="ov-body"></div></div>');
+    }
+    if (pairs.length > st.shown) {
+      h.push('<button class="btn more" data-act="more">Show more (' + fmt(pairs.length - st.shown) + ' remaining)</button>');
+    }
+    body.innerHTML = h.join('');
+  }
+
+  function renderGrid(body) {
+    var ids = collect(true, true), h = [], i, j, a, b, n, small, pct, gr;
+    if (ids.length < 2) {
+      body.innerHTML = '<div class="hint">The grid needs at least two groups. Widen the filter' + (st.hide ? ', or turn off &ldquo;Hide groups with 90%+ of users&rdquo;' : '') + '.</div>';
+      return;
+    }
+    if (ids.length > GRID_MAX) {
+      body.innerHTML = '<div class="hint">' + ids.length + ' groups match. Narrow the filter to ' + GRID_MAX +
+        ' or fewer to see the grid &mdash; for example type part of a group name, or a person&rsquo;s username to see how their groups relate.</div>';
+      return;
+    }
+    ids.sort(function (x, y) { return size(y) - size(x) || byName(x, y); });
+    gr = C.grid(data, { mode: st.mode, ids: ids, maxWork: MAX_WORK });
+    if (gr.tooLarge) { body.innerHTML = '<div class="hint">This selection is too large to compare quickly. Narrow the filter.</div>'; return; }
+    h.push('<p class="off" style="font-size:12.5px;margin:0 0 8px">Number = people in both groups. Darker = a larger share of the smaller group. The diagonal is each group&rsquo;s size. Click a number to see who.</p>');
+    h.push('<div class="gridwrap"><table class="gx"><thead><tr><th></th>');
+    for (j = 0; j < ids.length; j++) { h.push('<th title="' + esc(data.groups[ids[j]].n) + '"><span>' + esc(data.groups[ids[j]].n) + '</span></th>'); }
+    h.push('</tr></thead><tbody>');
+    for (i = 0; i < ids.length; i++) {
+      a = ids[i];
+      h.push('<tr><th title="' + esc(data.groups[a].n) + '">' + esc(data.groups[a].n) + '</th>');
+      for (j = 0; j < ids.length; j++) {
+        b = ids[j];
+        if (a === b) { h.push('<td class="self" title="' + esc(data.groups[a].n) + ': ' + gr.size[a] + ' people">' + fmt(gr.size[a]) + '</td>'); continue; }
+        n = C.sharedCount(gr, a, b);
+        if (!n) { h.push('<td class="z">&middot;</td>'); continue; }
+        small = Math.min(gr.size[a], gr.size[b]); pct = small ? n / small : 0;
+        h.push('<td data-a="' + a + '" data-b="' + b + '" title="' + esc(data.groups[a].n) + ' and ' + esc(data.groups[b].n) + ': ' + n + ' shared (' + Math.round(pct * 100) + '% of the smaller group)" style="background:rgba(93,173,226,' +
+          (0.15 + 0.8 * pct).toFixed(2) + ')' + (pct > 0.55 ? ';color:#0d1116;font-weight:600' : '') + '">' + fmt(n) + '</td>');
+      }
+      h.push('</tr>');
+    }
+    h.push('</tbody></table></div><div id="gridPeople" style="margin-top:12px"></div>');
+    body.innerHTML = h.join('');
+  }
+
+  function renderCombo(body) {
+    var h = [], i, gid, ppl, row, j, k, m, how;
+    h.push('<div class="combo"><input type="search" id="cinput" list="gnames" placeholder="Type a group name..." style="flex:0 1 320px">' +
+      '<button class="btn" data-act="cadd">Add group</button>');
+    for (i = 0; i < st.combo.length; i++) {
+      h.push('<span class="chip">' + esc(data.groups[st.combo[i]].n) + '<button data-act="cdel" data-g="' + st.combo[i] + '" title="Remove">&times;</button></span>');
+    }
+    h.push('</div><datalist id="gnames">');
+    for (i = 0; i < data.groups.length; i++) { h.push('<option value="' + esc(data.groups[i].n) + '">'); }
+    h.push('</datalist><div id="cmsg" class="off" style="font-size:12.5px"></div>');
+    if (st.combo.length < 2) {
+      h.push('<div class="hint">Add two to ' + COMBO_MAX + ' groups to see everyone who holds all of them &mdash; for example two groups that should not go together.</div>');
+      body.innerHTML = h.join('');
+      return;
+    }
+    ppl = C.intersect(data, st.mode, st.combo);
+    h.push('<div class="result"><b>' + ppl.length + ' ' + (ppl.length === 1 ? 'person holds' : 'people hold') + '</b> all ' + st.combo.length + ' groups' +
+      (st.mode === 'direct' ? ' (direct membership only)' : '') + '.</div>');
+    if (ppl.length) {
+      h.push('<table class="mt"><tr><th>Name</th><th>Username</th>');
+      for (i = 0; i < st.combo.length; i++) { h.push('<th>' + esc(data.groups[st.combo[i]].n) + '</th>'); }
+      h.push('</tr>');
+      for (j = 0; j < ppl.length; j++) {
+        row = '<tr><td>' + personLabel(data.people[ppl[j]]) + '</td><td class="how">' + esc(data.people[ppl[j]].s) + '</td>';
+        for (i = 0; i < st.combo.length; i++) {
+          gid = st.combo[i]; how = '';
+          for (k = 0; k < data.groups[gid].m.length; k++) {
+            m = data.groups[gid].m[k];
+            if (m[0] === ppl[j]) { how = howText(m[1], m[2]); break; }
+          }
+          row += '<td class="how">' + esc(how) + '</td>';
+        }
+        h.push(row + '</tr>');
+      }
+      h.push('</table>');
+    }
+    body.innerHTML = h.join('');
+  }
+
+  function addCombo() {
+    var input = $('cinput'), name = (input.value || '').toLowerCase().replace(/^\s+|\s+$/g, ''), i, found = -1;
+    if (!name) { return; }
+    for (i = 0; i < data.groups.length; i++) {
+      if (data.groups[i].n.toLowerCase() === name || data.groups[i].s.toLowerCase() === name) { found = i; break; }
+    }
+    if (found < 0) { $('cmsg').innerHTML = 'No group named &ldquo;' + esc(input.value) + '&rdquo;. Pick one from the suggestions.'; return; }
+    if (indexOf(st.combo, found) > -1) { $('cmsg').innerHTML = 'That group is already added.'; return; }
+    if (st.combo.length >= COMBO_MAX) { $('cmsg').innerHTML = 'Up to ' + COMBO_MAX + ' groups at a time.'; return; }
+    st.combo.push(found);
+    renderCombo($('ovbody'));
+    $('cinput').focus();
+  }
+
+  function renderOverlap() {
+    setCls($('st-pairs'), 'on', st.sub === 'pairs');
+    setCls($('st-grid'), 'on', st.sub === 'grid');
+    setCls($('st-combo'), 'on', st.sub === 'combo');
+    var body = $('ovbody');
+    if (st.sub === 'grid') { renderGrid(body); }
+    else if (st.sub === 'combo') { renderCombo(body); }
+    else { renderPairs(body); }
+  }
+
+  function render() {
+    if (st.tab === 'groups') { renderGroups(); }
+    else if (st.tab === 'overlap') { renderOverlap(); }
+  }
+
+  window.showTab = function (name) {
+    var tabs = ['people', 'groups', 'overlap'], i, fbar = $('fbar');
+    st.tab = name;
+    for (i = 0; i < tabs.length; i++) { setCls($('tab-' + tabs[i]), 'on', tabs[i] === name); setCls($('tb-' + tabs[i]), 'on', tabs[i] === name); }
+    fbar.style.display = name === 'people' ? 'none' : '';
+    // Groups and Overlap use the full window (list + detail, wide grids); People keeps
+    // its comfortable reading width.
+    setCls(document.getElementsByTagName('main')[0], 'wide', name !== 'people');
+    fbar.className = 'fbar' + (name === 'groups' ? ' show-gr' : (name === 'overlap' ? ' show-ov' : ''));
+    // The filter bar lives outside the panes; move it to the top of the active pane.
+    if (name !== 'people') { $('tab-' + name).insertBefore(fbar, $('tab-' + name).firstChild); }
+    render();
+  };
+
+  // Focus on one exact group rather than searching its name: a text search would also
+  // match people and other groups whose names contain the same letters.
+  function gotoPair(gid) {
+    st.focus = gid; st.q = ''; $('gq').value = '';
+    st.sub = 'pairs'; st.hide = false; $('ghide').checked = false;
+    if (st.minPct > 0.9) { st.minPct = 0.9; $('gmin').value = '0.9'; }
+    st.shown = PAGE;
+    window.showTab('overlap');
+  }
+
+  // ---- events ----
+  $('gq').oninput = $('gq').onkeyup = function () {
+    var v = this.value;
+    if (timer) { clearTimeout(timer); }
+    timer = setTimeout(function () { var q = v.toLowerCase().replace(/^\s+|\s+$/g, ''); if (q !== st.q) { st.q = q; st.focus = -1; st.shown = PAGE; render(); } }, 200);
+  };
+  $('gtype').onchange = function () { st.type = this.value; st.shown = PAGE; render(); };
+  $('gscope').onchange = function () { st.scope = this.value; st.shown = PAGE; render(); };
+  $('gsort').onchange = function () { st.sort = this.value; render(); };
+  $('gmin').onchange = function () { st.minPct = parseFloat(this.value); st.shown = PAGE; render(); };
+  $('ghide').onclick = function () { st.hide = this.checked; st.shown = PAGE; render(); };
+  $('mEff').onclick = function () { st.mode = 'effective'; setCls($('mEff'), 'on', true); setCls($('mDir'), 'on', false); render(); };
+  $('mDir').onclick = function () { st.mode = 'direct'; setCls($('mDir'), 'on', true); setCls($('mEff'), 'on', false); render(); };
+  $('st-pairs').onclick = function () { st.sub = 'pairs'; renderOverlap(); };
+  $('st-grid').onclick = function () { st.sub = 'grid'; renderOverlap(); };
+  $('st-combo').onclick = function () { st.sub = 'combo'; renderOverlap(); };
+
+  $('glist').onclick = function (e) {
+    var item = closest((e || window.event).target || (e || window.event).srcElement, 'gl-item', this);
+    if (!item) { return; }
+    st.sel = parseInt(item.getAttribute('data-g'), 10);
+    eachEl('#glist .gl-item', function (el) { setCls(el, 'on', el === item); });
+    renderDetail();
+  };
+  $('gdetail').onclick = function (e) {
+    var t = (e || window.event).target || (e || window.event).srcElement;
+    if (t && t.getAttribute && t.getAttribute('data-goto') !== null) { gotoPair(st.sel); }
+  };
+  $('ovbody').onclick = function (e) {
+    var t = (e || window.event).target || (e || window.event).srcElement, act = t.getAttribute ? t.getAttribute('data-act') : null, pair, body, a, b;
+    if (act === 'more') { st.shown += PAGE; renderPairs($('ovbody')); return; }
+    if (act === 'unfocus') { st.focus = -1; st.shown = PAGE; renderPairs($('ovbody')); return; }
+    if (act === 'cadd') { addCombo(); return; }
+    if (act === 'cdel') { st.combo.splice(indexOf(st.combo, parseInt(t.getAttribute('data-g'), 10)), 1); renderCombo($('ovbody')); return; }
+    if (t.tagName === 'TD' && t.getAttribute('data-a') !== null) {
+      a = parseInt(t.getAttribute('data-a'), 10); b = parseInt(t.getAttribute('data-b'), 10);
+      $('gridPeople').innerHTML = '<div class="h3">In both ' + esc(data.groups[a].n) + ' and ' + esc(data.groups[b].n) + '</div>' + peopleList([a, b]);
+      return;
+    }
+    pair = closest(t, 'ov-pair', this);
+    if (pair && closest(t, 'ov-ph', pair)) {
+      body = pair.lastChild;
+      if (!hasCls(pair, 'open')) {
+        body.innerHTML = peopleList([parseInt(pair.getAttribute('data-a'), 10), parseInt(pair.getAttribute('data-b'), 10)]);
+      }
+      setCls(pair, 'open', !hasCls(pair, 'open'));
+    }
+  };
+  $('ovbody').onkeydown = function (e) {
+    var ev = e || window.event, t = ev.target || ev.srcElement;
+    if (t && t.id === 'cinput' && (ev.keyCode === 13)) { addCombo(); }
+  };
+
+  // Pair count on the tab label, with the default filters.
+  setTimeout(function () {
+    var res = C.computePairs(data, { mode: st.mode, ids: collect(false, true), minPct: st.minPct, minShared: 2, maxWork: MAX_WORK });
+    setPairCount(res.tooLarge ? '' : fmt(res.pairs.length));
+  }, 0);
+
+  var start = (location.hash || '').replace('#', '');
+  if (start === 'groups' || start === 'overlap') { window.showTab(start); }
+}());
+</script>
+'@)
+    }
     $null = $sb.AppendLine('</body></html>')
 
     return $sb.ToString()
@@ -1324,10 +2258,14 @@ if ($UserReport) {
             $userHtmlFile = Join-Path $OutputPath "ADUserAccess_$runStamp.html"
             $userCsvFile  = Join-Path $OutputPath "ADUserAccess_$runStamp.csv"
 
+            # Same rows, same enabled/disabled rule: the Groups and Overlap tabs never
+            # disagree with the People tab about who is in scope.
+            $groupModel = ConvertTo-GroupAccessModel -Rows $allRows -Groups $groups -IncludeDisabled:$IncludeDisabled
+
             $html = New-UserAccessHtml -Users $userModel -DomainName $context.DnsRoot `
                 -ScopeNote $scopeNote -ScopeIsNarrowed:$scopeIsNarrowed `
                 -IncludeDisabled:$IncludeDisabled -NestedExpanded:$IncludeNested `
-                -GroupsProcessed $groups.Count
+                -GroupsProcessed $groups.Count -GroupModel $groupModel
 
             $html | Out-File -FilePath $userHtmlFile -Encoding UTF8
             # A valid report is tens of KB at minimum; anything smaller means the write was
