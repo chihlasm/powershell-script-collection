@@ -96,6 +96,8 @@ For full documentation, see [AD Export/README-AD-Group-Export.md](AD%20Export/RE
 
 ### CopyFileToServer.ps1
 
+**GUI**: `CopyFileToServer-GUI.ps1` opens a desktop window for the same job. You can paste or import a server list, edit or untick individual servers, check connections, copy several servers at once with a live status for each, and retry the ones that failed. See [CopyFileToServer/README.md](CopyFileToServer/README.md).
+
 **Description**: A PowerShell script that copies a single file to multiple destination servers. It creates the destination directory if it doesn't exist and handles errors gracefully for each server.
 
 **Parameters**:

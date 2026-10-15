@@ -12,6 +12,8 @@ MSP-TroubleshootingWorkbench/exports/
 MSP-TroubleshootingWorkbench/logs/
 RobocopyMigration/State/
 RobocopyMigration/Logs/
+CopyFileToServer/State/
+CopyFileToServer/Logs/
 *.pid
 
 # --- Local agent/tool scratch state ---
