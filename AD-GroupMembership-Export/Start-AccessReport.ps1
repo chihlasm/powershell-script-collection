@@ -124,7 +124,8 @@ function Read-MenuChoice {
     <#
         Prompts until the answer is one of $Valid. Bad input re-prompts rather than
         crashing or falling through to a default, so a typo cannot silently run the wrong
-        report.
+        report. Read-Host adds ': ' after the prompt itself, so prompts must not end in a
+        colon or the person sees '::'.
     #>
     param(
         [Parameter(Mandatory)][string]$Prompt,
@@ -282,7 +283,7 @@ function Show-MainMenu {
     Write-Host ''
     Write-Host '     [Q] Quit without running anything' -ForegroundColor DarkGray
     Write-Host ''
-    return Read-MenuChoice -Prompt 'Type 1, 2, 3 or Q and press Enter:' -Valid @('1','2','3','Q')
+    return Read-MenuChoice -Prompt 'Type 1, 2, 3 or Q and press Enter' -Valid @('1','2','3','Q')
 }
 
 function Get-GroupSelection {
@@ -403,7 +404,7 @@ function Get-OrganizationalUnitSelection {
     Write-Host '     [B] Go back' -ForegroundColor DarkGray
 
     $valid = @(1..$display.Count | ForEach-Object { "$_" }) + @('B')
-    $choice = Read-MenuChoice -Prompt "Type a number (1-$($display.Count)) or B and press Enter:" -Valid $valid
+    $choice = Read-MenuChoice -Prompt "Type a number (1-$($display.Count)) or B and press Enter" -Valid $valid
 
     if ($choice -eq 'B') { return $null }
     return $display[[int]$choice - 1]
@@ -412,6 +413,27 @@ function Get-OrganizationalUnitSelection {
 #endregion
 
 #region Run and package
+
+function Get-ExportParameter {
+    <#
+        The flags passed to the export. -ExcludeBuiltin keeps option 1 and 3 reports free of
+        Domain Users, Domain Computers and the other well-known groups, but it also drops
+        Domain Admins (RID 512) - so it is left off when the person typed group names
+        (option 2): a group asked for by name must be reported, and option 2's own example
+        is "Domain Admins".
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$ScopeParams,
+        [Parameter(Mandatory)][string]$Folder
+    )
+    $params = @{
+        IncludeNested = $true
+        UserReport    = $true
+        OutputPath    = $Folder
+    }
+    if (-not $ScopeParams.ContainsKey('GroupName')) { $params.ExcludeBuiltin = $true }
+    return ($params + $ScopeParams)
+}
 
 function Invoke-Report {
     <#
@@ -435,12 +457,7 @@ function Invoke-Report {
     Write-Host ''
     Write-Host '  ------------------------------------------------------------' -ForegroundColor DarkGray
 
-    $params = @{
-        IncludeNested  = $true
-        ExcludeBuiltin = $true
-        UserReport     = $true
-        OutputPath     = $Folder
-    } + $ScopeParams
+    $params = Get-ExportParameter -ScopeParams $ScopeParams -Folder $Folder
 
     $started = Get-Date
     try {
