@@ -109,7 +109,7 @@ If a server doesn't allow reading the performance counters, the tool falls back 
 
 ## Requirements
 
-- **Windows PowerShell 5.1** (PowerShell 7 also works)
+- **Windows PowerShell 4.0 or later** (Server 2012 R2 works as shipped; PowerShell 7 also works). 4.0 is the minimum because `Get-Process -IncludeUserName` arrived in 4.0 - remote targets need it too.
 - **Run as Administrator.** Windows only reveals who owns each process to an elevated session.
 - **For other servers:**
   - PowerShell remoting (WinRM) enabled on the target

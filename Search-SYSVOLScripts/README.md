@@ -43,6 +43,6 @@ Searches script files in the SYSVOL `scripts` folder for a specified text or reg
 
 ## Requirements
 
-- PowerShell 5.1+
+- PowerShell 3.0+ (Server 2012 / 2012 R2 work as shipped)
 - Network access to the SYSVOL share (or the specified path)
 - Run from a domain-joined machine with read permissions to the target folder

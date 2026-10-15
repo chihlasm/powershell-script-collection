@@ -13,7 +13,7 @@ to find the machine worth investigating.
 
 ## Requirements
 
-- Windows PowerShell 5.1
+- Windows PowerShell 3.0 or later (Server 2012 / 2012 R2 work as shipped)
 - Citrix Broker SDK (present on a Delivery Controller, or install Citrix Studio / the
   Citrix PowerShell SDK)
 - WinRM reachable on the target VDAs

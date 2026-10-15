@@ -1,4 +1,5 @@
-#Requires -Version 5.1
+# 3.0 so this runs on Server 2012 (PS 3.0) / 2012 R2 (PS 4.0) as shipped; Tests\PSVersionFloor.Tests.ps1 guards it.
+#Requires -Version 3.0
 
 <#
 .SYNOPSIS
@@ -175,7 +176,7 @@
 .NOTES
     Author: VC3
     Read-only. Queries performance counters and event logs; never writes or clears them.
-    Targets Windows PowerShell 5.1 so it runs on session hosts as-is.
+    Targets Windows PowerShell 3.0+ so it runs on session hosts as-is, including Server 2012 / 2012 R2.
 
     Complements rather than replaces:
       Get-CitrixVDAResources\Get-CitrixVDAResources.ps1  - deeper broker-side VDA detail

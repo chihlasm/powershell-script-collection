@@ -64,7 +64,8 @@
     Also itemises service and system accounts - useful when the RAM is not going to users.
 
 .NOTES
-    Requires: Windows PowerShell 5.1+, run as Administrator. For remote servers,
+    Requires: Windows PowerShell 4.0+ (for Get-Process -IncludeUserName; Server 2012 R2
+              works as shipped), run as Administrator. For remote servers,
               PowerShell remoting (WinRM) for the process list and CIM for the counters.
     Version : 1.2.0
 
@@ -77,7 +78,8 @@
       https://learn.microsoft.com/windows/win32/memory/memory-performance-information
 #>
 
-#Requires -Version 5.1
+# 4.0 (not 3.0) because Get-Process -IncludeUserName needs 4.0; runs on Server 2012 R2 as shipped. Tests\PSVersionFloor.Tests.ps1 guards it.
+#Requires -Version 4.0
 
 [CmdletBinding()]
 param(
@@ -199,7 +201,7 @@ function Get-ServerMemoryInfo {
 function Get-ProcessesByUser {
     param([string]$Server, [PSCredential]$Cred)
 
-    $results = [System.Collections.Generic.List[object]]::new()
+    $results = (New-Object 'System.Collections.Generic.List[object]')
     $isLocal = Test-IsLocalComputer $Server
 
     # Step 1: processes with their owning user. -IncludeUserName requires elevation.
@@ -359,7 +361,7 @@ function Export-InteractiveHTMLReport {
     $initialSysClass = if ($ShowSystemByDefault) { 'toggle-btn active' } else { 'toggle-btn' }
 
     # Build the data array for JavaScript
-    $jsonRecords = [System.Collections.Generic.List[string]]::new()
+    $jsonRecords = (New-Object 'System.Collections.Generic.List[string]')
     foreach ($proc in $AllData) {
         $isSystem = if (Test-IsSystemAccount $proc.UserName) { 'true' } else { 'false' }
         $startStr = if ($proc.StartTime) { ([datetime]$proc.StartTime).ToString('yyyy-MM-dd HH:mm:ss') } else { '' }
@@ -373,7 +375,7 @@ function Export-InteractiveHTMLReport {
     $jsonData = "[`n" + ($jsonRecords -join ",`n") + "`n]"
 
     # Build server memory data
-    $memEntries = [System.Collections.Generic.List[string]]::new()
+    $memEntries = (New-Object 'System.Collections.Generic.List[string]')
     foreach ($server in $ServerMemory.Keys) {
         $m = $ServerMemory[$server]
         $memEntries.Add(('{0}:{{total:{1},used:{2},free:{3},pct:{4}}}' -f (ConvertTo-JsString $server),
@@ -756,7 +758,7 @@ function Start-RAMReport {
     Write-Host ""
 
     $outputFolder = Resolve-OutputFolder $OutputPath
-    $allProcessData = [System.Collections.Generic.List[object]]::new()
+    $allProcessData = (New-Object 'System.Collections.Generic.List[object]')
     $serverMemory = @{}
 
     foreach ($server in $ComputerName) {

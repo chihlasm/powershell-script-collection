@@ -22,7 +22,16 @@ They get a plain-English menu:
      [Q] Quit without running anything
 ```
 
-Option 1 needs zero typing and runs the full access review — `-IncludeNested -ExcludeBuiltin -UserReport` are always applied, so they get the good report without knowing those flags exist. Option 3 lists the OUs found in the directory as a numbered menu rather than asking for a distinguished name.
+Option 1 needs zero typing and runs the full access review — `-IncludeNested -ExcludeBuiltin -UserReport` are always applied, so they get the good report without knowing those flags exist. Option 2 drops `-ExcludeBuiltin`, because a group typed by name must be reported: with it, `Domain Admins` (a built-in group, RID 512) was filtered out and the run came back empty. Option 3 lists the OUs found in the directory as a numbered menu rather than asking for a distinguished name.
+
+### Guides for non-technical users
+
+Two Word documents in this folder are written for anyone asked to check who has access to what, with no Active Directory experience assumed. Both avoid job titles and levels, which vary between companies; anything needing more access says to hand it to "your AD admin", meaning whoever looks after Active Directory. Both use a made-up company (Contoso), so they are safe to share:
+
+- **`AD Access Report - User Guide.docx`** — the full illustrated guide. It covers running the tool, the finish screen, every report tab, common tasks (offboarding check, "why does this person have access?", removing duplicate access, Domain Admins review), troubleshooting, what to put in a ticket, and a printable quick reference card.
+- **`AD Access Report - Quick Guide.docx`** — a one-page card: run it, attach it, read it in 30 seconds, when to escalate.
+
+The screenshots of the report are the real report, generated from fictional data. The console screenshots are mock-ups that use the launcher's exact text and colours. If the menu or the report layout changes, update the guides as well.
 
 What the launcher handles for them:
 
@@ -31,8 +40,9 @@ What the launcher handles for them:
 - **Verifies the files are not empty**, then offers to zip them. A zip cannot arrive as a half-synced placeholder — it transfers whole or fails loudly — so it is the recommended handoff format.
 - **Never closes on an error.** Every failure path ends with what to do next and waits for Enter.
 - **Offers to open the report** in the default browser when it is done.
+- **Shows you where the files are.** As the last step it opens File Explorer with the zip selected (or the report folder, if you skipped zipping), so nobody has to hunt for the output. Where Explorer is unavailable (remote PowerShell, Server Core) it prints the path instead.
 
-Requirements are the same as the script's: PowerShell 5.1, RSAT, and directory read access. Administrator rights are not needed.
+Requirements are the same as the script's: PowerShell 3.0 or later (so Server 2012 / 2012 R2 work as shipped), RSAT, and directory read access. Administrator rights are not needed.
 
 ## Quick start
 
@@ -56,6 +66,34 @@ Answers "what does this person have access to, and how did they get it?" — the
 **One HTML file**, self-contained (no CDN, no network access, opens on an isolated server and survives being emailed). One collapsible card per user, dark by default with a light toggle, a live filter box, and a "show only duplicate access" filter.
 
 **One CSV**, one row per user, for pivoting and filtering in Excel.
+
+### Three tabs: People, Groups, Overlap
+
+The HTML report has three views of the same data. No extra AD queries are made; the Groups and Overlap tabs are worked out in the browser from data embedded in the file, so filtering is instant and nothing needs re-running.
+
+| Tab | Answers | How it looks |
+|---|---|---|
+| **People** | What does this person have access to, and how? | One card per user (described above). |
+| **Groups** | Who is in this group, and how did they get in? | Group list on the left (sorted by size or name, with *dup* and *empty* markers); details on the right: type, location, owner, and every member with *direct*, *primary group*, or *via &lt;group&gt;*. Computers and nested groups are listed too. |
+| **Overlap** | Which groups share people? | Three sub-views, below. |
+| **Nesting** | Which groups are inside which, and how deep? | Every group that is inside another group or contains one, including built-in and out-of-scope parents fetched from AD (shown dashed). Select one to see an **Is inside** tree up to the top, a **Contains** tree down to the bottom, and every complete path, with **Copy paths** for tickets. Loops are marked where they close; nesting into protected groups (Domain Admins, Administrators, and the rest of Microsoft's protected list, recognised by SID so renamed groups still count) is highlighted. |
+
+#### Overlap sub-views
+
+- **Overlapping pairs** — every pair of groups sharing at least 2 people, ranked. Percent is shared people ÷ the smaller group's size. Each pair is labelled:
+  - **Near-duplicate** — 90%+ of even the larger group is shared: candidates to merge or retire.
+  - **Subset** — everyone in the smaller group is also in the larger one.
+  - **Contains** — one group is nested inside the other, so the overlap is by design; shown greyed and listed last.
+  - **Partial** — everything else.
+  Click a pair to list the shared people. Default minimum overlap is 50% (25/50/75/90% selectable).
+- **Grid** — a heat map of shared people, shown when the filter leaves 40 groups or fewer (type part of a group name, or someone's username, to narrow it). Click a cell to see who.
+- **Check a combination** — pick 2–5 groups and list everyone who holds *all* of them, e.g. two groups that should never go together.
+
+**Filters shared by Groups and Overlap:** search (matches group names *and* member names/usernames), type, scope, and an **Effective / Direct** toggle — Effective counts everyone with the group's access including through nesting; Direct counts only people added to the group itself (including those with it as their primary group). On Overlap, *Hide groups with 90%+ of users* (on by default) keeps All Staff–style groups from overlapping with everything.
+
+**About the Nesting tab:** parent groups outside the export are found by reading each group's `memberOf` and looking up any parent not already exported (read-only, at most 1,000 extra lookups; the report says if the limit was reached). Full downward chains need `-IncludeNested` (the launcher always uses it). `memberOf` is read from the domain controller that was queried, so nesting into groups in other domains of a multi-domain forest may not appear.
+
+Overlap counts people (user accounts) only and follows the same enabled/disabled rule as the People tab. The report works in Internet Explorer 10/11, the built-in browser on Server 2012 / 2012 R2, as well as current browsers.
 
 ### Duplicate access paths are the headline finding
 
@@ -115,9 +153,9 @@ This script walks the tree one level at a time and records `MembershipType`, `Ne
 
 A user's primary group is stored in the **user's** `primaryGroupID` attribute — *"the relative identifier (RID) for the primary group of the user. By default, this is the RID for the Domain Users group."* It is **not a linked attribute**, so it is never written into the group's `member` attribute.
 
-The practical result: `Get-ADGroupMember "Domain Users"` returns essentially nothing on a perfectly healthy domain. A report that says "Domain Users: 0 members" looks like a finding and is actually a bug.
+Whether `Get-ADGroupMember` adds primary-group members back is not documented by Microsoft, and in practice it can — so neither the `member` attribute nor the cmdlet alone is a reliable answer.
 
-This script reconstructs those members by matching `primaryGroupID` against the group's RID and tags them `MembershipType = Primary`. Disable with `-SkipPrimaryGroupMembers` on very large domains where the extra query is expensive.
+This script queries `primaryGroupID` directly, tags those members `MembershipType = Primary`, and merges them with the cmdlet's results so each person appears once. (An earlier version simply appended them, which made primary-group members show up as false "duplicate access".) Disable with `-SkipPrimaryGroupMembers` on very large domains where the extra query is expensive.
 
 ### 3. Non-user members get silently dropped
 
@@ -189,9 +227,12 @@ The flat shape is designed for Excel. Insert a PivotTable, put `GroupName` in Ro
 
 ## Requirements
 
-- PowerShell 5.1
+- PowerShell 3.0 or later. Windows Server 2012 (PS 3.0) and 2012 R2 (PS 4.0) run it as shipped — no WMF upgrade needed. On those versions the launcher's zip step uses the .NET `ZipFile` class instead of `Compress-Archive`, which only exists from PS 5.0.
 - `ActiveDirectory` RSAT module — imported at runtime, so the script starts even where the module isn't formally registered:
   ```powershell
+  # Windows Server
+  Install-WindowsFeature RSAT-AD-Tools -IncludeAllSubFeature
+  # Windows 10 / 11
   Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0
   ```
 - Directory **read** access. Administrator rights are not required.

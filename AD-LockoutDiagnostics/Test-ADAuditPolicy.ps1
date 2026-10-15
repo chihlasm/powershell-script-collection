@@ -1,4 +1,5 @@
-﻿#Requires -Version 5.1
+﻿# 3.0 so this runs on Server 2012 (PS 3.0) / 2012 R2 (PS 4.0) as shipped; Tests\PSVersionFloor.Tests.ps1 guards it.
+#Requires -Version 3.0
 
 <#
 .SYNOPSIS
@@ -283,7 +284,7 @@ function Get-AuditPolicyVerdict {
     # Turns collected per-DC results into ranked plain-English findings. Pure logic.
     param([object[]]$Results)
 
-    $findings = [System.Collections.Generic.List[string]]::new()
+    $findings = (New-Object 'System.Collections.Generic.List[string]')
     $Results = @($Results)
     $reachable = @($Results | Where-Object { $_.Reachable })
 
@@ -328,6 +329,21 @@ function Get-AuditPolicyVerdict {
     return $findings.ToArray()
 }
 
+function Import-ReferenceDataFile {
+    # Import-PowerShellDataFile is PowerShell 5.0+. On 3.0/4.0 (Server 2012 / 2012 R2) it
+    # is missing, and the try/catch around every caller would silently fall back to the
+    # script's built-in copy of the constants - the drift-prone copies the shared .psd1
+    # exists to replace. Import-LocalizedData reads the same file the same way (restricted
+    # language, no code executed) and exists on every version.
+    # https://learn.microsoft.com/powershell/module/microsoft.powershell.utility/import-localizeddata
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+    if (Get-Command -Name Import-PowerShellDataFile -ErrorAction SilentlyContinue) {
+        return Import-PowerShellDataFile -LiteralPath $Path -ErrorAction Stop
+    }
+    $full = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).ProviderPath
+    Import-LocalizedData -BaseDirectory (Split-Path -Parent $full) -FileName (Split-Path -Leaf $full) -ErrorAction Stop
+}
 function New-AuditPolicyHtml {
     # Self-contained dark-themed report, matching the other tools in this folder.
     param(
@@ -435,7 +451,7 @@ function New-AuditPolicyHtml {
     $css = $null
     $refPath = Join-Path $PSScriptRoot 'LockoutReference.psd1'
     if (Test-Path -LiteralPath $refPath) {
-        try { $css = (Import-PowerShellDataFile -Path $refPath -ErrorAction Stop).ReportCss } catch { $css = $null }
+        try { $css = (Import-ReferenceDataFile -Path $refPath -ErrorAction Stop).ReportCss } catch { $css = $null }
     }
     if (-not $css) {
         $css = @'

@@ -306,7 +306,7 @@ verdicts, see [`AD-LockoutDiagnostics`](../AD-LockoutDiagnostics/):
 
 ## Requirements
 
-- PowerShell 5.1+
+- PowerShell 3.0+ (Server 2012 / 2012 R2 work as shipped)
 - RSAT `ActiveDirectory` module
 - RSAT `DhcpServer` module (optional — skipped gracefully if absent)
 - Permission to read the Security event log on each domain controller

@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Backs up browser auto-fill passwords (Chrome and Edge)
 .DESCRIPTION

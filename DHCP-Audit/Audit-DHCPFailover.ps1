@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Audits DHCP failover health across all authorized DHCP servers in the domain.
 

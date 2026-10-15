@@ -1,4 +1,5 @@
-﻿#Requires -Version 5.1
+﻿# 3.0 so this runs on Server 2012 (PS 3.0) / 2012 R2 (PS 4.0) as shipped; Tests\PSVersionFloor.Tests.ps1 guards it.
+#Requires -Version 3.0
 
 <#
 .SYNOPSIS
@@ -186,6 +187,21 @@ function Get-TabDefinition {
     return [PSCustomObject]@{ Order = 99; Label = $name; Blurb = 'Additional report.' }
 }
 
+function Import-ReferenceDataFile {
+    # Import-PowerShellDataFile is PowerShell 5.0+. On 3.0/4.0 (Server 2012 / 2012 R2) it
+    # is missing, and the try/catch around every caller would silently fall back to the
+    # script's built-in copy of the constants - the drift-prone copies the shared .psd1
+    # exists to replace. Import-LocalizedData reads the same file the same way (restricted
+    # language, no code executed) and exists on every version.
+    # https://learn.microsoft.com/powershell/module/microsoft.powershell.utility/import-localizeddata
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+    if (Get-Command -Name Import-PowerShellDataFile -ErrorAction SilentlyContinue) {
+        return Import-PowerShellDataFile -LiteralPath $Path -ErrorAction Stop
+    }
+    $full = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).ProviderPath
+    Import-LocalizedData -BaseDirectory (Split-Path -Parent $full) -FileName (Split-Path -Leaf $full) -ErrorAction Stop
+}
 function Get-BaseCss {
     <#
     .SYNOPSIS
@@ -209,7 +225,7 @@ function Get-BaseCss {
     )) {
         if (Test-Path -LiteralPath $p) {
             try {
-                $ref = Import-PowerShellDataFile -LiteralPath $p -ErrorAction Stop
+                $ref = Import-ReferenceDataFile -Path $p -ErrorAction Stop
                 if ($ref.ReportCss) { return $ref.ReportCss }
             } catch { }
         }
@@ -312,11 +328,11 @@ function Add-FocusHighlight {
     # (?<![\w.-]) / (?![\w-]) bound the match to a complete name. '@' is deliberately
     # absent from the trailing class so "jdoe" matches within "jdoe@contoso.com".
     $pattern = '(?<![\w.-])' + [regex]::Escape($name) + '(?![\w-])'
-    $rx = [regex]::new($pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    $rx = New-Object regex -ArgumentList $pattern, ([System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
 
     # Split into markup and text runs; '<...>' segments keep their original form.
     $parts = [regex]::Split($Html, '(<[^>]*>)')
-    $sb = [System.Text.StringBuilder]::new()
+    $sb = (New-Object 'System.Text.StringBuilder')
     foreach ($part in $parts) {
         if ($part -like '<*>') {
             $null = $sb.Append($part)

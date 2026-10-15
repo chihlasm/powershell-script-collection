@@ -1,4 +1,5 @@
-﻿#Requires -Version 5.1
+﻿# 3.0 so this runs on Server 2012 (PS 3.0) / 2012 R2 (PS 4.0) as shipped; Tests\PSVersionFloor.Tests.ps1 guards it.
+#Requires -Version 3.0
 
 <#
 .SYNOPSIS
@@ -272,12 +273,27 @@ $ErrorActionPreference = 'Stop'
 # The fallbacks below keep this script self-contained when copied to a server on its own.
 # -----------------------------------------------------------------------------
 $script:Ref = $null
+function Import-ReferenceDataFile {
+    # Import-PowerShellDataFile is PowerShell 5.0+. On 3.0/4.0 (Server 2012 / 2012 R2) it
+    # is missing, and the try/catch around every caller would silently fall back to the
+    # script's built-in copy of the constants - the drift-prone copies the shared .psd1
+    # exists to replace. Import-LocalizedData reads the same file the same way (restricted
+    # language, no code executed) and exists on every version.
+    # https://learn.microsoft.com/powershell/module/microsoft.powershell.utility/import-localizeddata
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+    if (Get-Command -Name Import-PowerShellDataFile -ErrorAction SilentlyContinue) {
+        return Import-PowerShellDataFile -LiteralPath $Path -ErrorAction Stop
+    }
+    $full = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).ProviderPath
+    Import-LocalizedData -BaseDirectory (Split-Path -Parent $full) -FileName (Split-Path -Leaf $full) -ErrorAction Stop
+}
 foreach ($candidate in @(
     (Join-Path $PSScriptRoot 'LockoutReference.psd1'),
     (Join-Path (Split-Path $PSScriptRoot -Parent) 'AD-LockoutDiagnostics\LockoutReference.psd1')
 )) {
     if (Test-Path -LiteralPath $candidate) {
-        try { $script:Ref = Import-PowerShellDataFile -LiteralPath $candidate; break } catch { }
+        try { $script:Ref = Import-ReferenceDataFile -Path $candidate; break } catch { }
     }
 }
 
@@ -1821,7 +1837,7 @@ function New-AuthSourceReportHtml {
         (Join-Path (Split-Path $PSScriptRoot -Parent) 'AD-LockoutDiagnostics\LockoutReference.psd1')
     )) {
         if (Test-Path -LiteralPath $p) {
-            try { $css = (Import-PowerShellDataFile -LiteralPath $p -ErrorAction Stop).ReportCss; break } catch { }
+            try { $css = (Import-ReferenceDataFile -Path $p -ErrorAction Stop).ReportCss; break } catch { }
         }
     }
     if (-not $css) {
@@ -2041,7 +2057,7 @@ $fnDefs = $constDefs + "`n" + $fnDefs
 
 $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $ThrottleLimit)
 $pool.Open()
-$jobs = [System.Collections.Generic.List[hashtable]]::new()
+$jobs = (New-Object 'System.Collections.Generic.List[hashtable]')
 
 foreach ($dc in $dcs) {
     $ps = [System.Management.Automation.PowerShell]::Create()
@@ -2060,7 +2076,9 @@ if ($ThrottleLimit -gt 1 -and $dcs.Count -gt 1) {
 }
 
 $done = 0
-$remaining = [System.Collections.Generic.List[hashtable]]::new($jobs)
+# (,$jobs): New-Object spreads a bare collection into separate constructor arguments;
+# the leading comma passes $jobs whole to the List(IEnumerable) copy constructor.
+$remaining = New-Object 'System.Collections.Generic.List[hashtable]' -ArgumentList (,$jobs)
 while ($remaining.Count -gt 0) {
     $completed = @($remaining | Where-Object { $_.Handle.IsCompleted })
 

@@ -5,7 +5,7 @@ PowerShell script that exports RDS- and FSLogix-related Windows event log entrie
 Runs against the local machine by default, or against **one or many remote hosts** with `-ComputerName`. Designed to be dropped onto an RDS session host or Citrix VDA and run with no setup, or driven from a technician's workstation across a whole pool.
 
 ## Requirements
-- Windows PowerShell 5.1 or later (PowerShell 7+ also works).
+- Windows PowerShell 3.0 or later, so Server 2012 / 2012 R2 work as shipped (PowerShell 7+ also works).
 - For remote hosts: administrative rights on the target and the **Remote Event Log Management** firewall rule enabled there. `Get-WinEvent` reaches remote machines over RPC rather than PowerShell remoting, so this works where WinRM is switched off.
 - Administrator elevation required only if you pass `-IncludeSecurity`. Non-admin runs still produce RDS + FSLogix output. (The elevation check applies to local runs; for a remote host the query is attempted and an access denial is reported honestly.)
 

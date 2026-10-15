@@ -1,4 +1,5 @@
-#Requires -Version 5.1
+# 3.0 so this runs on Server 2012 (PS 3.0) / 2012 R2 (PS 4.0) as shipped; Tests\PSVersionFloor.Tests.ps1 guards it.
+#Requires -Version 3.0
 <#
 .SYNOPSIS
     Collects the Windows event logs that matter when troubleshooting FSLogix container
@@ -111,7 +112,7 @@
 
 .NOTES
     Read-only. Queries event logs; never clears or writes them.
-    Targets Windows PowerShell 5.1 so it runs on session hosts as-is.
+    Targets Windows PowerShell 3.0+ so it runs on session hosts as-is, including Server 2012 / 2012 R2.
 
     The Note field on each event is a triage HINT, not authoritative. The event's own
     Message text is the source of truth - always read it before drawing a conclusion.

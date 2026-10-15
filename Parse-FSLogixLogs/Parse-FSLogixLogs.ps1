@@ -1,4 +1,5 @@
-#Requires -Version 5.1
+# 3.0 so this runs on Server 2012 (PS 3.0) / 2012 R2 (PS 4.0) as shipped; Tests\PSVersionFloor.Tests.ps1 guards it.
+#Requires -Version 3.0
 <#
 .SYNOPSIS
     Parses FSLogix Profile and ODFC container logs into structured objects for triage.
@@ -81,7 +82,7 @@
 
 .NOTES
     Read-only. Never modifies or deletes log files.
-    Targets Windows PowerShell 5.1 so it runs on session hosts without extra install.
+    Targets Windows PowerShell 3.0+ so it runs on session hosts without extra install, including Server 2012 / 2012 R2.
 
     FSLogix log reference:
       https://learn.microsoft.com/en-us/fslogix/concepts-fslogix-logging

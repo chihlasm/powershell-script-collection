@@ -1,4 +1,5 @@
-#Requires -Version 5.1
+﻿# 4.0 (not 3.0) because #Requires -RunAsAdministrator needs 4.0; runs on Server 2012 R2 as shipped. Tests\PSVersionFloor.Tests.ps1 guards it.
+#Requires -Version 4.0
 #Requires -RunAsAdministrator
 
 <#

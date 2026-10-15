@@ -40,14 +40,26 @@
 
 .NOTES
     Author  : VC3 Scripts Collection
-    Requires: PowerShell 5.1, ActiveDirectory RSAT module, read access to the directory.
-              Administrator rights are NOT required.
+    Requires: PowerShell 3.0 or later, ActiveDirectory RSAT module, read access to the
+              directory. Administrator rights are NOT required. Runs on Windows Server
+              2012 / 2012 R2 as shipped.
+
+    REFERENCES
+    - PowerShell Support Lifecycle (3.0 shipped with Windows Server 2012, 4.0 with 2012 R2)
+      https://learn.microsoft.com/powershell/scripting/install/powershell-support-lifecycle
+    - ZipFile.CreateFromDirectory (fallback when Compress-Archive is unavailable; it is the
+      same System.IO.Compression API that Compress-Archive uses)
+      https://learn.microsoft.com/dotnet/api/system.io.compression.zipfile.createfromdirectory
+    - Install Remote Server Administration Tools (Install-WindowsFeature on Server)
+      https://learn.microsoft.com/windows-server/administration/install-remote-server-administration-tools
 
     This is a front end only. All directory work is done by Export-ADGroupMembership.ps1
     in the same folder; see its help for the full parameter set.
 #>
 
-#Requires -Version 5.1
+# 3.0, not 5.1, so the tool runs on Server 2012 (PS 3.0) and 2012 R2 (PS 4.0) - see the
+# matching note in Export-ADGroupMembership.ps1. Tests\Compatibility.Tests.ps1 enforces it.
+#Requires -Version 3.0
 
 [CmdletBinding()]
 param(
@@ -112,7 +124,8 @@ function Read-MenuChoice {
     <#
         Prompts until the answer is one of $Valid. Bad input re-prompts rather than
         crashing or falling through to a default, so a typo cannot silently run the wrong
-        report.
+        report. Read-Host adds ': ' after the prompt itself, so prompts must not end in a
+        colon or the person sees '::'.
     #>
     param(
         [Parameter(Mandatory)][string]$Prompt,
@@ -170,7 +183,8 @@ function Test-Prerequisite {
         Stop-WithMessage -Problem 'The Active Directory tools (RSAT) are not installed on this computer.' -WhatToDo @(
             'Ask your IT administrator to install the Remote Server Administration Tools.',
             'They can do this by running, as administrator:',
-            '    Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0',
+            '    On a server:     Install-WindowsFeature RSAT-AD-Tools -IncludeAllSubFeature',
+            '    On Windows 10/11: Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0',
             'Alternatively, run this report from a domain controller or an admin workstation.'
         )
     }
@@ -269,7 +283,7 @@ function Show-MainMenu {
     Write-Host ''
     Write-Host '     [Q] Quit without running anything' -ForegroundColor DarkGray
     Write-Host ''
-    return Read-MenuChoice -Prompt 'Type 1, 2, 3 or Q and press Enter:' -Valid @('1','2','3','Q')
+    return Read-MenuChoice -Prompt 'Type 1, 2, 3 or Q and press Enter' -Valid @('1','2','3','Q')
 }
 
 function Get-GroupSelection {
@@ -390,7 +404,7 @@ function Get-OrganizationalUnitSelection {
     Write-Host '     [B] Go back' -ForegroundColor DarkGray
 
     $valid = @(1..$display.Count | ForEach-Object { "$_" }) + @('B')
-    $choice = Read-MenuChoice -Prompt "Type a number (1-$($display.Count)) or B and press Enter:" -Valid $valid
+    $choice = Read-MenuChoice -Prompt "Type a number (1-$($display.Count)) or B and press Enter" -Valid $valid
 
     if ($choice -eq 'B') { return $null }
     return $display[[int]$choice - 1]
@@ -399,6 +413,27 @@ function Get-OrganizationalUnitSelection {
 #endregion
 
 #region Run and package
+
+function Get-ExportParameter {
+    <#
+        The flags passed to the export. -ExcludeBuiltin keeps option 1 and 3 reports free of
+        Domain Users, Domain Computers and the other well-known groups, but it also drops
+        Domain Admins (RID 512) - so it is left off when the person typed group names
+        (option 2): a group asked for by name must be reported, and option 2's own example
+        is "Domain Admins".
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$ScopeParams,
+        [Parameter(Mandatory)][string]$Folder
+    )
+    $params = @{
+        IncludeNested = $true
+        UserReport    = $true
+        OutputPath    = $Folder
+    }
+    if (-not $ScopeParams.ContainsKey('GroupName')) { $params.ExcludeBuiltin = $true }
+    return ($params + $ScopeParams)
+}
 
 function Invoke-Report {
     <#
@@ -422,12 +457,7 @@ function Invoke-Report {
     Write-Host ''
     Write-Host '  ------------------------------------------------------------' -ForegroundColor DarkGray
 
-    $params = @{
-        IncludeNested  = $true
-        ExcludeBuiltin = $true
-        UserReport     = $true
-        OutputPath     = $Folder
-    } + $ScopeParams
+    $params = Get-ExportParameter -ScopeParams $ScopeParams -Folder $Folder
 
     $started = Get-Date
     try {
@@ -444,6 +474,40 @@ function Invoke-Report {
     Write-Host '  ------------------------------------------------------------' -ForegroundColor DarkGray
 
     return ((Get-Date) - $started)
+}
+
+function New-ReportArchive {
+    <#
+        Zips the report folder's contents (not the folder itself) into ZipPath.
+
+        Compress-Archive arrived with PowerShell 5.0, so it is missing on Server 2012 and
+        2012 R2 as shipped. There the .NET ZipFile class is used directly - it is the same
+        System.IO.Compression API Compress-Archive wraps, and it ships with .NET 4.5. The
+        cmdlet is detected rather than the version number, so a 2012 box with WMF 5.1
+        installed takes the normal path.
+        https://learn.microsoft.com/dotnet/api/system.io.compression.zipfile.createfromdirectory
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Folder,
+        [Parameter(Mandatory)][string]$ZipPath
+    )
+
+    if (Test-Path -LiteralPath $ZipPath) { Remove-Item -LiteralPath $ZipPath -Force }
+
+    if (Get-Command -Name Compress-Archive -ErrorAction SilentlyContinue) {
+        Compress-Archive -Path (Join-Path $Folder '*') -DestinationPath $ZipPath -ErrorAction Stop
+    }
+    else {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+        # .NET resolves relative paths against the process directory, not the PowerShell
+        # location (-OutputRoot may be relative), so resolve through PowerShell first.
+        $folderFull = (Resolve-Path -LiteralPath $Folder).ProviderPath
+        $zipFull    = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ZipPath)
+        # $false = store the files at the zip root, matching Compress-Archive '<folder>\*'.
+        # The report folder is flat, so the pre-4.6.1 '\' entry-separator issue cannot apply.
+        [System.IO.Compression.ZipFile]::CreateFromDirectory(
+            $folderFull, $zipFull, [System.IO.Compression.CompressionLevel]::Optimal, $false)
+    }
 }
 
 function Complete-Report {
@@ -502,8 +566,7 @@ function Complete-Report {
     if (Confirm-YesNo -Question 'Package everything into one file for sending?' -DefaultYes $true) {
         $zipPath = Join-Path (Split-Path $Folder -Parent) ("ADAccessReport_" + (Split-Path $Folder -Leaf) + '.zip')
         try {
-            if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
-            Compress-Archive -Path (Join-Path $Folder '*') -DestinationPath $zipPath -ErrorAction Stop
+            New-ReportArchive -Folder $Folder -ZipPath $zipPath
             $zipSize = (Get-Item -LiteralPath $zipPath).Length
             if ($zipSize -eq 0) { throw 'The packaged file came out empty.' }
             Write-Host ''
@@ -540,8 +603,40 @@ function Complete-Report {
         catch { Write-Step "Could not open it automatically. Double-click: $($html.FullName)" 'WARN' }
     }
 
+    # The paths above scroll away once the browser opens, and people closed the window
+    # without knowing where the files went. Showing them in Explorer as the last step
+    # removes the hunt.
+    Open-ReportLocation -Folder $Folder -ZipPath $zipPath
+
     Write-Host ''
     Read-Host '   Press Enter to close'
+}
+
+function Open-ReportLocation {
+    <#
+        Opens File Explorer on the report: with the zip selected when one was made (the
+        file to send), otherwise inside the report folder. Explorer is unavailable in a
+        remote PowerShell session or on Server Core, so a failure only prints the path.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Folder,
+        [AllowEmptyString()][AllowNull()][string]$ZipPath
+    )
+
+    $target = if ($ZipPath -and (Test-Path -LiteralPath $ZipPath)) { $ZipPath } else { $Folder }
+    try {
+        if ($target -eq $ZipPath) {
+            # /select, opens the parent folder with the file highlighted.
+            Start-Process -FilePath 'explorer.exe' -ArgumentList "/select,`"$target`"" -ErrorAction Stop
+        }
+        else {
+            Start-Process -FilePath 'explorer.exe' -ArgumentList "`"$target`"" -ErrorAction Stop
+        }
+        Write-Step "Opened the report location in File Explorer: $target" 'PASS'
+    }
+    catch {
+        Write-Step "Could not open File Explorer. The files are in: $target" 'WARN'
+    }
 }
 
 #endregion

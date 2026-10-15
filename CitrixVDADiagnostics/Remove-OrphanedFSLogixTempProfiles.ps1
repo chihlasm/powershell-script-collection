@@ -1,4 +1,4 @@
-# Remove-OrphanedFSLogixTempProfiles.ps1
+﻿# Remove-OrphanedFSLogixTempProfiles.ps1
 # Removes temporary user profiles that were created for FSLogix failures when users are no longer logged in
 #
 # ############################################################################

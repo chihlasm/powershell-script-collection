@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Traces all paths through which a user may be flagged as privileged/admin in Active Directory.
 
