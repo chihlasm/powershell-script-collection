@@ -68,6 +68,7 @@ function Write-Status {
 $manifest = @(
     @{ Source = 'AD-LockoutDiagnostics';                                 Destination = 'AD-LockoutDiagnostics' }
     @{ Source = 'AD-AuthSourceEvidence/Export-ADAuthSourceEvidence.ps1'; Destination = 'AD-LockoutDiagnostics/Export-ADAuthSourceEvidence.ps1' }
+    @{ Source = 'AD-GroupMembership-Export';                             Destination = 'AD-GroupMembership-Export' }
     @{ Source = 'Block 365 Sign-in';                                     Destination = 'Block 365 Sign-in' }
     @{ Source = 'Citrix-FSLogix-HealthCollector';                        Destination = 'Citrix-FSLogix-HealthCollector' }
     @{ Source = 'DriveMap-Diagnostics';                                  Destination = 'DriveMap-Diagnostics' }
