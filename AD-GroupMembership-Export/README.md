@@ -24,11 +24,11 @@ They get a plain-English menu:
 
 Option 1 needs zero typing and runs the full access review — `-IncludeNested -ExcludeBuiltin -UserReport` are always applied, so they get the good report without knowing those flags exist. Option 2 drops `-ExcludeBuiltin`, because a group typed by name must be reported: with it, `Domain Admins` (a built-in group, RID 512) was filtered out and the run came back empty. Option 3 lists the OUs found in the directory as a numbered menu rather than asking for a distinguished name.
 
-### Guides for the service desk
+### Guides for non-technical users
 
-Two Word documents in this folder are written for people who are not engineers. Both use a made-up company (Contoso), so they are safe to share:
+Two Word documents in this folder are written for anyone asked to check who has access to what, with no Active Directory experience assumed. Both avoid job titles and levels, which vary between companies; anything needing more access says to hand it to "your AD admin", meaning whoever looks after Active Directory. Both use a made-up company (Contoso), so they are safe to share:
 
-- **`AD Access Report - Service Desk Guide.docx`** — the full illustrated guide. It covers running the tool, the finish screen, every report tab, common tasks (offboarding check, "why does this person have access?", removing duplicate access, Domain Admins review), troubleshooting, what to put in a ticket, and a printable quick reference card.
+- **`AD Access Report - User Guide.docx`** — the full illustrated guide. It covers running the tool, the finish screen, every report tab, common tasks (offboarding check, "why does this person have access?", removing duplicate access, Domain Admins review), troubleshooting, what to put in a ticket, and a printable quick reference card.
 - **`AD Access Report - Quick Guide.docx`** — a one-page card: run it, attach it, read it in 30 seconds, when to escalate.
 
 The screenshots of the report are the real report, generated from fictional data. The console screenshots are mock-ups that use the launcher's exact text and colours. If the menu or the report layout changes, update the guides as well.
