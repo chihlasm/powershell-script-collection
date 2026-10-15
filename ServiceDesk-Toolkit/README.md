@@ -1,7 +1,7 @@
 # Service Desk Escalation Toolkit — START HERE
 
 A small set of tested PowerShell tools for the escalation tickets we see most: account
-lockouts, missing mapped drives, slow or broken Citrix/RDS sessions, FSLogix profile
+lockouts, "who has access to what", missing mapped drives, slow or broken Citrix/RDS sessions, FSLogix profile
 problems, hiding people from the address book, and blocking Microsoft 365 sign-in.
 
 Every tool writes a report (HTML and/or CSV) you can attach to the ticket.
@@ -13,6 +13,7 @@ Every tool writes a report (HTML and/or CSV) you can attach to the ticket.
 | The ticket says...                                                  | Go to                                                        | Changes anything? |
 |---------------------------------------------------------------------|--------------------------------------------------------------|-------------------|
 | "My account keeps locking out"                                      | [AD-LockoutDiagnostics](#account-keeps-locking-out)          | No                |
+| "Who has access to what?" / "Who is in Domain Admins?" / offboarding check | [AD-GroupMembership-Export](#who-has-access-to-what)  | No                |
 | "My H: / S: / X: drive is missing" (or only shows up sometimes)     | [DriveMap-Diagnostics](#mapped-drive-is-missing)             | No                |
 | "Citrix is slow" — for one server or the whole farm                 | [Citrix-FSLogix-HealthCollector](#citrix-or-rds-is-slow)     | No                |
 | "Which Citrix servers are overloaded / low on disk?"                | [Get-CitrixVDAResources](#citrix-or-rds-is-slow)             | No                |
@@ -98,6 +99,33 @@ causes are checked too:
   closing a ticket on an empty result.
 - `Set-DCSecurityLogRetention.ps1` only reports unless you add `-Apply`. **Don't use
   `-Apply`** without a senior engineer's OK, because it changes domain controller settings.
+
+---
+
+## Who has access to what
+
+**Folder:** `AD-GroupMembership-Export`  **Run from:** any domain-joined machine with RSAT
+(Active Directory). Administrator rights are **not** needed, and it works on Windows Server
+2012 and newer.
+
+Double-click **`Run-AccessReport.bat`** and pick from the menu:
+
+- **1** for everyone and every group (best if you are not sure)
+- **2** for named groups, e.g. `Domain Admins, HR-*`
+- **3** for one department or area
+
+When it finishes, it packages everything into one `.zip` in `C:\ADReports` and opens File
+Explorer with that file selected. Attach it to the ticket. Open the `.html` file in it to
+read the report. It has four tabs: **People**, **Groups**, **Overlap** and **Nesting**.
+
+**Things to know:**
+- **DUPLICATE ×2** next to a group means the person gets that group in two ways. Removing
+  them from one group does **not** remove the access.
+- **Disabled accounts are left out.** A leaver whose account is already disabled won't appear,
+  but that does not mean their groups were removed.
+- It shows group membership, **not** folder or file-share permissions.
+- **New to it?** Read `AD Access Report - Quick Guide.docx` (one page) or the illustrated
+  `AD Access Report - User Guide.docx` in the folder.
 
 ---
 
