@@ -109,6 +109,48 @@ assert.ok(ct.indexOf('Parent > C01') > -1, ct);
 assert.ok(ct.indexOf('(+ 55 more downward paths not shown)') > -1, ct);
 assert.ok(N.copyText(d, 3, 100).indexOf('more') < 0, 'no notice when nothing was cut');
 assert.ok(N.copyText(d, 3, 100).indexOf('Helpdesk > Tier1 > Contractors > Helpdesk  (loop)') > -1);
+// "Is inside" drawn parents-above (reported: the upward tree read as if parents were inside the
+// selected group). ancestorForest starts at the top-level groups and runs down to the selection.
+function shape(n) {
+  var label = n.kind === 'sel' ? '[' + pl.nodes[n.id].n + ']' : (n.kind === 'seen' ? pl.nodes[n.id].n + '^' : (n.kind === 'loop' ? '~' + pl.nodes[n.id].n : pl.nodes[n.id].n));
+  return n.children.length ? label + '(' + n.children.map(shape).join(',') + ')' : label;
+}
+// 0 Planning, 1 AWE, 2 AWE+MTC, 3 AWE+MB, 4 LF_Users, 5 SungardCommunity, 6 SungardFinance
+var pl = nest(['Planning Department', 'All Winterville Employees', 'All Winterville Employees and Mayor and Town Council',
+  'All Winterville Employees and Mayor and Board', 'LF_Users', 'SungardCommunityUsers', 'SungardFinanceUsers'],
+  [[1,0],[2,1],[3,2],[4,2],[5,0],[6,0]]);
+var f = N.ancestorForest(pl, 0, 50);
+assert.deepStrictEqual(f.roots.map(shape), [
+  'All Winterville Employees and Mayor and Board(All Winterville Employees and Mayor and Town Council(All Winterville Employees([Planning Department])))',
+  'LF_Users(All Winterville Employees and Mayor and Town Council^)',
+  'SungardCommunityUsers([Planning Department])',
+  'SungardFinanceUsers([Planning Department])']);
+assert.strictEqual(f.more, 0);
+assert.deepStrictEqual(N.ancestorForest(pl, 3, 50).roots, [], 'a top-level group has nothing above it');
+
+// Diamond: Top -> L -> Bottom, Top -> R -> Bottom
+pl = dm;
+assert.deepStrictEqual(N.ancestorForest(dm, 3, 50).roots.map(shape), ['Top(L([Bottom]),R([Bottom]))']);
+
+// Loop through the selected group: Helpdesk -> Tier1 -> Contractors -> Helpdesk, plus IT-Staff and VPN above Helpdesk
+pl = d;
+var lf = N.ancestorForest(d, 3, 50).roots.map(shape);
+assert.ok(lf.indexOf('~Helpdesk(Tier1(Contractors([Helpdesk])))') > -1, JSON.stringify(lf));
+assert.ok(lf.indexOf('Admins(IT-Admins(IT-Staff([Helpdesk])))') > -1, JSON.stringify(lf));
+assert.ok(lf.indexOf('VPN([Helpdesk])') > -1, JSON.stringify(lf));
+
+// Loop higher up: A <-> B, B -> Sel
+pl = nest(['A', 'B', 'Sel'], [[0,1],[1,0],[1,2]]);
+var hf = N.ancestorForest(pl, 2, 50).roots.map(shape);
+// Which loop member starts the block is arbitrary; what matters: one block, loop marked once, selection reached.
+assert.deepStrictEqual(hf, ['B(A(~B),[Sel])']);
+
+// 60 parents: first 50 blocks, the rest counted
+var many = ['Child'], manyEdges = [];
+for (i = 1; i <= 60; i++) { many.push('P' + (i < 10 ? '0' : '') + i); manyEdges.push([i, 0]); }
+var mf = N.ancestorForest(nest(many, manyEdges), 0, 50);
+assert.strictEqual(mf.roots.length, 50);
+assert.strictEqual(mf.more, 10);
 console.log('OK');
 '@
         $path = Join-Path $script:Work 'harness.js'

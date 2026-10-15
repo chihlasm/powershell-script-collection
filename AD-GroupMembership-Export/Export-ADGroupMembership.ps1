@@ -1670,6 +1670,81 @@ var NestCore = (function () {
     return out;
   }
 
+  // "Is inside", drawn parents-above so that, as in the Contains tree, every line is inside
+  // the line above it. One block per top-level group, running down toward the selected group.
+  // (An upward tree with the selection at the top read as if the parents were inside it.)
+  // A group reached again shows 'seen'; a group already on the current route shows 'loop';
+  // a top-level block that only exists because the selection loops back into it is wrapped in
+  // a 'loop' node for the selection. Groups left over in a loop higher up start blocks too.
+  function ancestorForest(nest, id, maxChildren) {
+    var inA = {}, ancestors = [], queue = [id], v, k, p;
+    while (queue.length) {
+      v = queue.shift();
+      for (k = 0; k < nest.up[v].length; k++) {
+        p = nest.up[v][k];
+        if (p !== id && !inA[p]) { inA[p] = true; ancestors.push(p); queue.push(p); }
+      }
+    }
+    var sorter = byName(nest);
+    function toward(node) {
+      var out = [], j, c;
+      for (j = 0; j < nest.down[node].length; j++) { c = nest.down[node][j]; if (c === id || inA[c]) { out.push(c); } }
+      return out.sort(sorter);
+    }
+    var memo = {}, onRoute = {};
+    function dist(node) {
+      if (node === id) { return 0; }
+      if (memo.hasOwnProperty(node)) { return memo[node]; }
+      if (onRoute[node]) { return 0; }
+      onRoute[node] = true;
+      var best = 0, kids = toward(node), j;
+      for (j = 0; j < kids.length; j++) { best = Math.max(best, 1 + dist(kids[j])); }
+      onRoute[node] = false; memo[node] = best;
+      return best;
+    }
+    function order(a, b) { return (dist(b) - dist(a)) || sorter(a, b); }
+
+    var expanded = {}, path = {};
+    function build(node) {
+      var out = { id: node, kind: 'node', children: [], more: 0 }, kids = toward(node), j, c;
+      expanded[node] = true; path[node] = true;
+      for (j = 0; j < kids.length && j < maxChildren; j++) {
+        c = kids[j];
+        if (c === id) { out.children.push({ id: id, kind: 'sel', children: [], more: 0 }); }
+        else if (path[c]) { out.children.push({ id: c, kind: 'loop', children: [], more: 0 }); }
+        else if (expanded[c]) { out.children.push({ id: c, kind: 'seen', children: [], more: 0 }); }
+        else { out.children.push(build(c)); }
+      }
+      if (kids.length > maxChildren) { out.more = kids.length - maxChildren; }
+      path[node] = false;
+      return out;
+    }
+
+    var roots = [], forest = { roots: [], more: 0 }, i, j2, hasParentInA, fromSel, block;
+    for (i = 0; i < ancestors.length; i++) {
+      hasParentInA = false;
+      for (j2 = 0; j2 < nest.up[ancestors[i]].length; j2++) { if (inA[nest.up[ancestors[i]][j2]]) { hasParentInA = true; } }
+      if (!hasParentInA) { roots.push(ancestors[i]); }
+    }
+    roots.sort(order);
+    function addBlock(node) {
+      if (forest.roots.length >= maxChildren) { forest.more++; return; }
+      fromSel = false;
+      for (j2 = 0; j2 < nest.up[node].length; j2++) { if (nest.up[node][j2] === id) { fromSel = true; } }
+      block = build(node);
+      forest.roots.push(fromSel ? { id: id, kind: 'loop', children: [block], more: 0 } : block);
+    }
+    var isRoot = {};
+    for (i = 0; i < roots.length; i++) { isRoot[roots[i]] = true; addBlock(roots[i]); }
+    // Leftovers are only groups in a loop higher up that no top-level block reached; roots
+    // skipped by the limit are already counted in forest.more.
+    var leftover = [];
+    for (i = 0; i < ancestors.length; i++) { if (!expanded[ancestors[i]] && !isRoot[ancestors[i]]) { leftover.push(ancestors[i]); } }
+    leftover.sort(order);
+    for (i = 0; i < leftover.length; i++) { if (!expanded[leftover[i]]) { addBlock(leftover[i]); } }
+    return forest;
+  }
+
   // Plain-text paths for pasting into a ticket. Says how many were left out, so a pasted
   // list is never mistaken for a complete one.
   function copyText(nest, id, limit) {
@@ -1689,7 +1764,7 @@ var NestCore = (function () {
     return lines.join('\r\n');
   }
 
-  return { analyze: analyze, tree: tree, paths: paths, copyText: copyText };
+  return { analyze: analyze, tree: tree, paths: paths, ancestorForest: ancestorForest, copyText: copyText };
 }());
 if (typeof module !== 'undefined' && module.exports) { module.exports = NestCore; }
 '@
@@ -1774,6 +1849,22 @@ function Get-NestUiScript {
     if (node.more) { out.push('<div class="row seen" style="padding-left:' + (pad + 22) + 'px">+ ' + node.more + ' more</div>'); }
   }
 
+  // Parents-above rendering of NestCore.ancestorForest: arrows point to the group inside.
+  function forestHtml(node, depth, out) {
+    var k, pad = depth * 26, glyph = depth ? '<span class="glyph">&#9492;&#9472;&#9654;</span> ' : '';
+    if (node.kind === 'sel') {
+      out.push('<div class="row" style="padding-left:' + pad + 'px">' + glyph + link(node.id, ' sel') + '</div>');
+    } else if (node.kind === 'seen') {
+      out.push('<div class="row" style="padding-left:' + pad + 'px">' + glyph + link(node.id) + ' <span class="seen">&#8599; shown above</span></div>');
+    } else if (node.kind === 'loop') {
+      out.push('<div class="row" style="padding-left:' + pad + 'px">' + glyph + '<span class="loopm">&#8635; ' + esc(name(node.id)) + ' &mdash; loops back</span></div>');
+    } else {
+      out.push('<div class="row" style="padding-left:' + pad + 'px">' + glyph + link(node.id) + '</div>');
+    }
+    for (k = 0; k < node.children.length; k++) { forestHtml(node.children[k], depth + 1, out); }
+    if (node.more) { out.push('<div class="row seen" style="padding-left:' + (pad + 26) + 'px">+ ' + node.more + ' more</div>'); }
+  }
+
   function pathHtml(p, dir) {
     var ids = dir === 'up' ? p.ids.slice(0).reverse() : p.ids, parts = [], k, isLoopEnd;
     for (k = 0; k < ids.length; k++) {
@@ -1786,7 +1877,7 @@ function Get-NestUiScript {
   function renderDetail() {
     var d = $('ndetail');
     if (st.sel < 0) { d.innerHTML = '<div class="hint">No group selected.</div>'; return; }
-    var n = nest.nodes[st.sel], h = [], up = NestCore.tree(nest, st.sel, 'up', MAX_CHILDREN), down = NestCore.tree(nest, st.sel, 'down', MAX_CHILDREN);
+    var n = nest.nodes[st.sel], h = [], up = NestCore.ancestorForest(nest, st.sel, MAX_CHILDREN), down = NestCore.tree(nest, st.sel, 'down', MAX_CHILDREN);
     var pu = NestCore.paths(nest, st.sel, 'up', MAX_PATHS), pd = NestCore.paths(nest, st.sel, 'down', MAX_PATHS), k;
     if (nest.flags.capReached) { h.push('<div class="notice">Upward chains may be incomplete: the export stopped looking up parent groups at its limit.</div>'); }
     h.push('<h2>' + esc(n.n) + '</h2>');
@@ -1799,9 +1890,13 @@ function Get-NestUiScript {
     h.push('<div class="kv">' + (n.c ? '<b>Type</b><span>' + esc(n.c) + ' &middot; ' + esc(n.sc) + '</span>' : '') +
       (n.ou ? '<b>Where</b><span>' + esc(n.ou) + '</span>' : '') +
       '<b>Chain</b><span>' + levels(A.upDepth[st.sel]) + ' above, ' + levels(A.downDepth[st.sel]) + ' below</span></div>');
-    h.push('<div class="h3">Is inside (its members get these groups&rsquo; access)</div><div class="tree">');
-    if (up.children.length) { treeHtml(up, h); } else { h.push('<div class="seen">Not inside any other group.</div>'); }
-    h.push('</div><div class="h3">Contains (members of these groups get its access)</div><div class="tree">');
+    // Both sections read the same way: each group is inside the group on the line above it.
+    h.push('<div class="h3">Is inside &mdash; top-level groups first; each group is inside the one above it</div><div class="tree">');
+    if (up.roots.length) {
+      for (k = 0; k < up.roots.length; k++) { h.push('<div class="fblock">'); forestHtml(up.roots[k], 0, h); h.push('</div>'); }
+      if (up.more) { h.push('<div class="seen">+ ' + up.more + ' more top-level groups</div>'); }
+    } else { h.push('<div class="seen">Not inside any other group.</div>'); }
+    h.push('</div><div class="h3">Contains &mdash; each group is inside the one above it</div><div class="tree">');
     if (down.children.length) { treeHtml(down, h); } else { h.push('<div class="seen">Contains no groups.</div>'); }
     if (!nest.flags.nestedExpanded) { h.push('<div class="notice">Nested groups were not expanded in this run, so only one level down is shown. Re-run with -IncludeNested.</div>'); }
     h.push('</div><div class="h3">All paths <button class="btn" id="ncopy" style="margin-left:10px;font-size:11.5px;padding:3px 9px">Copy paths</button> <span id="ncopied" class="off"></span></div>');
@@ -2103,6 +2198,7 @@ table.gx td:not(.z):not(.self):hover{outline:2px solid var(--accent)}
 .tree{font-family:var(--mono);font-size:12.5px;line-height:1.9;margin:4px 0 14px}
 .tree .row{display:flex;align-items:center;gap:8px;white-space:nowrap}
 .tree .lv{color:var(--dim);font-size:11px;margin-left:auto;padding-left:20px}
+.fblock{margin-bottom:10px}
 .tree .glyph{color:var(--accent-dim)}
 .nlink{cursor:pointer;border-bottom:1px dotted var(--accent-dim)}.nlink:hover{color:var(--accent)}
 .nlink.sel{background:var(--accent);color:#0d1116;border-radius:3px;padding:0 5px;font-weight:700;border:0}
