@@ -157,6 +157,14 @@
       group of the user. By default, this is the RID for the Domain Users group."
       Link-Id is empty, so it is not a linked attribute and does not appear in 'member')
       https://learn.microsoft.com/windows/win32/adschema/a-primarygroupid
+    - Is-Member-Of-DL (memberOf): a back-link (Link-Id 3) held on the DC queried; used to
+      follow nesting upward for the Nesting tab, so cross-domain parents may not appear
+      https://learn.microsoft.com/windows/win32/adschema/a-memberof
+    - Protected accounts and groups (Appendix C): the groups the Nesting tab highlights
+      https://learn.microsoft.com/windows-server/identity/ad-ds/plan/security-best-practices/appendix-c--protected-accounts-and-groups-in-active-directory
+    - Well-known SIDs: S-1-5-32-544/548/549/550/551/552 and domain RIDs 512/516/518/519/
+      521/526/527, used to recognise protected groups whatever their name
+      https://learn.microsoft.com/windows-server/identity/ad-ds/manage/understand-security-identifiers
 #>
 
 # 3.0, not 5.1: Server 2012 ships PowerShell 3.0 and 2012 R2 ships 4.0, and a 5.1
@@ -1611,8 +1619,10 @@ var NestCore = (function () {
       upDepth.push(depthUp(comp[i])); downDepth.push(depthDown(comp[i]));
       chain.push(upDepth[i] + downDepth[i]);
       deepest = Math.max(deepest, chain[i]);
-      // Inside a protected group, or in a loop together with one.
-      toProtected.push(protAbove(comp[i]) || (loopComp[comp[i]] && cProt[comp[i]] && !nest.nodes[i].p));
+      // Inside a protected group, or in a loop together with one. A protected group inside
+      // another protected group is AD's default (Administrators contains Domain Admins and
+      // Enterprise Admins), so it is not flagged - the alert is for unexpected nesting.
+      toProtected.push(!nest.nodes[i].p && (protAbove(comp[i]) || (loopComp[comp[i]] && cProt[comp[i]])));
     }
     return { comp: comp, inLoop: inLoop, selfLoop: selfLoop, upDepth: upDepth, downDepth: downDepth,
              chain: chain, toProtected: toProtected, loops: loops, deepest: deepest };
@@ -1660,7 +1670,26 @@ var NestCore = (function () {
     return out;
   }
 
-  return { analyze: analyze, tree: tree, paths: paths };
+  // Plain-text paths for pasting into a ticket. Says how many were left out, so a pasted
+  // list is never mistaken for a complete one.
+  function copyText(nest, id, limit) {
+    var lines = ['Nesting for ' + nest.nodes[id].n], dirs = [['up', 'Is inside:', 'upward'], ['down', 'Contains:', 'downward']], d, k, p, ids, names, j;
+    for (d = 0; d < dirs.length; d++) {
+      p = paths(nest, id, dirs[d][0], limit);
+      lines.push(dirs[d][1]);
+      for (k = 0; k < p.list.length; k++) {
+        ids = dirs[d][0] === 'up' ? p.list[k].ids.slice(0).reverse() : p.list[k].ids;
+        names = [];
+        for (j = 0; j < ids.length; j++) { names.push(nest.nodes[ids[j]].n); }
+        lines.push('  ' + names.join(' > ') + (p.list[k].loop ? '  (loop)' : ''));
+      }
+      if (!p.list.length) { lines.push('  (none)'); }
+      if (p.more) { lines.push('  (+ ' + p.more + (p.capped ? '+' : '') + ' more ' + dirs[d][2] + ' paths not shown)'); }
+    }
+    return lines.join('\r\n');
+  }
+
+  return { analyze: analyze, tree: tree, paths: paths, copyText: copyText };
 }());
 if (typeof module !== 'undefined' && module.exports) { module.exports = NestCore; }
 '@
@@ -1754,23 +1783,6 @@ function Get-NestUiScript {
     return '<div class="npath">' + parts.join('<span class="sep">&rsaquo;</span>') + (p.loop ? '<span class="badge3">LOOP</span>' : '') + '</div>';
   }
 
-  function pathText(p, dir) {
-    var ids = dir === 'up' ? p.ids.slice(0).reverse() : p.ids, parts = [], k;
-    for (k = 0; k < ids.length; k++) { parts.push(name(ids[k])); }
-    return '  ' + parts.join(' > ') + (p.loop ? '  (loop)' : '');
-  }
-
-  function copyText(pu, pd) {
-    var lines = ['Nesting for ' + name(st.sel)], k;
-    lines.push('Is inside:');
-    for (k = 0; k < pu.list.length; k++) { lines.push(pathText(pu.list[k], 'up')); }
-    if (!pu.list.length) { lines.push('  (none)'); }
-    lines.push('Contains:');
-    for (k = 0; k < pd.list.length; k++) { lines.push(pathText(pd.list[k], 'down')); }
-    if (!pd.list.length) { lines.push('  (none)'); }
-    return lines.join('\r\n');
-  }
-
   function renderDetail() {
     var d = $('ndetail');
     if (st.sel < 0) { d.innerHTML = '<div class="hint">No group selected.</div>'; return; }
@@ -1800,7 +1812,7 @@ function Get-NestUiScript {
     if (!pu.list.length && !pd.list.length) { h.push('<div class="seen">No paths.</div>'); }
     h.push('<p class="off" style="font-size:12px;margin-top:14px">Nesting into groups in other domains of the forest may not appear: group parents are read from the domain controller that was queried.</p>');
     d.innerHTML = h.join('');
-    d.setAttribute('data-copy', copyText(pu, pd));
+    d.setAttribute('data-copy', NestCore.copyText(nest, st.sel, MAX_PATHS));
   }
 
   function copy(text) {

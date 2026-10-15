@@ -97,6 +97,18 @@ var limited = N.paths(nest(wideNames, wideEdges), 0, 'down', 5);
 assert.strictEqual(limited.list.length, 5);
 assert.strictEqual(limited.more, 55);
 assert.deepStrictEqual(N.paths(nest(['Solo'], []), 0, 'up', 100).list, []);
+// Final review #1: protected-inside-protected is AD's default (Administrators contains Domain Admins
+// and Enterprise Admins) and must not raise the "nested into protected groups" alert.
+var bi = nest(['Administrators','Domain Admins','Enterprise Admins','Helpdesk'], [[0,1],[0,2],[1,3]], [true, true, true, false]);
+var ba = N.analyze(bi);
+assert.deepStrictEqual(ba.toProtected, [false, false, false, true], 'only the non-protected Helpdesk is flagged');
+
+// Final review #2: copied paths must say when some were left out.
+var ct = N.copyText(nest(wideNames, wideEdges), 0, 5);
+assert.ok(ct.indexOf('Parent > C01') > -1, ct);
+assert.ok(ct.indexOf('(+ 55 more downward paths not shown)') > -1, ct);
+assert.ok(N.copyText(d, 3, 100).indexOf('more') < 0, 'no notice when nothing was cut');
+assert.ok(N.copyText(d, 3, 100).indexOf('Helpdesk > Tier1 > Contractors > Helpdesk  (loop)') > -1);
 console.log('OK');
 '@
         $path = Join-Path $script:Work 'harness.js'

@@ -187,3 +187,13 @@ Describe 'ConvertTo-NestModel and ConvertTo-NestJson' {
         @((ConvertFrom-Json $json).nodes | ForEach-Object { $_.n }) | Should -Contain '</script><img src=x onerror=alert(1)>'
     }
 }
+
+Describe 'Script help REFERENCES' {
+    It 'lists the Microsoft pages the nesting code relies on (CLAUDE.md convention)' {
+        $text = [System.IO.File]::ReadAllText((Join-Path (Split-Path -Parent $PSScriptRoot) 'Export-ADGroupMembership.ps1'))
+        $notes = [regex]::Match($text, '(?s)\.NOTES(.*?)#>').Groups[1].Value
+        $notes | Should -Match 'adschema/a-memberof'
+        $notes | Should -Match 'appendix-c--protected-accounts-and-groups-in-active-directory'
+        $notes | Should -Match 'understand-security-identifiers'
+    }
+}
