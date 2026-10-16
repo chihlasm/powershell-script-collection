@@ -8,13 +8,13 @@ function New-Sid([int]$Rid) { New-Object System.Security.Principal.SecurityIdent
 function Grp($Name, $Rid, $Scope = 'Global', $Cat = 'Security', $Ou = 'OU=Groups', $ManagedBy = $null) {
     [PSCustomObject]@{ Name = $Name; SamAccountName = $Name; DistinguishedName = "CN=$Name,$Ou,$script:Base"
         GroupCategory = $Cat; GroupScope = $Scope; SID = (New-Sid $Rid); objectClass = 'group'
-        Description = "Group $Name"; Created = (Get-Date); Modified = (Get-Date); ManagedBy = $ManagedBy; mail = $null; info = $null
+        Description = "Group $Name"; Created = [datetime]'2020-01-02 03:04:05'; Modified = [datetime]'2024-06-07 08:09:10'; ManagedBy = $ManagedBy; mail = $null; info = $null
         MemberOf = @() }
 }
-function Usr($Sam, $Rid, $PrimaryRid = 513, $Enabled = $true, $Dept = 'IT') {
+function Usr($Sam, $Rid, $PrimaryRid = 513, $Enabled = $true, $Dept = 'IT', $Office = $null) {
     [PSCustomObject]@{ Name = $Sam; SamAccountName = $Sam; DistinguishedName = "CN=$Sam,OU=Staff,$script:Base"
         objectClass = 'user'; SID = (New-Sid $Rid); primaryGroupID = $PrimaryRid; DisplayName = "User $Sam"
-        UserPrincipalName = "$Sam@contoso.com"; EmailAddress = $null; Department = $Dept; Title = 'Tech'
+        UserPrincipalName = "$Sam@contoso.com"; EmailAddress = $null; Department = $Dept; Title = 'Tech'; Office = $Office
         Enabled = $Enabled; LastLogonDate = (Get-Date).AddDays(-3); PasswordLastSet = (Get-Date).AddDays(-40) }
 }
 
@@ -35,7 +35,7 @@ $script:Groups = @(
 $script:Groups += @(1..10 | ForEach-Object { Grp ('Chain-{0:D2}' -f $_) (1200 + $_) })
 ($script:Groups | Where-Object Name -eq 'Administrators').SID = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544'
 $script:Users = @(
-    (Usr 'alice' 2001 1105)          # primary group RDS-Users (the observed quirk)
+    (Usr 'alice' 2001 1105 $true 'IT' 'Berlin HQ')          # primary group RDS-Users (the observed quirk)
     (Usr 'bob' 2002)
     (Usr 'carol' 2003 513 $false)    # disabled
     (Usr 'dave' 2004)

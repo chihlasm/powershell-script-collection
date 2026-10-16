@@ -23,7 +23,7 @@ BeforeAll {
     $fake = Join-Path $PSScriptRoot 'FakeAD'
     $export = Join-Path $script:Root 'Export-ADGroupMembership.ps1'
     $command = "`$env:PSModulePath = '$fake;' + `$env:PSModulePath; " +
-               "& '$export' -IncludeNested -ExcludeBuiltin -UserReport -OutputPath '$($script:Out)' *> `$null; exit `$LASTEXITCODE"
+               "& '$export' -IncludeNested -ExcludeBuiltin -UserReport -SplitByGroup -OutputPath '$($script:Out)' *> `$null; exit `$LASTEXITCODE"
     & $exe -NoProfile -NonInteractive -Command $command
     $script:ExitCode = $LASTEXITCODE
 
@@ -113,6 +113,49 @@ Describe 'Export-ADGroupMembership.ps1 -UserReport, end to end' {
         It 'keeps a member whose details could not be read, and leaves out the disabled user' {
             Id-Of 'ghost' | Should -BeGreaterOrEqual 0
             Id-Of 'carol' | Should -Be -1
+        }
+    }
+    Context 'Office, group dates and per-group CSVs' {
+        BeforeAll {
+            $script:Rows = @(Import-Csv -LiteralPath $script:GroupCsv.FullName)
+        }
+
+        It 'appends Office, GroupCreated and GroupModified after the existing columns' {
+            $names = @($script:Rows[0].PSObject.Properties | ForEach-Object { $_.Name })
+            $names[-4..-1] -join ',' | Should -Be 'ExportDate,Office,GroupCreated,GroupModified'
+        }
+
+        It 'fills Office for a user who has one' {
+            $r = @($script:Rows | Where-Object { $_.MemberSamAccountName -eq 'alice' })[0]
+            $r.Office | Should -Be 'Berlin HQ'
+        }
+
+        It 'gives a user with no Office an empty string, not a stray value' {
+            $r = @($script:Rows | Where-Object { $_.MemberSamAccountName -eq 'bob' })[0]
+            $r.Office | Should -BeExactly ''
+        }
+
+        It 'fills the group created and modified dates on every row' {
+            $blank = @($script:Rows | Where-Object { -not $_.GroupCreated -or -not $_.GroupModified })
+            $blank.Count | Should -Be 0
+            $script:Rows[0].GroupCreated | Should -Match '2020'
+            $script:Rows[0].GroupModified | Should -Match '2024'
+        }
+
+        It 'carries Office into the user CSV' {
+            $u = @(Import-Csv -LiteralPath $script:UserCsv.FullName)
+            @($u | Where-Object { $_.SamAccountName -eq 'alice' })[0].Office | Should -Be 'Berlin HQ'
+            @($u | Where-Object { $_.SamAccountName -eq 'bob' })[0].Office | Should -BeExactly ''
+        }
+
+        It '-SplitByGroup writes one CSV per group, holding only that group''s rows' {
+            $dir = Get-ChildItem $script:Out -Directory -Filter 'ADGroupMembership_*_ByGroup' | Select-Object -First 1
+            $dir | Should -Not -BeNullOrEmpty
+            $files = @(Get-ChildItem $dir.FullName -Filter '*.csv')
+            $files.Count | Should -Be @($script:Rows | Select-Object -ExpandProperty GroupDN -Unique).Count
+            $hr = @(Import-Csv -LiteralPath (Join-Path $dir.FullName 'HR-Staff.csv'))
+            $hr.Count | Should -BeGreaterThan 0
+            @($hr | Where-Object { $_.GroupName -ne 'HR-Staff' }).Count | Should -Be 0
         }
     }
 }

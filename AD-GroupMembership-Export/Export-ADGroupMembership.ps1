@@ -87,6 +87,11 @@
     Emit a placeholder row for groups with no members, so the export lists every group.
     Without this, empty groups are absent from the CSV.
 
+.PARAMETER SplitByGroup
+    Additionally write one CSV per group (same columns as the combined CSV) into a
+    'ADGroupMembership_<timestamp>_ByGroup' subfolder of -OutputPath. The combined CSV is
+    always written too, because the HTML report is built from it.
+
 .PARAMETER UserReport
     Additionally write a user-centric view of the same data: one entry per user listing
     every group they hold and how they got it. Produces an HTML report for reading and a
@@ -165,6 +170,11 @@
     - Well-known SIDs: S-1-5-32-544/548/549/550/551/552 and domain RIDs 512/516/518/519/
       521/526/527, used to recognise protected groups whatever their name
       https://learn.microsoft.com/windows-server/identity/ad-ds/manage/understand-security-identifiers
+    - Set-ADUser (Office property; ldapDisplayName physicalDeliveryOfficeName)
+      https://learn.microsoft.com/powershell/module/activedirectory/set-aduser
+    - When-Created / When-Changed (group Created / Modified)
+      https://learn.microsoft.com/windows/win32/adschema/a-whencreated
+      https://learn.microsoft.com/windows/win32/adschema/a-whenchanged
 #>
 
 # 3.0, not 5.1: Server 2012 ships PowerShell 3.0 and 2012 R2 ships 4.0, and a 5.1
@@ -215,6 +225,9 @@ param(
 
     [Parameter(Mandatory = $false)]
     [switch]$IncludeEmptyGroups,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$SplitByGroup,
 
     [Parameter(Mandatory = $false)]
     [switch]$UserReport,
@@ -462,6 +475,18 @@ function New-MembershipRow {
         PasswordLastSet    = if ($UserDetail) { $UserDetail.PasswordLastSet } else { $null }
         MemberDN           = if ($Member) { $Member.DistinguishedName } else { $null }
         ExportDate         = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        # Appended after ExportDate so the position of every pre-existing column is unchanged.
+        # Office: Get-ADUser's Office property is the physicalDeliveryOfficeName attribute.
+        # [string] turns an unset attribute (absent from the result) into '' rather than $null.
+        # Computers and unresolved members have no Office, so they are left $null (empty cell).
+        # https://learn.microsoft.com/powershell/module/activedirectory/set-aduser
+        Office             = if ($UserDetail) { [string]$UserDetail.Office } else { $null }
+        # Created/Modified are the whenCreated / whenChanged attributes. whenChanged is
+        # per-DC and does not replicate, so Modified can differ between domain controllers.
+        # https://learn.microsoft.com/windows/win32/adschema/a-whencreated
+        # https://learn.microsoft.com/windows/win32/adschema/a-whenchanged
+        GroupCreated       = $Group.Created
+        GroupModified      = $Group.Modified
     }
 }
 
@@ -482,7 +507,7 @@ function Get-UserDetail {
     try {
         if ($ObjectClass -eq 'user') {
             $detail = Get-ADUser -Identity $DistinguishedName @ADParams -ErrorAction Stop -Properties `
-                DisplayName, UserPrincipalName, EmailAddress, Department, Title,
+                DisplayName, UserPrincipalName, EmailAddress, Department, Title, Office,
                 Enabled, LastLogonDate, PasswordLastSet
         }
         elseif ($ObjectClass -eq 'computer') {
@@ -495,6 +520,7 @@ function Get-UserDetail {
                 EmailAddress      = $null
                 Department        = $null
                 Title             = $null
+                Office            = $null
                 Enabled           = $c.Enabled
                 LastLogonDate     = $c.LastLogonDate
                 PasswordLastSet   = $null
@@ -742,7 +768,7 @@ function Get-PrimaryGroupMember {
 
     try {
         $primaryMembers = @(Get-ADUser -Filter "primaryGroupID -eq $rid" @ADParams -ErrorAction Stop -Properties `
-            DisplayName, UserPrincipalName, EmailAddress, Department, Title,
+            DisplayName, UserPrincipalName, EmailAddress, Department, Title, Office,
             Enabled, LastLogonDate, PasswordLastSet, primaryGroupID)
     }
     catch {
@@ -947,6 +973,7 @@ function ConvertTo-UserAccessModel {
             EmailAddress      = $sample.EmailAddress
             Department        = $sample.Department
             Title             = $sample.Title
+            Office            = $sample.Office
             Enabled           = $sample.Enabled
             LastLogonDate     = $sample.LastLogonDate
             PasswordLastSet   = $sample.PasswordLastSet
@@ -1020,6 +1047,7 @@ function ConvertTo-UserAccessCsvRow {
             PasswordLastSet   = $u.PasswordLastSet
             MemberDN          = $u.MemberDN
             ExportDate        = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+            Office            = $u.Office   # appended last: existing column positions unchanged
         }
     }
 }
@@ -2942,6 +2970,33 @@ catch {
     Write-Status "Failed to write CSV: $($_.Exception.Message)" 'FAIL'
     $script:LogLines | Out-File -FilePath $script:LogFile -Encoding UTF8
     exit 1
+}
+
+if ($SplitByGroup) {
+    # Per-group files for consumers of the retired one-CSV-per-group script. A failure here
+    # is a warning only: the combined CSV above is the authoritative output.
+    try {
+        $splitDir = Join-Path $OutputPath "ADGroupMembership_${runStamp}_ByGroup"
+        $null = New-Item -ItemType Directory -Path $splitDir -Force -ErrorAction Stop
+        $usedNames = @{}
+        $splitCount = 0
+        foreach ($byGroup in ($allRows | Group-Object -Property GroupDN)) {
+            # Strip characters illegal in file names; a numeric suffix keeps two groups
+            # that sanitise to the same name (or differ only by case) from overwriting.
+            $safe = ($byGroup.Group[0].GroupName -replace '[^\w\.\- ]', '_').Trim()
+            if (-not $safe) { $safe = 'group' }
+            $candidate = $safe
+            $n = 1
+            while ($usedNames.ContainsKey($candidate.ToLowerInvariant())) { $n++; $candidate = "${safe}_$n" }
+            $usedNames[$candidate.ToLowerInvariant()] = $true
+            $byGroup.Group | Export-Csv -Path (Join-Path $splitDir "$candidate.csv") -NoTypeInformation -Encoding UTF8
+            $splitCount++
+        }
+        Write-Status "Per-group CSVs: $splitCount file(s) in $splitDir" 'PASS'
+    }
+    catch {
+        Write-Status "Could not write per-group CSVs: $($_.Exception.Message)" 'WARN'
+    }
 }
 
 #region User-centric report output
