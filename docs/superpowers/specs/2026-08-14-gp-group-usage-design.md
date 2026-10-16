@@ -1,8 +1,12 @@
 # AD-GroupPolicy-GroupUsage — Design
 
 **Date:** 2026-08-14
-**Status:** Approved. XML shape verified against a real sample (see Verified XML Shape).
-**Tool folder:** `AD-GroupPolicy-GroupUsage/`
+**Status:** Deferred (2026-10-16). Design approved and XML shape verified against a real
+sample (see Verified XML Shape), but no plan or script was written. The empty tool folder was
+removed so it would not look like a working tool; the sanitized sample now lives beside this
+spec as `2026-08-14-gp-group-usage-sample-userrights.xml`. Move it to
+`AD-GroupPolicy-GroupUsage/Tests/` when work resumes.
+**Tool folder (when built):** `AD-GroupPolicy-GroupUsage/`
 
 ## Problem
 
