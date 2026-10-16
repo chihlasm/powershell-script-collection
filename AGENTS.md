@@ -46,7 +46,7 @@ Query AD for server lists (`Get-DhcpServerInDC`, `Get-ADDomainController -Filter
 
 ## Commit Conventions
 
-Use conventional commit prefixes: `feat:`, `fix:`, `docs:`. First line is a brief subject, followed by a blank line and bullet-point details when needed. End with `Co-Authored-By: Codex Opus 4.6 <noreply@anthropic.com>`.
+Use conventional commit prefixes: `feat:`, `fix:`, `docs:`. First line is a brief subject, followed by a blank line and bullet-point details when needed. End with a `Co-Authored-By:` trailer naming the agent and model that actually did the work, in the form `Co-Authored-By: <Agent or model name> <address>`, using that vendor's own commit address. Never copy another vendor's model name or email address, and don't hardcode a version - it goes stale and misattributes the commit.
 
 ## Folder Structure Pattern
 
