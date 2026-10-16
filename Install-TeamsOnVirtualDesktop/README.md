@@ -175,6 +175,24 @@ Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -like "*Teams
 - Test in a non-production image-build VM first
 - Temp files stored in `%TEMP%` and cleaned up
 
+## Nerdio scripted action: `Nerdio-InstallNewTeams.ps1`
+
+For AVD host pools managed by **Nerdio Manager**, this folder also holds a Nerdio scripted
+action (execution mode `IndividualWithRestart`). It used to sit in `RDS-FSLogix-EventExport` as
+`Nerdio1.ps1`, where it had nothing to do with that tool.
+
+It installs new Teams machine-wide, sets the AVD optimization registry value, installs WebRTC,
+and turns off Teams auto-update. It also installs the **Teams Meeting Add-in for Outlook**,
+which `Install-TeamsOnVirtualDesktop.ps1` does not do. Logs go to
+`C:\Windows\Temp\NerdioManagerLogs`.
+
+Paste it into Nerdio as a scripted action. It is not meant to be run by hand.
+
+Two older Nerdio scripts that installed **classic** Teams (`Nerdio.ps1` and
+`nerdio-install-teams.ps1`) have been removed. Classic Teams reached end of availability on
+July 1, 2025, VDI included, so those scripts installed a client that no longer works.
+([End of availability for classic Teams client](https://learn.microsoft.com/microsoftteams/teams-classic-client-end-of-availability))
+
 ## Reference
 
 - Microsoft Learn — *Microsoft Teams for Virtualized Desktop Infrastructure (VDI)*: <https://learn.microsoft.com/en-us/microsoftteams/new-teams-vdi-requirements-deploy>

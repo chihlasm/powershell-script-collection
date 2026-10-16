@@ -19,14 +19,6 @@ A comprehensive PowerShell script to diagnose performance issues on Citrix Virtu
 
 This collection now includes additional specialized tools for comprehensive Citrix FSLogix environment management:
 
-### **Remove-OrphanedFSLogixTempProfiles.ps1** ⚠️ DO NOT USE
-- **Status**: **BROKEN — do not run in any environment.** This script has unsafe defects that can delete live user profiles mid-session. Specifically:
-  - No `SupportsShouldProcess` — the hand-rolled `-WhatIf` does not integrate with PowerShell's confirmation pipeline and leaves an incomplete audit trail.
-  - No minimum-age filter — a profile whose user logged off seconds ago is immediately eligible for deletion, while FSLogix is still flushing the VHD.
-  - Fragile `query session` parsing mis-identifies usernames, so the "active user" guard is unreliable and a currently logged-in user may be deleted.
-  - `Test-UserFolderExists` has a parameter/argument mismatch — its `FolderExists` result is meaningless.
-- **Next steps**: Rewrite required before use. See review notes in git history. A replacement should use `SupportsShouldProcess`, a `-MinAgeHours` safety window, reliable session enumeration (e.g. `Get-CimInstance Win32_LoggedOnUser` or `quser.exe` fixed-width parsing), and a corrected folder-existence check.
-
 ### **Monitor-CitrixFSLogixStorage.ps1**
 - **Purpose**: Monitors storage space across Citrix VDAs and FSLogix storage servers
 - **Key Features**:
@@ -58,18 +50,16 @@ This collection now includes additional specialized tools for comprehensive Citr
   - Color-coded alerts and professional HTML reports
   - **Software information section with detailed version and path reporting**
 
-### **CitrixFSLogix-AdvancedDiagnostics.ps1**
-- **Purpose**: Deep-dive troubleshooting for complex FSLogix issues
-- **Key Features**:
-  - FSLogix service health monitoring
-  - VHDX/VHD file corruption detection and accessibility testing
-  - Event log analysis for FSLogix/Citrix errors and warnings
-  - Network connectivity testing to profile shares
-  - Registry configuration validation
-  - Performance counter availability checking
-  - Full scan option for comprehensive analysis
-  - HTML reports with recommendations
+### Removed from this folder
 
+- **`CitrixFSLogix-AdvancedDiagnostics.ps1`**: `CitrixVDA-Consolidated.ps1` was built from it and
+  takes the same parameters (`-ServerName`, `-FullScan`, `-ExportReport`, `-ReportFormat`,
+  `-ReportPath`). Run that instead. Last version: commit `73ddb2e`.
+- **`Remove-OrphanedFSLogixTempProfiles.ps1`**: it was disabled because it could delete a live
+  user's profile. Last version: commit `b5e8b71`. A rewrite would need `SupportsShouldProcess`,
+  a minimum-age window, reliable session detection (not `query session` text parsing), and a
+  fixed folder-existence check. For cleaning up stale local profiles today, use
+  `Storage Space Clean-up\Cleanup-CitrixVDAStorage.ps1 -WhatIf`.
 
 ## Requirements
 
@@ -108,28 +98,6 @@ $cred | Export-Clixml -Path "C:\Secure\FSLogixCred.xml"
 ### Custom Thresholds
 ```powershell
 .\Monitor-CitrixFSLogixStorage.ps1 -IncludeLocalVDA -WarningThresholdPercent 70 -CriticalThresholdPercent 85
-```
-
-## Advanced Diagnostics Usage
-
-### Basic Diagnostics
-```powershell
-.\CitrixFSLogix-AdvancedDiagnostics.ps1
-```
-
-### Full Comprehensive Scan
-```powershell
-.\CitrixFSLogix-AdvancedDiagnostics.ps1 -FullScan
-```
-
-### Remote Server Analysis
-```powershell
-.\CitrixFSLogix-AdvancedDiagnostics.ps1 -ServerName "CitrixVDA02"
-```
-
-### Export Diagnostics Report
-```powershell
-.\CitrixFSLogix-AdvancedDiagnostics.ps1 -ExportReport -ReportFormat HTML -ReportPath "C:\Reports\FSLogixHealth.html"
 ```
 
 ## Consolidated Diagnostics Usage ⭐
