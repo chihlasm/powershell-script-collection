@@ -9,6 +9,7 @@ AD-LockoutDiagnostics/**/Case_*/
 # --- Runtime artifacts from running the tools ---
 MSP-TroubleshootingWorkbench/cases/
 MSP-TroubleshootingWorkbench/exports/
+Entra-DeviceActivityTimeline/Reports/
 MSP-TroubleshootingWorkbench/logs/
 RobocopyMigration/State/
 RobocopyMigration/Logs/
