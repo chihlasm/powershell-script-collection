@@ -198,6 +198,76 @@ Describe 'ConvertFrom-AuthEvent' {
             $row = ConvertFrom-AuthEvent -EventXml $script:Xml4740 -EventId 4740 -DcName 'DC01'
             $row.Account | Should -Be 'jdoe'
         }
+
+        It 'falls back to CallerComputerName when TargetDomainName is blank (parity with Diagnose/History)' {
+            # REGRESSION: this branch used to ignore the fallback that
+            # Diagnose-ADAccountLockout.ps1 and Get-ADLockoutHistory.ps1 honour.
+            $xml = @'
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System><TimeCreated SystemTime="2026-08-01T16:00:00.000Z"/></System>
+  <EventData>
+    <Data Name="TargetUserName">jdoe</Data>
+    <Data Name="TargetDomainName"></Data>
+    <Data Name="CallerComputerName">WIN81</Data>
+  </EventData>
+</Event>
+'@
+            (ConvertFrom-AuthEvent -EventXml $xml -EventId 4740 -DcName 'DC01').SourceHost | Should -Be 'WIN81'
+        }
+
+        It 'prefers TargetDomainName when both are present' {
+            $xml = $script:Xml4740 -replace '</EventData>', '<Data Name="CallerComputerName">OTHER</Data></EventData>'
+            (ConvertFrom-AuthEvent -EventXml $xml -EventId 4740 -DcName 'DC01').SourceHost | Should -Be 'WIN81'
+        }
+    }
+
+    Context 'event 4625 SubStatus rendering' {
+        It 'treats the padded SubStatus 0x00000000 as "no sub-status" and uses Status (regression)' {
+            $xml = @'
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System><TimeCreated SystemTime="2026-08-01T13:05:00.000Z"/></System>
+  <EventData>
+    <Data Name="TargetUserName">jdoe</Data>
+    <Data Name="Status">0xc000006d</Data>
+    <Data Name="SubStatus">0x00000000</Data>
+    <Data Name="WorkstationName">LAPTOP-7</Data>
+  </EventData>
+</Event>
+'@
+            (ConvertFrom-AuthEvent -EventXml $xml -EventId 4625 -DcName 'DC01').StatusCode | Should -Be '0xC000006D'
+        }
+    }
+}
+
+Describe 'Test-AccountMatch (-Identity filter)' {
+    It 'matches everything when no identity is supplied (default behaviour unchanged)' {
+        Test-AccountMatch -Account 'anyone' -Identity '' | Should -BeTrue
+        Test-AccountMatch -Account ''       -Identity $null | Should -BeTrue
+    }
+    It 'matches sAMAccountName, DOMAIN\user and UPN forms case-insensitively' {
+        Test-AccountMatch -Account 'JDoe' -Identity 'jdoe' | Should -BeTrue
+        Test-AccountMatch -Account 'jdoe' -Identity 'CONTOSO\jdoe' | Should -BeTrue
+        Test-AccountMatch -Account 'jdoe@contoso.com' -Identity 'jdoe' | Should -BeTrue
+        Test-AccountMatch -Account 'jdoe' -Identity 'jdoe@contoso.com' | Should -BeTrue
+    }
+    It 'rejects other accounts and blank event accounts when an identity is given' {
+        Test-AccountMatch -Account 'jsmith' -Identity 'jdoe' | Should -BeFalse
+        Test-AccountMatch -Account ''       -Identity 'jdoe' | Should -BeFalse
+    }
+    It 'does not match a longer name that merely starts with the identity' {
+        Test-AccountMatch -Account 'jdoe2' -Identity 'jdoe' | Should -BeFalse
+    }
+}
+
+Describe 'Export-ADAuthSourceEvidence.ps1 script surface' {
+    BeforeAll {
+        $script:ExportPath = "$PSScriptRoot\..\Export-ADAuthSourceEvidence.ps1"
+        $script:ExportAst = [System.Management.Automation.Language.Parser]::ParseFile($script:ExportPath, [ref]$null, [ref]$null)
+    }
+    It 'exposes an optional -Identity string parameter' {
+        $p = $script:ExportAst.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Identity' }
+        $p | Should -Not -BeNullOrEmpty
+        $p.StaticType.Name | Should -Be 'String'
     }
 }
 

@@ -206,17 +206,13 @@ function Import-ReferenceDataFile {
 function Get-ReportCss {
     # Prefer the shared stylesheet so every report in the toolkit looks like one family;
     # fall back to an inline copy so this script still renders standalone.
-    $refPaths = @(
-        (Join-Path $PSScriptRoot 'LockoutReference.psd1'),
-        (Join-Path (Split-Path $PSScriptRoot -Parent) 'AD-LockoutDiagnostics\LockoutReference.psd1')
-    )
-    foreach ($p in $refPaths) {
-        if (Test-Path -LiteralPath $p) {
-            try {
-                $ref = Import-ReferenceDataFile -Path $p -ErrorAction Stop
-                if ($ref.ReportCss) { return $ref.ReportCss }
-            } catch { }
-        }
+    # Only "beside this script" is searched; the file lives in this folder.
+    $p = Join-Path $PSScriptRoot 'LockoutReference.psd1'
+    if (Test-Path -LiteralPath $p) {
+        try {
+            $ref = Import-ReferenceDataFile -Path $p -ErrorAction Stop
+            if ($ref.ReportCss) { return $ref.ReportCss }
+        } catch { }
     }
     return $script:FallbackCss
 }

@@ -630,3 +630,91 @@ Describe 'Get-BadPasswordSummary' {
         $s[0].Span | Should -Not -BeNullOrEmpty
     }
 }
+
+Describe 'Diagnose: status codes come from LockoutReference.psd1' {
+    BeforeAll {
+        function New-Xml4625 {
+            param([string]$Status, [string]$SubStatus)
+            @"
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System><TimeCreated SystemTime="2026-08-12T14:41:28.000Z"/></System>
+  <EventData>
+    <Data Name="TargetUserName">jdoe</Data>
+    <Data Name="WorkstationName">LAPTOP-7</Data>
+    <Data Name="IpAddress">10.1.2.3</Data>
+    <Data Name="LogonType">3</Data>
+    <Data Name="Status">$Status</Data>
+    <Data Name="SubStatus">$SubStatus</Data>
+  </EventData>
+</Event>
+"@
+        }
+    }
+
+    It 'treats the padded SubStatus 0x00000000 as "no error" and reports Status (regression)' {
+        # The old test was ^0x0+$ in Diagnose, '-ne 0x0' in Forensics and Test-IsFailureStatus
+        # in Export; all three now use the psd1-driven Test-IsFailureStatus.
+        $row = ConvertFrom-BadLogonEvent -EventXml (New-Xml4625 -Status '0xC0000234' -SubStatus '0x00000000') -EventId 4625 -DcName 'DC01'
+        $row.Status | Should -Match '^0xC0000234\b'
+        $row.Status | Should -Match 'locked out'
+    }
+
+    It 'describes the codes the old inline table lacked: 0x00000000, 0xC0000192, 0xC0000371, 0xC0000413' {
+        foreach ($code in '0x00000000', '0xC0000192', '0xC0000371', '0xC0000413') {
+            Get-StatusMeaning -Code $code | Should -Not -Match '^Unrecognized'
+        }
+        $row = ConvertFrom-BadLogonEvent -EventXml (New-Xml4625 -Status '0xC000006D' -SubStatus '0xC0000413') -EventId 4625 -DcName 'DC01'
+        $row.Status | Should -Match 'authentication firewall'
+    }
+
+    It 'agrees with the psd1 for every documented code' {
+        $ref = Import-PowerShellDataFile "$PSScriptRoot\..\LockoutReference.psd1"
+        foreach ($k in $ref.StatusCodes.Keys) { Get-StatusMeaning -Code $k | Should -Be $ref.StatusCodes[$k] }
+    }
+}
+
+Describe 'Diagnose: never sentinels (regression)' {
+    # Learn: lockoutTime 0 = not locked out; badPasswordTime 0 = unknown; FromFileTime
+    # (Int64.MaxValue) throws, so the old "-gt 0" test could not render the sentinel.
+    # https://learn.microsoft.com/windows/win32/adschema/a-lockouttime
+    BeforeAll {
+        $script:Policy = [PSCustomObject]@{ Source='Default Domain Policy'; LockoutThreshold=3
+                                            LockoutObservationWindow='00:30:00'; LockoutDuration='00:30:00' }
+        function Get-NeverHtml {
+            param($PwdLastSet, $LockoutTime)
+            $user = [PSCustomObject]@{ SamAccountName='jdoe'; DistinguishedName='CN=jdoe,DC=x'; LockedOut=$false
+                                       badPwdCount=0; LastBadPasswordAttempt=(Get-Date)
+                                       pwdLastSet=$PwdLastSet; lockoutTime=$LockoutTime }
+            $out = Join-Path ([System.IO.Path]::GetTempPath()) ("nv-" + [guid]::NewGuid().ToString('N'))
+            try {
+                $p = Write-LockoutReport -User $user -Policy $script:Policy -Lockouts @() -BadLogons @() `
+                        -Resets @() -Verdict @('test') -OutputPath $out -DaysBack 7 `
+                        -DcList @('DC01') -Pdc 'DC01' -EntraConnectDiagnostics $null
+                Get-Content -Raw -Path $p
+            } finally { if (Test-Path -LiteralPath $out) { Remove-Item -LiteralPath $out -Recurse -Force } }
+        }
+    }
+
+    It 'renders lockoutTime = Int64.MaxValue as "Never locked out", not a 1601/9999 date or the raw number' {
+        $html = Get-NeverHtml -PwdLastSet 133000000000000000 -LockoutTime ([int64]::MaxValue)
+        $html | Should -Match 'Never locked out'
+        $html | Should -Not -Match '9223372036854775807'
+    }
+
+    It 'renders pwdLastSet = Int64.MaxValue as Never rather than throwing into the raw value' {
+        $html = Get-NeverHtml -PwdLastSet ([int64]::MaxValue) -LockoutTime 0
+        $html | Should -Not -Match '9223372036854775807'
+        $html | Should -Match 'Never'
+    }
+
+    It 'still labels pwdLastSet = 0 as must-change-at-next-logon' {
+        (Get-NeverHtml -PwdLastSet 0 -LockoutTime 0) | Should -Match 'must change password at next logon'
+    }
+
+    It 'ConvertFrom-AdFileTime returns $null for 0, Int64.MaxValue and negatives' {
+        ConvertFrom-AdFileTime -Value 0 | Should -BeNullOrEmpty
+        ConvertFrom-AdFileTime -Value ([int64]::MaxValue) | Should -BeNullOrEmpty
+        ConvertFrom-AdFileTime -Value (-5) | Should -BeNullOrEmpty
+        ConvertFrom-AdFileTime -Value 133000000000000000 | Should -BeOfType ([datetime])
+    }
+}

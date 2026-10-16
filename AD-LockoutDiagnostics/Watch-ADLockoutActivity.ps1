@@ -79,8 +79,12 @@
     REFERENCES
       badPwdCount - not replicated, resets on successful logon to that DC
         https://learn.microsoft.com/windows/win32/adschema/a-badpwdcount
-      badPasswordTime
+      badPasswordTime - 0 means "unknown"; Int64.MaxValue is a "never" sentinel (guarded)
         https://learn.microsoft.com/windows/win32/adschema/a-badpasswordtime
+      lockoutTime - 0 means not currently locked out
+        https://learn.microsoft.com/windows/win32/adschema/a-lockouttime
+      accountExpires - documents 0x7FFFFFFFFFFFFFFF as the large-integer "never" value
+        https://learn.microsoft.com/windows/win32/adschema/a-accountexpires
       Get-ADUser -Server, -Properties
         https://learn.microsoft.com/powershell/module/activedirectory/get-aduser
       Account lockout threshold
@@ -298,6 +302,31 @@ function Format-WatchLine {
     return $line
 }
 
+function ConvertFrom-AdFileTime {
+    <#
+    .SYNOPSIS
+        Converts an AD large-integer time (FILETIME) to a DateTime, or $null for "never".
+    .DESCRIPTION
+        0 and Int64.MaxValue (the NeverSentinels in LockoutReference.psd1) mean "never" /
+        "not set", not 1601-01-01 - and [datetime]::FromFileTime(Int64.MaxValue) throws, so
+        every caller must go through this guard rather than testing only "-gt 0".
+        Learn: lockoutTime "A value of zero means that the account is not currently locked
+        out"; badPasswordTime "A value of zero means that the last time an incorrect
+        password was used is unknown"; accountExpires documents 0x7FFFFFFFFFFFFFFF as the
+        "never" value for large-integer dates.
+        https://learn.microsoft.com/windows/win32/adschema/a-lockouttime
+        https://learn.microsoft.com/windows/win32/adschema/a-badpasswordtime
+        https://learn.microsoft.com/windows/win32/adschema/a-accountexpires
+    #>
+    param([object]$Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [datetime]) { return $Value }
+    $n = [int64]0
+    try { $n = [int64]$Value } catch { return $null }
+    if ($n -le 0 -or $n -ge [int64]::MaxValue) { return $null }
+    try { return [datetime]::FromFileTime($n) } catch { return $null }
+}
+
 function Get-WatchTarget {
     <#
     .SYNOPSIS
@@ -326,7 +355,7 @@ function Get-WatchTarget {
                     Account         = $u.SamAccountName
                     BadPwdCount     = [int]$u.badPwdCount
                     LockedOut       = [bool]$u.LockedOut
-                    BadPasswordTime = if ($u.badPasswordTime -and $u.badPasswordTime -gt 0) { [datetime]::FromFileTime($u.badPasswordTime) } else { $null }
+                    BadPasswordTime = ConvertFrom-AdFileTime -Value $u.badPasswordTime
                 })
             } catch {
                 Write-Verbose "$ComputerName / ${a}: $($_.Exception.Message)"
@@ -347,7 +376,7 @@ function Get-WatchTarget {
                 Account         = $u.SamAccountName
                 BadPwdCount     = [int]$u.badPwdCount
                 LockedOut       = [bool]$u.LockedOut
-                BadPasswordTime = if ($u.badPasswordTime -and $u.badPasswordTime -gt 0) { [datetime]::FromFileTime($u.badPasswordTime) } else { $null }
+                BadPasswordTime = ConvertFrom-AdFileTime -Value $u.badPasswordTime
             })
         }
     } catch {

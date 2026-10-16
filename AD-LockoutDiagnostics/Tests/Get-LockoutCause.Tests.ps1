@@ -370,7 +370,7 @@ Describe 'What To Fix speaks plain English' {
         # combined report High/Medium/Low rendered as plain text.
         $html = New-CaseReportHtml -CauseRows $script:Ws -GeneratedOn 'now' -Window 7
         $html | Should -Match "class='tag ok'>High<"
-        $shared = (Import-PowerShellDataFile "$PSScriptRoot\..\..\AD-LockoutDiagnostics\LockoutReference.psd1").ReportCss
+        $shared = (Import-PowerShellDataFile "$PSScriptRoot\..\LockoutReference.psd1").ReportCss
         $shared | Should -Match '\.tag\.ok'
         $shared | Should -Match '\.tag\.warn'
     }

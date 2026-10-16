@@ -14,8 +14,8 @@
 
 BeforeDiscovery {
     $script:Scripts = @(
-        @{ File = 'AD-AuthSourceEvidence\Export-ADAuthSourceEvidence.ps1' }
-        @{ File = 'AD-AuthSourceEvidence\Get-LockoutCause.ps1' }
+        @{ File = 'AD-LockoutDiagnostics\Export-ADAuthSourceEvidence.ps1' }
+        @{ File = 'AD-LockoutDiagnostics\Get-LockoutCause.ps1' }
         @{ File = 'AD-LockoutDiagnostics\Diagnose-ADAccountLockout.ps1' }
         @{ File = 'AD-LockoutDiagnostics\Get-ADLockoutHistory.ps1' }
         @{ File = 'AD-LockoutDiagnostics\Invoke-ADLockoutForensics.ps1' }

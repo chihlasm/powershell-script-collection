@@ -151,3 +151,41 @@ Describe 'Test-WatchInterval' {
         $r.Message  | Should -Match 'minimum|floor|raised'
     }
 }
+
+Describe 'ConvertFrom-AdFileTime / Get-WatchTarget never sentinels (regression)' {
+    # badPasswordTime: Learn says 0 = unknown. Int64.MaxValue is the large-integer "never"
+    # value; the old "-gt 0" test passed it straight into FromFileTime, which throws.
+    # https://learn.microsoft.com/windows/win32/adschema/a-badpasswordtime
+    BeforeAll {
+        # RSAT is not installed on every box that runs the tests; a stub lets Pester mock it.
+        if (-not (Get-Command Get-ADUser -ErrorAction SilentlyContinue)) {
+            function global:Get-ADUser { param($Identity, $Server, $Properties, $Filter) }
+            $script:AddedAdStub = $true
+        }
+    }
+    AfterAll {
+        if ($script:AddedAdStub) { Remove-Item Function:\Get-ADUser -ErrorAction SilentlyContinue }
+    }
+
+    It 'returns $null for 0 and Int64.MaxValue, a DateTime for a real value' {
+        ConvertFrom-AdFileTime -Value 0 | Should -BeNullOrEmpty
+        ConvertFrom-AdFileTime -Value ([int64]::MaxValue) | Should -BeNullOrEmpty
+        ConvertFrom-AdFileTime -Value 133000000000000000 | Should -BeOfType ([datetime])
+    }
+
+    It 'Get-WatchTarget does not throw or fabricate a date when badPasswordTime is Int64.MaxValue' {
+        Mock Get-ADUser {
+            [pscustomobject]@{ SamAccountName = 'jdoe'; badPwdCount = 1; LockedOut = $false; badPasswordTime = [int64]::MaxValue }
+        }
+        $r = @(Get-WatchTarget -ComputerName 'DC01' -Accounts @('jdoe'))
+        $r.Count | Should -Be 1
+        $r[0].BadPasswordTime | Should -BeNullOrEmpty
+    }
+
+    It 'Get-WatchTarget converts a real badPasswordTime' {
+        Mock Get-ADUser {
+            [pscustomobject]@{ SamAccountName = 'jdoe'; badPwdCount = 1; LockedOut = $false; badPasswordTime = [int64]133000000000000000 }
+        }
+        (@(Get-WatchTarget -ComputerName 'DC01' -Accounts @('jdoe')))[0].BadPasswordTime | Should -BeOfType ([datetime])
+    }
+}

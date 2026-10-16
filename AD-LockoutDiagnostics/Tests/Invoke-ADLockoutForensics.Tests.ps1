@@ -188,3 +188,103 @@ Describe 'EventMeaning labels stay outcome-neutral' {
         $script:EventMeaning[4625] | Should -Match '(?i)fail'
     }
 }
+
+Describe 'Get-EventCallerName (per-event source field)' {
+    # REGRESSION: the loop used to try TargetDomainName first for EVERY event. It is the
+    # caller computer for 4740 only (Learn's sample XML: TargetDomainName=WIN81); for 4768,
+    # 4724/4723 and 4625 with a blank WorkstationName it is the account's DOMAIN, which then
+    # ranked "CONTOSO" as the top source of failed authentication.
+    # https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4740
+
+    It '4740: reads the caller computer from TargetDomainName' {
+        Get-EventCallerName -EventId 4740 -Data @{ TargetDomainName = 'WIN81' } | Should -Be 'WIN81'
+    }
+    It '4740: falls back to CallerComputerName when TargetDomainName is blank' {
+        Get-EventCallerName -EventId 4740 -Data @{ TargetDomainName = ''; CallerComputerName = 'WIN81' } | Should -Be 'WIN81'
+    }
+    It '4768: uses the client IpAddress and never the account domain' {
+        $d = @{ TargetDomainName = 'CONTOSO'; TargetUserName = 'jdoe'; IpAddress = '::ffff:10.1.2.3' }
+        Get-EventCallerName -EventId 4768 -Data $d | Should -Be '::ffff:10.1.2.3'
+    }
+    It '4771: uses the client IpAddress and never the account domain' {
+        Get-EventCallerName -EventId 4771 -Data @{ TargetDomainName = 'CONTOSO'; IpAddress = '10.1.2.3' } | Should -Be '10.1.2.3'
+    }
+    It '4625: prefers WorkstationName, and falls back to the IP (not the domain) when it is blank' {
+        Get-EventCallerName -EventId 4625 -Data @{ TargetDomainName = 'CONTOSO'; WorkstationName = 'LAPTOP-7'; IpAddress = '10.1.2.3' } | Should -Be 'LAPTOP-7'
+        Get-EventCallerName -EventId 4625 -Data @{ TargetDomainName = 'CONTOSO'; WorkstationName = '-'; IpAddress = '10.1.2.3' } | Should -Be '10.1.2.3'
+        Get-EventCallerName -EventId 4625 -Data @{ TargetDomainName = 'CONTOSO'; WorkstationName = ''; IpAddress = '' } | Should -Be ''
+    }
+    It '4776: uses Workstation' {
+        Get-EventCallerName -EventId 4776 -Data @{ Workstation = 'OLDPHONE'; TargetDomainName = 'CONTOSO' } | Should -Be 'OLDPHONE'
+    }
+    It '4724 / 4723: have no source-machine field, so the account domain is never reported' {
+        Get-EventCallerName -EventId 4724 -Data @{ TargetDomainName = 'CONTOSO'; SubjectDomainName = 'CONTOSO' } | Should -Be ''
+        Get-EventCallerName -EventId 4723 -Data @{ TargetDomainName = 'CONTOSO' } | Should -Be ''
+    }
+}
+
+Describe 'Get-LockoutEvents (parsing end to end)' {
+    BeforeAll {
+        function New-FakeEvent {
+            param([int]$Id, [hashtable]$Data)
+            $inner = ($Data.GetEnumerator() | ForEach-Object { "<Data Name=`"$($_.Key)`">$($_.Value)</Data>" }) -join ''
+            $xml = "<Event xmlns=`"http://schemas.microsoft.com/win/2004/08/events/event`"><System/><EventData>$inner</EventData></Event>"
+            $o = New-Object PSObject -Property @{ Id = $Id; TimeCreated = (Get-Date); Xml = $xml }
+            $o | Add-Member -MemberType ScriptMethod -Name ToXml -Value { $this.Xml } -Force
+            $o
+        }
+    }
+
+    It 'does not rank the account domain as a failure source for 4768 (regression)' {
+        Mock Get-WinEvent { New-FakeEvent -Id 4768 -Data @{ TargetUserName = 'jdoe'; TargetDomainName = 'CONTOSO'; IpAddress = '::ffff:10.1.2.3'; Status = '0x18' } }
+        $rows = @(Get-LockoutEvents -ComputerName 'DC01' -ForestName 'a.local' -SamAccountName 'jdoe' -StartTime (Get-Date).AddDays(-1))
+        $rows.Count | Should -Be 1
+        $rows[0].CallerName | Should -Be '::ffff:10.1.2.3'
+        $rows[0].CallerName | Should -Not -Be 'CONTOSO'
+        $rows[0].Outcome    | Should -Be 'Failure'
+    }
+
+    It 'treats a padded 0x00000000 4625 SubStatus as "no sub-status" and keeps Status (regression)' {
+        Mock Get-WinEvent { New-FakeEvent -Id 4625 -Data @{ TargetUserName = 'jdoe'; TargetDomainName = 'CONTOSO'; WorkstationName = 'LAPTOP-7'; Status = '0xC0000234'; SubStatus = '0x00000000' } }
+        $rows = @(Get-LockoutEvents -ComputerName 'DC01' -ForestName 'a.local' -SamAccountName 'jdoe' -StartTime (Get-Date).AddDays(-1))
+        $rows[0].StatusCode | Should -Be '0xC0000234'
+        $rows[0].CallerName | Should -Be 'LAPTOP-7'
+    }
+
+    It 'still prefers a non-zero 4625 SubStatus' {
+        Mock Get-WinEvent { New-FakeEvent -Id 4625 -Data @{ TargetUserName = 'jdoe'; WorkstationName = 'LAPTOP-7'; Status = '0xC000006D'; SubStatus = '0xC000006A' } }
+        $rows = @(Get-LockoutEvents -ComputerName 'DC01' -ForestName 'a.local' -SamAccountName 'jdoe' -StartTime (Get-Date).AddDays(-1))
+        $rows[0].StatusCode | Should -Be '0xC000006A'
+    }
+
+    It 'classifies a 4776 with the padded success code as Success' {
+        Mock Get-WinEvent { New-FakeEvent -Id 4776 -Data @{ TargetUserName = 'jdoe'; Workstation = 'PC1'; Status = '0x00000000' } }
+        $rows = @(Get-LockoutEvents -ComputerName 'DC01' -ForestName 'a.local' -SamAccountName 'jdoe' -StartTime (Get-Date).AddDays(-1))
+        $rows[0].Outcome | Should -Be 'Success'
+    }
+
+    It 'describes codes that the old inline table lacked (0xC000005E, 0xC000015B, 0xC0000192, 0xC0000413)' {
+        foreach ($code in '0xC000005E', '0xC000015B', '0xC0000192', '0xC0000413') {
+            (Get-StatusMeaning -Code $code) | Should -Not -Match '^Unrecognized'
+        }
+    }
+}
+
+Describe 'Test-IsFailureStatus / ConvertFrom-AdFileTime in Forensics' {
+    It 'treats every rendering of success as not-a-failure' {
+        foreach ($c in '0x0', '0x00000000', '0', '', $null) { Test-IsFailureStatus -Code $c | Should -BeFalse }
+        Test-IsFailureStatus -Code '0x18' | Should -BeTrue
+    }
+    It 'returns $null (never) for 0 and Int64.MaxValue instead of a 1601 date or an exception' {
+        ConvertFrom-AdFileTime -Value 0 | Should -BeNullOrEmpty
+        ConvertFrom-AdFileTime -Value ([int64]::MaxValue) | Should -BeNullOrEmpty
+        ConvertFrom-AdFileTime -Value $null | Should -BeNullOrEmpty
+        ConvertFrom-AdFileTime -Value 133000000000000000 | Should -BeOfType ([datetime])
+    }
+    It 'Invoke-Analysis survives a badPasswordTime of Int64.MaxValue (FromFileTime would throw) - regression' {
+        $state = [pscustomobject]@{ Computer = 'DC01'; Forest = 'a.local'; Reachable = $true; Error = ''
+                                    BadPwdCount = 0; BadPasswordTime = [int64]::MaxValue; LockoutTime = 0; PwdLastSet = 0 }
+        { Invoke-Analysis -Topologies @() -AuditResults @() -LogHealth @() -Accounts @() `
+                          -BadPwdStates @($state) -Events @() -RequestedDays 7 -EventsCollected $true } | Should -Not -Throw
+    }
+}

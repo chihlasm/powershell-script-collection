@@ -62,23 +62,15 @@ function Write-Status {
 
 # Source is a folder or file relative to the repository root; Destination is relative to
 # the bundle root. Folder entries copy every tracked file below them (minus $excludePatterns).
-# The cross-folder file entries exist because the AD lockout and drive-map tools find
-# their companions beside themselves first (see Resolve-CompanionScript in
-# Invoke-ADLockoutInvestigation.ps1), so the bundle keeps them in one folder.
+# The AD lockout and drive-map tools find their companions beside themselves (see
+# Resolve-CompanionScript in Invoke-ADLockoutInvestigation.ps1). Those companions live in
+# the same folder in the repo, so each toolkit ships as one folder entry.
 $manifest = @(
     @{ Source = 'AD-LockoutDiagnostics';                                 Destination = 'AD-LockoutDiagnostics' }
-    @{ Source = 'AD-AuthSourceEvidence/Export-ADAuthSourceEvidence.ps1'; Destination = 'AD-LockoutDiagnostics/Export-ADAuthSourceEvidence.ps1' }
-    # Step 7 of the investigation. Without it the bundle silently skipped "What To Fix"
-    # and SUMMARY.txt lost its FINDINGS section - the part that states the answer.
-    @{ Source = 'AD-AuthSourceEvidence/Get-LockoutCause.ps1';            Destination = 'AD-LockoutDiagnostics/Get-LockoutCause.ps1' }
     @{ Source = 'AD-GroupMembership-Export';                             Destination = 'AD-GroupMembership-Export' }
     @{ Source = 'Block 365 Sign-in';                                     Destination = 'Block 365 Sign-in' }
     @{ Source = 'Citrix-FSLogix-HealthCollector';                        Destination = 'Citrix-FSLogix-HealthCollector' }
     @{ Source = 'DriveMap-Diagnostics';                                  Destination = 'DriveMap-Diagnostics' }
-    @{ Source = 'AD-GroupPolicy-DriveMaps/Audit-GPDriveMaps.ps1';        Destination = 'DriveMap-Diagnostics/Audit-GPDriveMaps.ps1' }
-    @{ Source = 'AD-GroupPolicy-DriveMaps/README.md';                    Destination = 'DriveMap-Diagnostics/README-Audit-GPDriveMaps.md' }
-    @{ Source = 'Search-SYSVOLScripts/Search-SYSVOLScripts.ps1';         Destination = 'DriveMap-Diagnostics/Search-SYSVOLScripts.ps1' }
-    @{ Source = 'Search-SYSVOLScripts/README.md';                        Destination = 'DriveMap-Diagnostics/README-Search-SYSVOLScripts.md' }
     @{ Source = 'Get-AzureFilesFSLogixProfiles';                         Destination = 'Get-AzureFilesFSLogixProfiles' }
     @{ Source = 'Get-CitrixVDAResources';                                Destination = 'Get-CitrixVDAResources' }
     @{ Source = 'Get-RAM-Usage';                                         Destination = 'Get-RAM-Usage' }
@@ -91,6 +83,7 @@ $manifest = @(
 # Matched against the path relative to a folder entry, with forward slashes.
 $excludePatterns = @(
     '(^|/)[Tt]ests/'    # Pester suites
+    '^Build-[^/]+\.ps1$' # Repo build scripts (e.g. Build-LockoutToolkit.ps1); they need git
     '^launcher/'        # MSPWorkbench.exe source; the built exe is shipped
     '(^|/)\.gitkeep$'
     '\.zip$'

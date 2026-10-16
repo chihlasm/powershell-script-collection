@@ -230,3 +230,41 @@ Describe 'Fixes found while writing the service desk guide' {
         $html | Should -Match 'administrator on the domain controllers'
     }
 }
+
+Describe 'Credential Validation (event 4776) is checked' {
+    # Event 4776 (NTLM) is written for success AND failure - 4776(S, F) - and the other
+    # lockout tools check this subcategory. It was missing here, so a DC with NTLM
+    # auditing off was declared healthy.
+    # https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4776
+    # GUID: Audit_AccountLogon_CredentialValidation
+    # https://learn.microsoft.com/windows/win32/secauthz/auditing-constants
+    It 'is in the subcategory list with the documented GUID and Failure auditing needed' {
+        $cv = $script:LockoutSubcategories | Where-Object { $_.Name -eq 'Credential Validation' }
+        $cv         | Should -Not -BeNullOrEmpty
+        $cv.Guid    | Should -Be '{0CCE923F-69AE-11D9-BED3-505054503030}'
+        $cv.EventId | Should -Be 4776
+        $cv.Needs   | Should -Be 'Failure'
+    }
+
+    It 'reports a Fail row for Credential Validation when auditpol says No Auditing' {
+        $csv = @'
+Machine Name,Policy Target,Subcategory,Subcategory GUID,Inclusion Setting,Exclusion Setting
+DC01,System,Credential Validation,{0CCE923F-69AE-11D9-BED3-505054503030},No Auditing,
+DC01,System,Logon,{0CCE9215-69AE-11D9-BED3-505054503030},Success and Failure,
+'@
+        Mock Invoke-Command { [pscustomobject]@{ AuditPolCsv = $csv; SCENoApplyLegacyAuditPolicy = 1 } }
+        Mock Get-WinEvent { throw 'no log in test' }
+        $r = Get-DCAuditPolicy -DcName 'DC01'
+        $row = $r.Subcategories | Where-Object { $_.Subcategory -eq 'Credential Validation' }
+        $row.Status  | Should -Be 'Fail'
+        $row.EventId | Should -Be 4776
+    }
+
+    It 'names Credential Validation in the verdict when it is not logging anywhere' {
+        $row = [pscustomobject]@{ DC='DC01'; Subcategory='Credential Validation'; EventId=4776; Needs='Failure'
+                                  Setting='No Auditing'; Status='Fail'; Detail=''; Explains='x' }
+        $res = [pscustomobject]@{ DC='DC01'; Reachable=$true; Subcategories=@($row); LegacyOverrideRisk=$false
+                                  LogMaxMB=128; RetentionDays=30; Errors=@() }
+        (Get-AuditPolicyVerdict -Results @($res)) -join "`n" | Should -Match 'Credential Validation'
+    }
+}

@@ -201,6 +201,10 @@
     # GUIDs are used rather than display names because display names are localized -
     # matching on the name fails on a non-English DC. GUIDs are invariant.
     # https://learn.microsoft.com/windows/security/threat-protection/auditing/advanced-security-audit-policy-settings
+    # GUID table (Audit_AccountLogon_CredentialValidation = 0cce923f-..., etc.):
+    # https://learn.microsoft.com/windows/win32/secauthz/auditing-constants
+    # Test-ADAuditPolicy.ps1 and Invoke-ADLockoutForensics.ps1 carry self-contained copies
+    # of this list; Tests\SharedReferenceParity.Tests.ps1 fails if they drift.
     # -------------------------------------------------------------------------
     AuditSubcategories = @(
         @{
@@ -271,14 +275,23 @@
         4724 = 'Admin/helpdesk password reset'
         4723 = 'User-initiated password change'
         4625 = 'Failed logon'                  # always a failure
-        4771 = 'Kerberos pre-authentication'   # success or failure
+        4771 = 'Kerberos pre-authentication'   # FAILURE only (see DualOutcomeEvents) - label kept neutral
         4768 = 'Kerberos TGT request'          # success or failure
         4776 = 'NTLM credential validation'    # success or failure
     }
 
     # Events that are logged for BOTH outcomes. Callers must inspect the status code
     # rather than assuming the event's presence implies failure.
-    DualOutcomeEvents = @(4776, 4771, 4768)
+    #
+    # 4771 is deliberately NOT in this list. Microsoft Learn titles it "4771(F) Kerberos
+    # pre-authentication failed" - a Failure-only event ("This event generates every time
+    # the Key Distribution Center fails to issue a Kerberos Ticket Granting Ticket"). The
+    # successful TGT request is logged as 4768, which IS dual-outcome: 4768(S, F), where a
+    # Result Code other than 0x0 is a failure. 4776 is likewise 4776(S, F).
+    # https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4771
+    # https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4768
+    # https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4776
+    DualOutcomeEvents = @(4776, 4768)
 
     # -------------------------------------------------------------------------
     # Status / error codes.
@@ -352,7 +365,14 @@
     NonReplicatedAttributes = @('badPwdCount', 'badPasswordTime', 'lockoutTime', 'logonCount', 'lastLogon')
 
     # AD large-integer "never" sentinels. Rendering these through FromFileTime yields
-    # 1601-01-01, which reads as a real date and misleads the investigator.
+    # 1601-01-01 (0) or throws (Int64.MaxValue), and a real date would mislead the
+    # investigator. Learn: lockoutTime 0 = not currently locked out; badPasswordTime 0 =
+    # unknown; accountExpires documents 0x7FFFFFFFFFFFFFFF as the large-integer "never".
+    # Diagnose, Forensics and Watch each carry ConvertFrom-AdFileTime, which honours these;
+    # Tests\SharedReferenceParity.Tests.ps1 proves it for every value listed here.
+    # https://learn.microsoft.com/windows/win32/adschema/a-lockouttime
+    # https://learn.microsoft.com/windows/win32/adschema/a-badpasswordtime
+    # https://learn.microsoft.com/windows/win32/adschema/a-accountexpires
     NeverSentinels = @(0, 9223372036854775807)
 
     # -------------------------------------------------------------------------
