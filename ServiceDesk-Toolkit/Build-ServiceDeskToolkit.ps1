@@ -69,14 +69,13 @@ $manifest = @(
     @{ Source = 'AD-LockoutDiagnostics';                                 Destination = 'AD-LockoutDiagnostics' }
     @{ Source = 'AD-UserQuickCheck';                                     Destination = 'AD-UserQuickCheck' }
     @{ Source = 'AD-GroupMembership-Export';                             Destination = 'AD-GroupMembership-Export' }
-    @{ Source = 'Block 365 Sign-in';                                     Destination = 'Block 365 Sign-in' }
     @{ Source = 'Citrix-FSLogix-HealthCollector';                        Destination = 'Citrix-FSLogix-HealthCollector' }
     @{ Source = 'Citrix-FSLogix-Triage';                                 Destination = 'Citrix-FSLogix-Triage' }
     @{ Source = 'DriveMap-Diagnostics';                                  Destination = 'DriveMap-Diagnostics' }
     @{ Source = 'Get-AzureFilesFSLogixProfiles';                         Destination = 'Get-AzureFilesFSLogixProfiles' }
     @{ Source = 'Get-CitrixVDAResources';                                Destination = 'Get-CitrixVDAResources' }
     @{ Source = 'Get-RAM-Usage';                                         Destination = 'Get-RAM-Usage' }
-    @{ Source = 'HideFromGal';                                           Destination = 'HideFromGal' }
+    @{ Source = 'M365-SyncedUserFixes';                                  Destination = 'M365-SyncedUserFixes' }
     @{ Source = 'Network-QuickCheck';                                    Destination = 'Network-QuickCheck' }
     @{ Source = 'RDS-FSLogix-EventExport';                               Destination = 'RDS-FSLogix-EventExport' }
     @{ Source = 'ServiceDesk-Toolkit/README.md';                         Destination = 'README.md' }

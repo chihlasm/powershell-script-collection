@@ -1,0 +1,3 @@
+# Batch files can misparse labels and blocks with LF line endings; always check them out as CRLF.
+*.cmd text eol=crlf
+*.bat text eol=crlf

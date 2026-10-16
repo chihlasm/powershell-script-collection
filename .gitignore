@@ -44,3 +44,7 @@ __pycache__/
 
 # --- Generated bundles (ServiceDesk-Toolkit/Build-ServiceDeskToolkit.ps1) ---
 dist/
+
+# M365-SyncedUserFixes: cached Entra Connect server name and the AD change log (client data)
+**/EntraConnectSettings.json
+M365-SyncedUserFixes/Logs/

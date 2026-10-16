@@ -32,8 +32,7 @@ handed out, so it always matches this repository.
 | [DHCP-Audit](DHCP-Audit/) | DHCP failover health across every authorized DHCP server |
 | [Search-DNSRecords](Search-DNSRecords/) | Browser GUI to search and audit DNS records |
 | [LocalAdminManager](LocalAdminManager/) | Add or remove domain users/groups in local Administrators |
-| [HideFromGal](HideFromGal/) | **Changes AD.** Hide or unhide users in the Exchange Online address book |
-| [Block 365 Sign-in](Block%20365%20Sign-in/) | **Changes AD.** Block Microsoft 365 sign-in while keeping on-prem login |
+| [M365-SyncedUserFixes](M365-SyncedUserFixes/) | **Changes AD.** Block Microsoft 365 sign-in or hide someone from the address book when the account is synced from AD, and build the Entra Connect rules both need |
 
 ### Microsoft Entra ID and Microsoft 365
 
@@ -120,6 +119,7 @@ handed out, so it always matches this repository.
 | `CitrixVDADiagnostics\CitrixFSLogix-AdvancedDiagnostics.ps1` | `CitrixVDA-Consolidated.ps1` in the same folder, same parameters |
 | `CitrixVDADiagnostics\Remove-OrphanedFSLogixTempProfiles.ps1` | Was disabled as unsafe. For stale local profiles use `Storage Space Clean-up\Cleanup-CitrixVDAStorage.ps1 -WhatIf` |
 | `Nerdio.ps1`, `nerdio-install-teams.ps1` (classic Teams) | Classic Teams no longer works (end of availability July 1, 2025). Use [Install-TeamsOnVirtualDesktop](Install-TeamsOnVirtualDesktop/), or its `Nerdio-InstallNewTeams.ps1` for Nerdio |
+| `Block 365 Sign-in`, `HideFromGal` | Merged into [M365-SyncedUserFixes](M365-SyncedUserFixes/). Same attributes and marker values, so people already blocked or hidden stay that way |
 
 ## Tool details
 
@@ -334,36 +334,6 @@ For a combined performance *and* event view across a fleet, use [Citrix-FSLogix-
 - Output can be redirected to log files for automated monitoring
 - Windows Update checking requires Windows Update service access
 
-### CloudSignInMgr.ps1 (Block 365 Sign-in)
-
-**Description**: A collection of PowerShell scripts for managing Microsoft 365 cloud sign-in access for Active Directory users. Provides both one-time setup and ongoing management capabilities for blocking/unblocking cloud access.
-
-**Scripts**:
-- **CloudSignInMgr.ps1**: GUI-based tool for managing cloud sign-in blocking by setting/clearing the `msDS-cloudExtensionAttribute10` attribute on AD user accounts.
-- **Block365SignIn-RuleBuilder.ps1**: Creates a custom Entra Connect synchronization rule that maps the `msDS-cloudExtensionAttribute10` AD attribute to `cloudFiltered` in Azure AD.
-
-**Prerequisites**:
-- Entra Connect server with Azure AD Connect installed and ADSync module available
-- Domain-joined administrative workstation with Active Directory module
-- Domain Admin or equivalent permissions for AD modifications
-- Administrative access to Entra Connect server for rule creation
-
-**Usage**:
-1. **Setup (One-time)**: Run `Block365SignIn-RuleBuilder.ps1` on the Entra Connect server to create the synchronization rule.
-2. **Management (Ongoing)**: Run `CloudSignInMgr.ps1` on a domain workstation to block/unblock users from cloud sign-in.
-
-**Features**:
-- Automatic domain detection and connector lookup for rule builder
-- GUI with search, bulk selection, and confirmation prompts for user management
-- Manual synchronization triggering
-- Error handling and user-friendly messages
-
-**Notes**:
-- Run rule builder only once per Entra Connect server/domain
-- GUI tool supports search, select all/deselect all, and bulk operations
-- Changes take effect after Entra Connect synchronization cycle
-- Uses cloud extension attribute that doesn't conflict with on-premises AD
-- Test in non-production environment first
 
 ## Install-TeamsOnVirtualDesktop
 
@@ -644,37 +614,6 @@ For full documentation, see [FSLogix-Profile-Backup/README.md](FSLogix-Profile-B
 - ActiveDirectory module (via RSAT)
 - Domain permissions to read GPO settings and permissions
 
-## HideFromGal
-
-**Description**: A collection of PowerShell scripts for managing user visibility in the Exchange Online Global Address List (GAL) using Entra Connect synchronization rules. Provides both one-time setup and ongoing management capabilities for hiding users from GAL.
-
-**Scripts**:
-- **HideFromGal-RuleBuilder.ps1**: Creates a custom Entra Connect synchronization rule that maps the `msDS-cloudExtensionAttribute1` AD attribute to `msExchHideFromAddressLists` in Exchange Online.
-- **HideFromGAL.ps1**: GUI-based tool for managing GAL visibility by setting/clearing the `msDS-cloudExtensionAttribute1` attribute on AD user accounts.
-
-**Prerequisites**:
-- Entra Connect server with Azure AD Connect installed and ADSync module available
-- Domain-joined administrative workstation with Active Directory module
-- Domain Admin or equivalent permissions for AD modifications
-- Administrative access to Entra Connect server for rule creation
-
-**Usage**:
-1. **Setup (One-time)**: Run `HideFromGal-RuleBuilder.ps1` on the Entra Connect server to create the synchronization rule.
-2. **Management (Ongoing)**: Run `HideFromGAL.ps1` on a domain workstation to hide/unhide users from GAL.
-
-**Features**:
-- Automatic domain detection and connector lookup
-- GUI with search, bulk selection, and confirmation prompts
-- Manual synchronization triggering
-- Comprehensive logging to `C:\Temp\`
-- Error handling and user-friendly messages
-
-**Notes**:
-- Run rule builder only once per Entra Connect server/domain
-- GUI tool supports search, select all/deselect all, and bulk operations
-- Changes take effect after Entra Connect synchronization cycle
-- Uses cloud extension attribute that doesn't conflict with on-premises AD
-- Test in non-production environment first
 
 ## Entra-DeviceActivityTimeline
 
