@@ -12,6 +12,7 @@ Every tool writes a report (HTML and/or CSV) you can attach to the ticket.
 
 | The ticket says...                                                  | Go to                                                        | Changes anything? |
 |---------------------------------------------------------------------|--------------------------------------------------------------|-------------------|
+| "I can't sign in" / "Is my account OK?" (start here)               | [AD-UserQuickCheck](#cant-sign-in)                           | No                |
 | "My account keeps locking out"                                      | [AD-LockoutDiagnostics](#account-keeps-locking-out)          | No                |
 | "Who has access to what?" / "Who is in Domain Admins?" / offboarding check | [AD-GroupMembership-Export](#who-has-access-to-what)  | No                |
 | "My H: / S: / X: drive is missing" (or only shows up sometimes)     | [DriveMap-Diagnostics](#mapped-drive-is-missing)             | No                |
@@ -61,6 +62,35 @@ each tool and the one command to start with.
    [Features on Demand capability names](https://learn.microsoft.com/windows-hardware/manufacture/desktop/features-on-demand-non-language-fod))
 
 5. `cd` into the tool's folder before running it. All examples below assume you're in that folder.
+
+---
+
+## Can't sign in
+
+**Folder:** `AD-UserQuickCheck`  **Run from:** any domain-joined machine with RSAT (Active
+Directory). Administrator rights are **not** needed. It only reads; it changes nothing.
+
+Run this first for any "I can't log in" ticket. It answers **"Can this person sign in right
+now?"** with a YES or NO, gives the reason in plain English, and tells you what to do next:
+
+```powershell
+.\Get-ADUserQuickCheck.ps1 -Identity jdoe
+```
+
+It checks whether the account is disabled, locked out (and when it unlocks by itself),
+expired, or has an expired password or one that must be changed. It also shows the last
+sign-in across every domain controller, and any restrictions on which computers or hours the
+person can sign in.
+
+Add `-OutputPath C:\Temp` to save an HTML report you can attach to the ticket.
+
+**Things to know:**
+- If it says the account is **locked out** and the user keeps getting locked again, go to
+  [Account keeps locking out](#account-keeps-locking-out) to find the device causing it.
+- It checks the **on-premises** account only. A user who can sign in to their PC but not to
+  Microsoft 365 needs a cloud-side check (MFA, Conditional Access, cloud password).
+- If it warns that it **couldn't reach a domain controller**, the last-sign-in and
+  bad-password numbers may be incomplete. Don't treat them as final.
 
 ---
 
