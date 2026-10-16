@@ -62,6 +62,15 @@ There is no auto-discovery for this: the Entra Connect server is not marked as s
 
 Read-only, takes seconds. It confirms the hybrid checks can actually read what they assume — that the `Directory Synchronization` event provider is registered, that the PTA log channel exists under the expected name, and that this account can read both remotely. Every one of those assumptions fails the same way (an empty result), and an empty result is indistinguishable from a healthy quiet server. Run it again after any Entra Connect upgrade.
 
+### Guides for service desk staff
+
+Two Word documents in this folder are written for service desk staff handling "my account keeps locking out" tickets, with no Active Directory experience assumed. Anything needing more access says to hand it to "your AD admin", meaning whoever looks after Active Directory. Both use a made-up company (Contoso), so they are safe to share:
+
+- **`AD Lockout Investigation - User Guide.docx`** — the full illustrated guide. It covers starting the workbench, the Entra Connect prompt, the finish screen, every tab of `Investigation Report.html`, what each likely cause means and who fixes it, common tasks (clearing a stale password from a device, service accounts, many accounts locking at once, confirming the fix), troubleshooting, what to put in a ticket, and a printable quick reference card.
+- **`AD Lockout Investigation - Quick Guide.docx`** — a one-page card: run it, attach it, read it in 30 seconds, when to escalate.
+
+The report screenshots are the real combined report, produced by the toolkit's own scripts from fictional events. The console screenshots are mock-ups that use the scripts' exact text and colours. If the workbench prompts, the investigation steps, or the report tabs change, update the guides as well.
+
 ---
 
 The individual tools remain runnable on their own when you already know what you want.
@@ -77,6 +86,7 @@ The individual tools remain runnable on their own when you already know what you
 | `Set-DCSecurityLogRetention.ps1`    | DC log sizing          | *How far back* can these reports actually see? |
 | `Test-EntraConnectReadiness.ps1`    | Hybrid preflight       | Can the hybrid checks *read* what they assume? |
 | `Export-ADAuthSourceEvidence.ps1`   | Device identity        | *What is* the machine behind that source IP?   |
+| `Get-SourceMachineActivity.ps1`     | Device timeline        | Was that machine *on* when the failures came?  |
 | `LockoutReference.psd1`             | Shared data            | Documented event IDs, status codes, audit GUIDs|
 
 > **If a lockout report comes back empty, run `Test-ADAuditPolicy.ps1` before concluding
@@ -325,6 +335,60 @@ For a domain, the durable fix is **Group Policy**, not a per-DC change:
 `Computer Configuration → Policies → Windows Settings → Security Settings → Event Log → Maximum security log size`
 
 Apply it to the Domain Controllers OU. Use this script to *calculate the number* and verify the result; use the GPO to *enforce* it. For retention beyond a few weeks, forward events to a SIEM or use Windows Event Forwarding rather than growing local logs indefinitely.
+
+---
+
+## Get-SourceMachineActivity.ps1
+
+Reads a source machine's **own** logs - startup, shutdown, sleep, wake, lock and unlock - and lines them up against the failures that came from it. The investigation runs it as **step 8** against the top 3 sources that resolved to a domain-joined workstation, and it adds a **Device Timeline** tab to the combined report and a `DEVICE TIMELINE` section to `SUMMARY.txt`.
+
+The DC evidence says *that* a machine sent a bad password; it cannot say what the machine was doing. This answers that:
+
+| Reading | What it means |
+| --- | --- |
+| Failures within 5 minutes of a **wake, startup or unlock** | Something on it replays a saved password when it resumes - typically a mapped drive reconnecting. Confirms the culprit. |
+| Failures while it was **shut down or asleep** | It cannot be sending them. Something else is using its address or name (a second device, a VM, a DHCP address that moved). Overturns the culprit. |
+| Failures while it was **locked** | Nobody was typing - a service, scheduled task, mapped drive or app sent them. |
+
+### Usage
+
+```powershell
+# One machine, timeline only
+.\Get-SourceMachineActivity.ps1 -ComputerName CON-LT-0142
+
+# Lined up against the failures from a case
+.\Get-SourceMachineActivity.ps1 -ComputerName CON-LT-0142 -AuthEventsCsv '.\Case_...\4 - Which Device\AuthEvents_....csv'
+
+# What step 8 runs
+.\Get-SourceMachineActivity.ps1 -SourcesCsv .\AuthSources_....csv -AuthEventsCsv .\AuthEvents_....csv -Top 3
+```
+
+### Events read
+
+| Event | Provider / log | Meaning |
+| --- | --- | --- |
+| 12 / 13 | Kernel-General, System | Windows started / shut down |
+| 1074 | User32, System | Restart or shutdown requested (who and why) |
+| 41, 6008 | Kernel-Power / EventLog, System | Restarted after a crash or power loss |
+| 42 / 107 | Kernel-Power, System | Entering sleep / resumed from sleep |
+| 506 / 507 | Kernel-Power, System | Entering / leaving Modern Standby |
+| 4800 / 4801, 4802 / 4803 | Security | Locked / unlocked, screen saver on / off |
+
+Events are matched on provider **and** ID - the same ID from another provider is ignored.
+
+### Things to know
+
+- **Lock and unlock need auditing on the PC.** 4800/4801 are only written when *Audit Other Logon/Logoff Events* is set to Success on that machine. When none are found the report says so instead of reading the silence as "never locked". Reading the Security log also needs administrator rights on the machine; the System log usually does not.
+- **Modern Standby is not "off".** Laptops using Modern Standby (506/507) can keep the network connected while they look asleep, so failures in that period are reported separately and never taken as proof the machine was idle.
+- **Wake beats unlock.** When a wake and an unlock both fall just before a failure, the wake is credited - that is when Windows reconnects drives and services retry.
+- **Reachability.** It needs remote Event Log access (the *Remote Event Log Management* firewall rule). An unreachable machine is reported as such; that is itself worth noting if failures are still arriving while it is off.
+- **Coverage.** The report states how far back each machine's System log reaches; failures older than that are not judged.
+
+Sources: [event 4800](https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4800) ·
+[Audit Other Logon/Logoff Events](https://learn.microsoft.com/windows/security/threat-protection/auditing/audit-other-logonlogoff-events) ·
+[reboot event IDs](https://learn.microsoft.com/troubleshoot/windows-server/performance/troubleshoot-unexpected-reboots-system-event-logs) ·
+[Kernel-Power sleep events](https://learn.microsoft.com/defender-endpoint/troubleshoot-mdav-scan-issues#reasons-why-scans-are-canceled-or-terminated) ·
+[Modern Standby](https://learn.microsoft.com/windows-hardware/design/device-experiences/modern-standby)
 
 ---
 
