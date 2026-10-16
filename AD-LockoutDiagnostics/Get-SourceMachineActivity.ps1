@@ -140,6 +140,10 @@ $script:ActivityMap = @(
     @{ Log='Security'; Provider='Microsoft-Windows-Security-Auditing'; Id=4801; Kind='Unlock';         Label='Unlocked' }
     @{ Log='Security'; Provider='Microsoft-Windows-Security-Auditing'; Id=4802; Kind='ScreenSaverOn';  Label='Screen saver started' }
     @{ Log='Security'; Provider='Microsoft-Windows-Security-Auditing'; Id=4803; Kind='ScreenSaverOff'; Label='Screen saver dismissed' }
+    # Read only to recover real wake times (Repair-ResumeTime); never rows of their own
+    # unless a clock jump does not belong to a resume.
+    @{ Log='System';   Provider='Microsoft-Windows-Kernel-General';      Id=1;    Kind='ClockChange';  Label='System clock changed' }
+    @{ Log='System';   Provider='Microsoft-Windows-Power-Troubleshooter'; Id=1;   Kind='ResumeRecord'; Label='Resume record' }
 )
 
 # The points after which a saved password is typically replayed.
@@ -178,13 +182,45 @@ function ConvertFrom-ActivityEvent {
         [int]$EventId,
         [datetime]$Time,
         [string]$Message,
-        [string]$UserName
+        [string]$UserName,
+        [hashtable]$Data
     )
+    if (-not $Data) { $Data = @{} }
 
     $rule = $script:ActivityMap | Where-Object {
         $_.Id -eq $EventId -and $_.Log -eq $LogName -and $_.Provider -eq $ProviderName
     } | Select-Object -First 1
     if (-not $rule) { return $null }
+
+    # The clock reset (Kernel-General 1: OldTime/NewTime) and the resume record
+    # (Power-Troubleshooter 1: SleepTime/WakeTime, Target/EffectiveState) carry the real
+    # resume times in EventData, UTC. State values are SYSTEM_POWER_STATE: 5 = hibernate,
+    # 6 = shutdown; target shutdown + effective hibernate is a Fast Startup.
+    #   https://learn.microsoft.com/windows/win32/api/winnt/ne-winnt-system_power_state
+    #   https://learn.microsoft.com/windows-hardware/drivers/kernel/distinguishing-fast-startup-from-wake-from-hibernation
+    $clockFrom = $null; $clockTo = $null; $resumeType = ''; $wakeSource = ''
+    if ($rule.Kind -eq 'ClockChange' -or $rule.Kind -eq 'ResumeRecord') {
+        $inv = [Globalization.CultureInfo]::InvariantCulture
+        $fromKey = if ($rule.Kind -eq 'ClockChange') { 'OldTime' } else { 'SleepTime' }
+        $toKey   = if ($rule.Kind -eq 'ClockChange') { 'NewTime' } else { 'WakeTime' }
+        try {
+            $clockFrom = [datetime]::Parse([string]$Data[$fromKey], $inv, [Globalization.DateTimeStyles]::RoundtripKind).ToLocalTime()
+            $clockTo   = [datetime]::Parse([string]$Data[$toKey], $inv, [Globalization.DateTimeStyles]::RoundtripKind).ToLocalTime()
+        } catch { return $null }
+        if ($rule.Kind -eq 'ClockChange') {
+            # Time sync nudges the clock constantly; only a jump of minutes matters.
+            if ([math]::Abs(($clockTo - $clockFrom).TotalMinutes) -lt 2) { return $null }
+            $Message = "Clock moved from $($clockFrom.ToString('yyyy-MM-dd HH:mm:ss')) to $($clockTo.ToString('yyyy-MM-dd HH:mm:ss'))"
+        } else {
+            $target = 0; $effective = 0
+            [void][int]::TryParse([string]$Data['TargetState'], [ref]$target)
+            [void][int]::TryParse([string]$Data['EffectiveState'], [ref]$effective)
+            $resumeType = if ($target -eq 6 -and $effective -eq 5) { 'FastStartup' } elseif ($effective -eq 5) { 'Hibernate' } else { 'Sleep' }
+            $wakeSource = [string]$Data['WakeSourceText']
+            if ($wakeSource -match '^\s*Unknown\s*$') { $wakeSource = '' }
+            $Message = ''
+        }
+    }
 
     # First line of the rendered message is enough context for a timeline row (1074 names
     # the process and user; 42 names the sleep reason) without dumping the whole event.
@@ -201,7 +237,153 @@ function ConvertFrom-ActivityEvent {
         Label   = $rule.Label
         EventId = $EventId
         Detail  = $detail
+        ClockFrom  = $clockFrom
+        ClockTo    = $clockTo
+        ResumeType = $resumeType
+        WakeSource = $wakeSource
     }
+}
+
+function Repair-ResumeTime {
+    # Recovers real wake and start times after a long sleep, hibernation or Fast Startup.
+    # Pure. Same logic as Entra-DeviceActivityTimeline\Get-DeviceActivityTimeline.ps1 (folders
+    # here are self-contained); keep the two in step.
+    #
+    # While a device is down its clock stops. On resume Windows writes "resumed from sleep"
+    # (Kernel-Power 107) BEFORE it resets the clock from the hardware clock, so 107 is stamped
+    # with the moment it went down - seconds after the sleep event - and the timeline shows a
+    # device that woke at once and then sat on, silent, for days. Two later events carry the
+    # real time:
+    #   1. Power-Troubleshooter 1 (the resume record): SleepTime/WakeTime, written after the
+    #      resume. Used first.
+    #   2. Kernel-General 1 (the clock reset): OldTime = the stopped clock, NewTime = real.
+    #      Fallback when there is no resume record; Microsoft documents event 1 on every time
+    #      change, so the match is strict: a forward jump whose OldTime falls within
+    #      -MaxGapMinutes after the device went down (sleep, standby or shutdown).
+    #      https://learn.microsoft.com/troubleshoot/windows-server/active-directory/w32time-event-142-time-service-stopped-advertising
+    #      https://learn.microsoft.com/windows/win32/sysinfo/system-time
+    # The ordering itself was observed on Windows 11 laptops, not documented.
+    #
+    # Each recovered resume becomes a row at the real time (or, when an accurate resume row
+    # already exists there, adds its detail to that row). Rows stamped with the stopped clock
+    # are kept but relabelled so they no longer count. Unmatched clock jumps stay as
+    # "System clock changed"; resume records are never shown as rows of their own.
+    param([object[]]$Events, [int]$MaxGapMinutes = 10)
+
+    $list = @($Events | Where-Object { $_ } | Sort-Object Time)
+    $stale = @{}; $used = @{}; $enrich = @{}
+    $added = New-Object System.Collections.ArrayList
+    $resumeKinds = @('Wake', 'StandbyExit', 'Startup')
+
+    # Resume-type rows AFTER the sleep/shutdown event and well before the real resume time are
+    # the ones Windows stamped with the stopped clock. Rows before that event are genuine - a
+    # laptop typically leaves Modern Standby just before it hibernates.
+    $markStale = {
+        param([datetime]$Down, [datetime]$Up)
+        $from = $null
+        foreach ($e in $list) {
+            $t = [datetime]$e.Time
+            if ($t -gt $Down.AddMinutes($MaxGapMinutes)) { break }
+            if ($t -ge $Down.AddMinutes(-1) -and $e.Kind -in @('Sleep', 'Shutdown')) { $from = $t; break }
+        }
+        if (-not $from) { $from = $Down }
+        $first = $null
+        for ($i = 0; $i -lt $list.Count; $i++) {
+            $t = [datetime]$list[$i].Time
+            if ($t -le $from) { continue }
+            if ($t -gt $Down.AddMinutes($MaxGapMinutes) -or $t -ge $Up.AddSeconds(-60)) { break }
+            if ($list[$i].Kind -in $resumeKinds) { $stale[$i] = $true; if (-not $first) { $first = $t } }
+        }
+        return $first
+    }
+    # An accurate resume row already at the real time, if Windows wrote one.
+    $findRow = {
+        param([datetime]$Up)
+        for ($i = 0; $i -lt $list.Count; $i++) {
+            if (-not $stale.ContainsKey($i) -and $list[$i].Kind -in $resumeKinds -and
+                [math]::Abs(([datetime]$list[$i].Time - $Up).TotalSeconds) -le 120) { return $i }
+        }
+        return -1
+    }
+    $staleNote = { param($at) if ($at) { " Windows logged it at $(([datetime]$at).ToString('yyyy-MM-dd HH:mm:ss')), before its clock caught up." } else { '' } }
+
+    # 1. Resume records.
+    $recovered = @()
+    for ($c = 0; $c -lt $list.Count; $c++) {
+        $r = $list[$c]
+        if ($r.Kind -ne 'ResumeRecord') { continue }
+        $used[$c] = $true
+        if (-not $r.ClockFrom -or -not $r.ClockTo) { continue }
+        $down = [datetime]$r.ClockFrom; $up = [datetime]$r.ClockTo
+        $recovered += $up
+        $how = switch ($r.ResumeType) { 'FastStartup' { 'a Fast Startup shutdown' } 'Hibernate' { 'hibernation' } default { 'sleep' } }
+        $why = if ($r.WakeSource) { " Wake source: $($r.WakeSource)." } else { '' }
+        $staleAt = & $markStale $down $up
+        $isStart = $r.ResumeType -eq 'FastStartup'
+        $kind  = if ($isStart) { 'Startup' } else { 'Wake' }
+        $label = if ($isStart) { 'Windows started (Fast Startup)' } elseif ($r.ResumeType -eq 'Hibernate') { 'Woke from hibernation' } else { 'Woke from sleep' }
+        $idx = & $findRow $up
+        if ($idx -ge 0) {
+            # An accurate row is already there (often "Left Modern Standby" right after a
+            # hibernate resume); give it the resume record's more precise meaning.
+            $enrich[$idx] = @{ Kind = $kind; Label = $label; Note = "Resumed from $how.$why" }
+            continue
+        }
+        $null = $added.Add([PSCustomObject]@{
+            Time = $up; EventId = 1
+            Kind  = $kind
+            Label = $label
+            Detail = "Down since $($down.ToString('yyyy-MM-dd HH:mm:ss')); resumed from $how.$why$(& $staleNote $staleAt)"
+            ClockFrom = $down; ClockTo = $up; ResumeType = $r.ResumeType; WakeSource = $r.WakeSource
+        })
+    }
+
+    # 2. Clock resets with no resume record for the same resume.
+    for ($c = 0; $c -lt $list.Count; $c++) {
+        $jump = $list[$c]
+        if ($jump.Kind -ne 'ClockChange' -or -not $jump.ClockFrom -or -not $jump.ClockTo) { continue }
+        $old = [datetime]$jump.ClockFrom; $new = [datetime]$jump.ClockTo
+        if (($new - $old).TotalMinutes -lt 2) { continue }
+        if (@($recovered | Where-Object { [math]::Abs(($_ - $new).TotalSeconds) -le 120 }).Count -gt 0) { $used[$c] = $true; continue }
+
+        $downIdx = -1
+        for ($i = 0; $i -lt $list.Count; $i++) {
+            $t = [datetime]$list[$i].Time
+            if ($t -gt $old) { break }
+            if ($list[$i].Kind -in @('Sleep', 'StandbyEnter', 'Shutdown') -and ($old - $t).TotalMinutes -le $MaxGapMinutes) { $downIdx = $i }
+        }
+        if ($downIdx -lt 0) { continue }
+
+        $down = [datetime]$list[$downIdx].Time
+        $wasOff = $list[$downIdx].Kind -eq 'Shutdown'
+        $staleAt = & $markStale $down $new
+        $used[$c] = $true
+        if ((& $findRow $new) -ge 0) { continue }
+        $null = $added.Add([PSCustomObject]@{
+            Time = $new; EventId = 1
+            Kind  = $(if ($wasOff) { 'Startup' } else { 'Wake' })
+            Label = $(if ($wasOff) { 'Windows started' } else { 'Woke from sleep' })
+            Detail = "$(if ($wasOff) { 'Off' } else { 'Asleep or hibernated' }) since $($down.ToString('yyyy-MM-dd HH:mm:ss')); real time recovered from the clock reset.$(& $staleNote $staleAt)"
+            ClockFrom = $old; ClockTo = $new; ResumeType = ''; WakeSource = ''
+        })
+    }
+
+    $out = for ($i = 0; $i -lt $list.Count; $i++) {
+        if ($used.ContainsKey($i)) { continue }
+        $e = $list[$i]
+        if ($stale.ContainsKey($i)) {
+            $e = $e.PSObject.Copy()
+            $e.Label = if ($e.Kind -eq 'Startup') { 'Start logged with the clock still at the time it shut down' } else { 'Resume logged with the clock still at the time it went to sleep' }
+            $e.Kind = 'ResumeLogged'
+        } elseif ($enrich.ContainsKey($i)) {
+            $e = $e.PSObject.Copy()
+            # A Windows-started row keeps its kind; a standby/wake row takes the record's.
+            if ($e.Kind -ne 'Startup') { $e.Kind = $enrich[$i].Kind; $e.Label = $enrich[$i].Label }
+            $e.Detail = (@($e.Detail, $enrich[$i].Note) | Where-Object { $_ }) -join ' - '
+        }
+        $e
+    }
+    return @(@($out) + @($added) | Sort-Object Time)
 }
 
 function Get-ActivityInterval {
@@ -410,7 +592,7 @@ function Get-RemoteErrorText {
 
 function Get-MachineActivity {
     # Reads one machine. The only function here that touches the network.
-    param([Parameter(Mandatory)][string]$Computer, [Parameter(Mandatory)][datetime]$StartTime)
+    param([Parameter(Mandatory)][string]$Computer, [Parameter(Mandatory)][datetime]$StartTime, [int]$LookbackDays = 14)
 
     $result = [PSCustomObject]@{
         Computer = $Computer; Reachable = $true; UnreachableReason = ''
@@ -421,9 +603,16 @@ function Get-MachineActivity {
     $rows = New-Object System.Collections.ArrayList
 
     try {
-        $sys = @(Get-WinEvent -ComputerName $Computer -FilterHashtable @{ LogName='System'; Id=$systemIds; StartTime=$StartTime } -ErrorAction Stop)
+        # Read $LookbackDays further back: the sleep that a wake in the window belongs to is
+        # often earlier, and without it a long sleep is invisible. Trimmed back below.
+        $sys = @(Get-WinEvent -ComputerName $Computer -FilterHashtable @{ LogName='System'; Id=$systemIds; StartTime=$StartTime.AddDays(-$LookbackDays) } -ErrorAction Stop)
         foreach ($ev in $sys) {
-            $r = ConvertFrom-ActivityEvent -LogName 'System' -ProviderName $ev.ProviderName -EventId $ev.Id -Time $ev.TimeCreated -Message $ev.Message
+            # Only the clock-reset and resume-record events (both ID 1) need their fields.
+            $data = @{}
+            if ($ev.Id -eq 1) {
+                try { foreach ($n in ([xml]$ev.ToXml()).Event.EventData.Data) { if ($n.Name) { $data[$n.Name] = [string]$n.'#text' } } } catch { }
+            }
+            $r = ConvertFrom-ActivityEvent -LogName 'System' -ProviderName $ev.ProviderName -EventId $ev.Id -Time $ev.TimeCreated -Message $ev.Message -Data $data
             if ($r) { $null = $rows.Add($r) }
         }
     } catch {
@@ -466,8 +655,19 @@ function Get-MachineActivity {
         }
     }
 
-    $result.Events = @($rows | Sort-Object Time)
+    $result.Events = @(Select-ActivityWindow -Events (Repair-ResumeTime -Events $rows) -StartTime $StartTime)
     return $result
+}
+
+function Select-ActivityWindow {
+    # Trims repaired events back to the window, keeping the last power event before it so
+    # the window opens in the right state - a failure on day one of a two-week sleep is then
+    # "while asleep", not "while on". Pure.
+    param([object[]]$Events, [datetime]$StartTime)
+    $sorted = @($Events | Where-Object { $_ } | Sort-Object Time)
+    $powerKinds = @('Startup', 'Shutdown', 'UnexpectedRestart', 'Sleep', 'Wake', 'StandbyEnter', 'StandbyExit')
+    $before = @($sorted | Where-Object { [datetime]$_.Time -lt $StartTime -and $_.Kind -in $powerKinds }) | Select-Object -Last 1
+    return @(@($before) + @($sorted | Where-Object { [datetime]$_.Time -ge $StartTime }) | Where-Object { $_ })
 }
 
 function New-TimelineRow {
@@ -488,7 +688,9 @@ function New-TimelineRow {
 
     $merged = @()
     foreach ($e in @($Events)) { $merged += [PSCustomObject]@{ Time=[datetime]$e.Time; IsFailure=$false; Item=$e } }
-    foreach ($f in @($FailureTimes)) {
+    # Timeline-only runs pass $null, which [object[]] binds as @($null) - skip it, or the
+    # [datetime] cast below throws.
+    foreach ($f in @($FailureTimes | Where-Object { $_ })) {
         $s = Get-FailureState -Time ([datetime]$f) -Intervals $Intervals -ResumePoints $ResumePoints -CoverageStart $CoverageStart -WindowMinutes $WindowMinutes
         $merged += [PSCustomObject]@{ Time=[datetime]$f; IsFailure=$true; Item=$s }
     }
