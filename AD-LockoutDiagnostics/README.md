@@ -555,3 +555,15 @@ Invoke-Pester .\AD-LockoutDiagnostics\Tests\ -Output Detailed
 ```
 
 The domain-bound functions (AD queries, event-log reads) are verified by running the scripts against a real domain.
+
+## Building the zip
+
+`AD-Lockout-Diagnostics.zip` is the toolkit in one flat folder: the scripts and guides here, plus `Export-ADAuthSourceEvidence.ps1`, `Get-LockoutCause.ps1` and `Watch-ADLockoutActivity.ps1` from `AD-AuthSourceEvidence`. The investigation finds its companions beside itself, so the extracted folder works with no setup.
+
+The zip is **not kept in git**. A committed copy went stale for weeks and was missing the device timeline step. Build a fresh one whenever you hand the toolkit out:
+
+```powershell
+.\AD-LockoutDiagnostics\Build-LockoutToolkit.ps1 -Force
+```
+
+The build copies only git-tracked files, so case folders and reports, which hold client AD data, can never end up in it. Tests are left out. It prints the file list and the zip's SHA-256. A test checks that every companion script the investigation needs is in the zip.
