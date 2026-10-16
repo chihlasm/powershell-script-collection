@@ -1,52 +1,123 @@
 # powershell-script-collection
-Collection of useful PowerShell scripts for automation and system administration tasks.
 
-## Table of Contents
+PowerShell tools for Windows Server, Active Directory, Citrix/RDS and Microsoft 365
+administration in MSP environments. Each folder is one self-contained tool with its own
+`README.md`. Copy the folder to the machine you run it from; there are no shared modules.
 
-- [AD Export](#ad-export)
-- [Block 365 Sign-in](#cloudsigninmgrps1-block-365-sign-in)
-- [Citrix-FSLogix-HealthCollector](#citrix-fslogix-healthcollector)
-- [Citrix-PerfTriage](#citrix-perftriage)
-- [CitrixVDADiagnostics](#citrixvdadiagnostics)
-- [CopyFileToServer](#copyfiletoserverps1)
-- [CursorFix](#cursorfixps1)
-- [DeleteOldFolders](#deleteoldfoldersps1)
-- [DriveMap-Diagnostics](#drivemap-diagnostics)
-- [Entra-DeviceActivityTimeline](#entra-deviceactivitytimeline)
-- [FileCopyMoveGUI](#filecopymoveguips1)
-- [FolderPermissionManager](#folderpermissionmanager)
-- [FSLogix-Profile-Backup](#fslogix-profile-backup)
-- [Get-AzureFilesFSLogixProfiles](#get-azurefilesfslogixprofiles)
-- [HideFromGal](#hidefromgal)
-- [Install-TeamsOnVirtualDesktop](#install-teamsonvirtualdesktop)
-- [LocalAdminManager](#localadminmanager)
-- [PasswordPolicyAuditor](#passwordpolicyauditor)
-- [SMBTest](#smb-diagnostic--drive-mapping-script)
-- [AD-GroupPolicy-Audit](#ad-groupolicy-audit)
-- [Get-CitrixSessions](#get-citrixsessions)
-- [RDS-FSLogix-EventExport](#rds-fslogix-eventexport)
-- [ServiceDesk-Toolkit](#servicedesk-toolkit)
+**Service desk staff: start with [ServiceDesk-Toolkit/README.md](ServiceDesk-Toolkit/README.md)**,
+which says which tool to run for each kind of ticket. The bundle it builds is what gets
+handed out, so it always matches this repository.
 
-## AD Export
+## Tool index
 
-**Description**: A comprehensive PowerShell script to export user members from multiple Active Directory groups with flexible output options. Supports individual or combined CSV exports, nested group inclusion, rich user data, and comprehensive logging.
+### Start here
 
-**Files Included**:
-- `Export-MultipleADGroupMembers.ps1` - Main export script
-- `Export-ADGroupMembers-Example.ps1` - Usage examples
-- `README-AD-Group-Export.md` - Detailed documentation
+| Folder | What it does |
+|---|---|
+| [ServiceDesk-Toolkit](ServiceDesk-Toolkit/) | Builds the service desk bundle and its START HERE page |
+| [MSP-TroubleshootingWorkbench](MSP-TroubleshootingWorkbench/) | Browser case page: run checks, add notes, generate ticket notes |
 
-**Prerequisites**:
-- Active Directory PowerShell module (via RSAT)
-- Domain permissions to read group membership
+### Active Directory and Group Policy
 
-**Usage Examples**:
-- Basic export: `.\AD Export\Export-MultipleADGroupMembers.ps1 -GroupNames "Domain Admins", "Enterprise Admins"`
-- Combined output: `.\AD Export\Export-MultipleADGroupMembers.ps1 -GroupNames "Group1", "Group2" -CombinedOutput`
+| Folder | What it does |
+|---|---|
+| [AD-LockoutDiagnostics](AD-LockoutDiagnostics/) | Why does this account keep locking out, and from which device? Includes source-device evidence, cause ranking and a live watcher |
+| [AD-GroupMembership-Export](AD-GroupMembership-Export/) | Who has access to what: every group and member, with nesting and overlap |
+| [Find-PrivilegedAccessPaths](Find-PrivilegedAccessPaths/) | Why is this user an admin? Plus a domain-wide privileged access report |
+| [AD-Audit](AD-Audit/) | Whole-domain posture audit: accounts, password policy, DCs, trusts, infrastructure |
+| [AD-GroupPolicy-Audit](AD-GroupPolicy-Audit/) | Audits every GPO for duplicates, conflicts, security issues and FSLogix settings |
+| [DriveMap-Diagnostics](DriveMap-Diagnostics/) | Why is a mapped drive missing? Also audits every GPO drive map and searches SYSVOL logon scripts |
+| [ADReplicationDiagnostics](ADReplicationDiagnostics/) | AD replication and DFSR/DFS Namespace health |
+| [DC-Diagnostics](DC-Diagnostics/) | Run on a DC: health and events lined up against an outage window |
+| [DHCP-Audit](DHCP-Audit/) | DHCP failover health across every authorized DHCP server |
+| [Search-DNSRecords](Search-DNSRecords/) | Browser GUI to search and audit DNS records |
+| [LocalAdminManager](LocalAdminManager/) | Add or remove domain users/groups in local Administrators |
+| [HideFromGal](HideFromGal/) | **Changes AD.** Hide or unhide users in the Exchange Online address book |
+| [Block 365 Sign-in](Block%20365%20Sign-in/) | **Changes AD.** Block Microsoft 365 sign-in while keeping on-prem login |
 
-For full documentation, see [AD Export/README-AD-Group-Export.md](AD%20Export/README-AD-Group-Export.md)
+### Microsoft Entra ID and Microsoft 365
 
-## Scripts
+| Folder | What it does |
+|---|---|
+| [Get-EntraPasswordPolicy](Get-EntraPasswordPolicy/) | Tenant password policy, smart lockout and per-user expiry |
+| [Get-M365SecurityEvidence](Get-M365SecurityEvidence/) | MFA, password policy and privileged-account evidence for audits |
+| [Entra-DeviceActivityTimeline](Entra-DeviceActivityTimeline/) | When was this Entra-joined device on, asleep, locked and signed in to? |
+
+### Citrix, RDS and FSLogix
+
+| Folder | What it does |
+|---|---|
+| [Citrix-FSLogix-HealthCollector](Citrix-FSLogix-HealthCollector/) | Health verdict per session host: performance plus event logs |
+| [Citrix-PerfTriage](Citrix-PerfTriage/) | One-command performance triage on a session host |
+| [CitrixVDADiagnostics](CitrixVDADiagnostics/) | Deeper VDA and FSLogix performance diagnostics |
+| [Get-CitrixVDAResources](Get-CitrixVDAResources/) | Which VDAs are short on CPU, memory or disk, farm-wide |
+| [Get-CitrixSessions](Get-CitrixSessions/) / [CitrixUserSessions](CitrixUserSessions/) | Who is logged on to which VDA |
+| [Get-RAM-Usage](Get-RAM-Usage/) | RAM by user and process on a multi-session server |
+| [RDS-FSLogix-EventExport](RDS-FSLogix-EventExport/) | RDS and FSLogix event-log errors for a time window |
+| [Get-FSLogixStorageEvents](Get-FSLogixStorageEvents/) / [Parse-FSLogixLogs](Parse-FSLogixLogs/) | FSLogix storage events and log parsing |
+| [Get-AzureFilesFSLogixProfiles](Get-AzureFilesFSLogixProfiles/) | FSLogix containers on Azure Files, with sizes |
+| [FSLogix-ProfileDiskRepair](FSLogix-ProfileDiskRepair/) | Scan and repair FSLogix VHDX filesystem errors |
+| [FSLogix-Profile-Backup](FSLogix-Profile-Backup/) | Back up browser saved passwords from profiles |
+| [FSLogix-miExcel-Cleanup](FSLogix-miExcel-Cleanup/) | Remove the miExcel add-in from FSLogix profiles |
+| [Storage Space Clean-up](Storage%20Space%20Clean-up/) | Disk cleanup for VDAs with FSLogix |
+| [Install-TeamsOnVirtualDesktop](Install-TeamsOnVirtualDesktop/) | Clean Teams install on Citrix / RDS / AVD |
+| [Migrate-AdobeProducts](Migrate-AdobeProducts/) | Replace Adobe Acrobat on Citrix VDAs |
+| [CitrixWorkspaceApp_Remediation](CitrixWorkspaceApp_Remediation/) | Clean up and reinstall Citrix Workspace app |
+
+### Files, storage and permissions
+
+| Folder | What it does |
+|---|---|
+| [FolderPermissionManager](FolderPermissionManager/) | Browser GUI for NTFS permissions |
+| [RobocopyMigration](RobocopyMigration/) | GUI for server-to-server file migrations |
+| [CopyFileToServer](CopyFileToServer/) | GUI to copy files to many servers |
+| [FileCopyMoveGUI](FileCopyMoveGUI/) | GUI copy/move with Robocopy-style options |
+| [DeleteOldFolders](DeleteOldFolders/) | Delete `.old` folders past an age |
+| [Drive-Storage-Report](Drive-Storage-Report/) | HTML report of drive and folder usage |
+| [DiskSpdDiagnostic](DiskSpdDiagnostic/) | Storage performance triage with diskspd |
+| [Storage-Corruption-Diagnostic](Storage-Corruption-Diagnostic/) | Read-only checks for suspected filesystem corruption |
+| [SMBTest](SMBTest/) | Step-by-step SMB connectivity diagnostics |
+
+### Servers and virtualization
+
+| Folder | What it does |
+|---|---|
+| [Hyper-V-Inventory](Hyper-V-Inventory/) / [VMware-Inventory](VMware-Inventory/) | Host and VM inventory with capacity rollups |
+| [HyperV-Host-Diagnostics](HyperV-Host-Diagnostics/) | Hyper-V host evidence for guest data loss or reboots |
+| [Sql-Corruption-Diagnostic](Sql-Corruption-Diagnostic/) | Read-only SQL Server corruption diagnostics |
+| [Schedule-Reboot](Schedule-Reboot/) | Schedule a one-time server reboot |
+
+### Software, printers and desktop fixes
+
+| Folder | What it does |
+|---|---|
+| [Install-MSI](Install-MSI/) / [Download and Install](Download%20and%20Install/) | Install an MSI from a share or URL |
+| [Install-Chocolatey-VC3](Install-Chocolatey-VC3/) | Install Chocolatey with the private repository source |
+| [Set-PrinterDefaults](Set-PrinterDefaults/) | Set black-and-white, two-sided defaults on printers |
+| [CursorFix](CursorFix/) | Fix invisible cursor issues |
+
+### Network
+
+| Folder | What it does |
+|---|---|
+| [Network-Troubleshooting-Palette](Network-Troubleshooting-Palette/) | Network troubleshooting command palette |
+| [Juniper-ConsoleSetup](Juniper-ConsoleSetup/) | Browser GUI for Juniper console-cable provisioning |
+| [Juniper-DeviceManager](Juniper-DeviceManager/) | Work in progress: Juniper fleet management over NETCONF |
+| [JunOS - Info](JunOS%20-%20Info/) | Python: Juniper firmware and config audit |
+
+### Retired tools
+
+| Was | Use instead |
+|---|---|
+| `AD Export` | [AD-GroupMembership-Export](AD-GroupMembership-Export/) (see its "Migrating from AD Export" section) |
+| `PasswordPolicyAuditor` | [AD-Audit](AD-Audit/) for the domain policy and fine-grained policies, [Get-EntraPasswordPolicy](Get-EntraPasswordPolicy/) for the cloud |
+| `AD-AuthSourceEvidence` | Merged into [AD-LockoutDiagnostics](AD-LockoutDiagnostics/) |
+| `AD-GroupPolicy-DriveMaps`, `Search-SYSVOLScripts` | Merged into [DriveMap-Diagnostics](DriveMap-Diagnostics/) |
+
+## Tool details
+
+The sections below are older summaries for some of the tools. Each folder's own README is
+the authoritative, current documentation.
 
 ### DeleteOldFolders.ps1
 
@@ -312,28 +383,6 @@ For a combined performance *and* event view across a fleet, use [Citrix-FSLogix-
 - Changes take effect after Entra Connect synchronization cycle
 - Uses cloud extension attribute that doesn't conflict with on-premises AD
 - Test in non-production environment first
-
-## PasswordPolicyAuditor
-
-**Description**: Retrieves and exports password policies from Active Directory Domain and Azure AD Tenant with detailed descriptions. Supports multiple export formats (CSV, HTML, TXT) and includes comprehensive policy explanations.
-
-**Parameters**:
-- `-OutputPath <string>` (Optional, default: current directory): Path where the output file will be saved.
-- `-OutputFormat <string>` (Optional, default: CSV): Format for the output file (CSV, HTML, or TXT).
-- `-IncludeAD <bool>` (Optional, default: $true): Include Active Directory domain password policy.
-- `-IncludeAzureAD <bool>` (Optional, default: $true): Include Azure AD tenant password policy.
-- `-AzureADCredential <PSCredential>` (Optional): PSCredential object for Azure AD authentication.
-
-**Usage Examples**:
-- Basic audit: `.\PasswordPolicyAuditor\Get-PasswordPolicies.ps1`
-- HTML report: `.\PasswordPolicyAuditor\Get-PasswordPolicies.ps1 -OutputFormat HTML`
-- AD only: `.\PasswordPolicyAuditor\Get-PasswordPolicies.ps1 -IncludeAzureAD $false`
-
-**Notes**:
-- Requires ActiveDirectory module for on-premises policies (install RSAT tools).
-- Requires AzureAD or MSOnline module for cloud policies.
-- Supports both interactive and credential-based Azure AD authentication.
-- Exports include policy descriptions and current values.
 
 ## Install-TeamsOnVirtualDesktop
 
