@@ -67,6 +67,45 @@ Describe 'Get-ActivityInterval' {
     }
 }
 
+Describe 'Repair-ResumeTime (wake logged with the stopped clock)' {
+    BeforeAll {
+        # Real sequence from a Windows 11 laptop: hibernate at 07:29:35, "resumed from sleep"
+        # (107) stamped four seconds later with the stopped clock, then two weeks later the
+        # clock reset and the resume record at the real wake time.
+        $script:LongSleep = @(
+            (New-Act Sleep '2026-09-28T07:29:35'); (New-Act Wake '2026-09-28T07:29:39')
+            ([PSCustomObject]@{ Time = [datetime]'2026-10-12T02:14:12'; Kind = 'ClockChange'; Label = 'System clock changed'; EventId = 1; Detail = ''
+                                ClockFrom = [datetime]'2026-09-28T07:29:39'; ClockTo = [datetime]'2026-10-12T02:14:12'; ResumeType = ''; WakeSource = '' })
+            ([PSCustomObject]@{ Time = [datetime]'2026-10-12T02:14:15'; Kind = 'ResumeRecord'; Label = 'Resume record'; EventId = 1; Detail = ''
+                                ClockFrom = [datetime]'2026-09-28T07:28:54'; ClockTo = [datetime]'2026-10-12T02:14:12'; ResumeType = 'Hibernate'; WakeSource = '' })
+        )
+    }
+
+    It 'moves the wake to the real time' {
+        $out = @(Repair-ResumeTime -Events $script:LongSleep)
+        $w = @($out | Where-Object { $_.Kind -eq 'Wake' })
+        $w.Count | Should -Be 1
+        $w[0].Time | Should -Be ([datetime]'2026-10-12T02:14:12')
+        @($out | Where-Object { $_.Kind -in 'ClockChange', 'ResumeRecord' }).Count | Should -Be 0
+    }
+
+    It 'classes a failure in the middle of the sleep as while asleep, not after resuming' {
+        # Regression: with the stale 107 taken at face value the sleep "ended" four seconds
+        # after it began, so this failure was counted as the machine being on.
+        $before = Measure-FailureState -FailureTimes @([datetime]'2026-10-05T10:00') -Events $script:LongSleep
+        $after  = Measure-FailureState -FailureTimes @([datetime]'2026-10-05T10:00') -Events (Repair-ResumeTime -Events $script:LongSleep)
+        $before.WhileAsleep | Should -Be 0
+        $after.WhileAsleep | Should -Be 1
+    }
+
+    It 'keeps the last power event before the window so the window opens asleep' {
+        $win = @(Select-ActivityWindow -Events (Repair-ResumeTime -Events $script:LongSleep) -StartTime '2026-10-01')
+        $win[0].Kind | Should -Be 'Sleep'
+        $c = Measure-FailureState -FailureTimes @([datetime]'2026-10-05T10:00') -Events $win
+        $c.WhileAsleep | Should -Be 1
+    }
+}
+
 Describe 'Get-ActivityVerdict' {
     BeforeAll {
         $script:Ev = @(
@@ -175,6 +214,16 @@ Describe 'New-TimelineRow' {
         $rows = @(New-TimelineRow -Events $ev -FailureTimes $f -Intervals $p.Intervals -ResumePoints $p.ResumePoints)
         $rows.Count | Should -Be 3
         $rows[2].Label | Should -Match '^3 failed sign-ins right after it resumed'
+    }
+
+    It 'builds a timeline-only report when no failure times are supplied' {
+        # Regression: the main flow passes $null here when there is no -AuthEventsCsv, which
+        # [object[]] binds as @($null) and used to throw "Cannot convert null to DateTime".
+        $ev = @((New-Act Sleep '2026-10-14T12:00'); (New-Act Wake '2026-10-14T13:00'))
+        $p  = Get-ActivityInterval -Events $ev
+        $rows = @(New-TimelineRow -Events $ev -FailureTimes $null -Intervals $p.Intervals -ResumePoints $p.ResumePoints)
+        $rows.Count | Should -Be 2
+        @($rows | Where-Object { $_.IsFailure }).Count | Should -Be 0
     }
 }
 

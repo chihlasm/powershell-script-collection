@@ -12,6 +12,7 @@ Collection of useful PowerShell scripts for automation and system administration
 - [CursorFix](#cursorfixps1)
 - [DeleteOldFolders](#deleteoldfoldersps1)
 - [DriveMap-Diagnostics](#drivemap-diagnostics)
+- [Entra-DeviceActivityTimeline](#entra-deviceactivitytimeline)
 - [FileCopyMoveGUI](#filecopymoveguips1)
 - [FolderPermissionManager](#folderpermissionmanager)
 - [FSLogix-Profile-Backup](#fslogix-profile-backup)
@@ -644,3 +645,17 @@ For full documentation, see [FSLogix-Profile-Backup/README.md](FSLogix-Profile-B
 - Changes take effect after Entra Connect synchronization cycle
 - Uses cloud extension attribute that doesn't conflict with on-premises AD
 - Test in non-production environment first
+
+## Entra-DeviceActivityTimeline
+
+When was one Windows device on, asleep, locked, unlocked and signed in to? For Microsoft Entra joined / Intune managed devices, where there is no domain to query from. Runs on the device itself (RMM session, Defender Live Response, or an Intune Remediation run on demand) and writes an HTML day-by-day report plus CSVs, zipped for collection.
+
+```powershell
+.\Entra-DeviceActivityTimeline\Get-DeviceActivityTimeline.ps1 -UserName jdoe@contoso.com -DaysBack 30
+```
+
+- Says up front whether lock/unlock (4800/4801) can exist. The audit setting that writes them is off by default in Intune, so the report recovers unlocks from the sign-in record (4624 type 7) instead
+- Recovers real wake times after long sleeps, which Windows logs with the frozen pre-sleep clock
+- `-IntuneSummary` fits the answer into Intune's 2,048-character Remediation output; `-EnableLockAuditing` starts recording lock/unlock now
+
+See [Entra-DeviceActivityTimeline/README.md](Entra-DeviceActivityTimeline/README.md).

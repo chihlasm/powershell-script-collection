@@ -372,6 +372,8 @@ The DC evidence says *that* a machine sent a bad password; it cannot say what th
 | 41, 6008 | Kernel-Power / EventLog, System | Restarted after a crash or power loss |
 | 42 / 107 | Kernel-Power, System | Entering sleep / resumed from sleep |
 | 506 / 507 | Kernel-Power, System | Entering / leaving Modern Standby |
+| 1 | Power-Troubleshooter, System | Resume record: real sleep and wake times, sleep type (used to correct 107) |
+| 1 | Kernel-General, System | Clock reset after resume (fallback correction for 107) |
 | 4800 / 4801, 4802 / 4803 | Security | Locked / unlocked, screen saver on / off |
 
 Events are matched on provider **and** ID - the same ID from another provider is ignored.
@@ -380,6 +382,7 @@ Events are matched on provider **and** ID - the same ID from another provider is
 
 - **Lock and unlock need auditing on the PC.** 4800/4801 are only written when *Audit Other Logon/Logoff Events* is set to Success on that machine. When none are found the report says so instead of reading the silence as "never locked". Reading the Security log also needs administrator rights on the machine; the System log usually does not.
 - **Modern Standby is not "off".** Laptops using Modern Standby (506/507) can keep the network connected while they look asleep, so failures in that period are reported separately and never taken as proof the machine was idle.
+- **After a long sleep, 107 is stamped with the wrong time.** Windows writes *resumed from sleep* before it resets its stopped clock, so 107 carries the time the machine went to sleep. Taken at face value, a laptop that hibernated for two weeks "woke" seconds later, and failures sent from somewhere else during those two weeks would look like they came from a machine that was on. The real wake time is taken from the resume record (or, failing that, the clock reset). The stale 107 is kept in the timeline, relabelled. The System log is read 14 days before the window so a sleep that began earlier still counts.
 - **Wake beats unlock.** When a wake and an unlock both fall just before a failure, the wake is credited - that is when Windows reconnects drives and services retry.
 - **Reachability.** It needs remote Event Log access (the *Remote Event Log Management* firewall rule). An unreachable machine is reported as such; that is itself worth noting if failures are still arriving while it is off.
 - **Coverage.** The report states how far back each machine's System log reaches; failures older than that are not judged.
@@ -552,3 +555,15 @@ Invoke-Pester .\AD-LockoutDiagnostics\Tests\ -Output Detailed
 ```
 
 The domain-bound functions (AD queries, event-log reads) are verified by running the scripts against a real domain.
+
+## Building the zip
+
+`AD-Lockout-Diagnostics.zip` is the toolkit in one flat folder: the scripts and guides here, plus `Export-ADAuthSourceEvidence.ps1`, `Get-LockoutCause.ps1` and `Watch-ADLockoutActivity.ps1` from `AD-AuthSourceEvidence`. The investigation finds its companions beside itself, so the extracted folder works with no setup.
+
+The zip is **not kept in git**. A committed copy went stale for weeks and was missing the device timeline step. Build a fresh one whenever you hand the toolkit out:
+
+```powershell
+.\AD-LockoutDiagnostics\Build-LockoutToolkit.ps1 -Force
+```
+
+The build copies only git-tracked files, so case folders and reports, which hold client AD data, can never end up in it. Tests are left out. It prints the file list and the zip's SHA-256. A test checks that every companion script the investigation needs is in the zip.

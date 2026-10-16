@@ -123,7 +123,7 @@ Query AD for server lists (`Get-DhcpServerInDC`, `Get-ADDomainController -Filter
 
 ## Commit Conventions
 
-Use conventional commit prefixes: `feat:`, `fix:`, `docs:`. First line is a brief subject, followed by a blank line and bullet-point details when needed. End with `Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>`.
+Use conventional commit prefixes: `feat:`, `fix:`, `docs:`. First line is a brief subject, followed by a blank line and bullet-point details when needed. End with a `Co-Authored-By:` trailer naming the Claude model that actually did the work, e.g. `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Use the model you are running as, not the one in this example; a hardcoded name goes stale and misattributes the commit.
 
 ## Folder Structure Pattern
 
