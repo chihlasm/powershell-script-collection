@@ -4,8 +4,8 @@ Audits all GPOs in an Active Directory domain and generates reports covering dup
 
 ## Requirements
 
-- Windows PowerShell 5.1+
-- RSAT modules: `GroupPolicy`, `ActiveDirectory`
+- Windows PowerShell 5.1+ (declared with `#Requires -Version 5.1`; the script uses `::new()`)
+- RSAT modules: `GroupPolicy`, `ActiveDirectory` (imported at runtime with a try/catch, not `#Requires -Modules`, so servers with unregistered RSAT still work)
 - Domain read permissions for GPO settings and permissions
 
 ## Quick Start
@@ -35,6 +35,8 @@ Audits all GPOs in an Active Directory domain and generates reports covering dup
 | `-Domain` | string | Current domain | Target domain to audit |
 | `-Credential` | PSCredential | None | Credential for cross-domain auth |
 | `-SkipBrowserOpen` | switch | Off | Don't open HTML report in browser |
+| `-IncludeUnlinked` | switch | Off | Include GPOs with no links in the analysis |
+| `-LoadFunctionsOnly` | switch | Off | Define functions and exit without auditing (used by the Pester tests) |
 
 ## What It Checks
 
@@ -45,7 +47,7 @@ Audits all GPOs in an Active Directory domain and generates reports covering dup
 | **Optimizations** | Empty GPOs, unlinked GPOs, stale GPOs (>1 year), disabled sections with no settings |
 | **Security** | Non-standard edit permissions, sensitive GPOs applying to all Authenticated Users |
 | **Security Filtering** | GPOs with no Apply permission (won't apply to anyone) |
-| **Drive Maps** | Same share mapped in multiple GPOs, same drive letter pointing to different shares |
+| **Drive Maps** | Summary only: how many GPOs contain drive maps and how many mappings. For conflicts, duplicates, item-level-targeting overlap and path checks run `DriveMap-Diagnostics\Audit-GPDriveMaps.ps1` |
 | **Printers** | Same printer deployed by multiple GPOs, conflicting default printer settings |
 | **FSLogix** | Profile Container, ODFC, Cloud Cache, and App Masking settings from both ADMX Admin Templates and GP Preferences registry items; conflicting values across GPOs; best-practice recommendations (VolumeType, redirections.xml, VHDLocations/CCDLocations overlap, missing critical settings); mixed-source warnings |
 | **Links** | Full link inventory with enforcement and ordering details |
@@ -59,7 +61,6 @@ OutputPath/
   GPO-Audit-2025-01-15-143022.html          # Main HTML report
   GPO-Audit-2025-01-15-143022-Duplicates.csv
   GPO-Audit-2025-01-15-143022-Overlaps.csv
-  GPO-Audit-2025-01-15-143022-DriveMaps.csv
   GPO-Audit-2025-01-15-143022-Printers.csv
   GPO-Audit-2025-01-15-143022-Optimizations.csv
   GPO-Audit-2025-01-15-143022-Security.csv
@@ -73,7 +74,7 @@ OutputPath/
     PolicyName-{GUID}.xml                    # One per GPO
 ```
 
-CSV files are only created when findings exist for that category.
+CSV files are only created when findings exist for that category. There is no drive map CSV; use `Audit-GPDriveMaps.ps1` for that.
 
 ## FSLogix Audit Details
 
@@ -100,3 +101,15 @@ Best-practice checks include:
 ## Performance Notes
 
 The script caches every GPO's XML report in memory on the first pass, then reuses the cache across all analysis functions. This avoids redundant `Get-GPOReport` calls and significantly reduces runtime in environments with many GPOs.
+
+## Relationship to Audit-GPDriveMaps.ps1
+
+This script used to carry its own drive map duplicate check, which could disagree with the richer one in `DriveMap-Diagnostics\Audit-GPDriveMaps.ps1`. That check was removed; the drive map section now only counts mappings and points to the dedicated tool.
+
+`Write-AuditLog`, `Get-CachedGPOReports`, `Escape-Html`, `Get-ItemLevelTargeting` and `Get-FilterCollectionSummary` are copies of the functions in `Audit-GPDriveMaps.ps1` (each is marked with a "kept in sync" comment). Edit both together; `Tests\Audit-ADGroupPolicy.Tests.ps1` fails if the bodies drift apart. `Test-Prerequisites` deliberately differs (runtime module import).
+
+## Tests
+
+```powershell
+Invoke-Pester .\Tests\Audit-ADGroupPolicy.Tests.ps1   # Pester 5
+```
