@@ -21,8 +21,8 @@ Every tool writes a report (HTML and/or CSV) you can attach to the ticket.
 | "The server's memory is maxed out — who is using it?"               | [Get-RAM-Usage](#server-memory-is-high--who-is-using-it)      | No                |
 | "My profile didn't load" / "temp profile" / "I got logged straight back out" | [Citrix-FSLogix-Triage](#profile-or-logon-problems-on-citrix-or-rds), then [RDS-FSLogix-EventExport](#profile-or-logon-problems-on-citrix-or-rds) | No                |
 | "I can't reach the server" / "the app won't connect" / "is port 445 open?" | [Network-QuickCheck](#cant-reach-a-server-or-app)            | No                |
-| "Hide this person from the address book (GAL)"                      | [HideFromGal](#hide-someone-from-the-address-book)           | **Yes — AD**      |
-| "Block this user from Microsoft 365 but keep their PC login"        | [Block 365 Sign-in](#block-someone-from-microsoft-365)       | **Yes — AD**      |
+| "Hide this person from the address book (GAL)"                      | [M365-SyncedUserFixes](#hide-someone-from-the-address-book)  | **Yes — AD**      |
+| "Block this user from Microsoft 365 but keep their PC login"        | [M365-SyncedUserFixes](#block-someone-from-microsoft-365)    | **Yes — AD**      |
 
 Each folder has its own `README.md` with the full detail. This page covers when to use
 each tool and the one command to start with.
@@ -298,44 +298,44 @@ Ask the user roughly **when** it happened and set the window to cover it. Add
 
 ## Hide someone from the address book
 
-**Folder:** `HideFromGal`  **This changes AD.**
+**Folder:** `M365-SyncedUserFixes`  **This changes AD.**
 
-Double-click **`Launch-HideFromGAL.vbs`** (not the `.ps1`). Find the person, tick them, hide.
+For accounts that come from AD, where the Microsoft 365 admin center won't let you hide them.
+Double-click **`Start M365 Synced User Fixes.cmd`** and choose **Hide from address book** (or use
+`Launch-HideFromGAL.cmd`, which opens that page directly). Find the person, tick them, click **Hide**.
 
 **Things to know:**
-- **Read the coloured banner at the top first.**
-  - 🟢 Green: good to go.
-  - 🔴 Red: the Entra Connect rule that does the actual hiding is missing, so hiding won't work. Escalate.
-  - 🟡 Yellow: the tool couldn't check. Hiding still works, but you get no confirmation.
-- Run it **on the Entra Connect server** if you can. That's the only place the banner can
+- **Read the coloured card at the top first.**
+  - Green: good to go.
+  - Red: the Entra Connect rule that does the actual hiding is missing, so hiding is switched off. Escalate.
+  - Amber: the tool couldn't check. Hiding still works, but you get no confirmation.
+- Run it **on the Entra Connect server** if you can. That's the only place the card can
   confirm the rule properly.
 - Changes take effect after the next sync. Outlook's offline address book can take **up to
   24 hours** to catch up, so tell the customer that.
-- **Don't run `HideFromGal-RuleBuilder.ps1`.** That's a one-time setup step for a senior engineer.
+- **Leave "Set up sync rules" to a senior engineer.** It builds Entra Connect rules.
 
 ---
 
 ## Block someone from Microsoft 365
 
-**Folder:** `Block 365 Sign-in`  **This changes AD.**
+**Folder:** `M365-SyncedUserFixes`  **This changes AD.**
 
 Blocks Microsoft 365 sign-in while leaving the user's PC login and file shares working.
 Common for leavers on their last day, or for a compromised cloud account.
 
-Double-click **`Launch-CloudSignInMgr.vbs`**. Find the person, tick them, click
-**Block cloud sign-in**, and let it run a sync when asked.
+Double-click **`Start M365 Synced User Fixes.cmd`** (it opens on **Block Microsoft 365 sign-in**).
+Find the person, tick them, click **Block sign-in**, and let it run a sync when asked.
 
 **Things to know:**
-- **Read the banner before blocking anyone.** It tells you which kind of rule the client uses:
-  - `accountEnabled`: the account is disabled in the cloud. **Licenses and mailbox are kept.**
-  - `cloudFiltered`: the cloud account is **deleted**, and **the mailbox and licenses go with it.**
-    If the banner says this and the ticket only asked for a temporary block, stop and check with
-    a senior engineer.
-- **Never run `Block365SignIn-RuleBuilder.ps1`** unless a senior engineer tells you to. On a client
-  that already has a rule, it creates a second one that deletes cloud accounts.
-- **Restore cloud sign-in** always works, whatever the banner says.
-- Run it on the Entra Connect server if you can (same reason as HideFromGal above).
-
+- **Read the card before blocking anyone.** It says what blocking does at this client:
+  - "disables the Microsoft 365 account": **licences and mailbox are kept.**
+  - A red line saying blocking **DELETES** the person: the mailbox and licences go too.
+    If the ticket only asked for a temporary block, stop and check with a senior engineer.
+- People already signed in can stay signed in until their session ends. For an immediate
+  cut-off, also revoke their sessions in the Entra admin center.
+- **Restore sign-in** always works, whatever the card says.
+- Every change is logged in the tool's `Logs` folder.
 ---
 
 ## Can't reach a server or app
