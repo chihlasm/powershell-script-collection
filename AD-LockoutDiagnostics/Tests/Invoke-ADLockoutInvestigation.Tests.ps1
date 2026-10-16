@@ -252,3 +252,99 @@ Describe 'Bugs found in the real Case_jdoe run' {
         }
     }
 }
+
+Describe 'Fixes found while writing the service desk guide' {
+    BeforeAll {
+        $script:OkGate = [PSCustomObject]@{ Ran=$true; Blocking=$false; CriticalGaps=@(); OtherGaps=@(); Message='' }
+        $script:NoGate = [PSCustomObject]@{ Ran=$false; Blocking=$false; CriticalGaps=@(); OtherGaps=@(); Message='' }
+    }
+
+    It 'keeps the space after a word ending in a colon when wrapping the Fix text' {
+        # The wrap loop used "line ends with ':'" to mean "nothing on this line yet", which
+        # also fired after "run:" - so every summary printed "run:net use" and
+        # "Microsoft:the SCM".
+        $findings = @([PSCustomObject]@{ FailureCount=72; Sentence='x'; Confidence='High'
+            Remediation='On the source machine run: net use (list mapped drives) and cmdkey /list. Microsoft: the SCM caches service account passwords and retries the old one until updated.' })
+        $out = New-CaseSummary -Identity 'jdoe' -DaysBack 7 -Gate $script:OkGate -Steps @() `
+                 -CaseFolder 'C:\x' -GeneratedOn 'now' -Findings $findings
+        $out | Should -Match 'run: net use'
+        $out | Should -Match 'Microsoft: the SCM'
+        $out | Should -Not -Match 'run:net|Microsoft:the'
+        $out | Should -Match 'Fix        : On the source'
+    }
+
+    It 'wraps a long Fix line without losing or doubling words' {
+        $words = 1..60 | ForEach-Object { "word$_" }
+        $findings = @([PSCustomObject]@{ FailureCount=1; Sentence='x'; Confidence='Low'; Remediation=($words -join ' ') })
+        $out = New-CaseSummary -Identity 'jdoe' -DaysBack 7 -Gate $script:OkGate -Steps @() `
+                 -CaseFolder 'C:\x' -GeneratedOn 'now' -Findings $findings
+        foreach ($w in $words) { ([regex]::Matches($out, "\b$w\b")).Count | Should -Be 1 }
+        foreach ($line in ($out -split "`r?`n")) { $line.Length | Should -BeLessOrEqual 96 }
+    }
+
+    It 'says lockout auditing is evidently working when the audit read failed but lockouts were found' {
+        # A helpdesk account usually cannot run auditpol on the DCs. Collected 4740 events
+        # still prove lockout auditing is on, and saying only "UNKNOWN" hid that.
+        $out = New-CaseSummary -Identity 'jdoe' -DaysBack 7 -Gate $script:NoGate -Steps @() `
+                 -CaseFolder 'C:\x' -GeneratedOn 'now' -LockoutEventsFound $true
+        $out | Should -Match 'PARTLY CONFIRMED'
+        $out | Should -Match 'administrator'
+        $out | Should -Not -Match 'UNKNOWN'
+    }
+
+    It 'still says UNKNOWN, and why, when the audit read failed and nothing was found' {
+        $out = New-CaseSummary -Identity 'jdoe' -DaysBack 7 -Gate $script:NoGate -Steps @() `
+                 -CaseFolder 'C:\x' -GeneratedOn 'now' -LockoutEventsFound $false
+        $out | Should -Match 'UNKNOWN'
+        $out | Should -Match 'proves nothing'
+        $out | Should -Match 'administrator on the domain controllers'
+    }
+
+    It 'explains the likely cause when audit policy could not be determined' {
+        $gate = Test-AuditGateResult -AuditRows @() -Reference $null
+        $gate.Message | Should -Match 'proves nothing'
+        $gate.Message | Should -Match 'administrator'
+    }
+
+    It 'ships every companion script it resolves in the Service Desk bundle' {
+        # The bundle copied Export-ADAuthSourceEvidence.ps1 but not Get-LockoutCause.ps1,
+        # so step 7 was always skipped there: no "What To Fix" tab, no FINDINGS section.
+        $src      = Get-Content -Raw "$PSScriptRoot\..\Invoke-ADLockoutInvestigation.ps1"
+        $manifest = Get-Content -Raw "$PSScriptRoot\..\..\ServiceDesk-Toolkit\Build-ServiceDeskToolkit.ps1"
+        $companions = @([regex]::Matches($src, "Resolve-CompanionScript -FileName '([^']+)'") | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+        $companions.Count | Should -BeGreaterThan 0
+        foreach ($c in $companions) {
+            $manifest | Should -Match ([regex]::Escape("Destination = 'AD-LockoutDiagnostics/$c'"))
+        }
+    }
+}
+
+Describe 'Step 8 - device timeline' {
+    It 'puts a DEVICE TIMELINE section straight after the findings' {
+        $gate = [PSCustomObject]@{ Ran=$true; Blocking=$false; CriticalGaps=@(); OtherGaps=@(); Message='' }
+        $findings = @([PSCustomObject]@{ FailureCount=84; Sentence='mjohnson (84 failures from CON-LT-0142)'; Confidence='High'; Remediation='net use' })
+        $rows = @([PSCustomObject]@{ Computer='CON-LT-0142'; Verdict='9 of 12 failures came within 5 minutes of CON-LT-0142 waking from sleep (9).'; Next='Something on it replays a saved password.' })
+        $out = New-CaseSummary -Identity 'mjohnson' -DaysBack 7 -Gate $gate -Steps @() -CaseFolder 'C:\x' -GeneratedOn 'now' `
+                 -Findings $findings -TimelineRows $rows
+        $out | Should -Match 'DEVICE TIMELINE'
+        $out | Should -Match 'waking from sleep'
+        $out.IndexOf('FINDINGS') | Should -BeLessThan $out.IndexOf('DEVICE TIMELINE')
+        $out.IndexOf('DEVICE TIMELINE') | Should -BeLessThan $out.IndexOf('EVIDENCE QUALITY')
+    }
+
+    It 'omits the section when step 8 produced nothing' {
+        $gate = [PSCustomObject]@{ Ran=$true; Blocking=$false; CriticalGaps=@(); OtherGaps=@(); Message='' }
+        New-CaseSummary -Identity 'x' -DaysBack 7 -Gate $gate -Steps @() -CaseFolder 'C:\x' -GeneratedOn 'now' | Should -Not -Match 'DEVICE TIMELINE'
+    }
+
+    It 'numbers every step out of 8' {
+        $src = Get-Content -Raw "$PSScriptRoot\..\Invoke-ADLockoutInvestigation.ps1"
+        $src | Should -Not -Match 'STEP \d/7'
+        $src | Should -Match 'STEP 8/8'
+    }
+
+    It 'files the timeline into its own case subfolder' {
+        $src = Get-Content -Raw "$PSScriptRoot\..\Invoke-ADLockoutInvestigation.ps1"
+        $src | Should -Match "Match = 'SourceActivity';\s+Folder = '6 - Device Timeline'"
+    }
+}

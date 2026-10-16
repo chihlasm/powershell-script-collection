@@ -245,3 +245,11 @@ Describe 'Every class the source reports emit must be styled in the combined pag
         $unstyled | Should -BeNullOrEmpty -Because 'a class with no rule renders as unstyled text in the combined report'
     }
 }
+
+Describe 'Device Timeline tab' {
+    It 'gives the step 8 report its own tab after What To Fix' {
+        $t = Get-TabDefinition -FileName 'SourceActivity_2026-10-14_093140.html'
+        $t.Label | Should -Be 'Device Timeline'
+        $t.Order | Should -BeGreaterThan (Get-TabDefinition -FileName 'LockoutCauses_2026.html').Order
+    }
+}
