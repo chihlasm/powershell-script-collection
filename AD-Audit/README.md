@@ -4,8 +4,8 @@ Comprehensive Active Directory audit tool that checks users, groups, computers, 
 
 ## Requirements
 
-- Windows PowerShell 5.1+
-- **ActiveDirectory** RSAT module (`Install-WindowsFeature RSAT-AD-PowerShell` on servers, or install RSAT via Settings > Optional Features on workstations)
+- Windows PowerShell 5.1+ (`#Requires -Version 5.1`)
+- **ActiveDirectory** RSAT module (imported at run time, not via `#Requires -Modules`) (`Install-WindowsFeature RSAT-AD-PowerShell` on servers, or install RSAT via Settings > Optional Features on workstations)
 - Domain-joined machine or valid domain credentials
 - Optional: **DnsServer** module for stale DNS record checks
 
@@ -53,7 +53,7 @@ The GUI calls `Invoke-ADAudit.ps1` internally. The UI stays responsive during th
 
 | Parameter | Default | Description |
 |---|---|---|
-| `-OutputPath` | Script directory | Where reports are saved |
+| `-OutputPath` | Current directory | Where reports are saved |
 | `-ExportFormat` | `Both` | `HTML`, `CSV`, or `Both` |
 | `-Domain` | Current domain | Target domain FQDN |
 | `-Credential` | Current user | PSCredential for remote domain |
@@ -61,6 +61,7 @@ The GUI calls `Invoke-ADAudit.ps1` internally. The UI stays responsive during th
 | `-SkipBrowserOpen` | `$false` | Don't auto-open HTML report |
 | `-IncludeSection` | `All` | Array of section names (see below) |
 | `-LogCallback` | None | Scriptblock for log capture (used by GUI) |
+| `-LoadFunctionsOnly` | `$false` | Define functions and exit without auditing (used by the Pester tests) |
 
 ### Section Names
 
@@ -85,7 +86,7 @@ All DCs with OS version, site, Global Catalog and RODC status, FSMO roles held, 
 
 ### Group Analysis
 - Empty groups and large groups (50+ members)
-- Privileged group membership (Domain Admins, Enterprise Admins, Schema Admins, Administrators, Account Operators, Backup Operators, Server Operators)
+- Privileged group membership (Domain Admins, Enterprise Admins, Schema Admins, Administrators, Account Operators, Backup Operators, Server Operators). Groups are matched by well-known SID/RID, so renamed or localized groups are still found. Schema and Enterprise Admins are read from the forest root domain.
 - Nested group warnings (groups inside privileged groups)
 
 ### Computer Accounts
@@ -100,6 +101,9 @@ All DCs with OS version, site, Global Catalog and RODC status, FSMO roles held, 
 - Fine-grained password policies with precedence and scope
 
 ### Privileged Access
+
+This is a concise summary. For full nested-group path analysis (who can reach Domain Admins and how), use the dedicated tool `Find-PrivilegedAccessPaths\Get-DomainPrivilegedAccess.ps1`.
+
 - AdminSDHolder protected accounts
 - Kerberos delegation: unconstrained (non-DC), constrained, and Resource-Based Constrained Delegation (RBCD)
 - Kerberoastable admin accounts (Domain Admins with SPNs)
@@ -114,9 +118,9 @@ All DCs with OS version, site, Global Catalog and RODC status, FSMO roles held, 
 ### Infrastructure Health
 - Tombstone lifetime
 - AD Recycle Bin status
-- Schema version (mapped to Windows Server version)
+- Schema version (mapped to Windows Server version; 88 = Server 2019/2022, 91 = Server 2025)
 - Sysvol replication method (DFSR vs legacy FRS)
-- Trust health: selective authentication, SID filtering, TGT delegation
+- Trust health: selective authentication, SID filtering, TGT delegation. SID filtering is read from the trust's `trustAttributes` bits: an external trust without the quarantine bit is reported as DISABLED (High); forest trusts get forest filtering by default; within-forest trusts are not filtered by default (not a finding).
 
 ### OU Structure
 - Total OUs and maximum nesting depth
@@ -137,3 +141,4 @@ All DCs with OS version, site, Global Catalog and RODC status, FSMO roles held, 
 |---|---|
 | `Invoke-ADAudit.ps1` | Main audit script (CLI) |
 | `Show-ADAuditGUI.ps1` | WinForms GUI launcher |
+| `Tests\Invoke-ADAudit.Tests.ps1` | Pester 5 tests (mocked AD cmdlets) for schema mapping, SID filtering and SID-based groups |

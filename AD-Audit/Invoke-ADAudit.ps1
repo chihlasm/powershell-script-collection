@@ -1,4 +1,4 @@
-#Requires -Modules ActiveDirectory
+#Requires -Version 5.1
 
 <#
 .SYNOPSIS
@@ -20,7 +20,7 @@
     Exports results as HTML report and/or CSV files. Returns results hashtable for pipeline use.
 
 .PARAMETER OutputPath
-    Directory where reports will be saved. Defaults to script directory.
+    Directory where reports will be saved. Defaults to the current directory.
 
 .PARAMETER ExportFormat
     Export format for reports: HTML, CSV, or Both. Default: Both
@@ -45,6 +45,10 @@
 .PARAMETER LogCallback
     Optional scriptblock called with each log message. Used by GUI wrapper.
 
+.PARAMETER LoadFunctionsOnly
+    Define the audit functions and return without running an audit. Used by the Pester
+    tests (dot-source the script with -LoadFunctionsOnly).
+
 .EXAMPLE
     .\Invoke-ADAudit.ps1
     Runs full audit with default settings.
@@ -67,14 +71,34 @@
 
 .NOTES
     Author: PowerShell Script Collection
-    Version: 2.0
-    Requires: ActiveDirectory module (RSAT)
+    Version: 2.1
+    Requires: Windows PowerShell 5.1 (uses ::new()), ActiveDirectory module (RSAT).
+    The ActiveDirectory module is imported at run time (not via #Requires -Modules) so
+    servers that have RSAT cmdlets available but not formally registered still work.
+
+    The Privileged Access section is a concise summary. For full nested-group path
+    analysis use Find-PrivilegedAccessPaths\Get-DomainPrivilegedAccess.ps1.
+
+    REFERENCES
+    - Schema objectVersion -> OS mapping:
+      https://learn.microsoft.com/windows-server/identity/ad-ds/deploy/find-active-directory-schema
+    - Well-known SIDs / RIDs (Domain Admins -512, Schema Admins -518, Enterprise Admins
+      -519, BUILTIN\Administrators S-1-5-32-544, Account Operators -548, Server Operators
+      -549, Backup Operators -551):
+      https://learn.microsoft.com/windows-server/identity/ad-ds/manage/understand-security-identifiers
+    - trustAttributes bits (QUARANTINED_DOMAIN 0x4, FOREST_TRANSITIVE 0x8, WITHIN_FOREST
+      0x20, TREAT_AS_EXTERNAL 0x40):
+      https://learn.microsoft.com/openspecs/windows_protocols/ms-adts/e9a2d23c-c31e-4a6f-88a0-6646fdb51a3c
+    - SID filtering rules per trust boundary:
+      https://learn.microsoft.com/openspecs/windows_protocols/ms-pac/55fc19f2-55ba-4251-8a6a-103dd7c66280
+    - netdom trust /quarantine (Yes = accept only SIDs from the directly trusted domain):
+      https://learn.microsoft.com/windows-server/administration/windows-commands/netdom-trust
 #>
 
 [CmdletBinding()]
 param(
     [Parameter()]
-    [string]$OutputPath = $PSScriptRoot,
+    [string]$OutputPath = (Get-Location).Path,
 
     [Parameter()]
     [ValidateSet('HTML', 'CSV', 'Both')]
@@ -98,7 +122,10 @@ param(
     [string[]]$IncludeSection = @('All'),
 
     [Parameter()]
-    [scriptblock]$LogCallback
+    [scriptblock]$LogCallback,
+
+    [Parameter()]
+    [switch]$LoadFunctionsOnly
 )
 
 #region Script Configuration
@@ -132,10 +159,10 @@ function Write-AuditLog {
 
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $prefix = switch ($Level) {
-        'Info'    { '[i]' }
-        'Warning' { '[!]' }
-        'Error'   { '[!]' }
-        'Success' { '[OK]' }
+        'Info'    { '[INFO]' }
+        'Warning' { '[WARN]' }
+        'Error'   { '[FAIL]' }
+        'Success' { '[PASS]' }
     }
     $colors = @{
         'Info'    = 'Cyan'
@@ -159,12 +186,16 @@ function Escape-Html {
 function Test-Prerequisites {
     Write-AuditLog "Checking prerequisites..." -Level Info
 
-    if (-not (Get-Module -ListAvailable -Name ActiveDirectory)) {
-        Write-AuditLog "Missing required module: ActiveDirectory" -Level Error
-        Write-AuditLog "Please install RSAT tools or run on a domain controller" -Level Error
+    # Runtime import instead of '#Requires -Modules' so servers with RSAT cmdlets that are
+    # not formally registered still run (repo convention, see CLAUDE.md).
+    try {
+        Import-Module ActiveDirectory -ErrorAction Stop
+    }
+    catch {
+        Write-AuditLog "Missing required module: ActiveDirectory ($($_.Exception.Message))" -Level Error
+        Write-AuditLog "Install RSAT (Install-WindowsFeature RSAT-AD-PowerShell) or run on a domain controller" -Level Error
         return $false
     }
-    Import-Module ActiveDirectory -ErrorAction SilentlyContinue
 
     try {
         $null = Get-ADDomain @ADParams -ErrorAction Stop
@@ -175,6 +206,115 @@ function Test-Prerequisites {
         Write-AuditLog "Failed to connect to domain: $_" -Level Error
         return $false
     }
+}
+
+function Get-PrivilegedGroupSet {
+    <#
+    Returns the privileged groups to audit as Name / Sid / Server objects.
+    Groups are identified by well-known SID (locale-independent; the display names are
+    localized and can be renamed):
+      - Domain Admins          <domain SID>-512
+      - Schema Admins          <forest ROOT domain SID>-518   (exists only in the root domain)
+      - Enterprise Admins      <forest ROOT domain SID>-519   (exists only in the root domain)
+      - Administrators         S-1-5-32-544
+      - Account Operators      S-1-5-32-548
+      - Server Operators       S-1-5-32-549
+      - Backup Operators       S-1-5-32-551
+    https://learn.microsoft.com/windows-server/identity/ad-ds/manage/understand-security-identifiers
+    Server is set for the forest-root groups when the audited domain is a child domain.
+    #>
+    $domainSid = (Get-ADDomain @ADParams -ErrorAction Stop).DomainSID.Value
+    $rootSid = $domainSid
+    $rootServer = $null
+    try {
+        $rootName = (Get-ADForest @ADParams -ErrorAction Stop).RootDomain
+        $rootParams = $ADParams.Clone()
+        $rootParams['Server'] = $rootName
+        $rootDomain = Get-ADDomain @rootParams -ErrorAction Stop
+        if ($rootDomain.DomainSID.Value -ne $domainSid) {
+            $rootSid = $rootDomain.DomainSID.Value
+            $rootServer = $rootName
+        }
+    } catch {
+        Write-AuditLog "Could not resolve forest root domain SID; Schema/Enterprise Admins assumed in the audited domain: $($_.Exception.Message)" -Level Warning
+    }
+
+    return @(
+        [PSCustomObject]@{ Name = 'Domain Admins';     Sid = "$domainSid-512"; Server = $null }
+        [PSCustomObject]@{ Name = 'Enterprise Admins'; Sid = "$rootSid-519";   Server = $rootServer }
+        [PSCustomObject]@{ Name = 'Schema Admins';     Sid = "$rootSid-518";   Server = $rootServer }
+        [PSCustomObject]@{ Name = 'Administrators';    Sid = 'S-1-5-32-544';   Server = $null }
+        [PSCustomObject]@{ Name = 'Account Operators'; Sid = 'S-1-5-32-548';   Server = $null }
+        [PSCustomObject]@{ Name = 'Backup Operators';  Sid = 'S-1-5-32-551';   Server = $null }
+        [PSCustomObject]@{ Name = 'Server Operators';  Sid = 'S-1-5-32-549';   Server = $null }
+    )
+}
+
+function Get-SchemaVersionOS {
+    param([int]$Version)
+    # https://learn.microsoft.com/windows-server/identity/ad-ds/deploy/find-active-directory-schema
+    # Version 88 is shared by Server 2019 and 2022; Server 2025 is 91 (NOT 90 - no released
+    # Windows Server uses 90).
+    $schemaMap = @{
+        30 = 'Windows Server 2003'
+        31 = 'Windows Server 2003 R2'
+        44 = 'Windows Server 2008'
+        47 = 'Windows Server 2008 R2'
+        56 = 'Windows Server 2012'
+        69 = 'Windows Server 2012 R2'
+        87 = 'Windows Server 2016'
+        88 = 'Windows Server 2019/2022'
+        91 = 'Windows Server 2025'
+    }
+    if ($schemaMap.ContainsKey($Version)) { return $schemaMap[$Version] }
+    return "Unknown (version $Version)"
+}
+
+function Get-TrustSidFilteringState {
+    <#
+    Interprets a trust's SID filtering from the trustAttributes bits.
+    Quarantine (0x4, TRUST_ATTRIBUTE_QUARANTINED_DOMAIN) set  = SID filtering ENFORCED
+    (netdom /quarantine:Yes accepts only SIDs from the directly trusted domain). Clear = an
+    external trust accepts any SID. The previous code inverted this.
+    Other cases per MS-PAC 4.1.2.2 / MS-ADTS trustAttributes:
+      - Within-forest trusts (0x20) are not filtered by default (WithinForest boundary).
+      - Forest trusts (0x8) always get cross-forest filtering; TREAT_AS_EXTERNAL (0x40)
+        relaxes that to external-trust filtering.
+    https://learn.microsoft.com/openspecs/windows_protocols/ms-adts/e9a2d23c-c31e-4a6f-88a0-6646fdb51a3c
+    https://learn.microsoft.com/openspecs/windows_protocols/ms-pac/55fc19f2-55ba-4251-8a6a-103dd7c66280
+    https://learn.microsoft.com/windows-server/administration/windows-commands/netdom-trust
+    Returns State, Severity (Low/Warning/High) for the report.
+    #>
+    param(
+        [int]$TrustAttributes,
+        [bool]$IntraForest = $false,
+        [string]$TrustType = ''
+    )
+
+    $quarantined      = ($TrustAttributes -band 0x4) -ne 0
+    $forestTransitive = ($TrustAttributes -band 0x8) -ne 0
+    $withinForest     = $IntraForest -or (($TrustAttributes -band 0x20) -ne 0)
+    $treatAsExternal  = ($TrustAttributes -band 0x40) -ne 0
+
+    if ($TrustType -eq 'MIT') {
+        return [PSCustomObject]@{ State = 'Not applicable (non-Windows Kerberos realm)'; Severity = 'Low' }
+    }
+    if ($withinForest) {
+        if ($quarantined) {
+            return [PSCustomObject]@{ State = 'Enforced (quarantined within forest)'; Severity = 'Low' }
+        }
+        return [PSCustomObject]@{ State = 'Not applicable (within forest)'; Severity = 'Low' }
+    }
+    if ($forestTransitive) {
+        if ($treatAsExternal) {
+            return [PSCustomObject]@{ State = 'Relaxed (forest trust treated as external; SID history may pass)'; Severity = 'Warning' }
+        }
+        return [PSCustomObject]@{ State = 'Enforced (forest filtering)'; Severity = 'Low' }
+    }
+    if ($quarantined) {
+        return [PSCustomObject]@{ State = 'Enforced (quarantined)'; Severity = 'Low' }
+    }
+    return [PSCustomObject]@{ State = 'DISABLED (external trust accepts any SID)'; Severity = 'High' }
 }
 #endregion
 
@@ -361,26 +501,26 @@ function Get-GroupAudit {
         $largeGroups = @($groups | Where-Object { $_.Members.Count -gt 50 } |
             Select-Object Name, @{N='MemberCount';E={$_.Members.Count}}, GroupCategory, GroupScope)
 
-        # Privileged groups
-        $privilegedGroupNames = @(
-            'Domain Admins', 'Enterprise Admins', 'Schema Admins',
-            'Administrators', 'Account Operators', 'Backup Operators', 'Server Operators'
-        )
+        # Privileged groups are resolved by well-known SID, not by English name, so the audit
+        # works on localized domains and still finds groups that were renamed.
         $privilegedMembers = [System.Collections.Generic.List[object]]::new()
 
-        foreach ($groupName in $privilegedGroupNames) {
+        foreach ($pg in @(Get-PrivilegedGroupSet)) {
             try {
-                $members = Get-ADGroupMember -Identity $groupName @ADParams -ErrorAction Stop
+                $memberParams = $ADParams.Clone()
+                if ($pg.Server) { $memberParams['Server'] = $pg.Server }
+                $members = Get-ADGroupMember -Identity $pg.Sid @memberParams -ErrorAction Stop
                 foreach ($m in $members) {
                     $privilegedMembers.Add([PSCustomObject]@{
-                        Group       = $groupName
+                        Group       = $pg.Name
+                        GroupSid    = $pg.Sid
                         Name        = $m.name
                         SamAccount  = $m.SamAccountName
                         ObjectClass = $m.objectClass
                     })
                 }
             } catch {
-                # Group may not exist (e.g., Enterprise Admins in child domain)
+                Write-AuditLog "Could not read members of $($pg.Name) ($($pg.Sid)): $($_.Exception.Message)" -Level Warning
             }
         }
 
@@ -537,7 +677,9 @@ function Get-PasswordPolicyAudit {
 }
 
 function Get-PrivilegedAccessAudit {
-    Write-AuditLog "Auditing privileged access..." -Level Info
+    # Concise summary only. Nested group path analysis lives in the dedicated tool
+    # Find-PrivilegedAccessPaths\Get-DomainPrivilegedAccess.ps1.
+    Write-AuditLog "Auditing privileged access (summary; see Find-PrivilegedAccessPaths\Get-DomainPrivilegedAccess.ps1 for full nested-path analysis)..." -Level Info
 
     $results = @{
         AdminSDHolder    = @()
@@ -605,7 +747,8 @@ function Get-PrivilegedAccessAudit {
 
     try {
         # Admin accounts with SPNs (Kerberoastable)
-        $adminUsers = Get-ADGroupMember -Identity 'Domain Admins' @ADParams -ErrorAction SilentlyContinue |
+        $domainAdmins = @(Get-PrivilegedGroupSet | Where-Object { $_.Name -eq 'Domain Admins' })[0]
+        $adminUsers = Get-ADGroupMember -Identity $domainAdmins.Sid @ADParams -ErrorAction SilentlyContinue |
             Where-Object { $_.objectClass -eq 'user' }
 
         $kerberoastable = [System.Collections.Generic.List[object]]::new()
@@ -822,17 +965,7 @@ function Get-ADInfrastructureAudit {
         $schemaNC = (Get-ADRootDSE @ADParams).schemaNamingContext
         $schema = Get-ADObject $schemaNC -Properties objectVersion @ADParams -ErrorAction Stop
         $results.SchemaVersion = $schema.objectVersion
-        $schemaMap = @{
-            47 = 'Windows Server 2008 R2'
-            56 = 'Windows Server 2012'
-            69 = 'Windows Server 2012 R2'
-            87 = 'Windows Server 2016'
-            88 = 'Windows Server 2019/2022'
-            90 = 'Windows Server 2025'
-        }
-        $results.SchemaOS = if ($schemaMap.ContainsKey([int]$schema.objectVersion)) {
-            $schemaMap[[int]$schema.objectVersion]
-        } else { "Unknown (version $($schema.objectVersion))" }
+        $results.SchemaOS = Get-SchemaVersionOS -Version ([int]$schema.objectVersion)
     } catch {
         Write-AuditLog "Could not check schema version: $_" -Level Warning
     }
@@ -851,15 +984,25 @@ function Get-ADInfrastructureAudit {
     try {
         # Trust health validation
         $trustHealth = [System.Collections.Generic.List[object]]::new()
-        $trusts = Get-ADTrust -Filter * @ADParams -ErrorAction SilentlyContinue
+        $trusts = Get-ADTrust -Filter * -Properties TrustAttributes @ADParams -ErrorAction SilentlyContinue
         foreach ($trust in $trusts) {
+            $attrs = 0
+            if ($null -ne $trust.TrustAttributes) {
+                $attrs = [int]$trust.TrustAttributes
+            } else {
+                # Attribute not returned: rebuild the bits we need from the cmdlet's booleans.
+                if ($trust.SIDFilteringQuarantined) { $attrs = $attrs -bor 0x4 }
+                if ($trust.ForestTransitive)        { $attrs = $attrs -bor 0x8 }
+            }
+            $sidState = Get-TrustSidFilteringState -TrustAttributes $attrs -IntraForest ([bool]$trust.IntraForest) -TrustType "$($trust.TrustType)"
             $trustHealth.Add([PSCustomObject]@{
                 Name             = $trust.Name
                 Direction        = $trust.Direction
                 TrustType        = $trust.TrustType
                 IntraForest      = $trust.IntraForest
                 SelectiveAuth    = $trust.SelectiveAuthentication
-                SIDFiltering     = -not $trust.SIDFilteringQuarantined
+                SIDFiltering     = $sidState.State
+                SIDFilteringSeverity = $sidState.Severity
                 TGTDelegation    = $trust.TGTDelegation
             })
         }
@@ -1517,6 +1660,7 @@ function Export-HTMLReport {
 
         <div class="section" id="privileged">
             <h2>Privileged Access</h2>
+            <p style="color:#666;font-size:0.9em">This section is a summary. For full nested-group path analysis of who can reach Domain Admins, run <code>Find-PrivilegedAccessPaths\Get-DomainPrivilegedAccess.ps1</code>.</p>
 
             <h3>AdminSDHolder Protected Accounts <span class="badge badge-info">$(@($priv.AdminSDHolder).Count)</span></h3>
             $(if (@($priv.AdminSDHolder).Count -gt 0) {
@@ -1613,8 +1757,8 @@ function Export-HTMLReport {
             <table>
                 <tr><th>Name</th><th>Direction</th><th>Type</th><th>IntraForest</th><th>Selective Auth</th><th>SID Filtering</th><th>TGT Delegation</th></tr>
                 $($infra.TrustHealth | ForEach-Object {
-                    $sidClass = if ($_.SIDFiltering) { 'severity-warning' } else { 'severity-low' }
-                    "<tr><td>$(Escape-Html $_.Name)</td><td>$($_.Direction)</td><td>$($_.TrustType)</td><td>$($_.IntraForest)</td><td>$($_.SelectiveAuth)</td><td class='$sidClass'>$($_.SIDFiltering)</td><td>$($_.TGTDelegation)</td></tr>"
+                    $sidClass = switch ($_.SIDFilteringSeverity) { 'High' { 'severity-high' } 'Warning' { 'severity-warning' } default { 'severity-low' } }
+                    "<tr><td>$(Escape-Html $_.Name)</td><td>$($_.Direction)</td><td>$($_.TrustType)</td><td>$($_.IntraForest)</td><td>$($_.SelectiveAuth)</td><td class='$sidClass'>$(Escape-Html $_.SIDFiltering)</td><td>$($_.TGTDelegation)</td></tr>"
                 })
             </table>
 "@
@@ -1700,6 +1844,9 @@ function Export-HTMLReport {
 #endregion
 
 #region Main Execution
+
+# Tests dot-source the script with -LoadFunctionsOnly to get the functions without running an audit.
+if ($LoadFunctionsOnly) { return }
 
 # Prerequisites check
 if (-not (Test-Prerequisites)) {
