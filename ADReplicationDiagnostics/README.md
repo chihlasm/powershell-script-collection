@@ -1,105 +1,57 @@
 # Diagnose-AD-DFS-Replication.ps1
 
-## Description
+Read-only diagnostics for Active Directory replication and DFS Replication (DFSR) / DFS Namespaces (DFSN) across domain controllers.
 
-This PowerShell script provides comprehensive diagnostics for Active Directory replication and DFS/DFSR issues across multiple domain controllers.
+## What it checks
 
-## Features
+1. **AD replication** (kept short; `AD-Audit\Invoke-ADAudit.ps1` gives the full picture) - current replication failures (`Get-ADReplicationFailure -Target`) and per-partner last success (`Get-ADReplicationPartnerMetadata`). A partner with consecutive failures, no success, or no success within `-StaleHours` is reported as stale.
+2. **DFSR service** on every DC, queried remotely with `Get-CimInstance Win32_Service -ComputerName`.
+3. **DFS Replication** - `Get-DfsReplicationGroup -IncludeSysvol`, `Get-DfsrMember`, `Get-DfsrConnection`, `Get-DfsReplicatedFolder`, and `Get-DfsrBacklog` for every enabled connection and replicated folder. `Get-DfsrBacklog` only returns 100 files; the script reads the true count from its verbose stream.
+4. **DFS Namespaces** - `Get-DfsnRoot -Domain`, `Get-DfsnRootTarget`, `Get-DfsnFolder`, `Get-DfsnFolderTarget`.
 
-- AD replication status checking
-- DFS/DFSR service health monitoring
-- Replication backlog analysis
-- Namespace and target verification
-- Colored output for easy issue identification
-- Support for specifying specific domain controllers or auto-detection
-- Optional logging to file with timestamps and execution details
+Every server is queried in its own try/catch, so one unreachable DC does not stop the run. Output uses `[PASS]` / `[WARN]` / `[FAIL]` / `[INFO]` prefixes.
 
 ## Requirements
 
-- Windows PowerShell 5.1 or later
-- ActiveDirectory module (available on domain controllers or RSAT installed)
-- DFSReplication module (available on domain controllers or RSAT installed)
-- Domain admin privileges
-- Run as administrator
+- Windows PowerShell 3.0 or later (`#Requires -Version 3.0`)
+- ActiveDirectory module (imported at run time; the script exits with RSAT instructions if it is missing)
+- Optional: DFSR and DFSN modules (the "DFS Management Tools" RSAT feature, or a DC/file server with the DFS roles). If a module is missing, that half is skipped with a warning.
+- A domain admin (or equivalent read access to the DFS configuration and remote CIM/WMI access to the DCs)
+
+The module names are `DFSR` and `DFSN`. Earlier versions of this script called `Get-DfsReplicationGroupMember`, `Get-DfsReplicationGroupConnection`, `Get-DfsReplicationBacklog`, `Get-DfsNamespace` and `Get-DfsReplicationTarget`, none of which exist, and `Get-Service -ComputerName`, which is gone in PowerShell 6+.
 
 ## Usage
 
-### Basic usage (auto-detect all domain controllers):
-
 ```powershell
 .\Diagnose-AD-DFS-Replication.ps1
+.\Diagnose-AD-DFS-Replication.ps1 -DomainControllers DC1, DC2 -OutputPath C:\Logs
+.\Diagnose-AD-DFS-Replication.ps1 -StaleHours 48 -BacklogWarningThreshold 100
 ```
 
-### Specify specific domain controllers:
-
-```powershell
-.\Diagnose-AD-DFS-Replication.ps1 -DomainControllers "DC1", "DC2", "DC3"
-```
-
-### Enable logging to file:
-
-```powershell
-.\Diagnose-AD-DFS-Replication.ps1 -LogFile "C:\Logs\AD-DFS-Diagnostic.log"
-```
-
-### Combined usage:
-
-```powershell
-.\Diagnose-AD-DFS-Replication.ps1 -DomainControllers "DC1", "DC2", "DC3" -LogFile "C:\Logs\AD-DFS-Diagnostic.log"
-```
+| Parameter | Default | Description |
+|---|---|---|
+| `-DomainControllers` | all DCs in the domain | DC names to check |
+| `-OutputPath` (alias `-LogFile`) | current directory | Output directory; a value with a file extension is used as the log file path |
+| `-StaleHours` | `24` | Hours without a successful replication before a partnership is "Stale" |
+| `-BacklogWarningThreshold` | `1` | Backlog file count that is reported as a problem |
+| `-LoadFunctionsOnly` | off | Define functions and return (used by tests) |
 
 ## Output
 
-The script provides:
+Written to `-OutputPath`, named with a `yyyy-MM-dd_HHmmss` timestamp:
 
-- List of detected domain controllers
-- AD replication failures and status
-- DFS/DFSR service status
-- Replication group information
-- Backlog analysis
-- Namespace and target details
-- Summary of issues found
+- `AD-DFS-Replication_<timestamp>.log` - everything shown on screen
+- `AD-DFS-Replication_<timestamp>-ADReplication.csv` - partner status
+- `AD-DFS-Replication_<timestamp>-DfsrBacklog.csv` - backlog per connection and folder
 
-When logging is enabled, a detailed log file is created with:
-- Execution start time and parameters
-- All console output with timestamps
-- Execution duration and issue count
-- Complete diagnostic history
+Standalone (non-domain) namespaces are not enumerated; only domain-based namespaces of the current domain.
 
-## Notes
+## Tests
 
-- The script gracefully handles missing modules and permissions
-- All operations are read-only and safe to run in production
-- Requires network connectivity to all domain controllers
-- Best run from a domain controller or management server with RSAT
-
-## Troubleshooting
-
-If you encounter permission errors, ensure you're running as a domain admin.
-
-If modules are not found, install RSAT or run from a domain controller.
-
-For DFS/DFSR issues, check service status and network connectivity first.
-
-## Log File Format
-
-When logging is enabled, the log file contains:
-
+```powershell
+Invoke-Pester .\ADReplicationDiagnostics\Tests
 ```
-AD/DFS Replication Diagnostic Log
-Started: 2025-11-06 12:20:00
-Computer: WORKSTATION01
-User: DOMAIN\Administrator
-Parameters: DomainControllers= LogFile=C:\Logs\AD-DFS-Diagnostic.log
-================================================================================
 
-2025-11-06 12:20:01 [Cyan] Logging enabled. Output will be saved to: C:\Logs\AD-DFS-Diagnostic.log
-2025-11-06 12:20:01 [Green] Auto-detected 3 domain controllers:
-2025-11-06 12:20:01 [Cyan]   DC1.domain.com
-...
-================================================================================
-Diagnostic completed: 2025-11-06 12:21:15
-Duration: 74.23 seconds
-Total issues found: 0
-Log saved to: C:\Logs\AD-DFS-Diagnostic.log
-================================================================================
+The tests mock every AD, DFSR and DFSN cmdlet, assert the correct cmdlet names and parameters are called, assert the old non-existent names are never called, and cover the missing-module and unreachable-DC paths.
+
+References are listed in the script's `.NOTES`.

@@ -7,11 +7,11 @@
     handed to technicians.
 
 .DESCRIPTION
-    The toolkit spans two folders in this repository: this one, and three scripts from
-    AD-AuthSourceEvidence that the investigation runs as steps 6-7 (and the live watcher).
-    The zip puts them all in ONE flat folder - Invoke-ADLockoutInvestigation.ps1 looks for
-    its companions beside itself first (Resolve-CompanionScript), so the flat copy works
-    with no path setup.
+    The whole toolkit lives in this folder, including the three scripts the investigation
+    runs as steps 6-7 and the live watcher (they used to live in a separate
+    AD-AuthSourceEvidence folder). The zip is ONE flat folder - Invoke-ADLockoutInvestigation.ps1
+    looks for its companions beside itself (Resolve-CompanionScript), so it works with no
+    path setup.
 
     The zip used to be assembled by hand and drifted badly: the copy replaced by this
     script dated from 2026-08-27 and was missing the device timeline step entirely.
@@ -67,12 +67,9 @@ function Write-Status {
 }
 
 # Files from other folders, relative to the repository root. Everything git tracks at the
-# top level of this folder is included as well (see $excludePatterns).
-$companions = @(
-    'AD-AuthSourceEvidence/Export-ADAuthSourceEvidence.ps1'   # step 6 - which machine
-    'AD-AuthSourceEvidence/Get-LockoutCause.ps1'              # step 7 - what to fix
-    'AD-AuthSourceEvidence/Watch-ADLockoutActivity.ps1'       # live watcher
-)
+# top level of this folder is included as well (see $excludePatterns). Empty since the
+# AD-AuthSourceEvidence scripts moved into this folder; kept for any future companion.
+$companions = @()
 
 # Matched against the file name of each top-level file in this folder.
 $excludePatterns = @(

@@ -44,6 +44,16 @@
       no CallerComputerName element despite the Event Viewer label:
         https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4740
 
+      Status code tables, 4776 (S, F) and 4771 (F) - 0x0 is success; consumed via
+      LockoutReference.psd1:
+        https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4776
+        https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4771
+
+      lockoutTime / badPasswordTime / pwdLastSet - 0 is a sentinel, not 1601-01-01:
+        https://learn.microsoft.com/windows/win32/adschema/a-lockouttime
+        https://learn.microsoft.com/windows/win32/adschema/a-badpasswordtime
+        https://learn.microsoft.com/windows/win32/adschema/a-pwdlastset
+
       lockoutTime semantics - a non-zero value does not mean currently locked; AD never
       clears it on auto-unlock:
         https://learn.microsoft.com/openspecs/windows_protocols/ms-adts/b80798ae-1f8c-4d30-9d80-a1f3281e96e2
@@ -149,7 +159,9 @@ function ConvertFrom-BadLogonEvent {
         # https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4625
         $sub = $d['SubStatus']
         $st  = $d['Status']
-        $subIsMeaningful = $sub -and ($sub -notmatch '^0x0+$')
+        # Test-IsFailureStatus is driven by LockoutReference.psd1 SuccessStatusCodes, so
+        # '0x0' and the padded '0x00000000' are both treated as "no error".
+        $subIsMeaningful = (-not [string]::IsNullOrWhiteSpace($sub)) -and (Test-IsFailureStatus -Code $sub)
         if ($subIsMeaningful)  { $status = $sub }
         elseif ($st)           { $status = $st }
         else                   { $status = $null }
@@ -191,32 +203,11 @@ function ConvertFrom-BadLogonEvent {
     # and 4625/4776 (Winlogon errors).
     $statusText = $status
     if ($status) {
-        $known = @{
-            '0x0'        = 'Success'
-            '0x6'        = 'Username does not exist'
-            '0xC'        = 'Rejected by KDC policy (logon hours or workstation restriction)'
-            '0x10'       = 'Smart-card / certificate problem'
-            '0x12'       = 'Credentials revoked - disabled, expired, or locked out'
-            '0x17'       = 'Password has expired'
-            '0x18'       = 'Bad password'
-            '0x19'       = 'Additional pre-authentication required'
-            '0x25'       = 'Clock skew too great'
-            '0xC000005E' = 'No logon servers available'
-            '0xC0000064' = 'Username does not exist'
-            '0xC000006A' = 'Bad password'
-            '0xC000006D' = 'Bad username/password, or LAN Manager auth level mismatch'
-            '0xC000006F' = 'Logon outside authorized hours'
-            '0xC0000070' = 'Logon from unauthorized workstation'
-            '0xC0000071' = 'Password expired'
-            '0xC0000072' = 'Account disabled'
-            '0xC000015B' = 'Logon type not granted on that machine'
-            '0xC0000193' = 'Account expired'
-            '0xC0000224' = 'Must change password at next logon'
-            '0xC0000234' = 'Account locked out'
-        }
+        # Meanings come from LockoutReference.psd1 (single source of truth), via
+        # Get-StatusMeaning, which also tolerates case and zero-padding differences.
         $key = ([string]$status).Trim()
-        $meaning = $known[$key]
-        if (-not $meaning) { $meaning = $known[($key.ToUpper() -replace '^0X', '0x')] }
+        $meaning = Get-StatusMeaning -Code $key
+        if ($meaning -match '^Unrecognized status code') { $meaning = $null }
         if ($meaning) { $statusText = "$key - $meaning" }
     }
 
@@ -1058,6 +1049,131 @@ function Import-ReferenceDataFile {
     $full = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).ProviderPath
     Import-LocalizedData -BaseDirectory (Split-Path -Parent $full) -FileName (Split-Path -Leaf $full) -ErrorAction Stop
 }
+# ---------------------------------------------------------------------------
+# Status codes. LockoutReference.psd1 beside this script is the single source of truth;
+# the table below is a fallback used ONLY when that file is missing, and must stay
+# identical to it (Tests\ReferenceDataCompat.Tests.ps1 fails if it drifts).
+# Kerberos codes: https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4771
+# NTLM codes:     https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4776
+# 0x0 means SUCCESS in both families.
+# ---------------------------------------------------------------------------
+$script:SuccessStatusCodes = @('0x0', '0x00000000', '0', '')
+$script:StatusCodes = @{
+    # --- Kerberos (4771 / 4768) ---
+    '0x0'        = 'Success (KDC_ERR_NONE)'
+    '0x6'        = 'Username does not exist (KDC_ERR_C_PRINCIPAL_UNKNOWN)'
+    '0xC'        = 'KDC policy rejects request (KDC_ERR_POLICY) - e.g. logon hours or workstation restriction'
+    '0x10'       = 'KDC has no support for PADATA type (KDC_ERR_PADATA_TYPE_NOSUPP) - usually a smart-card/certificate problem'
+    '0x12'       = 'Client credentials revoked (KDC_ERR_CLIENT_REVOKED) - account disabled, expired, or LOCKED OUT'
+    '0x17'       = 'Password has expired (KDC_ERR_KEY_EXPIRED)'
+    '0x18'       = 'Bad password - pre-authentication failed (KDC_ERR_PREAUTH_FAILED)'
+    '0x19'       = 'Additional pre-authentication required (KDC_ERR_PREAUTH_REQUIRED)'
+    '0x25'       = 'Clock skew too great (KRB_AP_ERR_SKEW)'
+
+    # --- NTLM (4776 / 4625), Winlogon error codes ---
+    '0x00000000' = 'Success (no errors)'
+    '0xC000005E' = 'No logon servers available to service the logon request'
+    '0xC0000064' = 'Username does not exist'
+    '0xC000006A' = 'Bad password'
+    '0xC000006D' = 'Generic logon failure - bad username/password, or a LAN Manager authentication level mismatch'
+    '0xC000006F' = 'Logon outside authorized hours'
+    '0xC0000070' = 'Logon from unauthorized workstation'
+    '0xC0000071' = 'Password expired'
+    '0xC0000072' = 'Account disabled'
+    '0xC000015B' = 'User has not been granted the requested logon type at this machine'
+    '0xC0000192' = 'Netlogon service was not started'
+    '0xC0000193' = 'Account expired'
+    '0xC0000224' = 'Change password at next logon is flagged'
+    '0xC0000234' = 'Account locked out'
+    '0xC0000371' = 'Local account store has no secret material for this account'
+    '0xC0000413' = 'Machine is protected by an authentication firewall; account not allowed to authenticate to it'
+}
+$script:LockoutReferenceFile = Join-Path $PSScriptRoot 'LockoutReference.psd1'
+if (Test-Path -LiteralPath $script:LockoutReferenceFile) {
+    try {
+        $script:RefData = Import-ReferenceDataFile -Path $script:LockoutReferenceFile
+        if ($script:RefData.StatusCodes)        { $script:StatusCodes        = $script:RefData.StatusCodes }
+        if ($script:RefData.SuccessStatusCodes) { $script:SuccessStatusCodes = $script:RefData.SuccessStatusCodes }
+    } catch { }
+}
+
+function Get-StatusMeaning {
+    <#
+    .SYNOPSIS
+        Translates a Kerberos or Winlogon status code into plain English.
+    .DESCRIPTION
+        Codes are matched case-insensitively and in both padded and unpadded hex forms,
+        because the logs are inconsistent: the same failure appears as 0xc000006a in one
+        event and 0xC000006A in another.
+    #>
+    param([string]$Code)
+
+    if ([string]::IsNullOrWhiteSpace($Code)) { return '' }
+    $c = $Code.Trim()
+
+    foreach ($key in $script:StatusCodes.Keys) {
+        if ($key -ieq $c) { return $script:StatusCodes[$key] }
+    }
+
+    # Try normalizing 0x0000000C style padding down to 0xC and back up again.
+    if ($c -match '^0x0*([0-9a-fA-F]+)$') {
+        $bare = $Matches[1]
+        foreach ($key in $script:StatusCodes.Keys) {
+            if ($key -match '^0x0*([0-9a-fA-F]+)$' -and $Matches[1] -ieq $bare) {
+                return $script:StatusCodes[$key]
+            }
+        }
+    }
+
+    return "Unrecognized status code $Code"
+}
+
+function Test-IsFailureStatus {
+    <#
+    .SYNOPSIS
+        Decides whether a status code represents a failure.
+    .DESCRIPTION
+        Events 4776 and 4768 are written for BOTH successful and failed authentication
+        (Learn: 4776(S, F), 4768(S, F)); 4771 is Failure-only (4771(F)). The status code
+        is the only discriminator - 0x0 means SUCCESS.
+        Treating the presence of the event as evidence of failure reports healthy
+        machines as the top source of bad passwords.
+        https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4776
+    #>
+    param([string]$Code)
+
+    $c = if ($null -eq $Code) { '' } else { $Code.Trim() }
+    foreach ($ok in $script:SuccessStatusCodes) {
+        if ($c -ieq $ok) { return $false }
+    }
+    return $true
+}
+
+function ConvertFrom-AdFileTime {
+    <#
+    .SYNOPSIS
+        Converts an AD large-integer time (FILETIME) to a DateTime, or $null for "never".
+    .DESCRIPTION
+        0 and Int64.MaxValue (the NeverSentinels in LockoutReference.psd1) mean "never" /
+        "not set", not 1601-01-01 - and [datetime]::FromFileTime(Int64.MaxValue) throws, so
+        every caller must go through this guard rather than testing only "-gt 0".
+        Learn: lockoutTime "A value of zero means that the account is not currently locked
+        out"; badPasswordTime "A value of zero means that the last time an incorrect
+        password was used is unknown"; accountExpires documents 0x7FFFFFFFFFFFFFFF as the
+        "never" value for large-integer dates.
+        https://learn.microsoft.com/windows/win32/adschema/a-lockouttime
+        https://learn.microsoft.com/windows/win32/adschema/a-badpasswordtime
+        https://learn.microsoft.com/windows/win32/adschema/a-accountexpires
+    #>
+    param([object]$Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [datetime]) { return $Value }
+    $n = [int64]0
+    try { $n = [int64]$Value } catch { return $null }
+    if ($n -le 0 -or $n -ge [int64]::MaxValue) { return $null }
+    try { return [datetime]::FromFileTime($n) } catch { return $null }
+}
+
 function Write-LockoutReport {
     # Builds a self-contained dark-themed HTML report and writes it to disk. Returns the
     # full path. No console logging here (the orchestration body logs the path).
@@ -1093,14 +1209,20 @@ function Write-LockoutReport {
     # --- pwdLastSet: filetime Int64 or datetime ---
     $pwdLastSet = $null
     try {
-        if (($User.pwdLastSet -is [int64] -or $User.pwdLastSet -is [int]) -and [int64]$User.pwdLastSet -gt 0) {
-            $pwdLastSet = [datetime]::FromFileTime([int64]$User.pwdLastSet)
-        } elseif (($User.pwdLastSet -is [int64] -or $User.pwdLastSet -is [int]) -and [int64]$User.pwdLastSet -eq 0) {
-            # pwdLastSet of 0 means "user must change password at next logon" - directly
-            # relevant to a reset/lockout investigation, so label it rather than show 1601.
-            $pwdLastSet = '0 (user must change password at next logon)'
+        $pls = $User.pwdLastSet
+        if ($pls -is [int64] -or $pls -is [int]) {
+            if ([int64]$pls -eq 0) {
+                # pwdLastSet of 0 means "user must change password at next logon" (Learn:
+                # a-pwdlastset) - directly relevant to a reset/lockout investigation, so
+                # label it rather than show 1601.
+                # https://learn.microsoft.com/windows/win32/adschema/a-pwdlastset
+                $pwdLastSet = '0 (user must change password at next logon)'
+            } else {
+                $dt = ConvertFrom-AdFileTime -Value $pls
+                $pwdLastSet = if ($dt) { $dt } else { 'Never' }   # Int64.MaxValue / negative
+            }
         } else {
-            $pwdLastSet = $User.pwdLastSet
+            $pwdLastSet = $pls
         }
     } catch {
         $pwdLastSet = $User.pwdLastSet
@@ -1118,17 +1240,23 @@ function Write-LockoutReport {
     # https://learn.microsoft.com/openspecs/windows_protocols/ms-adts/b80798ae-1f8c-4d30-9d80-a1f3281e96e2
     $lockoutTime = $null
     try {
-        if ($User.lockoutTime -and ($User.lockoutTime -is [int64] -or $User.lockoutTime -is [int]) -and [int64]$User.lockoutTime -gt 0) {
-            $stamp = [datetime]::FromFileTime([int64]$User.lockoutTime)
-            $lockoutTime = if ($User.LockedOut) {
-                "$($stamp.ToString('yyyy-MM-dd HH:mm:ss')) (still locked)"
+        $lt = $User.lockoutTime
+        if ($lt -is [int64] -or $lt -is [int]) {
+            $stamp = ConvertFrom-AdFileTime -Value $lt
+            if ($stamp) {
+                $lockoutTime = if ($User.LockedOut) {
+                    "$($stamp.ToString('yyyy-MM-dd HH:mm:ss')) (still locked)"
+                } else {
+                    "$($stamp.ToString('yyyy-MM-dd HH:mm:ss')) (last lockout - has since auto-unlocked)"
+                }
             } else {
-                "$($stamp.ToString('yyyy-MM-dd HH:mm:ss')) (last lockout - has since auto-unlocked)"
+                # 0 (Learn: "not currently locked out") or Int64.MaxValue: never.
+                $lockoutTime = 'Never locked out'
             }
-        } elseif (-not $User.lockoutTime -or [int64]$User.lockoutTime -eq 0) {
+        } elseif (-not $lt) {
             $lockoutTime = 'Never locked out'
         } else {
-            $lockoutTime = $User.lockoutTime
+            $lockoutTime = $lt
         }
     } catch {
         $lockoutTime = $User.lockoutTime

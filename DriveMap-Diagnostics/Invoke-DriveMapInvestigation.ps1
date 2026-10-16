@@ -98,8 +98,8 @@
     Continues past a BLIND readiness gate result instead of stopping.
 
 .NOTES
-    Reuses AD-GroupPolicy-DriveMaps\Audit-GPDriveMaps.ps1 and
-    Search-SYSVOLScripts\Search-SYSVOLScripts.ps1 UNMODIFIED, via Resolve-CompanionScript and
+    Reuses Audit-GPDriveMaps.ps1 and Search-SYSVOLScripts.ps1 (both in this folder)
+    UNMODIFIED, via Resolve-CompanionScript and
     Invoke-Step (copied from AD-LockoutDiagnostics\Invoke-ADLockoutInvestigation.ps1's own
     functions of the same name, quoting logic intact).
 
@@ -172,22 +172,14 @@ function Write-Status {
 }
 
 function Resolve-CompanionScript {
-    # Finds a companion script whether the tools are laid out as sibling folders (the repo)
-    # or flat in one directory (a distributed zip). Checking beside this script first means
-    # a packaged copy works without any path assumptions. Copied from
-    # AD-LockoutDiagnostics\Invoke-ADLockoutInvestigation.ps1's function of the same name
-    # (lines ~218-232), with candidate paths adjusted to this toolkit's reused scripts.
+    # Finds a companion script beside this one. Audit-GPDriveMaps.ps1 and
+    # Search-SYSVOLScripts.ps1 live in this folder in the repo and in the Service Desk
+    # bundle alike, so no other layout is searched. Same as
+    # AD-LockoutDiagnostics\Invoke-ADLockoutInvestigation.ps1's function of the same name.
     param([Parameter(Mandatory)][string]$FileName, [Parameter(Mandatory)][string]$ScriptRoot)
 
-    foreach ($candidate in @(
-        (Join-Path $ScriptRoot $FileName),
-        (Join-Path $ScriptRoot "AD-GroupPolicy-DriveMaps\$FileName"),
-        (Join-Path $ScriptRoot "Search-SYSVOLScripts\$FileName"),
-        (Join-Path (Split-Path $ScriptRoot -Parent) "AD-GroupPolicy-DriveMaps\$FileName"),
-        (Join-Path (Split-Path $ScriptRoot -Parent) "Search-SYSVOLScripts\$FileName")
-    )) {
-        if (Test-Path -LiteralPath $candidate) { return $candidate }
-    }
+    $candidate = Join-Path $ScriptRoot $FileName
+    if (Test-Path -LiteralPath $candidate) { return $candidate }
     return $null
 }
 
@@ -1485,7 +1477,7 @@ if ($auditScript) {
         Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if ($mappingsCsv) { $gpoActionCsvPath = $mappingsCsv.FullName }
 } else {
-    Write-Status WARN 'Audit-GPDriveMaps.ps1 was not found beside this script or in a sibling AD-GroupPolicy-DriveMaps folder - skipping the GPO-side audit.'
+    Write-Status WARN 'Audit-GPDriveMaps.ps1 was not found beside this script - skipping the GPO-side audit.'
     $steps.Add([PSCustomObject]@{ Step = 'Domain drive maps (GPO audit)'; Script = 'Audit-GPDriveMaps.ps1'; Ran = $false; ExitCode = $null; Error = 'Script not found.' })
 }
 

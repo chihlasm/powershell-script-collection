@@ -86,6 +86,8 @@ The individual tools remain runnable on their own when you already know what you
 | `Set-DCSecurityLogRetention.ps1`    | DC log sizing          | *How far back* can these reports actually see? |
 | `Test-EntraConnectReadiness.ps1`    | Hybrid preflight       | Can the hybrid checks *read* what they assume? |
 | `Export-ADAuthSourceEvidence.ps1`   | Device identity        | *What is* the machine behind that source IP?   |
+| `Get-LockoutCause.ps1`              | Cause ranking          | *What do I fix* on that machine?               |
+| `Watch-ADLockoutActivity.ps1`       | Live watch             | Is it failing *right now*, and on which DC?    |
 | `Get-SourceMachineActivity.ps1`     | Device timeline        | Was that machine *on* when the failures came?  |
 | `LockoutReference.psd1`             | Shared data            | Documented event IDs, status codes, audit GUIDs|
 
@@ -558,7 +560,7 @@ The domain-bound functions (AD queries, event-log reads) are verified by running
 
 ## Building the zip
 
-`AD-Lockout-Diagnostics.zip` is the toolkit in one flat folder: the scripts and guides here, plus `Export-ADAuthSourceEvidence.ps1`, `Get-LockoutCause.ps1` and `Watch-ADLockoutActivity.ps1` from `AD-AuthSourceEvidence`. The investigation finds its companions beside itself, so the extracted folder works with no setup.
+`AD-Lockout-Diagnostics.zip` is the toolkit in one flat folder: the scripts, guides and reference data here. The investigation finds its companions beside itself, so the extracted folder works with no setup. `Export-ADAuthSourceEvidence.ps1`, `Get-LockoutCause.ps1` and `Watch-ADLockoutActivity.ps1` used to live in a separate `AD-AuthSourceEvidence` folder; their detailed documentation is in [README-AuthSourceEvidence.md](README-AuthSourceEvidence.md).
 
 The zip is **not kept in git**. A committed copy went stale for weeks and was missing the device timeline step. Build a fresh one whenever you hand the toolkit out:
 

@@ -18,6 +18,7 @@
       User Account Management           -> event 4740 (account locked out) + 4724 (reset)
       Logon                            -> event 4625 (failed logon)
       Kerberos Authentication Service   -> event 4771 (Kerberos pre-auth failed)
+      Credential Validation            -> event 4776 (NTLM credential validation)
       Account Lockout                  -> event 4625 against an already-locked account
 
     Note that event 4740 - the lockout itself - is produced by Audit User Account
@@ -56,6 +57,23 @@
 
     Companion tools: Get-ADLockoutHistory.ps1, Diagnose-ADAccountLockout.ps1,
     Set-DCSecurityLogRetention.ps1
+
+    The subcategory list here must match AuditSubcategories in LockoutReference.psd1 and
+    the copy in Invoke-ADLockoutForensics.ps1; Tests\ReferenceDataCompat.Tests.ps1 fails
+    if they drift. Credential Validation (4776, NTLM) is checked as a supporting source:
+    the investigation gate treats a gap there as a WARNING (reports will be partial), not
+    a blocker, because event 4740 - the lockout itself - comes from User Account
+    Management.
+
+    REFERENCES
+      Audit subcategory GUIDs (Audit_AccountLogon_CredentialValidation = 0cce923f-...)
+        https://learn.microsoft.com/windows/win32/secauthz/auditing-constants
+      Event 4776 - written for both success and failure (4776(S, F))
+        https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4776
+      Event 4740 - produced by Audit User Account Management
+        https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4740
+      Audit Account Lockout - no Success events
+        https://learn.microsoft.com/windows/security/threat-protection/auditing/audit-account-lockout
 #>
 [CmdletBinding()]
 param(
@@ -107,6 +125,19 @@ $script:LockoutSubcategories = @(
         EventId     = 4771
         Needs       = 'Failure'
         Explains    = 'Kerberos pre-authentication failures (domain-joined bad passwords)'
+    }
+    [PSCustomObject]@{
+        # NTLM credential validation. Event 4776 is documented as 4776(S, F): written for both
+        # outcomes, so Failure auditing is what exposes bad-password NTLM sources (mapped
+        # drives, legacy clients, cached credentials). The GUID is from Microsoft's Auditing
+        # Constants table: Audit_AccountLogon_CredentialValidation.
+        # https://learn.microsoft.com/windows/win32/secauthz/auditing-constants
+        # https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4776
+        Name        = 'Credential Validation'
+        Guid        = '{0CCE923F-69AE-11D9-BED3-505054503030}'
+        EventId     = 4776
+        Needs       = 'Failure'
+        Explains    = 'NTLM credential validation (4776) - catches legacy clients, mapped drives and cached credentials'
     }
     [PSCustomObject]@{
         # This subcategory gates BOTH event 4740 (account locked out) and 4724 (admin
@@ -499,6 +530,7 @@ function New-AuditPolicyHtml {
   <li><b>Account Management &rarr; Audit User Account Management</b> &rarr; <b>Success</b><br>
       Produces event 4740, the lockout itself. Without this nothing else matters.</li>
   <li><b>Account Logon &rarr; Audit Kerberos Authentication Service</b> &rarr; Success <i>and</i> Failure (4771)</li>
+  <li><b>Account Logon &rarr; Audit Credential Validation</b> &rarr; Success <i>and</i> Failure (4776, NTLM)</li>
   <li><b>Logon/Logoff &rarr; Audit Logon</b> &rarr; Success <i>and</i> Failure (4625)</li>
   <li><b>Logon/Logoff &rarr; Audit Account Lockout</b> &rarr; <b>Failure</b><br>
       This subcategory has no Success events, so enabling Success achieves nothing.</li>

@@ -91,6 +91,13 @@ causes are checked too:
 .\Invoke-ADLockoutInvestigation.ps1 -Identity jdoe -EntraConnectServer AADCONNECT01
 ```
 
+**While you're on the phone with the user**, watch the bad-password count live on every DC
+(read-only; press Ctrl+C to stop):
+
+```powershell
+.\Watch-ADLockoutActivity.ps1 -Identity jdoe
+```
+
 **Things to know:**
 - If it says **STOPPING** because the DCs aren't logging lockout events, that's a real finding,
   not a bug. It means the domain can't tell us who is causing the lockouts. Put that in the

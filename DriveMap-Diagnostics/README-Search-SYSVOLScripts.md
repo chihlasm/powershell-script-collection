@@ -1,5 +1,9 @@
 # Search-SYSVOLScripts
 
+> Part of the [drive-map toolkit](README.md). Runs on its own, and as the logon-script step
+> of `Invoke-DriveMapInvestigation.ps1`. This used to live in its own `Search-SYSVOLScripts`
+> folder.
+
 Searches script files in the SYSVOL `scripts` folder for a specified text or regex pattern. Auto-detects the domain's SYSVOL path, outputs color-coded results to the console, and exports all matches to a CSV report.
 
 ## Features

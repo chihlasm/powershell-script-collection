@@ -1,5 +1,9 @@
 # AD Authentication Source Evidence
 
+> Part of the [AD lockout toolkit](README.md). Covers `Export-ADAuthSourceEvidence.ps1`,
+> `Get-LockoutCause.ps1` and `Watch-ADLockoutActivity.ps1`, which
+> `Invoke-ADLockoutInvestigation.ps1` runs as steps 6 and 7.
+
 Exports authentication failure evidence from every domain controller and resolves each
 source IP address to an actual device — hostname, MAC address, hardware vendor, and
 domain membership.
@@ -271,16 +275,11 @@ leases by default — and an expired lease is exactly what an old failure needs.
 
 ## If the export stalls
 
-Two diagnostics ship beside the script. Both cap every query with a timeout, so neither
-can hang the way the export did:
-
-```powershell
-# Times each query shape against the real Security log
-.\Debug-CorrelationQuery.ps1 -ComputerName DC01
-
-# Tests whether MATCHING EventData queries are fast on this DC
-.\Debug-CorrelationQuery2.ps1 -ComputerName DC01
-```
+The query timings that explain stalls are recorded in the `.NOTES` of
+`Export-ADAuthSourceEvidence.ps1`. The two development scripts that measured them
+(`Debug-CorrelationQuery.ps1` and `Debug-CorrelationQuery2.ps1`) were never shipped and
+have been removed; recover them from git history (`git show 224650e:AD-AuthSourceEvidence/Debug-CorrelationQuery.ps1`)
+if you need to re-measure on a slow DC.
 
 A default run reads only 4625/4771/4776/4740. If *that* stalls, narrow it down:
 

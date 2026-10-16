@@ -130,7 +130,7 @@ This surfaces at three levels so it can't be missed:
 
 ### User CSV columns
 
-`SamAccountName`, `DisplayName`, `UserPrincipalName`, `EmailAddress`, `Department`, `Title`, `Enabled`, `GroupCount`, `DirectCount`, `NestedCount`, `PrimaryCount`, `RedundantCount`, `SurplusPathCount`, `Groups`, `RedundantGroups`, `LastLogonDate`, `PasswordLastSet`, `MemberDN`, `ExportDate`
+`SamAccountName`, `DisplayName`, `UserPrincipalName`, `EmailAddress`, `Department`, `Title`, `Enabled`, `GroupCount`, `DirectCount`, `NestedCount`, `PrimaryCount`, `RedundantCount`, `SurplusPathCount`, `Groups`, `RedundantGroups`, `LastLogonDate`, `PasswordLastSet`, `MemberDN`, `ExportDate`, `Office`
 
 `Groups` is semicolon-delimited with the path annotated per group; `RedundantGroups` spells out every route for the duplicated ones. Filter or sort on `SurplusPathCount` to triage.
 
@@ -177,6 +177,7 @@ Group members *"can be users, groups, and computers."* Filtering to `objectClass
 | `-UserMembersOnly` | Emit only user members. |
 | `-SkipPrimaryGroupMembers` | Skip primary-group reconstruction. |
 | `-IncludeEmptyGroups` | Emit a placeholder row so empty groups still appear. |
+| `-SplitByGroup` | Also write one CSV per group into an `ADGroupMembership_<timestamp>_ByGroup` subfolder. The combined CSV is always written. |
 | `-UserReport` | Also write the user-centric HTML report and CSV. |
 | `-IncludeDisabled` | Include disabled accounts in the user report. |
 | `-OutputPath` | Output directory, defaults to current directory. |
@@ -189,9 +190,13 @@ Group members *"can be users, groups, and computers."* Filtering to `objectClass
 
 **How the membership arises:** `MembershipType`, `NestingDepth`, `NestedVia`
 
-**User detail:** `DisplayName`, `UserPrincipalName`, `EmailAddress`, `Department`, `Title`, `Enabled`, `LastLogonDate`, `PasswordLastSet`
+**User detail:** `DisplayName`, `UserPrincipalName`, `EmailAddress`, `Department`, `Title`, `Enabled`, `LastLogonDate`, `PasswordLastSet`, plus `Office` (AD `physicalDeliveryOfficeName`; empty when unset)
+
+**Group dates:** `GroupCreated`, `GroupModified` (AD `whenCreated` / `whenChanged`; `whenChanged` is per-DC and does not replicate, so it can differ between domain controllers)
 
 **Run metadata:** `ExportDate`
+
+`Office`, `GroupCreated` and `GroupModified` are appended after `ExportDate` so existing column positions are unchanged. The HTML report does not show them; they are CSV-only.
 
 ### `MembershipType` values
 
@@ -251,3 +256,24 @@ Verified against Microsoft documentation:
 - [Get-ADGroupMember](https://learn.microsoft.com/powershell/module/activedirectory/get-adgroupmember) — `-Recursive` leaf-only behavior, member object classes, cross-forest limitation
 - [Get-ADGroup](https://learn.microsoft.com/powershell/module/activedirectory/get-adgroup) — `-Filter`/`-SearchBase` syntax, `GroupCategory` and `GroupScope` values
 - [Primary-Group-ID attribute](https://learn.microsoft.com/windows/win32/adschema/a-primarygroupid) — RID semantics, default to Domain Users, non-linked attribute
+
+## Migrating from AD Export
+
+This tool replaces the retired `AD Export\Export-MultipleADGroupMembers.ps1`.
+
+| Old parameter | Use now |
+|---|---|
+| `-GroupNames "A","B"` | `-GroupName 'A','B'` (wildcards allowed; matches Name and SamAccountName) |
+| `-OutputPath` | `-OutputPath` (unchanged; log is now `ADGroupMembership_<timestamp>.log`) |
+| `-CombinedOutput` | Default behaviour: one combined CSV, `ADGroupMembership_<timestamp>.csv` |
+| individual CSV per group (old default) | Add `-SplitByGroup`. The combined CSV is still written as well |
+| `-IncludeNestedGroups` | `-IncludeNested` (also records `NestingDepth` / `NestedVia`; old `-Recursive` lost the path) |
+| `-IncludeGroupInfo` | Always on: `GroupDescription`, `GroupCategory`, `GroupScope`, `GroupCreated`, `GroupModified` |
+
+Differences to expect:
+
+- Old `GroupName` / `DisplayName` / `SamAccountName` / `UserPrincipalName` / `EmailAddress` / `Department` / `Title` / `Office` / `Enabled` / `LastLogonDate` / `PasswordLastSet` / `ExportDate` are all present (`SamAccountName` is now `MemberSamAccountName`). Old `GroupCreated` / `GroupModified` keep their names.
+- The old script emitted users only. This one also emits groups and computers by default; add `-UserMembersOnly` for the old behaviour.
+- Primary-group members (for example everyone in `Domain Users`) are now included.
+- Old per-group file names were `ADGroupMembers_<Group>_<timestamp>.csv`; `-SplitByGroup` names them `<Group>.csv` inside the `_ByGroup` folder.
+- The old script required running as administrator; this one does not.

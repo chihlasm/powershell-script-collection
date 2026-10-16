@@ -41,8 +41,7 @@
     to Microsoft's documented lockout causes and prints the specific remediation. The top
     findings are lifted into SUMMARY.txt so the answer is readable without opening a CSV.
 
-    They are found either beside this script (the packaged zip) or in a sibling
-    AD-AuthSourceEvidence folder (the repo), and are skipped with a note if absent.
+    They are found beside this script, and are skipped with a note if absent.
 
     Everything lands in one timestamped case folder, and every report is combined into a
     single tabbed page - "Investigation Report.html" - with the findings on screen when it
@@ -186,6 +185,13 @@ function Test-AuditGateResult {
     # The gate fails only when the subcategory behind event 4740 is not logging, because
     # that is the event whose absence makes a lockout report meaningless. Other gaps
     # degrade the evidence but still leave something worth collecting.
+    #
+    # Credential Validation (event 4776, NTLM) is deliberately a WARNING, not critical:
+    # 4740 - produced by Audit User Account Management - still records the lockout, and
+    # Kerberos/Logon failures still name sources, so a report is meaningful without 4776;
+    # it is just partial for NTLM-only clients (mapped drives, legacy devices). It falls
+    # into OtherGaps automatically because only the 4740 subcategory is critical.
+    # https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4776
     param(
         [object[]]$AuditRows,
         [object]$Reference
@@ -239,19 +245,31 @@ function Test-AuditGateResult {
     return $result
 }
 
+function Get-DeviceStepArguments {
+    # Builds the argument table for step 6 (Export-ADAuthSourceEvidence.ps1).
+    #
+    # When an account is under investigation it is passed as -Identity so the export is
+    # scoped to that account's 4625/4771/4776/4740 events. Without it the export is
+    # domain-wide, and - because Diagnose-ADAccountLockout.ps1 does not query 4776 at all -
+    # a default run would never examine NTLM (4776) evidence for the target account.
+    # With no identity the arguments are exactly what they always were.
+    param(
+        [Parameter(Mandatory)][int]$DaysBack,
+        [Parameter(Mandatory)][string]$OutputPath,
+        [string]$Identity
+    )
+    $a = @{ DaysBack = [math]::Min($DaysBack, 90); OutputPath = $OutputPath }
+    if (-not [string]::IsNullOrWhiteSpace($Identity)) { $a['Identity'] = $Identity }
+    return $a
+}
+
 function Resolve-CompanionScript {
-    # Finds a companion script whether the tools are laid out as sibling folders (the
-    # repo) or flat in one directory (the distributed zip). Checking beside this script
-    # first means the packaged copy works without any path assumptions.
+    # Finds a companion script beside this one. Every companion lives in this folder in the
+    # repo, the zip and the Service Desk bundle alike, so no other layout is searched.
     param([Parameter(Mandatory)][string]$FileName, [Parameter(Mandatory)][string]$ScriptRoot)
 
-    foreach ($candidate in @(
-        (Join-Path $ScriptRoot $FileName),
-        (Join-Path $ScriptRoot "AD-AuthSourceEvidence\$FileName"),
-        (Join-Path (Split-Path $ScriptRoot -Parent) "AD-AuthSourceEvidence\$FileName")
-    )) {
-        if (Test-Path -LiteralPath $candidate) { return $candidate }
-    }
+    $candidate = Join-Path $ScriptRoot $FileName
+    if (Test-Path -LiteralPath $candidate) { return $candidate }
     return $null
 }
 
@@ -664,7 +682,7 @@ if ($MultiForest) {
 $evidenceScript = Resolve-CompanionScript -FileName 'Export-ADAuthSourceEvidence.ps1' -ScriptRoot $scriptRoot
 if (-not $evidenceScript) {
     $null = $steps.Add([PSCustomObject]@{ Step='Device identity'; Script='Export-ADAuthSourceEvidence.ps1'
-                                          Ran=$false; ExitCode=$null; Error='Skipped - Export-ADAuthSourceEvidence.ps1 not found beside this script or in AD-AuthSourceEvidence' })
+                                          Ran=$false; ExitCode=$null; Error='Skipped - Export-ADAuthSourceEvidence.ps1 not found beside this script' })
 } elseif ($gate.Blocking -and -not $Force) {
     $null = $steps.Add([PSCustomObject]@{ Step='Device identity'; Script='Export-ADAuthSourceEvidence.ps1'
                                           Ran=$false; ExitCode=$null; Error='Skipped - audit gate blocking (use -Force to collect anyway)' })
@@ -672,7 +690,7 @@ if (-not $evidenceScript) {
     Write-Status STEP 'STEP 6/8  Device identity - which machine is sending the bad passwords?'
     # DaysBack is capped at 90 because that is the exporter's documented ceiling; the
     # investigation default of 30 fits, but a caller may pass more.
-    $args6 = @{ DaysBack = [math]::Min($DaysBack, 90); OutputPath = $caseFolder }
+    $args6 = Get-DeviceStepArguments -DaysBack $DaysBack -OutputPath $caseFolder -Identity $Identity
     $null = $steps.Add((Invoke-Step -Name 'Device identity' -CaseFolder $caseFolder `
         -ScriptPath $evidenceScript -Arguments $args6))
 }

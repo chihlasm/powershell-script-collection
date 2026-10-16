@@ -42,10 +42,16 @@ Describe 'LockoutReference.psd1' {
     }
 
     It 'lists the events that are written for both outcomes' {
-        foreach ($id in @(4776, 4771, 4768)) {
+        # Learn: 4776(S, F) and 4768(S, F).
+        foreach ($id in @(4776, 4768)) {
             $script:Ref.DualOutcomeEvents | Should -Contain $id
         }
         $script:Ref.DualOutcomeEvents | Should -Not -Contain 4625
+    }
+
+    It 'does not list 4771 as dual-outcome (Learn: 4771(F) is Failure-only) - regression' {
+        # https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4771
+        $script:Ref.DualOutcomeEvents | Should -Not -Contain 4771
     }
 
     It 'records which AD attributes do not replicate' {
@@ -309,12 +315,15 @@ Describe 'Fixes found while writing the service desk guide' {
     It 'ships every companion script it resolves in the Service Desk bundle' {
         # The bundle copied Export-ADAuthSourceEvidence.ps1 but not Get-LockoutCause.ps1,
         # so step 7 was always skipped there: no "What To Fix" tab, no FINDINGS section.
+        # The companions now live in this folder, which the bundle copies whole, so each
+        # one must be in this folder and the folder must be in the manifest.
         $src      = Get-Content -Raw "$PSScriptRoot\..\Invoke-ADLockoutInvestigation.ps1"
         $manifest = Get-Content -Raw "$PSScriptRoot\..\..\ServiceDesk-Toolkit\Build-ServiceDeskToolkit.ps1"
+        $manifest | Should -Match ([regex]::Escape("Source = 'AD-LockoutDiagnostics';"))
         $companions = @([regex]::Matches($src, "Resolve-CompanionScript -FileName '([^']+)'") | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
         $companions.Count | Should -BeGreaterThan 0
         foreach ($c in $companions) {
-            $manifest | Should -Match ([regex]::Escape("Destination = 'AD-LockoutDiagnostics/$c'"))
+            Join-Path "$PSScriptRoot\.." $c | Should -Exist
         }
     }
 }
@@ -346,5 +355,50 @@ Describe 'Step 8 - device timeline' {
     It 'files the timeline into its own case subfolder' {
         $src = Get-Content -Raw "$PSScriptRoot\..\Invoke-ADLockoutInvestigation.ps1"
         $src | Should -Match "Match = 'SourceActivity';\s+Folder = '6 - Device Timeline'"
+    }
+}
+
+Describe 'Credential Validation (4776) gap in the audit gate' {
+    # DECISION: a missing Credential Validation subcategory is a WARNING (OtherGaps), not a
+    # blocker. 4740 comes from User Account Management, so the lockout itself is still
+    # recorded; only NTLM-only sources are missed. Event 4776 is 4776(S, F).
+    # https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4776
+    It 'does not block, and is reported as a supporting-evidence gap naming event 4776' {
+        $rows = @(
+            (New-AuditRow 'DC01' 'User Account Management' 4740 'Success' 'Pass')
+            (New-AuditRow 'DC01' 'Credential Validation' 4776 'No Auditing' 'Fail')
+        )
+        $gate = Test-AuditGateResult -AuditRows $rows -Reference $script:Ref
+        $gate.Blocking        | Should -BeFalse
+        $gate.CriticalGaps.Count | Should -Be 0
+        $gate.OtherGaps.Count | Should -Be 1
+        $gate.OtherGaps[0]    | Should -Match '4776'
+        $gate.Message         | Should -Match 'partial'
+    }
+
+    It 'the shared reference lists Credential Validation with the verified GUID and event 4776' {
+        $cv = @($script:Ref.AuditSubcategories | Where-Object { $_.Name -eq 'Credential Validation' })
+        $cv.Count   | Should -Be 1
+        $cv[0].Guid | Should -Be '{0CCE923F-69AE-11D9-BED3-505054503030}'
+        $cv[0].Events | Should -Contain 4776
+    }
+}
+
+Describe 'Get-DeviceStepArguments (step 6 scope)' {
+    # Diagnose does not query 4776 and Export used to be unfiltered, so a default run never
+    # examined NTLM evidence for the target account. Passing -Identity scopes step 6 to it.
+    It 'passes the identity to Export-ADAuthSourceEvidence when one was given' {
+        $a = Get-DeviceStepArguments -DaysBack 30 -OutputPath 'C:\case' -Identity 'jdoe'
+        $a['Identity']   | Should -Be 'jdoe'
+        $a['DaysBack']   | Should -Be 30
+        $a['OutputPath'] | Should -Be 'C:\case'
+    }
+    It 'leaves the arguments unchanged (no Identity key) when no identity was given' {
+        $a = Get-DeviceStepArguments -DaysBack 30 -OutputPath 'C:\case' -Identity ''
+        $a.ContainsKey('Identity') | Should -BeFalse
+        $a.Keys.Count | Should -Be 2
+    }
+    It 'still caps DaysBack at the exporter ceiling of 90' {
+        (Get-DeviceStepArguments -DaysBack 365 -OutputPath 'C:\case')['DaysBack'] | Should -Be 90
     }
 }

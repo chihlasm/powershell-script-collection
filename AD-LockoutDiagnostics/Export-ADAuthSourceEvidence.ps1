@@ -25,7 +25,7 @@
 
     WHY THIS EXISTS ALONGSIDE THE LOCKOUT TOOLS
 
-    The tools in AD-LockoutDiagnostics answer "why is THIS account locking out" and render
+    The other lockout tools in this folder answer "why is THIS account locking out" and render
     a ranked verdict. This script deliberately does not judge. It emits wide, flat CSV
     evidence intended to be cross-referenced against inventory you already hold - RMM
     exports, Intune, switch MAC tables, DHCP scopes - to identify a device the domain
@@ -49,6 +49,12 @@
 .PARAMETER DaysBack
     How many days of Security event log to search. 1-90, default 7. Large windows on a
     busy domain produce very large exports; start small.
+.PARAMETER Identity
+    Optional. Restrict the export to events for ONE account (sAMAccountName, DOMAIN\user
+    or user@domain). Applies to 4625, 4771, 4776 and 4740 - the target account of each
+    event. When omitted the export covers every account, exactly as before. The full
+    lockout investigation passes the account it was started for so that NTLM (4776)
+    evidence for that account is actually examined.
 .PARAMETER OutputPath
     Folder where the CSV files are written, created if missing. Defaults to an
     "Account Lockout Diagnostics" folder beside this script - the same folder the full
@@ -185,11 +191,12 @@ mm-devices.csv
     failure counts, account list and timestamps. Blocking an evidence export on an
     optional nicety is the wrong trade, so the default run does not attempt it.
 
-    Both diagnostics used to reach these numbers are kept beside this script:
-      Debug-CorrelationQuery.ps1   times each query shape against a real Security log
-      Debug-CorrelationQuery2.ps1  tests whether MATCHING EventData queries are fast
+    The two diagnostics used to reach these numbers were development-only and have been
+    removed; recover them with
+      git show 224650e:AD-AuthSourceEvidence/Debug-CorrelationQuery.ps1   (query shape timings)
+      git show 224650e:AD-AuthSourceEvidence/Debug-CorrelationQuery2.ps1  (matching EventData)
 
-    Companion tools in AD-LockoutDiagnostics:
+    Companion tools in this folder:
       Test-ADAuditPolicy.ps1        Run FIRST. If failure auditing is off, this script
                                     returns an empty export that looks identical to a
                                     clean result.
@@ -220,6 +227,9 @@ mm-devices.csv
 param(
     [ValidateRange(1, 90)]
     [int]$DaysBack = 7,
+
+    # Optional single-account filter; see .PARAMETER Identity.
+    [string]$Identity,
 
     # Defaults to a "Reports" folder beside this script, resolved from $PSScriptRoot so
     # output location does not depend on the caller's working directory.
@@ -288,17 +298,16 @@ function Import-ReferenceDataFile {
     $full = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).ProviderPath
     Import-LocalizedData -BaseDirectory (Split-Path -Parent $full) -FileName (Split-Path -Leaf $full) -ErrorAction Stop
 }
-foreach ($candidate in @(
-    (Join-Path $PSScriptRoot 'LockoutReference.psd1'),
-    (Join-Path (Split-Path $PSScriptRoot -Parent) 'AD-LockoutDiagnostics\LockoutReference.psd1')
-)) {
-    if (Test-Path -LiteralPath $candidate) {
-        try { $script:Ref = Import-ReferenceDataFile -Path $candidate; break } catch { }
-    }
+# Only "beside this script" is searched: this script now lives in AD-LockoutDiagnostics
+# (and in the packaged zip) next to LockoutReference.psd1.
+$candidate = Join-Path $PSScriptRoot 'LockoutReference.psd1'
+if (Test-Path -LiteralPath $candidate) {
+    try { $script:Ref = Import-ReferenceDataFile -Path $candidate } catch { }
 }
 
-# Status values meaning "no error", in every form the logs render them. Event 4776 and
-# 4771 are written for BOTH success and failure; the status code is the ONLY discriminator.
+# Status values meaning "no error", in every form the logs render them. Events 4776 and
+# 4768 are written for BOTH success and failure (4771 is Failure-only); the status code
+# is the ONLY discriminator.
 # https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4776
 $script:SuccessStatusCodes = if ($script:Ref -and $script:Ref.SuccessStatusCodes) {
     $script:Ref.SuccessStatusCodes
@@ -309,32 +318,37 @@ $script:SuccessStatusCodes = if ($script:Ref -and $script:Ref.SuccessStatusCodes
 $script:StatusCodes = if ($script:Ref -and $script:Ref.StatusCodes) {
     $script:Ref.StatusCodes
 } else {
+    # Fallback only when LockoutReference.psd1 is missing. Must stay identical to the
+    # psd1 StatusCodes table; Tests\ReferenceDataCompat.Tests.ps1 fails if it drifts.
     @{
+        # --- Kerberos (4771 / 4768) ---
         '0x0'        = 'Success (KDC_ERR_NONE)'
         '0x6'        = 'Username does not exist (KDC_ERR_C_PRINCIPAL_UNKNOWN)'
-        '0xC'        = 'KDC policy rejects request (KDC_ERR_POLICY)'
-        '0x10'       = 'KDC has no support for PADATA type - usually smart-card related'
-        '0x12'       = 'Client credentials revoked - disabled, expired, or LOCKED OUT'
+        '0xC'        = 'KDC policy rejects request (KDC_ERR_POLICY) - e.g. logon hours or workstation restriction'
+        '0x10'       = 'KDC has no support for PADATA type (KDC_ERR_PADATA_TYPE_NOSUPP) - usually a smart-card/certificate problem'
+        '0x12'       = 'Client credentials revoked (KDC_ERR_CLIENT_REVOKED) - account disabled, expired, or LOCKED OUT'
         '0x17'       = 'Password has expired (KDC_ERR_KEY_EXPIRED)'
         '0x18'       = 'Bad password - pre-authentication failed (KDC_ERR_PREAUTH_FAILED)'
-        '0x19'       = 'Additional pre-authentication required'
+        '0x19'       = 'Additional pre-authentication required (KDC_ERR_PREAUTH_REQUIRED)'
         '0x25'       = 'Clock skew too great (KRB_AP_ERR_SKEW)'
+
+        # --- NTLM (4776 / 4625), Winlogon error codes ---
         '0x00000000' = 'Success (no errors)'
-        '0xC000005E' = 'No logon servers available'
+        '0xC000005E' = 'No logon servers available to service the logon request'
         '0xC0000064' = 'Username does not exist'
         '0xC000006A' = 'Bad password'
-        '0xC000006D' = 'Generic logon failure - bad username/password or LM level mismatch'
+        '0xC000006D' = 'Generic logon failure - bad username/password, or a LAN Manager authentication level mismatch'
         '0xC000006F' = 'Logon outside authorized hours'
         '0xC0000070' = 'Logon from unauthorized workstation'
         '0xC0000071' = 'Password expired'
         '0xC0000072' = 'Account disabled'
-        '0xC000015B' = 'Logon type not granted at this machine'
+        '0xC000015B' = 'User has not been granted the requested logon type at this machine'
         '0xC0000192' = 'Netlogon service was not started'
         '0xC0000193' = 'Account expired'
         '0xC0000224' = 'Change password at next logon is flagged'
         '0xC0000234' = 'Account locked out'
         '0xC0000371' = 'Local account store has no secret material for this account'
-        '0xC0000413' = 'Blocked by authentication firewall'
+        '0xC0000413' = 'Machine is protected by an authentication firewall; account not allowed to authenticate to it'
     }
 }
 
@@ -490,8 +504,9 @@ function Test-IsFailureStatus {
     .SYNOPSIS
         Decides whether a status code represents a failure.
     .DESCRIPTION
-        Events 4776, 4771 and 4768 are written for BOTH successful and failed
-        authentication. The status code is the only discriminator - 0x0 means SUCCESS.
+        Events 4776 and 4768 are written for BOTH successful and failed authentication
+        (Learn: 4776(S, F), 4768(S, F)); 4771 is Failure-only (4771(F)). The status code
+        is the only discriminator - 0x0 means SUCCESS.
         Treating the presence of the event as evidence of failure reports healthy
         machines as the top source of bad passwords.
         https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4776
@@ -503,6 +518,26 @@ function Test-IsFailureStatus {
         if ($c -ieq $ok) { return $false }
     }
     return $true
+}
+
+function Test-AccountMatch {
+    <#
+    .SYNOPSIS
+        True when an event's account name is the account named by -Identity.
+    .DESCRIPTION
+        Compares sAMAccountName-style values case-insensitively after stripping a
+        DOMAIN\ prefix or @suffix from either side, because the same account appears as
+        'jdoe', 'CONTOSO\jdoe' or 'jdoe@contoso.com' depending on the event and the
+        client. An empty -Identity matches everything (no filter).
+    #>
+    param([string]$Account, [string]$Identity)
+    if ([string]::IsNullOrWhiteSpace($Identity)) { return $true }
+    if ([string]::IsNullOrWhiteSpace($Account))  { return $false }
+    $a = $Account.Trim();  if ($a.Contains('\')) { $a = $a.Substring($a.LastIndexOf('\') + 1) }
+    $i = $Identity.Trim(); if ($i.Contains('\')) { $i = $i.Substring($i.LastIndexOf('\') + 1) }
+    if ($a.Contains('@')) { $a = $a.Substring(0, $a.IndexOf('@')) }
+    if ($i.Contains('@')) { $i = $i.Substring(0, $i.IndexOf('@')) }
+    return ($a -ieq $i)
 }
 
 function ConvertFrom-AuthEvent {
@@ -519,8 +554,9 @@ function ConvertFrom-AuthEvent {
           4771  IpAddress / IpPort only. The value shown in Event Viewer as
                 "Failure Code" is named Status in the XML.
           4776  Workstation (NOT WorkstationName). No IP field exists at all.
-          4740  Caller machine is in TargetDomainName. There is NO CallerComputerName
-                element, despite Event Viewer labelling it that way.
+          4740  Caller machine is in TargetDomainName (Learn's sample XML). Event Viewer
+                labels it "Caller Computer Name"; CallerComputerName is honoured only as
+                a fallback when TargetDomainName is blank.
     #>
     param(
         [Parameter(Mandatory)][string]$EventXml,
@@ -602,6 +638,9 @@ function ConvertFrom-AuthEvent {
             # yields a name here, not an address.
             # https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4740
             $sourceHost = $d['TargetDomainName']
+            # Some producers also emit CallerComputerName; honour it when TargetDomainName
+            # is blank, matching Diagnose-ADAccountLockout and Get-ADLockoutHistory.
+            if ([string]::IsNullOrWhiteSpace($sourceHost)) { $sourceHost = $d['CallerComputerName'] }
             $statusCode = ''
         }
 
@@ -1890,16 +1929,11 @@ function New-AuthSourceReportHtml {
     $verdict = Get-AuthSourceVerdict -Sources $src
 
     # Shared stylesheet, so this page matches the rest of the toolkit and the combined
-    # report styles it correctly. Resolved from either layout: the repo (sibling folder)
-    # or the packaged zip (flat).
+    # report styles it correctly. Read from beside this script.
     $css = $null
-    foreach ($p in @(
-        (Join-Path $PSScriptRoot 'LockoutReference.psd1'),
-        (Join-Path (Split-Path $PSScriptRoot -Parent) 'AD-LockoutDiagnostics\LockoutReference.psd1')
-    )) {
-        if (Test-Path -LiteralPath $p) {
-            try { $css = (Import-ReferenceDataFile -Path $p -ErrorAction Stop).ReportCss; break } catch { }
-        }
+    $p = Join-Path $PSScriptRoot 'LockoutReference.psd1'
+    if (Test-Path -LiteralPath $p) {
+        try { $css = (Import-ReferenceDataFile -Path $p -ErrorAction Stop).ReportCss } catch { }
     }
     if (-not $css) {
         $css = @'
@@ -2031,6 +2065,7 @@ $startTime = (Get-Date).AddDays(-$DaysBack)
 Write-Host ''
 Write-Status "AD authentication source evidence export" 'INFO'
 Write-Status "Window: last $DaysBack days (since $($startTime.ToString('yyyy-MM-dd HH:mm:ss')))" 'INFO'
+if ($Identity) { Write-Status "Scope: events for account '$Identity' only" 'INFO' }
 Write-Host ''
 
 # --- Domain controllers -------------------------------------------------------
@@ -2061,7 +2096,8 @@ $workerScript = {
         [int[]]$EventIds,
         [datetime]$StartTime,
         [int]$DaysBack,
-        [string]$FunctionDefs
+        [string]$FunctionDefs,
+        [string]$Identity
     )
 
     # Rehydrate the parsing helpers inside this runspace.
@@ -2094,7 +2130,10 @@ $workerScript = {
         }
 
         $rows = foreach ($evt in $events) {
-            try { ConvertFrom-AuthEvent -EventXml $evt.ToXml() -EventId $evt.Id -DcName $ComputerName } catch { }
+            try {
+                $row = ConvertFrom-AuthEvent -EventXml $evt.ToXml() -EventId $evt.Id -DcName $ComputerName
+                if (Test-AccountMatch -Account $row.Account -Identity $Identity) { $row }
+            } catch { }
         }
         $out.Rows = @($rows)
     } catch {
@@ -2106,7 +2145,7 @@ $workerScript = {
 
 # The functions each runspace needs, extracted from this script's own definitions so
 # there is exactly one copy of the parsing logic to maintain.
-$fnNames = @('ConvertFrom-AuthEvent', 'ConvertTo-NormalizedIp', 'Get-StatusMeaning', 'Test-IsFailureStatus')
+$fnNames = @('ConvertFrom-AuthEvent', 'ConvertTo-NormalizedIp', 'Get-StatusMeaning', 'Test-IsFailureStatus', 'Test-AccountMatch')
 $fnDefs  = ($fnNames | ForEach-Object {
     "function $_ {`n$((Get-Command $_ -CommandType Function).Definition)`n}"
 }) -join "`n"
@@ -2132,6 +2171,7 @@ foreach ($dc in $dcs) {
     [void]$ps.AddParameter('StartTime',    $startTime)
     [void]$ps.AddParameter('DaysBack',     $DaysBack)
     [void]$ps.AddParameter('FunctionDefs', $fnDefs)
+    [void]$ps.AddParameter('Identity',     $Identity)
     $jobs.Add(@{ PowerShell = $ps; Handle = $ps.BeginInvoke(); DC = $dc })
 }
 

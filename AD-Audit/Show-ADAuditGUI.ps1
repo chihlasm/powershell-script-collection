@@ -1,3 +1,4 @@
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     WinForms GUI launcher for Invoke-ADAudit.ps1.

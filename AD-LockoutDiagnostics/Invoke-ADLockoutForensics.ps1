@@ -116,6 +116,16 @@
         https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4776
       Event 4724 - An attempt was made to reset an account's password
         https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4724
+      Event 4723 - An attempt was made to change an account's password (no source machine)
+        https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4723
+      Event 4768 - Kerberos TGT request, 4768(S, F); source is IpAddress
+        https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4768
+      Audit subcategory GUIDs (Auditing Constants)
+        https://learn.microsoft.com/windows/win32/secauthz/auditing-constants
+      badPasswordTime / lockoutTime - 0 is a sentinel; Int64.MaxValue = never
+        https://learn.microsoft.com/windows/win32/adschema/a-badpasswordtime
+        https://learn.microsoft.com/windows/win32/adschema/a-lockouttime
+        https://learn.microsoft.com/windows/win32/adschema/a-accountexpires
       badPwdCount is non-replicated (per-DC)
         https://learn.microsoft.com/windows/win32/adschema/a-badpwdcount
       Advanced audit policy subcategory GUIDs
@@ -188,8 +198,14 @@ $script:EventMeaning = @{
 # NTLM codes are the Winlogon error codes in Table 1 of:
 #   https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4776
 #
-# 0x0 means SUCCESS in both families. 4776/4771/4768 are written for successful
-# authentications too, so the status code is the only discriminator.
+# 0x0 means SUCCESS in both families. 4776(S, F) and 4768(S, F) are written for successful
+# authentications too (4771 is Failure-only, 4771(F)), so the status code is the only
+# discriminator.
+# FALLBACK ONLY: used when LockoutReference.psd1 is missing. LockoutReference.psd1 beside
+# this script is loaded over it (see the reference-data block after Import-ReferenceDataFile)
+# and is the single source of truth. This table must stay identical to the psd1;
+# Tests\ReferenceDataCompat.Tests.ps1 fails if it drifts.
+$script:SuccessStatusCodes = @('0x0', '0x00000000', '0', '')
 $script:StatusCodes = @{
     # --- Kerberos (4771 / 4768) ---
     '0x0'        = 'Success (KDC_ERR_NONE)'
@@ -202,8 +218,9 @@ $script:StatusCodes = @{
     '0x19'       = 'Additional pre-authentication required (KDC_ERR_PREAUTH_REQUIRED)'
     '0x25'       = 'Clock skew too great (KRB_AP_ERR_SKEW)'
 
-    # --- NTLM (4776), Winlogon error codes ---
+    # --- NTLM (4776 / 4625), Winlogon error codes ---
     '0x00000000' = 'Success (no errors)'
+    '0xC000005E' = 'No logon servers available to service the logon request'
     '0xC0000064' = 'Username does not exist'
     '0xC000006A' = 'Bad password'
     '0xC000006D' = 'Generic logon failure - bad username/password, or a LAN Manager authentication level mismatch'
@@ -211,10 +228,13 @@ $script:StatusCodes = @{
     '0xC0000070' = 'Logon from unauthorized workstation'
     '0xC0000071' = 'Password expired'
     '0xC0000072' = 'Account disabled'
+    '0xC000015B' = 'User has not been granted the requested logon type at this machine'
+    '0xC0000192' = 'Netlogon service was not started'
     '0xC0000193' = 'Account expired'
     '0xC0000224' = 'Change password at next logon is flagged'
     '0xC0000234' = 'Account locked out'
     '0xC0000371' = 'Local account store has no secret material for this account'
+    '0xC0000413' = 'Machine is protected by an authentication firewall; account not allowed to authenticate to it'
 }
 
 $script:Findings = New-Object System.Collections.ArrayList
@@ -286,6 +306,123 @@ function ConvertTo-SafeHtml {
     return ($s -replace '&', '&amp;' -replace '<', '&lt;' -replace '>', '&gt;' -replace '"', '&quot;')
 }
 
+function Get-EventCallerName {
+    <#
+    .SYNOPSIS
+        Picks the SOURCE MACHINE (name or address) for a Security event, per event ID.
+    .DESCRIPTION
+        The field that names the source differs by event, and TargetDomainName is a
+        machine name for ONE event only. Using it blindly turned the account's own domain
+        ("CONTOSO") into the "caller" for 4768/4625 and ranked it as the top failure source.
+          4740  TargetDomainName holds the caller computer (Learn's sample XML:
+                TargetDomainName=WIN81, rendered as "Caller Computer Name");
+                CallerComputerName is honoured as a fallback.
+          4625  WorkstationName, else the Source Network Address (IpAddress).
+          4776  Workstation ("Source Workstation").
+          4771  IpAddress ("Client Address"); there is no workstation field.
+          4768  IpAddress ("Client Address"); there is no workstation field.
+          4724/4723  No source-machine field exists (Subject is the ACTING ACCOUNT) -> ''.
+        https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4740
+        https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4625
+        https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4776
+        https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4771
+        https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4768
+        https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4724
+        https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4723
+    #>
+    param([int]$EventId, [hashtable]$Data)
+
+    $keys = switch ($EventId) {
+        4740    { @('TargetDomainName', 'CallerComputerName') }
+        4625    { @('WorkstationName', 'IpAddress') }
+        4776    { @('Workstation') }
+        4771    { @('IpAddress') }
+        4768    { @('IpAddress') }
+        default { @() }
+    }
+    foreach ($k in $keys) {
+        if ($Data.ContainsKey($k) -and $Data[$k] -and $Data[$k] -ne '-') { return [string]$Data[$k] }
+    }
+    return ''
+}
+
+function Get-StatusMeaning {
+    <#
+    .SYNOPSIS
+        Translates a Kerberos or Winlogon status code into plain English.
+    .DESCRIPTION
+        Codes are matched case-insensitively and in both padded and unpadded hex forms,
+        because the logs are inconsistent: the same failure appears as 0xc000006a in one
+        event and 0xC000006A in another.
+    #>
+    param([string]$Code)
+
+    if ([string]::IsNullOrWhiteSpace($Code)) { return '' }
+    $c = $Code.Trim()
+
+    foreach ($key in $script:StatusCodes.Keys) {
+        if ($key -ieq $c) { return $script:StatusCodes[$key] }
+    }
+
+    # Try normalizing 0x0000000C style padding down to 0xC and back up again.
+    if ($c -match '^0x0*([0-9a-fA-F]+)$') {
+        $bare = $Matches[1]
+        foreach ($key in $script:StatusCodes.Keys) {
+            if ($key -match '^0x0*([0-9a-fA-F]+)$' -and $Matches[1] -ieq $bare) {
+                return $script:StatusCodes[$key]
+            }
+        }
+    }
+
+    return "Unrecognized status code $Code"
+}
+
+function Test-IsFailureStatus {
+    <#
+    .SYNOPSIS
+        Decides whether a status code represents a failure.
+    .DESCRIPTION
+        Events 4776 and 4768 are written for BOTH successful and failed authentication
+        (Learn: 4776(S, F), 4768(S, F)); 4771 is Failure-only (4771(F)). The status code
+        is the only discriminator - 0x0 means SUCCESS.
+        Treating the presence of the event as evidence of failure reports healthy
+        machines as the top source of bad passwords.
+        https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4776
+    #>
+    param([string]$Code)
+
+    $c = if ($null -eq $Code) { '' } else { $Code.Trim() }
+    foreach ($ok in $script:SuccessStatusCodes) {
+        if ($c -ieq $ok) { return $false }
+    }
+    return $true
+}
+
+function ConvertFrom-AdFileTime {
+    <#
+    .SYNOPSIS
+        Converts an AD large-integer time (FILETIME) to a DateTime, or $null for "never".
+    .DESCRIPTION
+        0 and Int64.MaxValue (the NeverSentinels in LockoutReference.psd1) mean "never" /
+        "not set", not 1601-01-01 - and [datetime]::FromFileTime(Int64.MaxValue) throws, so
+        every caller must go through this guard rather than testing only "-gt 0".
+        Learn: lockoutTime "A value of zero means that the account is not currently locked
+        out"; badPasswordTime "A value of zero means that the last time an incorrect
+        password was used is unknown"; accountExpires documents 0x7FFFFFFFFFFFFFFF as the
+        "never" value for large-integer dates.
+        https://learn.microsoft.com/windows/win32/adschema/a-lockouttime
+        https://learn.microsoft.com/windows/win32/adschema/a-badpasswordtime
+        https://learn.microsoft.com/windows/win32/adschema/a-accountexpires
+    #>
+    param([object]$Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [datetime]) { return $Value }
+    $n = [int64]0
+    try { $n = [int64]$Value } catch { return $null }
+    if ($n -le 0 -or $n -ge [int64]::MaxValue) { return $null }
+    try { return [datetime]::FromFileTime($n) } catch { return $null }
+}
+
 function Format-AdTimestamp {
     <#
     .SYNOPSIS
@@ -297,9 +434,10 @@ function Format-AdTimestamp {
     if ($null -eq $Value) { return 'Not set' }
     if ($Value -is [datetime]) { return $Value.ToString('yyyy-MM-dd HH:mm:ss') }
     try { $n = [int64]$Value } catch { return [string]$Value }
-    if ($n -eq 0 -or $n -eq [int64]::MaxValue) { return 'Never' }
-    try { return ([datetime]::FromFileTime($n)).ToString('yyyy-MM-dd HH:mm:ss') }
-    catch { return [string]$Value }
+    if ($n -le 0 -or $n -ge [int64]::MaxValue) { return 'Never' }
+    $dt = ConvertFrom-AdFileTime -Value $n
+    if ($dt) { return $dt.ToString('yyyy-MM-dd HH:mm:ss') }
+    return [string]$Value
 }
 #endregion
 
@@ -564,7 +702,10 @@ function Get-DCLogHealth {
 
         if ($oldest) {
             $out.OldestEvent  = $oldest.TimeCreated
-            $out.CoverageDays = [math]::Round(((Get-Date) - $oldest.TimeCreated).TotalDays, 1)
+            # Rounded to 2 places like Set-DCSecurityLogRetention's Get-DCLogStatus and
+            # Test-ADAuditPolicy's Get-DCAuditPolicy, so the three report the same retention
+            # for the same log (Tests\DuplicatedHelpers.Parity.Tests.ps1 enforces this).
+            $out.CoverageDays = [math]::Round(((Get-Date) - $oldest.TimeCreated).TotalDays, 2)
             $out.CoversWindow = ($out.CoverageDays -ge $RequestedDays)
         }
     }
@@ -764,14 +905,7 @@ function Get-LockoutEvents {
         # 4776 uses a different field name for the account.
         if ($SamAccountName -and -not $target) { continue }
 
-        $caller = ''
-        foreach ($k in 'TargetDomainName', 'WorkstationName', 'Workstation', 'CallerComputerName', 'IpAddress') {
-            if ($d.ContainsKey($k) -and $d[$k] -and $d[$k] -ne '-') { $caller = $d[$k]; break }
-        }
-        # Prefer an explicit source machine when several are present.
-        foreach ($k in 'CallerComputerName', 'WorkstationName', 'Workstation') {
-            if ($d.ContainsKey($k) -and $d[$k] -and $d[$k] -ne '-') { $caller = $d[$k]; break }
-        }
+        $caller = Get-EventCallerName -EventId $e.Id -Data $d
 
         $ip = ''
         if ($d.ContainsKey('IpAddress') -and $d['IpAddress'] -and $d['IpAddress'] -ne '-') { $ip = $d['IpAddress'] }
@@ -781,7 +915,9 @@ function Get-LockoutEvents {
             if ($d.ContainsKey($k) -and $d[$k]) { $status = $d[$k]; break }
         }
         # 4625 carries the real reason in SubStatus; Status is often a generic 0xC000006D.
-        if ($e.Id -eq 4625 -and $d.ContainsKey('SubStatus') -and $d['SubStatus'] -and $d['SubStatus'] -ne '0x0') {
+        # Test-IsFailureStatus treats every rendering of "no error" ('0x0', '0x00000000', ...)
+        # as success, so a padded zero SubStatus no longer overrides a real Status.
+        if ($e.Id -eq 4625 -and $d.ContainsKey('SubStatus') -and $d['SubStatus'] -and (Test-IsFailureStatus -Code $d['SubStatus'])) {
             $status = $d['SubStatus']
         }
 
@@ -789,7 +925,7 @@ function Get-LockoutEvents {
         # 4776/4771/4768 are logged for successful authentications too. A status of 0x0
         # means SUCCESS. Reporting every 4776 as a failure points the investigation at
         # machines that are working correctly, which is worse than reporting nothing.
-        $isSuccessCode = ($status -eq '0x0' -or $status -eq '0x00000000' -or $status -eq '0' -or $status -eq '')
+        $isSuccessCode = -not (Test-IsFailureStatus -Code $status)
 
         $outcome = 'Failure'
         if     ($e.Id -eq 4740) { $outcome = 'Lockout' }
@@ -799,7 +935,10 @@ function Get-LockoutEvents {
         elseif ($isSuccessCode) { $outcome = 'Success' }
 
         $statusText = ''
-        if ($status -and $script:StatusCodes.ContainsKey($status)) { $statusText = $script:StatusCodes[$status] }
+        if ($status) {
+            $statusText = Get-StatusMeaning -Code $status
+            if ($statusText -match '^Unrecognized status code') { $statusText = '' }
+        }
 
         $meaning = 'Other'
         if ($script:EventMeaning.ContainsKey($e.Id)) { $meaning = $script:EventMeaning[$e.Id] }
@@ -930,8 +1069,8 @@ function Invoke-Analysis {
             $setTimes = @()
             foreach ($a in $Accounts) {
                 try {
-                    $n = [int64]$a.User.pwdLastSet
-                    if ($n -gt 0 -and $n -ne [int64]::MaxValue) { $setTimes += [datetime]::FromFileTime($n) }
+                    $setAt = ConvertFrom-AdFileTime -Value $a.User.pwdLastSet
+                    if ($setAt) { $setTimes += $setAt }
                 } catch { }
             }
 
@@ -1013,11 +1152,13 @@ function Invoke-Analysis {
             -Action 'Focus event collection and network tracing on the DC(s) listed above. If they are in a different forest than expected, that is your answer.'
     }
 
-    $recent = @($BadPwdStates | Where-Object {
-        $_.Reachable -and $_.BadPasswordTime -and ([int64]$_.BadPasswordTime) -gt 0
-    })
-    if ($recent.Count -gt 0 -and $EventsCollected) {
-        $latest = ($recent | ForEach-Object { [datetime]::FromFileTime([int64]$_.BadPasswordTime) } | Measure-Object -Maximum).Maximum
+    # badPasswordTime 0 means "unknown" and Int64.MaxValue means "never" (neither is a date),
+    # and FromFileTime(Int64.MaxValue) throws - ConvertFrom-AdFileTime returns $null for both.
+    $recentTimes = @($BadPwdStates | Where-Object { $_.Reachable } |
+        ForEach-Object { ConvertFrom-AdFileTime -Value $_.BadPasswordTime } |
+        Where-Object { $_ })
+    if ($recentTimes.Count -gt 0 -and $EventsCollected) {
+        $latest = ($recentTimes | Measure-Object -Maximum).Maximum
         $failEvents = @($Events | Where-Object { $_.EventID -in @(4625, 4771, 4768, 4776) })
 
         # A recent bad-password timestamp with no matching failure event is the
@@ -1110,6 +1251,16 @@ function Import-ReferenceDataFile {
     }
     $full = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).ProviderPath
     Import-LocalizedData -BaseDirectory (Split-Path -Parent $full) -FileName (Split-Path -Leaf $full) -ErrorAction Stop
+}
+# LockoutReference.psd1 beside this script is the single source of truth for status codes;
+# the tables in the Constants region are fallbacks for when it is missing.
+$script:LockoutReferenceFile = Join-Path $PSScriptRoot 'LockoutReference.psd1'
+if (Test-Path -LiteralPath $script:LockoutReferenceFile) {
+    try {
+        $script:RefData = Import-ReferenceDataFile -Path $script:LockoutReferenceFile
+        if ($script:RefData.StatusCodes)        { $script:StatusCodes        = $script:RefData.StatusCodes }
+        if ($script:RefData.SuccessStatusCodes) { $script:SuccessStatusCodes = $script:RefData.SuccessStatusCodes }
+    } catch { }
 }
 function New-HtmlReport {
     param(

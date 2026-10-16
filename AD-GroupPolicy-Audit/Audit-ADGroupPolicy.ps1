@@ -1,4 +1,4 @@
-﻿#Requires -Modules GroupPolicy, ActiveDirectory
+﻿#Requires -Version 5.1
 
 <#
 .SYNOPSIS
@@ -13,6 +13,7 @@
     - Security analysis and permission review
     - FSLogix configuration analysis (templates, registry keys, profiles)
     - GPO link analysis and inheritance review
+    - Summarises GP Preferences drive maps (conflict/duplicate analysis: Audit-GPDriveMaps.ps1)
     - Exports all GPO settings to XML for detailed comparison
 
     All GPO XML reports are fetched once and cached in memory to avoid
@@ -39,6 +40,12 @@
 .PARAMETER SkipBrowserOpen
     Do not open the HTML report in the default browser after generation.
 
+.PARAMETER IncludeUnlinked
+    Include GPOs that are not linked anywhere in the analysis (they are skipped by default).
+
+.PARAMETER LoadFunctionsOnly
+    Define the functions and return without running the audit (used by the Pester tests).
+
 .EXAMPLE
     .\Audit-ADGroupPolicy.ps1
     Runs full audit with default settings.
@@ -58,7 +65,20 @@
 .NOTES
     Author: PowerShell Script Collection
     Version: 2.0
-    Requires: GroupPolicy module, ActiveDirectory module (RSAT)
+    Requires: Windows PowerShell 5.1 (uses ::new()), GroupPolicy module, ActiveDirectory module (RSAT).
+    The modules are loaded at runtime with Import-Module in try/catch (see Test-Prerequisites) rather
+    than '#Requires -Modules', which blocks the script on servers where RSAT is present but not registered.
+
+    Drive maps: this script only reports how many GPOs contain drive maps. Use
+    DriveMap-Diagnostics\Audit-GPDriveMaps.ps1 for conflicts, duplicates and ILT overlap.
+
+    Helper functions Write-AuditLog, Get-CachedGPOReports, Escape-Html, Get-ItemLevelTargeting and
+    Get-FilterCollectionSummary are copies of the ones in DriveMap-Diagnostics\Audit-GPDriveMaps.ps1
+    and must be kept in sync (Tests\Audit-ADGroupPolicy.Tests.ps1 fails if they drift).
+
+    REFERENCES
+    - Get-GPOReport: https://learn.microsoft.com/powershell/module/grouppolicy/get-gporeport
+    - about_Requires: https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_requires
 #>
 
 [CmdletBinding()]
@@ -86,7 +106,10 @@ param(
     [switch]$SkipBrowserOpen,
 
     [Parameter()]
-    [switch]$IncludeUnlinked
+    [switch]$IncludeUnlinked,
+
+    [Parameter()]
+    [switch]$LoadFunctionsOnly
 )
 
 #region Script Configuration
@@ -167,6 +190,8 @@ $FSLogixCriticalSettings = @(
 #endregion
 
 #region Helper Functions
+# Kept in sync with DriveMap-Diagnostics\Audit-GPDriveMaps.ps1 (identical function body; enforced by Tests\Audit-ADGroupPolicy.Tests.ps1).
+# Change both copies together.
 function Write-AuditLog {
     param(
         [string]$Message,
@@ -191,17 +216,21 @@ function Write-AuditLog {
     Write-Host "[$timestamp] $prefix $Message" -ForegroundColor $colors[$Level]
 }
 
+# Intentionally NOT a verbatim copy of the DriveMap-Diagnostics version: this script loads the
+# modules with a runtime Import-Module try/catch (no '#Requires -Modules', which would block the
+# script before it starts on servers where RSAT cmdlets are present but not registered).
 function Test-Prerequisites {
     Write-AuditLog "Checking prerequisites..." -Level Info
 
     $modules = @('GroupPolicy', 'ActiveDirectory')
-    $missing = [System.Collections.Generic.List[string]]::new()
+    $missing = New-Object 'System.Collections.Generic.List[string]'
 
     foreach ($module in $modules) {
-        if (-not (Get-Module -ListAvailable -Name $module)) {
+        try {
+            Import-Module $module -ErrorAction Stop
+        }
+        catch {
             $missing.Add($module)
-        } else {
-            Import-Module $module -ErrorAction SilentlyContinue
         }
     }
 
@@ -226,6 +255,8 @@ function Test-Prerequisites {
     }
 }
 
+# Kept in sync with DriveMap-Diagnostics\Audit-GPDriveMaps.ps1 (identical function body; enforced by Tests\Audit-ADGroupPolicy.Tests.ps1).
+# Change both copies together.
 function Get-CachedGPOReports {
     param(
         [array]$GPOs
@@ -390,7 +421,7 @@ function Get-RegistryPreferenceItems {
             $props = $reg.Properties
             if (-not $props) { continue }
 
-            $ilt = Get-ItemLevelTargeting -PreferenceElement $reg
+            $ilt = Get-ItemLevelTargeting $reg
 
             $Results.Add([PSCustomObject]@{
                 GPOName       = $GPOName
@@ -416,19 +447,35 @@ function Get-RegistryPreferenceItems {
     }
 }
 
+# Kept in sync with DriveMap-Diagnostics\Audit-GPDriveMaps.ps1 (identical function body; enforced by Tests\Audit-ADGroupPolicy.Tests.ps1).
+# Change both copies together.
 function Escape-Html {
     param([string]$Value)
     if ([string]::IsNullOrEmpty($Value)) { return '' }
     return [System.Security.SecurityElement]::Escape($Value)
 }
 
+# Kept in sync with DriveMap-Diagnostics\Audit-GPDriveMaps.ps1 (identical function body; enforced by Tests\Audit-ADGroupPolicy.Tests.ps1).
+# Change both copies together.
+# NOTE: the parameter is named -DriveElement upstream; it accepts any GP Preferences item element
+# (Registry, Drive, SharedPrinter...), so callers here pass it positionally.
 function Get-ItemLevelTargeting {
-    param([System.Xml.XmlElement]$PreferenceElement)
+    <#
+    .SYNOPSIS
+        Parses item-level targeting (ILT) filters from a GP Preferences Drive element.
+    .DESCRIPTION
+        Walks the <Filters> child element and returns a human-readable summary
+        of all targeting conditions (security groups, users, OUs, IP ranges,
+        computers, etc.).
+    #>
+    param(
+        [System.Xml.XmlElement]$DriveElement
+    )
 
-    $filters = [System.Collections.Generic.List[string]]::new()
-    $filterObjects = [System.Collections.Generic.List[object]]::new()
+    $filters = (New-Object 'System.Collections.Generic.List[string]')
+    $filterObjects = (New-Object 'System.Collections.Generic.List[object]')
 
-    $filtersNode = $PreferenceElement.Filters
+    $filtersNode = $DriveElement.Filters
     if (-not $filtersNode) {
         return @{
             Summary = 'No targeting (applies to all)'
@@ -436,6 +483,7 @@ function Get-ItemLevelTargeting {
         }
     }
 
+    # Walk all child filter elements
     foreach ($child in $filtersNode.ChildNodes) {
         if ($child.NodeType -ne 'Element') { continue }
 
@@ -448,51 +496,81 @@ function Get-ItemLevelTargeting {
                 if (-not $name) { $name = $child.userContext }
                 "Group $bool '$name'"
             }
-            'FilterUser' { "User $bool '$($child.name)'" }
-            'FilterComputer' { "Computer $bool '$($child.name)'" }
+            'FilterUser' {
+                $name = $child.name
+                "User $bool '$name'"
+            }
+            'FilterComputer' {
+                $name = $child.name
+                "Computer $bool '$name'"
+            }
             'FilterOrgUnit' {
                 $name = $child.name
                 if (-not $name) { $name = $child.directMember }
                 "OU $bool '$name'"
             }
-            'FilterSite' { "Site $bool '$($child.name)'" }
+            'FilterSite' {
+                $name = $child.name
+                "Site $bool '$name'"
+            }
             'FilterNetworkAddress' {
+                # IP address range filter
                 $addr = $child.ipAddress
                 if (-not $addr) { $addr = $child.name }
                 "IP Range $bool '$addr'"
             }
-            'FilterOperatingSystem' { "OS $bool '$($child.name)'" }
-            'FilterRunOnce' { "Run Once (apply only on first processing)" }
+            'FilterOperatingSystem' {
+                $name = $child.name
+                "OS $bool '$name'"
+            }
+            'FilterRunOnce' {
+                "Run Once (apply only on first processing)"
+            }
             'FilterCollection' {
+                # Nested collection - recurse
                 $nested = Get-FilterCollectionSummary -CollectionNode $child
                 "Collection: ($nested)"
             }
             default {
+                # Catch-all for less common filter types
                 $name = $child.name
-                if ($name) { "$filterType $bool '$name'" } else { "$filterType (details in XML)" }
+                if ($name) {
+                    "$filterType $bool '$name'"
+                } else {
+                    "$filterType (details in XML)"
+                }
             }
         }
 
         $filters.Add($detail)
         $filterObjects.Add([PSCustomObject]@{
-            Type   = $filterType
-            Bool   = $child.bool
-            Not    = $child.not -eq '1'
-            Detail = $detail
+            Type    = $filterType
+            Bool    = $child.bool     # AND / OR connector
+            Not     = $child.not -eq '1'
+            Detail  = $detail
         })
     }
 
     $summary = if ($filters.Count -gt 0) { $filters -join '; ' } else { 'No targeting (applies to all)' }
-    return @{ Summary = $summary; Filters = $filterObjects }
+
+    return @{
+        Summary = $summary
+        Filters = $filterObjects
+    }
 }
 
+# Kept in sync with DriveMap-Diagnostics\Audit-GPDriveMaps.ps1 (identical function body; enforced by Tests\Audit-ADGroupPolicy.Tests.ps1).
+# Change both copies together.
 function Get-FilterCollectionSummary {
-    param([System.Xml.XmlElement]$CollectionNode)
+    param(
+        [System.Xml.XmlElement]$CollectionNode
+    )
 
-    $parts = [System.Collections.Generic.List[string]]::new()
+    $parts = (New-Object 'System.Collections.Generic.List[string]')
 
     foreach ($child in $CollectionNode.ChildNodes) {
         if ($child.NodeType -ne 'Element') { continue }
+
         $bool = if ($child.not -eq '1') { 'NOT' } else { '' }
         $name = $child.name
 
@@ -503,7 +581,7 @@ function Get-FilterCollectionSummary {
             'FilterOrgUnit'        { $parts.Add("OU $bool '$name'") }
             'FilterSite'           { $parts.Add("Site $bool '$name'") }
             'FilterNetworkAddress' { $parts.Add("IP $bool '$($child.ipAddress)'") }
-            'FilterCollection' {
+            'FilterCollection'     {
                 $nested = Get-FilterCollectionSummary -CollectionNode $child
                 $parts.Add("($nested)")
             }
@@ -529,7 +607,7 @@ function Get-DriveMapPreferenceItems {
             $props = $drive.Properties
             if (-not $props) { continue }
 
-            $ilt = Get-ItemLevelTargeting -PreferenceElement $drive
+            $ilt = Get-ItemLevelTargeting $drive
 
             # Resolve drive letter — thisDrive can be NOCHANGE
             $driveLetter = $props.thisDrive
@@ -575,7 +653,7 @@ function Get-PrinterPreferenceItems {
             $props = $printer.Properties
             if (-not $props) { continue }
 
-            $ilt = Get-ItemLevelTargeting -PreferenceElement $printer
+            $ilt = Get-ItemLevelTargeting $printer
 
             $Results.Add([PSCustomObject]@{
                 GPOName       = $GPOName
@@ -598,7 +676,7 @@ function Get-PrinterPreferenceItems {
             $props = $printer.Properties
             if (-not $props) { continue }
 
-            $ilt = Get-ItemLevelTargeting -PreferenceElement $printer
+            $ilt = Get-ItemLevelTargeting $printer
 
             $Results.Add([PSCustomObject]@{
                 GPOName       = $GPOName
@@ -1280,13 +1358,14 @@ function Get-FSLogixAudit {
     return $fslogixFindings
 }
 
-function Find-DuplicateDriveMaps {
+# Drive map conflict and duplicate analysis lives in DriveMap-Diagnostics\Audit-GPDriveMaps.ps1
+# (effective-map, ILT-overlap, group-membership and UNC reachability checks). This audit only
+# counts drive maps so the two reports cannot disagree about conflicts.
+function Get-DriveMapSummary {
     param(
         [array]$GPOs,
         [hashtable]$GPOCache
     )
-
-    Write-AuditLog "Analyzing drive map preferences across GPOs..." -Level Info
 
     $allDriveMaps = [System.Collections.Generic.List[object]]::new()
 
@@ -1301,7 +1380,6 @@ function Find-DuplicateDriveMaps {
             if (-not $extensions) { continue }
 
             foreach ($ext in $extensions) {
-                # GP Preferences Drive Maps - recurse into Collections
                 if ($ext.Extension.DriveMapSettings) {
                     Get-DriveMapPreferenceItems -Node $ext.Extension.DriveMapSettings -GPOName $gpo.DisplayName -GPOId $gpo.Id -Scope $scope -Results $allDriveMaps
                 }
@@ -1309,120 +1387,14 @@ function Find-DuplicateDriveMaps {
         }
     }
 
-    # Group by UNC path (case-insensitive) to find same share in multiple GPOs
-    $duplicatesByPath = [System.Collections.Generic.List[object]]::new()
-    $conflictsByLetter = [System.Collections.Generic.List[object]]::new()
+    $gpoNames = @($allDriveMaps | Select-Object -ExpandProperty GPOName -Unique | Sort-Object)
 
-    if ($allDriveMaps.Count -gt 0) {
-        # Same UNC path in multiple GPOs
-        $byPath = $allDriveMaps | Group-Object -Property { $_.UNCPath.ToLower() } |
-            Where-Object { ($_.Group | Select-Object -ExpandProperty GPOName -Unique).Count -gt 1 }
-
-        foreach ($group in $byPath) {
-            $maps = $group.Group
-            $letters = ($maps | Select-Object -ExpandProperty DriveLetter -Unique) -join ', '
-            $gpos = ($maps | Select-Object -ExpandProperty GPOName -Unique) -join ', '
-
-            $duplicatesByPath.Add([PSCustomObject]@{
-                UNCPath        = $maps[0].UNCPath
-                DriveLetters   = $letters
-                AffectedGPOs   = $gpos
-                GPOCount       = ($maps | Select-Object -ExpandProperty GPOName -Unique).Count
-                IsSameLetter   = ($maps | Select-Object -ExpandProperty DriveLetter -Unique).Count -eq 1
-                Severity       = if (($maps | Select-Object -ExpandProperty DriveLetter -Unique).Count -gt 1) { 'Warning' } else { 'Info' }
-                Recommendation = if (($maps | Select-Object -ExpandProperty DriveLetter -Unique).Count -gt 1) {
-                    "Same share mapped to different drive letters across GPOs - review for conflicts"
-                } else {
-                    "Same share mapped identically in multiple GPOs - consider consolidating"
-                }
-            })
-        }
-
-        # Same drive letter mapped to different paths (with ILT overlap check)
-        $realLetterMaps = $allDriveMaps | Where-Object {
-            $_.DriveLetter -and
-            $_.DriveLetter -ne 'NOCHANGE' -and
-            $_.DriveLetter.Trim() -ne ''
-        }
-
-        $byLetter = $realLetterMaps |
-            Group-Object -Property DriveLetter |
-            Where-Object {
-                ($_.Group | Select-Object -ExpandProperty UNCPath -Unique).Count -gt 1
-            }
-
-        foreach ($group in $byLetter) {
-            $maps = $group.Group
-            $letter = $maps[0].DriveLetter
-
-            # Per-mapping detail
-            $mappingDetails = [System.Collections.Generic.List[object]]::new()
-            foreach ($map in $maps) {
-                $mappingDetails.Add([PSCustomObject]@{
-                    GPOName    = $map.GPOName
-                    UNCPath    = $map.UNCPath
-                    ILTSummary = $map.ILTSummary
-                    Action     = $map.Action
-                    Label      = $map.Label
-                })
-            }
-
-            # Check ILT overlap
-            $hasRealConflict = $false
-            $uniquePathMaps = @($maps | Sort-Object UNCPath | Group-Object UNCPath | ForEach-Object { $_.Group[0] })
-            for ($i = 0; $i -lt $uniquePathMaps.Count; $i++) {
-                for ($j = $i + 1; $j -lt $uniquePathMaps.Count; $j++) {
-                    $m1 = $uniquePathMaps[$i]
-                    $m2 = $uniquePathMaps[$j]
-
-                    $m1HasILT = $m1.ILTFilters -and $m1.ILTFilters.Count -gt 0
-                    $m2HasILT = $m2.ILTFilters -and $m2.ILTFilters.Count -gt 0
-
-                    if (-not $m1HasILT -or -not $m2HasILT) {
-                        $hasRealConflict = $true; break
-                    }
-
-                    $g1 = @($m1.ILTFilters | Where-Object { $_.Type -eq 'FilterGroup' -and -not $_.Not } |
-                        ForEach-Object { if ($_.Detail -match "'(.+)'") { $Matches[1] } }) | Where-Object { $_ }
-                    $g2 = @($m2.ILTFilters | Where-Object { $_.Type -eq 'FilterGroup' -and -not $_.Not } |
-                        ForEach-Object { if ($_.Detail -match "'(.+)'") { $Matches[1] } }) | Where-Object { $_ }
-
-                    if ($g1.Count -gt 0 -and $g2.Count -gt 0) {
-                        $overlap = $g1 | Where-Object { $_ -in $g2 }
-                        if ($overlap.Count -gt 0) { $hasRealConflict = $true; break }
-                    } else {
-                        $hasRealConflict = $true; break
-                    }
-                }
-                if ($hasRealConflict) { break }
-            }
-
-            $severity = if ($hasRealConflict) { 'High' } else { 'Info' }
-            $recommendation = if ($hasRealConflict) {
-                "REAL CONFLICT: Drive $letter mapped to different shares with overlapping or no targeting"
-            } else {
-                "ILT RESOLVED: Drive $letter mapped differently but item-level targeting does not overlap"
-            }
-
-            $conflictsByLetter.Add([PSCustomObject]@{
-                DriveLetter     = $letter
-                MappingDetails  = $mappingDetails
-                HasRealConflict = $hasRealConflict
-                ConflictPaths   = ($maps | Select-Object -ExpandProperty UNCPath -Unique) -join ' vs '
-                AffectedGPOs    = ($maps | Select-Object -ExpandProperty GPOName -Unique) -join ', '
-                GPOCount        = ($maps | Select-Object -ExpandProperty GPOName -Unique).Count
-                Severity        = $severity
-                Recommendation  = $recommendation
-            })
-        }
-    }
-
-    Write-AuditLog "Found $($allDriveMaps.Count) drive maps: $($duplicatesByPath.Count) duplicate paths, $($conflictsByLetter.Count) letter conflicts" -Level Info
+    Write-AuditLog "Found $($allDriveMaps.Count) drive maps in $($gpoNames.Count) GPOs (run Audit-GPDriveMaps.ps1 for conflicts and duplicates)" -Level Info
 
     return @{
-        AllDriveMaps       = $allDriveMaps
-        DuplicatePaths     = $duplicatesByPath
-        ConflictingLetters = $conflictsByLetter
+        MappingCount = $allDriveMaps.Count
+        GPOCount     = $gpoNames.Count
+        GPONames     = $gpoNames
     }
 }
 
@@ -1942,89 +1914,16 @@ function Export-HTMLReport {
         </div>
 
         <div class="section" id="drivemaps">
-            <h2>Drive Map Analysis</h2>
-            $(if ($AuditResults.DriveMaps.ConflictingLetters.Count -gt 0) {
-                $realCount = ($AuditResults.DriveMaps.ConflictingLetters | Where-Object { $_.HasRealConflict }).Count
-                $iltCount = ($AuditResults.DriveMaps.ConflictingLetters | Where-Object { -not $_.HasRealConflict }).Count
-                "<h3>Drive Letter Conflicts <span class='badge badge-danger'>$realCount real</span> $(if ($iltCount -gt 0) { "<span class='badge badge-success'>$iltCount ILT resolved</span>" })</h3>
-                <p>Same drive letter mapped to different UNC paths across GPOs.</p>"
-                $AuditResults.DriveMaps.ConflictingLetters | Sort-Object { -not $_.HasRealConflict } | ForEach-Object {
-                    $c = $_
-                    $borderColor = if ($c.HasRealConflict) { '#e74c3c' } else { '#27ae60' }
-                    $statusBadge = if ($c.HasRealConflict) { "<span class='badge badge-danger'>Real Conflict</span>" } else { "<span class='badge badge-success'>ILT Resolved</span>" }
-                    "<div style='border-left:4px solid $borderColor; padding:12px; margin:10px 0; background:#fff; border-radius:4px;'>
-                        <strong>Drive $(Escape-Html $c.DriveLetter):</strong> $statusBadge
-                        <table style='margin-top:8px'>
-                            <tr><th>GPO</th><th>UNC Path</th><th>Action</th><th>Label</th><th>Item-Level Targeting</th></tr>
-                            $($c.MappingDetails | ForEach-Object {
-                                $iltDisplay = if ($_.ILTSummary -eq 'No targeting (applies to all)') {
-                                    "<span class='ilt-tag'>All users</span>"
-                                } else {
-                                    ($_.ILTSummary -split '; ' | ForEach-Object { "<span class='ilt-tag'>$(Escape-Html $_)</span>" }) -join ' '
-                                }
-                                "<tr>
-                                    <td>$(Escape-Html $_.GPOName)</td>
-                                    <td>$(Escape-Html $_.UNCPath)</td>
-                                    <td>$(Escape-Html $_.Action)</td>
-                                    <td>$(Escape-Html $_.Label)</td>
-                                    <td>$iltDisplay</td>
-                                </tr>"
-                            })
-                        </table>
-                        <p style='color:#7f8c8d; font-size:13px; margin-top:8px;'>$(Escape-Html $c.Recommendation)</p>
-                    </div>"
-                }
+            <h2>Drive Maps</h2>
+            $(if ($AuditResults.DriveMaps.MappingCount -gt 0) {
+                "<p><span class='badge badge-info'>$($AuditResults.DriveMaps.GPOCount) GPOs</span> contain <strong>$($AuditResults.DriveMaps.MappingCount)</strong> drive map preference items.</p>
+                <p>$(($AuditResults.DriveMaps.GPONames | ForEach-Object { "<span class='multi-value'>$(Escape-Html $_)</span>" }) -join '')</p>"
+            } else {
+                "<p class='badge badge-info'>No drive map preferences found in any audited GPO</p>"
             })
-
-            $(if ($AuditResults.DriveMaps.DuplicatePaths.Count -gt 0) {
-                "<h3>Duplicate Share Paths <span class='badge badge-warning'>$($AuditResults.DriveMaps.DuplicatePaths.Count)</span></h3>
-                <p>Same UNC path mapped in multiple GPOs.</p>
-                <table>
-                    <tr><th>UNC Path</th><th>Drive Letters</th><th>Affected GPOs</th><th>Same Letter</th><th>Severity</th><th>Recommendation</th></tr>
-                    $($AuditResults.DriveMaps.DuplicatePaths | ForEach-Object {
-                        $severityClass = "severity-$($_.Severity.ToLower())"
-                        "<tr>
-                            <td>$(Escape-Html $_.UNCPath)</td>
-                            <td>$(Escape-Html $_.DriveLetters)</td>
-                            <td>$(($_.AffectedGPOs -split ', ' | ForEach-Object { "<span class='multi-value'>$(Escape-Html $_)</span>" }) -join '')</td>
-                            <td>$($_.IsSameLetter)</td>
-                            <td class='$severityClass'>$(Escape-Html $_.Severity)</td>
-                            <td>$(Escape-Html $_.Recommendation)</td>
-                        </tr>"
-                    })
-                </table>"
-            })
-
-            $(if ($AuditResults.DriveMaps.DuplicatePaths.Count -eq 0 -and $AuditResults.DriveMaps.ConflictingLetters.Count -eq 0) {
-                if ($AuditResults.DriveMaps.AllDriveMaps.Count -eq 0) {
-                    "<p class='badge badge-info'>No drive map preferences found in any GPO</p>"
-                } else {
-                    "<p class='badge badge-success'>No duplicate or conflicting drive maps found ($($AuditResults.DriveMaps.AllDriveMaps.Count) total mappings)</p>"
-                }
-            })
-
-            $(if ($AuditResults.DriveMaps.AllDriveMaps.Count -gt 0) {
-                "<h3>All Drive Mappings ($($AuditResults.DriveMaps.AllDriveMaps.Count))</h3>
-                <table>
-                    <tr><th>GPO</th><th>Scope</th><th>Action</th><th>Drive</th><th>UNC Path</th><th>Label</th><th>Item-Level Targeting</th></tr>
-                    $($AuditResults.DriveMaps.AllDriveMaps | Sort-Object DriveLetter, UNCPath | ForEach-Object {
-                        $iltDisplay = if ($_.ILTSummary -eq 'No targeting (applies to all)') {
-                            "<span class='ilt-tag'>All users</span>"
-                        } else {
-                            ($_.ILTSummary -split '; ' | ForEach-Object { "<span class='ilt-tag'>$(Escape-Html $_)</span>" }) -join ' '
-                        }
-                        "<tr>
-                            <td>$(Escape-Html $_.GPOName)</td>
-                            <td>$(Escape-Html $_.Configuration)</td>
-                            <td>$(Escape-Html $_.Action)</td>
-                            <td><strong>$(Escape-Html $_.DriveLetter)</strong></td>
-                            <td>$(Escape-Html $_.UNCPath)</td>
-                            <td>$(Escape-Html $_.Label)</td>
-                            <td>$iltDisplay</td>
-                        </tr>"
-                    })
-                </table>"
-            })
+            <p>Drive letter conflicts, duplicate shares, item-level targeting overlap and unreachable paths are
+            reported by <strong>DriveMap-Diagnostics\Audit-GPDriveMaps.ps1</strong>. They are intentionally not
+            repeated here so the two reports cannot disagree.</p>
         </div>
 
         <div class="section" id="printers">
@@ -2531,11 +2430,6 @@ function Export-CSVReports {
             Export-Csv -Path "$OutputPath\$ReportName-Links.csv" -NoTypeInformation -Encoding UTF8
     }
 
-    if ($AuditResults.DriveMaps.AllDriveMaps.Count -gt 0) {
-        $AuditResults.DriveMaps.AllDriveMaps |
-            Export-Csv -Path "$OutputPath\$ReportName-DriveMaps.csv" -NoTypeInformation -Encoding UTF8
-    }
-
     if ($AuditResults.Printers.AllPrinters.Count -gt 0) {
         $AuditResults.Printers.AllPrinters |
             Export-Csv -Path "$OutputPath\$ReportName-Printers.csv" -NoTypeInformation -Encoding UTF8
@@ -2638,7 +2532,7 @@ function Start-GPOAudit {
     $auditResults.LinkAnalysis = Get-GPOLinkAnalysis -GPOs $linkedGPOs -GPOCache $gpoCache
     $auditResults.SecurityFindings = Get-SecurityAnalysis -GPOs $linkedGPOs
     $auditResults.NoSecurityFiltering = Get-GPOsWithNoSecurityFiltering -GPOs $linkedGPOs
-    $auditResults.DriveMaps = Find-DuplicateDriveMaps -GPOs $linkedGPOs -GPOCache $gpoCache
+    $auditResults.DriveMaps = Get-DriveMapSummary -GPOs $linkedGPOs -GPOCache $gpoCache
     $auditResults.Printers = Find-DuplicatePrinters -GPOs $linkedGPOs -GPOCache $gpoCache
 
     # Collect ALL settings for searchable browser
@@ -2774,11 +2668,8 @@ function Start-GPOAudit {
     Write-Host "  No Security Filtering Issues: $($auditResults.NoSecurityFiltering.Count)"
     Write-Host ""
     Write-Host "Drive Maps:" -ForegroundColor Cyan
-    Write-Host "  Total Mappings: $($auditResults.DriveMaps.AllDriveMaps.Count)"
-    Write-Host "  Duplicate Paths: $($auditResults.DriveMaps.DuplicatePaths.Count)"
-    $realConflicts = ($auditResults.DriveMaps.ConflictingLetters | Where-Object { $_.HasRealConflict }).Count
-    $iltResolved = ($auditResults.DriveMaps.ConflictingLetters | Where-Object { -not $_.HasRealConflict }).Count
-    Write-Host "  Drive Letter Conflicts: $realConflicts real, $iltResolved ILT-resolved"
+    Write-Host "  GPOs with Drive Maps: $($auditResults.DriveMaps.GPOCount) ($($auditResults.DriveMaps.MappingCount) mappings)"
+    Write-Host "  Conflicts/duplicates: run DriveMap-Diagnostics\Audit-GPDriveMaps.ps1"
     Write-Host ""
     Write-Host "Printers:" -ForegroundColor Cyan
     Write-Host "  Total Mappings: $($auditResults.Printers.AllPrinters.Count)"
@@ -2815,5 +2706,7 @@ function Start-GPOAudit {
 }
 
 # Run the audit
-$results = Start-GPOAudit
+if (-not $LoadFunctionsOnly) {
+    $results = Start-GPOAudit
+}
 #endregion

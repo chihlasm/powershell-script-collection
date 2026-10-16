@@ -221,16 +221,13 @@ function Get-BaseCss {
         its styling here. The inline fallback exists only for the case where
         LockoutReference.psd1 is missing entirely.
     #>
-    foreach ($p in @(
-        (Join-Path $PSScriptRoot 'LockoutReference.psd1'),
-        (Join-Path (Split-Path $PSScriptRoot -Parent) 'AD-LockoutDiagnostics\LockoutReference.psd1')
-    )) {
-        if (Test-Path -LiteralPath $p) {
-            try {
-                $ref = Import-ReferenceDataFile -Path $p -ErrorAction Stop
-                if ($ref.ReportCss) { return $ref.ReportCss }
-            } catch { }
-        }
+    # Only "beside this script" is searched; the file lives in this folder.
+    $p = Join-Path $PSScriptRoot 'LockoutReference.psd1'
+    if (Test-Path -LiteralPath $p) {
+        try {
+            $ref = Import-ReferenceDataFile -Path $p -ErrorAction Stop
+            if ($ref.ReportCss) { return $ref.ReportCss }
+        } catch { }
     }
     return $script:FallbackCss
 }
