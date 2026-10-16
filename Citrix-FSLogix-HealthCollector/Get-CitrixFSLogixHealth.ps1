@@ -144,7 +144,7 @@
 
 .PARAMETER PassThru
     Also emit one result object per machine to the pipeline, for use by other scripts
-    (the MSP Troubleshooting Workbench passes this). Without it the script only writes the
+    (a troubleshooting workbench that runs this as a check passes it). Without it the script only writes the
     report files and the console summary, so an interactive run does not end with a wall
     of raw objects scrolling past the summary.
 

@@ -12,7 +12,7 @@
 
     Only files tracked by git are copied. That keeps local run output (case folders,
     exports, logs that can contain client AD/tenant data) out of the bundle even when it
-    is sitting in the tool folders. Pester tests, the workbench launcher source, .gitkeep
+    is sitting in the tool folders. Pester tests, repository build scripts, .gitkeep
     placeholders and zips are left out; technicians don't need them.
 
     Copies are taken from the working tree, so uncommitted edits to tracked files are
@@ -71,12 +71,13 @@ $manifest = @(
     @{ Source = 'AD-GroupMembership-Export';                             Destination = 'AD-GroupMembership-Export' }
     @{ Source = 'Block 365 Sign-in';                                     Destination = 'Block 365 Sign-in' }
     @{ Source = 'Citrix-FSLogix-HealthCollector';                        Destination = 'Citrix-FSLogix-HealthCollector' }
+    @{ Source = 'Citrix-FSLogix-Triage';                                 Destination = 'Citrix-FSLogix-Triage' }
     @{ Source = 'DriveMap-Diagnostics';                                  Destination = 'DriveMap-Diagnostics' }
     @{ Source = 'Get-AzureFilesFSLogixProfiles';                         Destination = 'Get-AzureFilesFSLogixProfiles' }
     @{ Source = 'Get-CitrixVDAResources';                                Destination = 'Get-CitrixVDAResources' }
     @{ Source = 'Get-RAM-Usage';                                         Destination = 'Get-RAM-Usage' }
     @{ Source = 'HideFromGal';                                           Destination = 'HideFromGal' }
-    @{ Source = 'MSP-TroubleshootingWorkbench';                          Destination = 'MSP-TroubleshootingWorkbench' }
+    @{ Source = 'Network-QuickCheck';                                    Destination = 'Network-QuickCheck' }
     @{ Source = 'RDS-FSLogix-EventExport';                               Destination = 'RDS-FSLogix-EventExport' }
     @{ Source = 'ServiceDesk-Toolkit/README.md';                         Destination = 'README.md' }
 )
@@ -85,7 +86,6 @@ $manifest = @(
 $excludePatterns = @(
     '(^|/)[Tt]ests/'    # Pester suites
     '^Build-[^/]+\.ps1$' # Repo build scripts (e.g. Build-LockoutToolkit.ps1); they need git
-    '^launcher/'        # MSPWorkbench.exe source; the built exe is shipped
     '(^|/)\.gitkeep$'
     '\.zip$'
     '^Nerdio\d*\.ps1$'  # Scratch scripts in RDS-FSLogix-EventExport, not part of the tool

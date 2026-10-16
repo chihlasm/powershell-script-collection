@@ -15,7 +15,6 @@ handed out, so it always matches this repository.
 | Folder | What it does |
 |---|---|
 | [ServiceDesk-Toolkit](ServiceDesk-Toolkit/) | Builds the service desk bundle and its START HERE page |
-| [MSP-TroubleshootingWorkbench](MSP-TroubleshootingWorkbench/) | Browser case page: run checks, add notes, generate ticket notes |
 
 ### Active Directory and Group Policy
 
@@ -48,6 +47,7 @@ handed out, so it always matches this repository.
 
 | Folder | What it does |
 |---|---|
+| [Citrix-FSLogix-Triage](Citrix-FSLogix-Triage/) | Profile won't load? Plain-English FSLogix check of one session host, with next steps |
 | [Citrix-FSLogix-HealthCollector](Citrix-FSLogix-HealthCollector/) | Health verdict per session host: performance plus event logs |
 | [Citrix-PerfTriage](Citrix-PerfTriage/) | One-command performance triage on a session host |
 | [CitrixVDADiagnostics](CitrixVDADiagnostics/) | Deeper VDA and FSLogix performance diagnostics |
@@ -101,6 +101,7 @@ handed out, so it always matches this repository.
 
 | Folder | What it does |
 |---|---|
+| [Network-QuickCheck](Network-QuickCheck/) | Can this computer reach that server on that port? Plain-English YES / PARTLY / NO |
 | [Network-Troubleshooting-Palette](Network-Troubleshooting-Palette/) | Network troubleshooting command palette |
 | [Juniper-ConsoleSetup](Juniper-ConsoleSetup/) | Browser GUI for Juniper console-cable provisioning |
 | [Juniper-DeviceManager](Juniper-DeviceManager/) | Work in progress: Juniper fleet management over NETCONF |
@@ -114,6 +115,7 @@ handed out, so it always matches this repository.
 | `PasswordPolicyAuditor` | [AD-Audit](AD-Audit/) for the domain policy and fine-grained policies, [Get-EntraPasswordPolicy](Get-EntraPasswordPolicy/) for the cloud |
 | `AD-AuthSourceEvidence` | Merged into [AD-LockoutDiagnostics](AD-LockoutDiagnostics/) |
 | `AD-GroupPolicy-DriveMaps`, `Search-SYSVOLScripts` | Merged into [DriveMap-Diagnostics](DriveMap-Diagnostics/) |
+| `MSP-TroubleshootingWorkbench` | The workbench now lives in its own repository. Its checks are standalone tools here: [Citrix-FSLogix-Triage](Citrix-FSLogix-Triage/), [Network-QuickCheck](Network-QuickCheck/), [AD-LockoutDiagnostics](AD-LockoutDiagnostics/) and [Citrix-FSLogix-HealthCollector](Citrix-FSLogix-HealthCollector/) |
 
 ## Tool details
 
@@ -235,8 +237,6 @@ the authoritative, current documentation.
 
 **Output**: per-machine CSV, event CSV, **raw per-sample CSV** (so a performance claim stays auditable), and a self-contained dark HTML report with fleet tiles, a per-machine table, and the fleet-wide most common problems.
 
-Also registered in the MSP Troubleshooting Workbench as the `citrix.fslogix.health` check.
-
 ## Citrix-PerfTriage
 
 **Description**: One-command performance triage for Citrix / RDS session hosts with FSLogix, including the Hyper-V hosts underneath. Runs the health collector, FSLogix log parser, storage event collector, RDS event export, DiskSpd profile share benchmark and the Hyper-V host scripts against the same servers and time window, then writes one summary report that says what to look at first.
@@ -298,7 +298,7 @@ For a combined performance *and* event view across a fleet, use [Citrix-FSLogix-
 
 ## ServiceDesk-Toolkit
 
-**Description**: Builds the Service Desk Escalation Toolkit, a bundle of about ten tools from this repository (lockouts, drive maps, Citrix/RDS/FSLogix, GAL hiding, M365 sign-in blocking, the workbench) with one START HERE page for service desk staff. The bundle is generated from the tool folders, not kept in git, so it always matches the current tools.
+**Description**: Builds the Service Desk Escalation Toolkit, a bundle of about ten tools from this repository (sign-in checks, lockouts, drive maps, network reachability, Citrix/RDS/FSLogix, GAL hiding, M365 sign-in blocking) with one START HERE page for service desk staff. The bundle is generated from the tool folders, not kept in git, so it always matches the current tools.
 
 **Files**:
 - `Build-ServiceDeskToolkit.ps1` - Copies the git-tracked tool files into the bundle (no tests, no local run output)

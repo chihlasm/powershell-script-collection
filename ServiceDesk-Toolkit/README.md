@@ -19,10 +19,10 @@ Every tool writes a report (HTML and/or CSV) you can attach to the ticket.
 | "Citrix is slow" — for one server or the whole farm                 | [Citrix-FSLogix-HealthCollector](#citrix-or-rds-is-slow)     | No                |
 | "Which Citrix servers are overloaded / low on disk?"                | [Get-CitrixVDAResources](#citrix-or-rds-is-slow)             | No                |
 | "The server's memory is maxed out — who is using it?"               | [Get-RAM-Usage](#server-memory-is-high--who-is-using-it)      | No                |
-| "My profile didn't load" / "temp profile" / "I got logged straight back out" | [RDS-FSLogix-EventExport](#profile-or-logon-problems-on-citrix-or-rds) | No                |
+| "My profile didn't load" / "temp profile" / "I got logged straight back out" | [Citrix-FSLogix-Triage](#profile-or-logon-problems-on-citrix-or-rds), then [RDS-FSLogix-EventExport](#profile-or-logon-problems-on-citrix-or-rds) | No                |
+| "I can't reach the server" / "the app won't connect" / "is port 445 open?" | [Network-QuickCheck](#cant-reach-a-server-or-app)            | No                |
 | "Hide this person from the address book (GAL)"                      | [HideFromGal](#hide-someone-from-the-address-book)           | **Yes — AD**      |
 | "Block this user from Microsoft 365 but keep their PC login"        | [Block 365 Sign-in](#block-someone-from-microsoft-365)       | **Yes — AD**      |
-| Not sure yet / want everything on one case page                     | [MSP-TroubleshootingWorkbench](#not-sure-where-to-start)     | No                |
 
 Each folder has its own `README.md` with the full detail. This page covers when to use
 each tool and the one command to start with.
@@ -261,7 +261,23 @@ Use it when one of the Citrix tools above flags a server for memory, or when a u
 
 ## Profile or logon problems on Citrix or RDS
 
-**Folder:** `RDS-FSLogix-EventExport`
+**Start with:** `Citrix-FSLogix-Triage`
+
+Checks the server the user signs in to and tells you in plain English whether FSLogix is
+healthy there: services running, profiles switched on, the profile share setting correct and
+reachable, recent FSLogix errors, and free disk space. Every finding comes with a "What to do".
+
+```powershell
+.\Invoke-CitrixFSLogixTriage.ps1 -ComputerName CTXVDA01 -UserName jdoe
+
+# Save a text report you can paste into the ticket
+.\Invoke-CitrixFSLogixTriage.ps1 -ComputerName CTXVDA01 -UserName jdoe -OutputPath C:\Temp
+```
+
+If it says **LOOKS HEALTHY**, the problem is more likely the user's own profile disk. Escalate
+with the report.
+
+**Then, for the detail:** `RDS-FSLogix-EventExport`
 
 Pulls the Remote Desktop and FSLogix event-log errors for a time window into one report.
 Use it when the user gets a temporary profile, a "profile failed to attach" error, or is
@@ -322,23 +338,25 @@ Double-click **`Launch-CloudSignInMgr.vbs`**. Find the person, tick them, click
 
 ---
 
-## Not sure where to start
+## Can't reach a server or app
 
-**Folder:** `MSP-TroubleshootingWorkbench`
+**Folder:** `Network-QuickCheck`
 
-A browser-based case page: create a case for the ticket, run checks (network, account
-lockout, Citrix/FSLogix), add your notes, then click **Generate Notes** for ready-to-paste
-ticket notes.
+Run it **on the computer that has the problem**. It answers "can this computer reach that
+server on that port?" with YES / PARTLY / NO, and checks the name lookup, ping, each port
+and the default gateway.
 
 ```powershell
-.\Start-MSPTroubleshootingWorkbench.ps1
+# File shares (a mapped drive won't connect)
+.\Invoke-NetworkQuickCheck.ps1 -TargetAddress FILESRV01 -Port 445
+
+# Several ports at once, with a report for the ticket
+.\Invoke-NetworkQuickCheck.ps1 -TargetAddress rds.contoso.com -Port 443,3389 -OutputPath C:\Temp
 ```
 
-(Or double-click `MSPWorkbench.exe`. If Windows SmartScreen blocks it, use the `.ps1`.)
-
-It opens at `http://localhost:8275/`. Press **Ctrl+C** in the PowerShell window to stop it.
-Every check it runs is read-only. It uses the `AD-LockoutDiagnostics` and
-`Citrix-FSLogix-HealthCollector` folders next to it, so keep the toolkit together.
+Common ports: **445** file shares, **3389** Remote Desktop, **443** websites and most cloud
+apps, **1494 / 2598** Citrix, **1433** SQL Server. A failed **ping** on its own is usually
+fine, because many servers block it. A failed **port** is what matters.
 
 ---
 
