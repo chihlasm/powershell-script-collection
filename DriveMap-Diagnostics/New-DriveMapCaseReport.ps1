@@ -48,7 +48,7 @@
     attached to tickets and opened on machines with no internet access. Every style and
     script is inlined.
 
-    VISUAL STYLE. Follows AD-GroupPolicy-DriveMaps\Audit-GPDriveMaps.ps1's existing report
+    VISUAL STYLE. Follows Audit-GPDriveMaps.ps1's existing report
     for component vocabulary (cards, badges, tables, metrics, back-to-top links) and
     AD-LockoutDiagnostics\New-LockoutCaseReport.ps1 for the tabbed-page chrome (a same-toolkit
     -family "Task 6" report already reviewed and shipped). Per this repository's CLAUDE.md

@@ -210,8 +210,9 @@ rather than after the user logs off.
 The orchestrator, and the only script in this toolkit that reaches a **verdict** rather than
 just collecting evidence. It runs, in order: the readiness gate, endpoint evidence collection
 (or accepts a bundle you already collected), the GPO-side audit (`Audit-GPDriveMaps.ps1`,
-reused from `AD-GroupPolicy-DriveMaps`), a SYSVOL logon-script search for the drive letter
-(`Search-SYSVOLScripts.ps1`), and then flattens everything into one evidence object and runs
+see [README-Audit-GPDriveMaps.md](README-Audit-GPDriveMaps.md)), a SYSVOL logon-script search
+for the drive letter (`Search-SYSVOLScripts.ps1`, see
+[README-Search-SYSVOLScripts.md](README-Search-SYSVOLScripts.md)), and then flattens everything into one evidence object and runs
 every ranked-cause rule against it. More than one rule can match — a machine can have more
 than one problem — so every case folder lists every match, most-confident first, not just the
 top one.

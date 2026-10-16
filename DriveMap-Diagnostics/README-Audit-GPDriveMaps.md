@@ -1,4 +1,8 @@
-# AD-GroupPolicy-DriveMaps
+# Audit-GPDriveMaps
+
+> Part of the [drive-map toolkit](README.md). Runs on its own, and as the GPO-side step of
+> `Invoke-DriveMapInvestigation.ps1`. This used to live in a separate
+> `AD-GroupPolicy-DriveMaps` folder.
 
 Audits all drive mappings configured via Group Policy Preferences across the domain.
 
