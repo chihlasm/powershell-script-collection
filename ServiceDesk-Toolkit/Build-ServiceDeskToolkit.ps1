@@ -67,6 +67,7 @@ function Write-Status {
 # the same folder in the repo, so each toolkit ships as one folder entry.
 $manifest = @(
     @{ Source = 'AD-LockoutDiagnostics';                                 Destination = 'AD-LockoutDiagnostics' }
+    @{ Source = 'AD-UserQuickCheck';                                     Destination = 'AD-UserQuickCheck' }
     @{ Source = 'AD-GroupMembership-Export';                             Destination = 'AD-GroupMembership-Export' }
     @{ Source = 'Block 365 Sign-in';                                     Destination = 'Block 365 Sign-in' }
     @{ Source = 'Citrix-FSLogix-HealthCollector';                        Destination = 'Citrix-FSLogix-HealthCollector' }
