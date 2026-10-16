@@ -1093,6 +1093,64 @@ function Resolve-DeviceClass {
     }
 }
 
+function Get-SourceNameToIpMap {
+    <#
+    .SYNOPSIS
+        Maps each machine name to the one IP it was recorded with, from events carrying both.
+    .DESCRIPTION
+        4740 and 4776 name the caller computer but carry no address, while 4625 from the
+        same machine carries both. Without this map the same laptop became two sources -
+        one keyed by IP with the real evidence, and a name-only twin holding its lockouts,
+        which then showed up as a duplicate "Insufficient evidence" finding.
+
+        A name seen with more than one IP (DHCP churn, VPN and wired) is left out: folding
+        it into either address would be a guess, and a wrong merge is worse than a twin.
+    #>
+    param([object[]]$Events)
+
+    $seen = @{}
+    foreach ($e in @($Events)) {
+        if (-not $e -or [string]::IsNullOrWhiteSpace($e.SourceIp) -or [string]::IsNullOrWhiteSpace($e.SourceHost)) { continue }
+        $name = ConvertTo-SourceNameKey -Name $e.SourceHost
+        if (-not $name) { continue }
+        if (-not $seen.ContainsKey($name)) { $seen[$name] = @{} }
+        $seen[$name][$e.SourceIp] = $true
+    }
+
+    $map = @{}
+    foreach ($name in $seen.Keys) {
+        $ips = @($seen[$name].Keys)
+        if ($ips.Count -eq 1) { $map[$name] = $ips[0] }
+    }
+    return $map
+}
+
+function ConvertTo-SourceNameKey {
+    # Event logs spell one machine several ways: CON-LT-0142, \\CON-LT-0142,
+    # con-lt-0142.contoso.com, CON-LT-0142$. Compare on the bare upper-case short name.
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return '' }
+    $n = $Name.Trim().TrimStart('\') -replace '\$$', ''
+    if ($n -match '^\d{1,3}(\.\d{1,3}){3}$') { return '' }
+    return ($n -split '\.')[0].ToUpperInvariant()
+}
+
+function Get-EventSourceKey {
+    # The one place an event's source key is decided, shared by the grouping and the
+    # per-event export so both land the same event on the same source.
+    param(
+        [Parameter(Mandatory)][object]$AuthEvent,
+        [hashtable]$NameToIp = @{}
+    )
+    if (-not [string]::IsNullOrWhiteSpace($AuthEvent.SourceIp)) { return $AuthEvent.SourceIp }
+    if (-not [string]::IsNullOrWhiteSpace($AuthEvent.SourceHost)) {
+        $name = ConvertTo-SourceNameKey -Name $AuthEvent.SourceHost
+        if ($name -and $NameToIp.ContainsKey($name)) { return $NameToIp[$name] }
+        return $AuthEvent.SourceHost
+    }
+    return '(not recorded)'
+}
+
 function Group-AuthSource {
     <#
     .SYNOPSIS
@@ -1102,7 +1160,9 @@ function Group-AuthSource {
 
         Sources are keyed by IP where one exists, and by hostname otherwise, because
         4776 and 4740 carry a name with no address at all. Keying only on IP would
-        silently drop every NTLM-only source.
+        silently drop every NTLM-only source. A name-only event whose machine name was
+        recorded with exactly one IP elsewhere is filed under that IP, so one machine is
+        one source (see Get-SourceNameToIpMap).
 
         Names seen for an IP on ANY event type are carried across, which is how a bare
         Kerberos IP (4771 has no name field) inherits the workstation name recorded by a
@@ -1115,14 +1175,9 @@ function Group-AuthSource {
 
     if (-not $Events -or $Events.Count -eq 0) { return @() }
 
+    $nameToIp = Get-SourceNameToIpMap -Events $Events
     $keyed = $Events | ForEach-Object {
-        $key = if (-not [string]::IsNullOrWhiteSpace($_.SourceIp)) {
-            $_.SourceIp
-        } elseif (-not [string]::IsNullOrWhiteSpace($_.SourceHost)) {
-            $_.SourceHost
-        } else {
-            '(not recorded)'
-        }
+        $key = Get-EventSourceKey -AuthEvent $_ -NameToIp $nameToIp
         $_ | Add-Member -NotePropertyName SourceKey -NotePropertyValue $key -PassThru -Force
     }
 
@@ -1797,10 +1852,16 @@ function Get-AuthSourceVerdict {
         }
     }
 
+    # The method is translated, not printed raw: "via EventLogCorrelation" is an internal
+    # token, and the reader needs to know what the evidence was to judge the name.
+    $how = Format-ResolutionMethod -Method $top.ResolutionMethod
+    $identified = if ($how) { "Identified with $("$($top.Confidence)".ToLower()) confidence: $how." }
+                  else      { "Identified with $("$($top.Confidence)".ToLower()) confidence." }
+    $desc = if (-not [string]::IsNullOrWhiteSpace($top.AdDescription)) { " AD describes it as: $($top.AdDescription)." } else { '' }
     return [PSCustomObject]@{
         Class = 'bad'
         Line  = "$who sent $($top.FailureCount) failures."
-        Next  = "Identified with $($top.Confidence.ToLower()) confidence via $($top.ResolutionMethod). Go to that machine and check saved credentials: cmdkey /list, mapped drives, scheduled tasks, services, and any mobile device signed in as this user."
+        Next  = "$identified$desc Go to that machine and check saved credentials: cmdkey /list, mapped drives, scheduled tasks, services, and any mobile device signed in as this user."
     }
 }
 
@@ -1919,6 +1980,9 @@ function New-AuthSourceReportHtml {
         $pairs = [ordered]@{
             'IP address'  = $s.SourceIp
             'Device'      = if ($s.DeviceDetail) { $s.DeviceDetail } else { Format-DeviceClass -Class $s.DeviceClass }
+            # Often names the user or the asset ("Marcus Johnson - old laptop"), which is
+            # the fastest route from a hostname to a person. It was collected but never shown.
+            'AD description' = $s.AdDescription
             'MAC / vendor'= if ($s.MacAddress) { "$($s.MacAddress) - $($s.MacVendor)" } else { '' }
             'How resolved'= Format-ResolutionMethod -Method $s.ResolutionMethod
             'DHCP lease'  = if ($s.DhcpLease) { "$($s.DhcpLease)$(if ($s.LeaseCoverageNote) { " ($($s.LeaseCoverageNote))" })" } else { '' }
@@ -2391,14 +2455,13 @@ if ($inventory.Count -gt 0 -and $inventoryMap) {
 $sourceLookup = @{}
 foreach ($rs in $resolvedSources) { $sourceLookup[$rs.SourceKey] = $rs }
 
+# Same keying as Group-AuthSource, so a name-only lockout row joins the source its
+# machine was merged into instead of losing its resolution.
+$nameToIp = Get-SourceNameToIpMap -Events $allEvents
 $eventExport = foreach ($e in $allEvents) {
     if (-not $IncludeSuccesses -and -not $e.IsFailure) { continue }
 
-    $key = if (-not [string]::IsNullOrWhiteSpace($e.SourceIp)) {
-        $e.SourceIp
-    } elseif (-not [string]::IsNullOrWhiteSpace($e.SourceHost)) {
-        $e.SourceHost
-    } else { '(not recorded)' }
+    $key = Get-EventSourceKey -AuthEvent $e -NameToIp $nameToIp
 
     $rs = $sourceLookup[$key]
 

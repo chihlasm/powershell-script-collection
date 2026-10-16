@@ -166,10 +166,9 @@ $script:FallbackCss = @'
   details { border-top:1px solid var(--line); margin-top:26px; padding-top:16px; }
   summary { cursor:pointer; font-size:12px; letter-spacing:.15em; text-transform:uppercase; color:var(--ink-faint); }
   .tablewrap { overflow-x:auto; margin-top:14px; }
-  .pill { display:inline-block; padding:2px 9px; border-radius:999px; font-size:11px; font-weight:600; }
-  .pill.High { background:rgba(226,104,106,.16); color:var(--bad); }
-  .pill.Medium { background:rgba(224,164,88,.16); color:var(--warn); }
-  .pill.Low { background:rgba(109,120,133,.16); color:var(--ink-faint); }
+  .tag { display:inline-block; padding:2px 9px; border-radius:999px; font-size:11px; font-weight:600;
+         border:1px solid var(--line); color:var(--ink-dim); }
+  .tag.ok { color:var(--ok); } .tag.warn { color:var(--warn); }
 '@
 
 # =============================================================================
@@ -220,6 +219,37 @@ function Get-ReportCss {
         }
     }
     return $script:FallbackCss
+}
+
+function Format-DeviceClass {
+    # DeviceClass arrives as an internal token from Export-ADAuthSourceEvidence.ps1
+    # ("DomainJoinedWorkstation"). Printed raw it reads as jargon to the technician the
+    # page is written for. Same wording as the Which Device report, so the tabs agree.
+    param([string]$Class)
+    switch ("$Class") {
+        'DomainJoinedWorkstation' { 'Domain-joined workstation' }
+        'DomainController'        { 'Domain controller' }
+        'Server'                  { 'Server' }
+        'NonDomainDevice'         { 'Not domain-joined' }
+        'LocalOrConsole'          { 'The domain controller itself' }
+        'NetworkDevice'           { 'Network device' }
+        'Unknown'                 { 'Unknown device' }
+        ''                        { 'Unknown device' }
+        default                   { $Class }
+    }
+}
+
+function Get-ConfidenceTagClass {
+    # Uses the shared stylesheet's .tag classes, which the combined report carries. The
+    # previous classes existed only in this script's fallback CSS, so inside the
+    # combined report High/Medium/Low rendered as plain unstyled text.
+    param([string]$Confidence)
+    switch ("$Confidence") {
+        'High'   { 'tag ok' }
+        'Medium' { 'tag warn' }
+        'Low'    { 'tag warn' }
+        default  { 'tag' }
+    }
 }
 
 function New-CaseReportHtml {
@@ -281,11 +311,11 @@ function New-CaseReportHtml {
         $null = $sb.AppendLine(("<span class='card-meta'>{0}</span>" -f (ConvertTo-HtmlSafe $first.SourceKey)))
         $null = $sb.AppendLine(("<span class='card-count'>{0} <small>failures</small></span>" -f (ConvertTo-HtmlSafe $first.FailureCount)))
         $null = $sb.AppendLine('</div>')
-        $null = $sb.AppendLine(("<p class='card-meta'>{0} &middot; {1} account(s): {2}</p>" -f (ConvertTo-HtmlSafe $first.DeviceClass), (ConvertTo-HtmlSafe $first.DistinctAccounts), (ConvertTo-HtmlSafe $first.Accounts)))
+        $null = $sb.AppendLine(("<p class='card-meta'>{0} &middot; {1} account(s): {2}</p>" -f (ConvertTo-HtmlSafe (Format-DeviceClass -Class $first.DeviceClass)), (ConvertTo-HtmlSafe $first.DistinctAccounts), (ConvertTo-HtmlSafe $first.Accounts)))
 
         $null = $sb.AppendLine('<table><tr><th>Confidence</th><th>Likely cause</th><th>What to do</th></tr>')
         foreach ($c in $grp.Group) {
-            $null = $sb.AppendLine(("<tr><td><span class='pill {0}'>{0}</span></td><td>{1}<br><small class='card-meta'>{2}</small></td><td>{3}</td></tr>" -f (ConvertTo-HtmlSafe $c.Confidence), (ConvertTo-HtmlSafe $c.Cause), (ConvertTo-HtmlSafe $c.Evidence), (ConvertTo-HtmlSafe $c.Remediation)))
+            $null = $sb.AppendLine(("<tr><td><span class='{4}'>{0}</span></td><td>{1}<br><small class='card-meta'>{2}</small></td><td>{3}</td></tr>" -f (ConvertTo-HtmlSafe $c.Confidence), (ConvertTo-HtmlSafe $c.Cause), (ConvertTo-HtmlSafe $c.Evidence), (ConvertTo-HtmlSafe $c.Remediation), (Get-ConfidenceTagClass -Confidence $c.Confidence)))
         }
         $null = $sb.AppendLine('</table></div>')
     }
@@ -294,7 +324,7 @@ function New-CaseReportHtml {
     $null = $sb.AppendLine('<details><summary>All rows</summary><div class="tablewrap"><table>')
     $null = $sb.AppendLine('<tr><th>Source</th><th>Name</th><th>Class</th><th>Failures</th><th>Accounts</th><th>Confidence</th><th>Cause</th></tr>')
     foreach ($r in $rows) {
-        $null = $sb.AppendLine(("<tr><td>{0}</td><td>{1}</td><td>{2}</td><td>{3}</td><td>{4}</td><td>{5}</td><td>{6}</td></tr>" -f (ConvertTo-HtmlSafe $r.SourceKey), (ConvertTo-HtmlSafe $r.ResolvedName), (ConvertTo-HtmlSafe $r.DeviceClass), (ConvertTo-HtmlSafe $r.FailureCount), (ConvertTo-HtmlSafe $r.DistinctAccounts), (ConvertTo-HtmlSafe $r.Confidence), (ConvertTo-HtmlSafe $r.Cause)))
+        $null = $sb.AppendLine(("<tr><td>{0}</td><td>{1}</td><td>{2}</td><td>{3}</td><td>{4}</td><td>{5}</td><td>{6}</td></tr>" -f (ConvertTo-HtmlSafe $r.SourceKey), (ConvertTo-HtmlSafe $r.ResolvedName), (ConvertTo-HtmlSafe (Format-DeviceClass -Class $r.DeviceClass)), (ConvertTo-HtmlSafe $r.FailureCount), (ConvertTo-HtmlSafe $r.DistinctAccounts), (ConvertTo-HtmlSafe $r.Confidence), (ConvertTo-HtmlSafe $r.Cause)))
     }
     $null = $sb.AppendLine('</table></div></details>')
 

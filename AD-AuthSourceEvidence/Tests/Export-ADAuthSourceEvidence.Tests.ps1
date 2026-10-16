@@ -275,7 +275,8 @@ Describe 'Group-AuthSource' {
 
     It 'produces one row per distinct source IP' {
         $g = Group-AuthSource -Events $script:Rows
-        ($g | Where-Object { $_.SourceIp -eq '10.0.0.50' }).Count | Should -Be 1
+        # @() because Windows PowerShell gives a single [PSCustomObject] no .Count.
+        @($g | Where-Object { $_.SourceIp -eq '10.0.0.50' }).Count | Should -Be 1
     }
 
     It 'ranks the source with the most failures first' {
@@ -316,7 +317,7 @@ Describe 'Group-AuthSource' {
             [PSCustomObject]@{ Time=[datetime]'2026-08-01T12:00:00'; Account='a'; SourceIp=''; SourceHost='OLDPHONE'; EventId=4776; IsFailure=$true; DC='DC01' }
             [PSCustomObject]@{ Time=[datetime]'2026-08-01T12:05:00'; Account='b'; SourceIp=''; SourceHost='OLDPHONE'; EventId=4740; IsFailure=$true; DC='DC01' }
         )
-        $g = Group-AuthSource -Events $nameOnly
+        $g = @(Group-AuthSource -Events $nameOnly)
         $g.Count            | Should -Be 1
         $g[0].SourceKey     | Should -Be 'OLDPHONE'
         $g[0].FailureCount  | Should -Be 2
@@ -911,5 +912,86 @@ Describe 'The domain controller is a relay, not a culprit' {
         $v = Get-AuthSourceVerdict -Sources $onlyDc
         $v.Line | Should -Match 'originating on DC02 itself'
         $v.Next | Should -Match 'Pass-through Authentication|Entra'
+    }
+}
+
+Describe 'One machine is one source' {
+    It 'files a name-only lockout (4740) under the IP that machine name was seen with' {
+        # 4740 carries the caller computer name but no address. Keyed by name, the same
+        # laptop became a second source and a duplicate "Insufficient evidence" finding.
+        $rows = @(
+            [PSCustomObject]@{ Time=[datetime]'2026-10-14T09:00:00'; Account='mjohnson'; SourceIp='10.20.4.142'; SourceHost='CON-LT-0142'; EventId=4625; IsFailure=$true; DC='DC01' }
+            [PSCustomObject]@{ Time=[datetime]'2026-10-14T09:01:00'; Account='mjohnson'; SourceIp='10.20.4.142'; SourceHost='';            EventId=4771; IsFailure=$true; DC='DC02' }
+            [PSCustomObject]@{ Time=[datetime]'2026-10-14T09:02:00'; Account='mjohnson'; SourceIp='';            SourceHost='CON-LT-0142'; EventId=4740; IsFailure=$true; DC='DC01' }
+        )
+        $g = @(Group-AuthSource -Events $rows)
+        $g.Count            | Should -Be 1
+        $g[0].SourceKey     | Should -Be '10.20.4.142'
+        $g[0].FailureCount  | Should -Be 3
+        $g[0].EventIds      | Should -Match '4740'
+        $g[0].LastSeen      | Should -Be ([datetime]'2026-10-14T09:02:00')
+    }
+
+    It 'matches the name however the log spells it' {
+        $rows = @(
+            [PSCustomObject]@{ Time=[datetime]'2026-10-14T09:00:00'; Account='a'; SourceIp='10.0.0.5'; SourceHost='con-lt-0142.contoso.com'; EventId=4625; IsFailure=$true; DC='DC01' }
+            [PSCustomObject]@{ Time=[datetime]'2026-10-14T09:02:00'; Account='a'; SourceIp='';         SourceHost='\CON-LT-0142';           EventId=4776; IsFailure=$true; DC='DC01' }
+        )
+        @(Group-AuthSource -Events $rows).Count | Should -Be 1
+    }
+
+    It 'does not merge a name seen with more than one IP - that would be a guess' {
+        $rows = @(
+            [PSCustomObject]@{ Time=[datetime]'2026-10-14T09:00:00'; Account='a'; SourceIp='10.0.0.5'; SourceHost='LAPTOP-9'; EventId=4625; IsFailure=$true; DC='DC01' }
+            [PSCustomObject]@{ Time=[datetime]'2026-10-14T09:01:00'; Account='a'; SourceIp='10.0.9.9'; SourceHost='LAPTOP-9'; EventId=4625; IsFailure=$true; DC='DC01' }
+            [PSCustomObject]@{ Time=[datetime]'2026-10-14T09:02:00'; Account='a'; SourceIp='';         SourceHost='LAPTOP-9'; EventId=4740; IsFailure=$true; DC='DC01' }
+        )
+        $g = @(Group-AuthSource -Events $rows)
+        $g.Count | Should -Be 3
+        @($g | Where-Object { $_.SourceKey -eq 'LAPTOP-9' }).Count | Should -Be 1
+    }
+
+    It 'gives the per-event export the same key as the grouping' {
+        $rows = @(
+            [PSCustomObject]@{ SourceIp='10.20.4.142'; SourceHost='CON-LT-0142' }
+            [PSCustomObject]@{ SourceIp='';            SourceHost='CON-LT-0142' }
+        )
+        $map = Get-SourceNameToIpMap -Events $rows
+        Get-EventSourceKey -AuthEvent $rows[1] -NameToIp $map | Should -Be '10.20.4.142'
+        Get-EventSourceKey -AuthEvent ([PSCustomObject]@{ SourceIp=''; SourceHost='' }) -NameToIp $map | Should -Be '(not recorded)'
+    }
+}
+
+Describe 'Which Device speaks plain English' {
+    BeforeAll {
+        $script:Top = [PSCustomObject]@{
+            SourceKey='10.20.4.142'; SourceIp='10.20.4.142'; ResolvedName='CON-LT-0142'
+            DeviceClass='DomainJoinedWorkstation'; Confidence='High'; ResolutionMethod='EventLogCorrelation'
+            FailureCount=72; DistinctAccounts=1; Accounts='mjohnson'
+            AdDescription='Marcus Johnson (old laptop - to be returned)'
+        }
+    }
+
+    It 'does not print the internal resolution token in the verdict' {
+        $v = Get-AuthSourceVerdict -Sources @($script:Top)
+        $v.Next | Should -Not -Match 'EventLogCorrelation'
+        $v.Next | Should -Match 'named itself in the event log'
+    }
+
+    It 'names the AD description in the verdict, the quickest route from hostname to person' {
+        $v = Get-AuthSourceVerdict -Sources @($script:Top)
+        $v.Next | Should -Match 'Marcus Johnson \(old laptop - to be returned\)'
+    }
+
+    It 'shows the AD description on the source card' {
+        # It was collected and written to the CSV but never shown in any report.
+        $html = New-AuthSourceReportHtml -Sources @($script:Top) -DaysBack 7 -GeneratedOn 'now'
+        $html | Should -Match 'AD description'
+        $html | Should -Match 'Marcus Johnson \(old laptop - to be returned\)'
+    }
+
+    It 'leaves the description out of the verdict when AD has none' {
+        $plain = $script:Top.PSObject.Copy(); $plain.AdDescription = ''
+        (Get-AuthSourceVerdict -Sources @($plain)).Next | Should -Not -Match 'AD describes it'
     }
 }
