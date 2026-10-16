@@ -234,7 +234,7 @@ function Get-DCAuditPolicy {
         }
         $result.Reachable = $true
     } catch {
-        $result.Errors += "Could not run auditpol remotely: $($_.Exception.Message)"
+        $result.Errors += (Get-AuditPolicyErrorText -Message $_.Exception.Message)
         return $result
     }
 
@@ -280,6 +280,18 @@ function Get-DCAuditPolicy {
     return $result
 }
 
+function Get-AuditPolicyErrorText {
+    # Access denied is by far the most common failure here, because auditpol must run ON
+    # each DC and that needs local administrator rights there. The raw WinRM text ("Access
+    # is denied. For more information, see the about_Remote_Troubleshooting Help topic")
+    # does not tell a technician what is missing, so say it plainly.
+    param([string]$Message)
+    if ($Message -match 'Access is denied|AccessDenied|0x80070005|Unauthorized') {
+        return 'Access denied: reading audit policy needs administrator rights on this domain controller (auditpol runs there over WinRM). The rest of the investigation can still run.'
+    }
+    return "Could not run auditpol remotely: $Message"
+}
+
 function Get-AuditPolicyVerdict {
     # Turns collected per-DC results into ranked plain-English findings. Pure logic.
     param([object[]]$Results)
@@ -323,7 +335,7 @@ function Get-AuditPolicyVerdict {
     }
 
     if ($findings.Count -eq 0) {
-        $findings.Add('All lockout-relevant audit subcategories are logging on every checked DC. An empty lockout report is therefore meaningful: the events genuinely did not occur on-prem, which points at a cloud-side origin (Entra sign-in logs, Smart Lockout, PTA) rather than a collection gap.')
+        $findings.Add('All lockout-relevant audit subcategories are logging on every checked DC, so the lockout reports can be trusted. If one comes back empty, that is a real result rather than a collection gap: the events genuinely did not occur on-prem, which points at a cloud-side origin (Entra sign-in logs, Smart Lockout, PTA).')
     }
 
     return $findings.ToArray()
@@ -370,7 +382,7 @@ function New-AuditPolicyHtml {
     if ($allSubs.Count -eq 0 -or $reachable.Count -eq 0) {
         $verdictClass = 'unknown'
         $verdictLine  = 'Audit policy could not be read.'
-        $verdictNext  = 'Without this, an empty lockout report proves nothing - it could mean no lockouts, or no auditing. Check WinRM connectivity and administrative rights on the domain controllers, then run this again.'
+        $verdictNext  = 'The usual reason is that the account running the check is not an administrator on the domain controllers - reading audit policy needs that, over WinRM. Lockouts the other reports DO find are still real; only an empty report cannot be trusted. Run this again as an account with admin rights on the DCs, or ask whoever looks after Active Directory to.'
     } elseif ($lockoutGaps.Count -gt 0) {
         $dcs = ($lockoutGaps | Select-Object -ExpandProperty DC -Unique) -join ', '
         $verdictClass = 'bad'
@@ -384,7 +396,9 @@ function New-AuditPolicyHtml {
     } else {
         $verdictClass = 'ok'
         $verdictLine  = 'Everything needed to investigate lockouts is being recorded.'
-        $verdictNext  = 'An empty lockout report is therefore a real result: the events genuinely did not happen on-prem. That points at a cloud-side origin - Entra sign-in logs, Smart Lockout, or a pass-through authentication agent - rather than a gap in collection.'
+        # Worded for both outcomes. The old text only described an empty report, and read
+        # oddly on the far more common case: a report that found plenty of lockouts.
+        $verdictNext  = 'The other reports in this case can be trusted. If one of them comes back empty, that is a real result rather than a gap in collection - the events did not happen on-prem, which points at a cloud-side origin: Entra sign-in logs, Smart Lockout, or a pass-through authentication agent.'
     }
 
     # --- Per-subcategory cards, worst first ---

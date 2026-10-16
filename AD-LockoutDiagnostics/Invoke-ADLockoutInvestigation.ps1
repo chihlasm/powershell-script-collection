@@ -29,6 +29,11 @@
       5. Invoke-ADLockoutForensics.ps1   Which DC/forest?               (with -MultiForest)
       6. Export-ADAuthSourceEvidence.ps1 WHICH MACHINE is sending them? (sibling folder)
       7. Get-LockoutCause.ps1            WHAT should be fixed?          (analysis only)
+      8. Get-SourceMachineActivity.ps1   Was that machine ON at the time? (top 3 workstations)
+
+    Step 8 cross-checks the answer against the source machines' own logs: startup,
+    shutdown, sleep, wake, lock and unlock. Failures that start right after a machine wakes
+    confirm it; failures that continue while it was shut down overturn it.
 
     Steps 6 and 7 close the loop. Steps 1-5 establish that an account is locking out and
     where the authentication is arriving; step 6 identifies the physical device behind the
@@ -196,7 +201,10 @@ function Test-AuditGateResult {
 
     $AuditRows = @($AuditRows)
     if ($AuditRows.Count -eq 0) {
-        $result.Message = 'Audit policy could not be determined, so an empty lockout report proves nothing.'
+        # Usually the account running the investigation is not an administrator on the
+        # DCs - auditpol must run on each one over WinRM. Say so, so the warning reads
+        # as an access gap to mention on the ticket rather than as a broken tool.
+        $result.Message = 'Audit policy could not be determined, so an empty lockout report proves nothing. This usually means this account is not an administrator on the domain controllers; the rest of the investigation still runs.'
         return $result
     }
 
@@ -314,7 +322,13 @@ function New-CaseSummary {
         [object[]]$Steps,
         [string]$CaseFolder,
         [string]$GeneratedOn,
-        [object[]]$Findings = @()
+        [object[]]$Findings = @(),
+        # True when the lockout history found 4740 events. That alone proves lockout
+        # auditing works on the PDC, which matters when the audit-policy read itself was
+        # denied - the common case for a helpdesk account without DC admin rights.
+        [bool]$LockoutEventsFound = $false,
+        # One row per machine from step 8 (SourceActivitySummary CSV): Computer, Verdict, Next.
+        [object[]]$TimelineRows = @()
     )
 
     $sb = New-Object System.Text.StringBuilder
@@ -341,13 +355,19 @@ function New-CaseSummary {
                 # Wrap the remediation so a long instruction stays readable in Notepad.
                 $text = [string]$f.Remediation
                 $line = '     Fix        : '
+                # Track "nothing on this line yet" explicitly. Inferring it from the line
+                # ending in ':' also fired after any word ending in a colon, so "run: net
+                # use" was printed as "run:net use" in SUMMARY.txt and the Findings tab.
+                $atLineStart = $true
                 foreach ($word in ($text -split ' ')) {
-                    if (($line.Length + $word.Length + 1) -gt 96) {
+                    if ($word -eq '') { continue }
+                    if (-not $atLineStart -and ($line.Length + $word.Length + 1) -gt 96) {
                         $null = $sb.AppendLine($line)
                         $line = '                  ' + $word
                     } else {
-                        $line = if ($line.TrimEnd().EndsWith(':')) { $line + $word } else { $line + ' ' + $word }
+                        $line = if ($atLineStart) { $line + $word } else { $line + ' ' + $word }
                     }
+                    $atLineStart = $false
                 }
                 if ($line.Trim()) { $null = $sb.AppendLine($line) }
             }
@@ -355,11 +375,30 @@ function New-CaseSummary {
         }
     }
 
+    # Step 8's reading of each source machine. Placed straight after the findings because
+    # it can confirm the top finding - or overturn it.
+    if (@($TimelineRows).Count -gt 0) {
+        $null = $sb.AppendLine('DEVICE TIMELINE - WAS THE MACHINE ON AT THE TIME?')
+        $null = $sb.AppendLine('------------------------------------------------')
+        foreach ($t in @($TimelineRows)) {
+            $null = $sb.AppendLine("  $($t.Verdict)")
+            if ($t.Next) { $null = $sb.AppendLine("     $($t.Next)") }
+        }
+        $null = $sb.AppendLine()
+    }
+
     $null = $sb.AppendLine('EVIDENCE QUALITY')
     $null = $sb.AppendLine('----------------')
-    if (-not $Gate.Ran) {
+    if (-not $Gate.Ran -and $LockoutEventsFound) {
+        $null = $sb.AppendLine('PARTLY CONFIRMED - audit policy could not be read (that needs administrator')
+        $null = $sb.AppendLine('rights on the domain controllers), but lockout events (4740) WERE found, so')
+        $null = $sb.AppendLine('lockout auditing is working on the PDC. Whether every failed-logon event')
+        $null = $sb.AppendLine('(4625/4771) is recorded could not be confirmed, so a thin source list may be')
+        $null = $sb.AppendLine('a collection gap rather than a clean result.')
+    } elseif (-not $Gate.Ran) {
         $null = $sb.AppendLine('UNKNOWN - audit policy could not be determined.')
-        $null = $sb.AppendLine('An empty lockout report proves nothing in this state.')
+        $null = $sb.AppendLine('An empty lockout report proves nothing in this state. The usual reason is')
+        $null = $sb.AppendLine('that this account is not an administrator on the domain controllers.')
     } elseif ($Gate.Blocking) {
         $null = $sb.AppendLine('*** NOT TRUSTWORTHY - LOCKOUT EVENTS ARE NOT BEING RECORDED ***')
         $null = $sb.AppendLine()
@@ -419,6 +458,8 @@ function New-CaseSummary {
                 'AuthEvents'       { 'Every authentication failure, one row per event'; break }
                 'AuthSources'      { 'WHICH DEVICE each failure came from'; break }
                 'LockoutCauses'    { 'Ranked likely causes and the fix for each'; break }
+                'SourceActivitySummary' { 'Device timeline verdict for each machine'; break }
+                'SourceActivity'   { 'When each source machine was on, asleep, locked or unlocked'; break }
                 'ADLockout_'       { 'Deep dive on the account'; break }
                 default            { '' }
             }
@@ -504,7 +545,7 @@ Write-Status INFO "Case folder: $caseFolder"
 $steps = New-Object System.Collections.ArrayList
 
 # --- Step 1: audit policy (the gate) ---
-Write-Status STEP 'STEP 1/7  Audit policy - is anything being logged?'
+Write-Status STEP 'STEP 1/8  Audit policy - is anything being logged?'
 $null = $steps.Add((Invoke-Step -Name 'Audit policy' -CaseFolder $caseFolder `
     -ScriptPath (Join-Path $scriptRoot 'Test-ADAuditPolicy.ps1') `
     -Arguments @{ OutputPath = $caseFolder; Format = 'Both' }))
@@ -550,7 +591,7 @@ if ($gate.Blocking -and -not $Force) {
 
 # --- Step 2: log retention (read-only) ---
 if ($proceed -and -not $SkipRetentionCheck) {
-    Write-Status STEP 'STEP 2/7  Security log retention - how far back can we see?'
+    Write-Status STEP 'STEP 2/8  Security log retention - how far back can we see?'
     $null = $steps.Add((Invoke-Step -Name 'Log retention' -CaseFolder $caseFolder `
         -ScriptPath (Join-Path $scriptRoot 'Set-DCSecurityLogRetention.ps1') `
         -Arguments @{ TargetDays = $DaysBack; OutputPath = $caseFolder }))
@@ -561,7 +602,7 @@ if ($proceed -and -not $SkipRetentionCheck) {
 
 # --- Step 3: domain-wide history ---
 if ($proceed) {
-    Write-Status STEP 'STEP 3/7  Domain-wide lockout history - who is locking out?'
+    Write-Status STEP 'STEP 3/8  Domain-wide lockout history - who is locking out?'
     $null = $steps.Add((Invoke-Step -Name 'Lockout history' -CaseFolder $caseFolder `
         -ScriptPath (Join-Path $scriptRoot 'Get-ADLockoutHistory.ps1') `
         -Arguments @{ DaysBack = $DaysBack; OutputPath = $caseFolder; Format = 'Both' }))
@@ -572,7 +613,7 @@ if ($proceed) {
 
 # --- Step 4: per-account deep dive ---
 if ($proceed -and $Identity) {
-    Write-Status STEP 'STEP 4/7  Per-account deep dive - why this account?'
+    Write-Status STEP 'STEP 4/8  Per-account deep dive - why this account?'
     $args4 = @{ Identity = $Identity; DaysBack = $DaysBack; OutputPath = $caseFolder }
 
     # Hybrid evidence is opt-in because it needs a server name we cannot discover
@@ -600,7 +641,7 @@ if ($proceed -and $Identity) {
 # which are directory attributes. This is the one step that still produces evidence when
 # auditing is completely disabled.
 if ($MultiForest) {
-    Write-Status STEP 'STEP 5/7  Multi-forest forensics - which DC and forest?'
+    Write-Status STEP 'STEP 5/8  Multi-forest forensics - which DC and forest?'
     if ($gate.Blocking) {
         Write-Status INFO 'Auditing is off, but per-DC counters are directory attributes - this step still works.'
     }
@@ -628,7 +669,7 @@ if (-not $evidenceScript) {
     $null = $steps.Add([PSCustomObject]@{ Step='Device identity'; Script='Export-ADAuthSourceEvidence.ps1'
                                           Ran=$false; ExitCode=$null; Error='Skipped - audit gate blocking (use -Force to collect anyway)' })
 } else {
-    Write-Status STEP 'STEP 6/7  Device identity - which machine is sending the bad passwords?'
+    Write-Status STEP 'STEP 6/8  Device identity - which machine is sending the bad passwords?'
     # DaysBack is capped at 90 because that is the exporter's documented ceiling; the
     # investigation default of 30 fits, but a caller may pass more.
     $args6 = @{ DaysBack = [math]::Min($DaysBack, 90); OutputPath = $caseFolder }
@@ -650,9 +691,29 @@ if (-not $causeScript) {
     $null = $steps.Add([PSCustomObject]@{ Step='Likely cause'; Script='Get-LockoutCause.ps1'
                                           Ran=$false; ExitCode=$null; Error='Skipped - step 6 produced no AuthSources CSV to analyse' })
 } else {
-    Write-Status STEP 'STEP 7/7  Likely cause - what should be fixed?'
+    Write-Status STEP 'STEP 7/8  Likely cause - what should be fixed?'
     $null = $steps.Add((Invoke-Step -Name 'Likely cause' -CaseFolder $caseFolder `
         -ScriptPath $causeScript -Arguments @{ SourcesCsv = $sourcesCsv.FullName; OutputPath = $caseFolder }))
+}
+
+# --- Step 8: device timeline ---
+# Reads the top workstation sources' own logs - startup, shutdown, sleep, wake, lock and
+# unlock - and lines them up against the failures. Needs step 6's CSVs; reads the source
+# machines rather than the DCs, so it does not depend on DC audit policy.
+$timelineScript = Join-Path $scriptRoot 'Get-SourceMachineActivity.ps1'
+$authEventsCsv  = Get-ChildItem -Path $caseFolder -Filter 'AuthEvents_*.csv' -ErrorAction SilentlyContinue |
+                  Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if (-not (Test-Path -LiteralPath $timelineScript)) {
+    $null = $steps.Add([PSCustomObject]@{ Step='Device timeline'; Script='Get-SourceMachineActivity.ps1'
+                                          Ran=$false; ExitCode=$null; Error='Skipped - Get-SourceMachineActivity.ps1 not found' })
+} elseif (-not $sourcesCsv) {
+    $null = $steps.Add([PSCustomObject]@{ Step='Device timeline'; Script='Get-SourceMachineActivity.ps1'
+                                          Ran=$false; ExitCode=$null; Error='Skipped - step 6 produced no AuthSources CSV to read machines from' })
+} else {
+    Write-Status STEP 'STEP 8/8  Device timeline - was that machine on at the time?'
+    $args8 = @{ SourcesCsv = $sourcesCsv.FullName; Top = 3; DaysBack = [math]::Min($DaysBack, 90); OutputPath = $caseFolder }
+    if ($authEventsCsv) { $args8['AuthEventsCsv'] = $authEventsCsv.FullName }
+    $null = $steps.Add((Invoke-Step -Name 'Device timeline' -CaseFolder $caseFolder -ScriptPath $timelineScript -Arguments $args8))
 }
 
 # --- Organize the outputs into a readable case folder ---
@@ -670,6 +731,7 @@ $layout = @(
     @{ Match = 'AuthSources_';           Folder = '4 - Which Device' }
     @{ Match = 'AuthEvents_';            Folder = '4 - Which Device' }
     @{ Match = 'LockoutCauses_';         Folder = '5 - What To Fix' }
+    @{ Match = 'SourceActivity';         Folder = '6 - Device Timeline' }
 )
 
 foreach ($file in @(Get-ChildItem -LiteralPath $caseFolder -File -ErrorAction SilentlyContinue)) {
@@ -728,6 +790,11 @@ $readmeLines = @(
     '      Ranked likely causes with the specific remediation for each. Open the .html'
     '      first; the .csv is the same data for filtering.'
     ''
+    '  6 - Device Timeline'
+    '      When each source machine was on, asleep, locked and unlocked, lined up against'
+    '      the failures. Confirms the culprit (failures right after it wakes) or overturns it'
+    '      (failures while it was shut down).'
+    ''
     '  Other'
     '      Anything that did not match a known report type.'
     ''
@@ -781,9 +848,28 @@ if ($causesCsv) {
     }
 }
 
+# --- Did the history find any lockouts? ---
+# Lets the summary say "lockout auditing is evidently working" when the audit-policy read
+# was denied but 4740 events were plainly collected.
+$lockoutEventsFound = $false
+$historyCsv = Get-ChildItem -Path $caseFolder -Filter 'ADLockoutHistory_*.csv' -Recurse -ErrorAction SilentlyContinue |
+              Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if ($historyCsv) {
+    try { $lockoutEventsFound = (@(Import-Csv -LiteralPath $historyCsv.FullName -ErrorAction Stop).Count -gt 0) } catch { }
+}
+
+# --- Device timeline rows for the summary ---
+$timelineRows = @()
+$timelineCsv = Get-ChildItem -Path $caseFolder -Filter 'SourceActivitySummary_*.csv' -Recurse -ErrorAction SilentlyContinue |
+               Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if ($timelineCsv) {
+    try { $timelineRows = @(Import-Csv -LiteralPath $timelineCsv.FullName -ErrorAction Stop) } catch { }
+}
+
 # --- Summary ---
 $summary = New-CaseSummary -Identity $Identity -DaysBack $DaysBack -Gate $gate -Steps $steps `
-    -CaseFolder $caseFolder -GeneratedOn (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') -Findings $findings
+    -CaseFolder $caseFolder -GeneratedOn (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') -Findings $findings `
+    -LockoutEventsFound $lockoutEventsFound -TimelineRows $timelineRows
 $summaryPath = Join-Path $caseFolder 'SUMMARY.txt'
 try {
     Set-Content -Path $summaryPath -Value $summary -Encoding UTF8 -ErrorAction Stop

@@ -68,6 +68,9 @@ function Write-Status {
 $manifest = @(
     @{ Source = 'AD-LockoutDiagnostics';                                 Destination = 'AD-LockoutDiagnostics' }
     @{ Source = 'AD-AuthSourceEvidence/Export-ADAuthSourceEvidence.ps1'; Destination = 'AD-LockoutDiagnostics/Export-ADAuthSourceEvidence.ps1' }
+    # Step 7 of the investigation. Without it the bundle silently skipped "What To Fix"
+    # and SUMMARY.txt lost its FINDINGS section - the part that states the answer.
+    @{ Source = 'AD-AuthSourceEvidence/Get-LockoutCause.ps1';            Destination = 'AD-LockoutDiagnostics/Get-LockoutCause.ps1' }
     @{ Source = 'AD-GroupMembership-Export';                             Destination = 'AD-GroupMembership-Export' }
     @{ Source = 'Block 365 Sign-in';                                     Destination = 'Block 365 Sign-in' }
     @{ Source = 'Citrix-FSLogix-HealthCollector';                        Destination = 'Citrix-FSLogix-HealthCollector' }

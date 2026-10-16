@@ -174,6 +174,8 @@ function Get-TabDefinition {
            Blurb = 'The physical machine behind each source address.' }
         @{ Match = 'LockoutCauses';          Order = 6; Label = 'What To Fix'
            Blurb = 'Ranked likely causes with the specific remediation for each.' }
+        @{ Match = 'SourceActivity';         Order = 7; Label = 'Device Timeline'
+           Blurb = 'When each source machine was on, asleep, locked and unlocked - lined up against the failed sign-ins.' }
     )
 
     foreach ($rule in $map) {

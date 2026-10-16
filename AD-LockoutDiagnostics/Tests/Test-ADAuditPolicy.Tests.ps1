@@ -192,3 +192,41 @@ Describe 'New-AuditPolicyHtml' {
         $html | Should -Match 'A &amp; B'
     }
 }
+
+Describe 'Fixes found while writing the service desk guide' {
+    BeforeAll {
+        $script:AllPass = @([PSCustomObject]@{
+            DC='DC01'; Reachable=$true
+            Subcategories=@(
+                [PSCustomObject]@{ DC='DC01'; Subcategory='User Account Management'; EventId=4740; Needs='Success'; Setting='Success and Failure'; Status='Pass'; Detail=''; Explains='' }
+                [PSCustomObject]@{ DC='DC01'; Subcategory='Logon'; EventId=4625; Needs='Failure'; Setting='Success and Failure'; Status='Pass'; Detail=''; Explains='' }
+            )
+            LegacyOverrideRisk=$false; LogMaxMB=128; RetentionDays=30; Errors=@()
+        })
+    }
+
+    It 'does not word the healthy verdict as if the report came back empty' {
+        # It said "An empty lockout report is therefore a real result" even on cases that
+        # had found plenty of lockouts. It must read correctly either way.
+        $html = New-AuditPolicyHtml -Results $script:AllPass -Verdict @()
+        $html | Should -Match 'can be trusted'
+        $html | Should -Not -Match 'An empty lockout report is therefore'
+        ((Get-AuditPolicyVerdict -Results $script:AllPass) -join ' ') | Should -Match 'can be trusted'
+    }
+
+    It 'turns a WinRM access-denied error into what is actually missing' {
+        $t = Get-AuditPolicyErrorText -Message 'Connecting to remote server DC01 failed with the following error message : Access is denied. For more information, see the about_Remote_Troubleshooting Help topic.'
+        $t | Should -Match 'administrator rights'
+        $t | Should -Not -Match 'about_Remote_Troubleshooting'
+    }
+
+    It 'keeps other remoting errors verbatim' {
+        Get-AuditPolicyErrorText -Message 'WinRM cannot complete the operation' | Should -Match 'WinRM cannot complete'
+    }
+
+    It 'names admin rights as the usual reason when nothing could be read' {
+        $html = New-AuditPolicyHtml -Results @([PSCustomObject]@{ DC='DC01'; Reachable=$false; Subcategories=@(); LegacyOverrideRisk=$null; LogMaxMB=$null; RetentionDays=$null; Errors=@('x') }) -Verdict @()
+        $html | Should -Match 'could not be read'
+        $html | Should -Match 'administrator on the domain controllers'
+    }
+}

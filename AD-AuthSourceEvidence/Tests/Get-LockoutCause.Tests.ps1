@@ -350,3 +350,35 @@ Describe 'New-CaseReportHtml' {
         $html | Should -Match '<style>'
     }
 }
+
+Describe 'What To Fix speaks plain English' {
+    BeforeAll {
+        $script:Ws = @([PSCustomObject]@{ SourceKey='10.20.4.142'; ResolvedName='CON-LT-0142'; DeviceClass='DomainJoinedWorkstation'
+                                         FailureCount='72'; DistinctAccounts='1'; Accounts='mjohnson'
+                                         Cause='Mapped network drive or stored credential using an old password'
+                                         Confidence='High'; Evidence='Logon type 3'; Remediation='net use' })
+    }
+
+    It 'translates the device class instead of printing the internal token' {
+        $html = New-CaseReportHtml -CauseRows $script:Ws -GeneratedOn 'now' -Window 7
+        $html | Should -Not -Match 'DomainJoinedWorkstation'
+        $html | Should -Match 'Domain-joined workstation'
+    }
+
+    It 'styles confidence with the shared .tag classes the combined report carries' {
+        # The old .pill classes lived only in this script's fallback CSS, so inside the
+        # combined report High/Medium/Low rendered as plain text.
+        $html = New-CaseReportHtml -CauseRows $script:Ws -GeneratedOn 'now' -Window 7
+        $html | Should -Match "class='tag ok'>High<"
+        $shared = (Import-PowerShellDataFile "$PSScriptRoot\..\..\AD-LockoutDiagnostics\LockoutReference.psd1").ReportCss
+        $shared | Should -Match '\.tag\.ok'
+        $shared | Should -Match '\.tag\.warn'
+    }
+
+    It 'maps every device class the evidence exporter can produce' {
+        foreach ($c in 'DomainJoinedWorkstation','DomainController','Server','NonDomainDevice','LocalOrConsole','NetworkDevice','Unknown') {
+            # Case-sensitive: an untranslated token is CamelCase (DomainJoinedWorkstation).
+            Format-DeviceClass -Class $c | Should -Not -MatchExactly '^[A-Z][a-z]+[A-Z]'
+        }
+    }
+}
