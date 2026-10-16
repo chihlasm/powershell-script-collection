@@ -88,7 +88,6 @@ $excludePatterns = @(
     '^Build-[^/]+\.ps1$' # Repo build scripts (e.g. Build-LockoutToolkit.ps1); they need git
     '(^|/)\.gitkeep$'
     '\.zip$'
-    '^Nerdio\d*\.ps1$'  # Scratch scripts in RDS-FSLogix-EventExport, not part of the tool
 )
 
 $repoRoot = Split-Path -Parent $PSScriptRoot

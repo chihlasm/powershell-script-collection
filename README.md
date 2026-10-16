@@ -52,7 +52,7 @@ handed out, so it always matches this repository.
 | [Citrix-PerfTriage](Citrix-PerfTriage/) | One-command performance triage on a session host |
 | [CitrixVDADiagnostics](CitrixVDADiagnostics/) | Deeper VDA and FSLogix performance diagnostics |
 | [Get-CitrixVDAResources](Get-CitrixVDAResources/) | Which VDAs are short on CPU, memory or disk, farm-wide |
-| [Get-CitrixSessions](Get-CitrixSessions/) / [CitrixUserSessions](CitrixUserSessions/) | Who is logged on to which VDA |
+| [Get-CitrixSessions](Get-CitrixSessions/) | Who is logged on to which VDA |
 | [Get-RAM-Usage](Get-RAM-Usage/) | RAM by user and process on a multi-session server |
 | [RDS-FSLogix-EventExport](RDS-FSLogix-EventExport/) | RDS and FSLogix event-log errors for a time window |
 | [Get-FSLogixStorageEvents](Get-FSLogixStorageEvents/) / [Parse-FSLogixLogs](Parse-FSLogixLogs/) | FSLogix storage events and log parsing |
@@ -72,7 +72,6 @@ handed out, so it always matches this repository.
 | [FolderPermissionManager](FolderPermissionManager/) | Browser GUI for NTFS permissions |
 | [RobocopyMigration](RobocopyMigration/) | GUI for server-to-server file migrations |
 | [CopyFileToServer](CopyFileToServer/) | GUI to copy files to many servers |
-| [FileCopyMoveGUI](FileCopyMoveGUI/) | GUI copy/move with Robocopy-style options |
 | [DeleteOldFolders](DeleteOldFolders/) | Delete `.old` folders past an age |
 | [Drive-Storage-Report](Drive-Storage-Report/) | HTML report of drive and folder usage |
 | [DiskSpdDiagnostic](DiskSpdDiagnostic/) | Storage performance triage with diskspd |
@@ -116,6 +115,11 @@ handed out, so it always matches this repository.
 | `AD-AuthSourceEvidence` | Merged into [AD-LockoutDiagnostics](AD-LockoutDiagnostics/) |
 | `AD-GroupPolicy-DriveMaps`, `Search-SYSVOLScripts` | Merged into [DriveMap-Diagnostics](DriveMap-Diagnostics/) |
 | `MSP-TroubleshootingWorkbench` | The workbench now lives in its own repository. Its checks are standalone tools here: [Citrix-FSLogix-Triage](Citrix-FSLogix-Triage/), [Network-QuickCheck](Network-QuickCheck/), [AD-LockoutDiagnostics](AD-LockoutDiagnostics/) and [Citrix-FSLogix-HealthCollector](Citrix-FSLogix-HealthCollector/) |
+| `CitrixUserSessions` | [Get-CitrixSessions](Get-CitrixSessions/): same query, more columns, optional CSV, same `-VdaMachineName` filter |
+| `FileCopyMoveGUI` | [RobocopyMigration](RobocopyMigration/) for copies. Neither moves files: FileCopyMoveGUI's "Move" option never passed `/MOV` to robocopy, and paths with spaces broke it |
+| `CitrixVDADiagnostics\CitrixFSLogix-AdvancedDiagnostics.ps1` | `CitrixVDA-Consolidated.ps1` in the same folder, same parameters |
+| `CitrixVDADiagnostics\Remove-OrphanedFSLogixTempProfiles.ps1` | Was disabled as unsafe. For stale local profiles use `Storage Space Clean-up\Cleanup-CitrixVDAStorage.ps1 -WhatIf` |
+| `Nerdio.ps1`, `nerdio-install-teams.ps1` (classic Teams) | Classic Teams no longer works (end of availability July 1, 2025). Use [Install-TeamsOnVirtualDesktop](Install-TeamsOnVirtualDesktop/), or its `Nerdio-InstallNewTeams.ps1` for Nerdio |
 
 ## Tool details
 
@@ -144,30 +148,6 @@ the authoritative, current documentation.
 - Supports long file paths and handles access-denied directories gracefully.
 - Always use `-WhatIf` first to preview what would be deleted.
 - Requires appropriate permissions to delete folders in the specified path.
-
-### FileCopyMoveGUI.ps1
-
-**Description**: This PowerShell script provides a graphical user interface (GUI) for performing file and folder copy or move operations with Robocopy-like features. It allows users to select source and destination directories, choose between copy and move operations, and configure options such as recursive copying, mirroring, and file exclusions.
-
-**Parameters**:
-- None (interactive GUI application)
-
-**Usage Examples**:
-- Run the script: `.\FileCopyMoveGUI.ps1`
-- Select source folder using the Browse button
-- Select destination folder using the Browse button
-- Choose operation type (Copy or Move)
-- Configure options as needed (Recursive, Mirror, Exclusions)
-- Click Start to begin the operation
-- Monitor progress and view logs in the interface
-
-**Notes**:
-- Requires Windows Forms assemblies (included in the script)
-- Uses robocopy.exe for the actual file operations
-- Supports recursive copying, mirroring, and file exclusions
-- Provides real-time progress tracking and error logging
-- Cancel button allows stopping the operation mid-process
-- Requires appropriate permissions for source and destination paths
 
 ### CopyFileToServer.ps1
 
