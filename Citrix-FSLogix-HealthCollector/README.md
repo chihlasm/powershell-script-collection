@@ -225,8 +225,8 @@ $health | Where-Object Verdict -ne 'Healthy' | Format-Table ComputerName, Verdic
 ```
 
 `-PassThru` is required for pipeline output. Without it, an interactive run ends on the summary
-instead of scrolling 37 fields per server past it. The MSP Troubleshooting Workbench's
-`citrix.fslogix.health` check passes `-PassThru`.
+instead of scrolling 37 fields per server past it. Any tool that runs this script as a check
+(for example a troubleshooting workbench) must pass `-PassThru` to read the per-machine rows.
 
 ### Tests
 
@@ -262,4 +262,4 @@ The full list is in the script's `.NOTES`. The key ones:
 - `Get-CitrixVDAResources`: faster fleet-wide CPU, memory and disk from the broker
 - `Get-RAM-Usage`: which *user* is using the memory on one server
 - `RDS-FSLogix-EventExport`: full event export for a time window
-- `MSP-TroubleshootingWorkbench`: runs this as the `citrix.fslogix.health` check
+- `Citrix-FSLogix-Triage`: plain-English FSLogix check of the one server a user signs in to

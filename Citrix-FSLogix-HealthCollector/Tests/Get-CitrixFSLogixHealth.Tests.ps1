@@ -690,13 +690,4 @@ Describe 'Script hygiene' {
         $text | Should -Match 'if \(\$PassThru\) \{ return \$results \}'
         $text | Should -Not -Match '(?m)^return \$results'
     }
-
-    It 'is called with -PassThru by the MSP workbench wrapper, which reads the result rows' {
-        $wrapper = Join-Path $PSScriptRoot '..\..\MSP-TroubleshootingWorkbench\checks\Invoke-CitrixFSLogixHealthCheck.ps1'
-        if (-not (Test-Path $wrapper)) {
-            Set-ItResult -Skipped -Because 'the workbench is not present beside this tool'
-            return
-        }
-        Get-Content $wrapper -Raw | Should -Match '-PassThru'
-    }
 }
