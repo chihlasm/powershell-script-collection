@@ -1,7 +1,7 @@
 # Service Desk Escalation Toolkit — START HERE
 
 A small set of tested PowerShell tools for the escalation tickets we see most: account
-lockouts, "who has access to what", missing mapped drives, slow or broken Citrix/RDS sessions, FSLogix profile
+lockouts, "who has access to what", "Access denied" on a folder, missing mapped drives, slow or broken Citrix/RDS sessions, FSLogix profile
 problems, hiding people from the address book, and blocking Microsoft 365 sign-in.
 
 Every tool writes a report (HTML and/or CSV) you can attach to the ticket.
@@ -16,6 +16,7 @@ Every tool writes a report (HTML and/or CSV) you can attach to the ticket.
 | "I can't sign in to Microsoft 365 / Outlook / Teams"                | [M365-UserQuickCheck](#cant-sign-in-to-microsoft-365)        | No                |
 | "My account keeps locking out"                                      | [AD-LockoutDiagnostics](#account-keeps-locking-out)          | No                |
 | "Who has access to what?" / "Who is in Domain Admins?" / offboarding check | [AD-GroupMembership-Export](#who-has-access-to-what)  | No                |
+| "I get 'Access denied' on a folder" / "Can this user open this folder?" | [FolderAccess-Check](#access-denied-on-a-folder)        | No                |
 | "My H: / S: / X: drive is missing" (or only shows up sometimes)     | [DriveMap-Diagnostics](#mapped-drive-is-missing)             | No                |
 | "Citrix is slow" — for one server or the whole farm                 | [Citrix-FSLogix-HealthCollector](#citrix-or-rds-is-slow)     | No                |
 | "Which Citrix servers are overloaded / low on disk?"                | [Get-CitrixVDAResources](#citrix-or-rds-is-slow)             | No                |
@@ -213,6 +214,34 @@ read the report. It has four tabs: **People**, **Groups**, **Overlap** and **Nes
 - It shows group membership, **not** folder or file-share permissions.
 - **New to it?** Read `AD Access Report - Quick Guide.docx` (one page) or the illustrated
   `AD Access Report - User Guide.docx` in the folder.
+
+---
+
+## Access denied on a folder
+
+**Folder:** `FolderAccess-Check`  **Run from:** any domain-joined machine with RSAT (Active
+Directory). It only reads; it changes nothing. To read the **share** permissions you need to be
+an administrator on the file server.
+
+Use the **full network path** of the folder, not the drive letter:
+
+```powershell
+.\Get-FolderAccessCheck.ps1 -Identity jdoe -Path '\\FS01\Finance\Budgets 2027'
+```
+
+The first line is the answer: **PROBABLY YES**, **PROBABLY NO** or **CAN'T TELL**, with the
+reason, whether the share or the folder permissions are what stops them, and the next steps.
+Below that are the share and folder permission entries in the order Windows checks them, and
+which of the user's groups matches each one. Add `-OutputPath C:\Temp` to save an HTML report
+and a CSV for the ticket. Add `-Access Modify` to check "can they change files in it?".
+
+**Things to know:**
+- **CAN'T TELL is a normal answer.** It always says what couldn't be read (your rights, the
+  share on the server, a DFS path, an admin share like `D$`) and what to do instead.
+- **Always finish in Effective Access**: the folder's *Properties → Security → Advanced →
+  Effective Access* tab, for the user. It is Windows' final word.
+- **The saved report holds client data** (group memberships, servers, paths): attach it to the
+  ticket, then delete the local copy.
 
 ---
 

@@ -72,6 +72,7 @@ $manifest = @(
     @{ Source = 'Citrix-FSLogix-HealthCollector';                        Destination = 'Citrix-FSLogix-HealthCollector' }
     @{ Source = 'Citrix-FSLogix-Triage';                                 Destination = 'Citrix-FSLogix-Triage' }
     @{ Source = 'DriveMap-Diagnostics';                                  Destination = 'DriveMap-Diagnostics' }
+    @{ Source = 'FolderAccess-Check';                                    Destination = 'FolderAccess-Check' }
     @{ Source = 'Get-AzureFilesFSLogixProfiles';                         Destination = 'Get-AzureFilesFSLogixProfiles' }
     @{ Source = 'Get-CitrixVDAResources';                                Destination = 'Get-CitrixVDAResources' }
     @{ Source = 'Get-RAM-Usage';                                         Destination = 'Get-RAM-Usage' }

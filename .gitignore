@@ -20,6 +20,7 @@ AD-LockoutDiagnostics/**/Case_*/
 **/FSLogixTriage_*.csv
 **/NetworkQuickCheck_*.txt
 **/NetworkQuickCheck_*.csv
+**/FolderAccessCheck_*
 
 # --- Runtime artifacts from running the tools ---
 Entra-DeviceActivityTimeline/Reports/
