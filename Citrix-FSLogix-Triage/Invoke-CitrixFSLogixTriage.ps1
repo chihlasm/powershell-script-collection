@@ -305,6 +305,66 @@ function Get-FSLogixCloudCacheProviderField {
     return ''
 }
 
+# Text that looks like an Azure storage connection string, account key or SAS token. A
+# malformed CCDLocations entry (a missing comma, say) can make a field read run on into the
+# connection string, so anything matching this is never echoed into a finding or the note.
+$script:SecretLikePattern = '(?i)AccountKey|SharedAccessSignature|\bsig=|DefaultEndpointsProtocol|connectionString\s*=\s*\S'
+
+# Every finding about a Cloud Cache entry uses this fixed wording and never repeats a value
+# from the entry. Report is the console/report text; Note is the ticket-note text, which also
+# avoids the key names so the note never carries "connection string" at all (AC32).
+$script:CloudCacheSpellingProblems = @(
+    [PSCustomObject]@{ Report = 'it has no type= part'; Note = 'the type part is missing' }
+    [PSCustomObject]@{ Report = "the type= key is not written exactly 'type=' (lower case)"; Note = "the word 'type' is not in lower case" }
+    [PSCustomObject]@{ Report = "the type is not exactly 'smb' or 'azure' (lower case)"; Note = "the type is not exactly 'smb' or 'azure' (lower case)" }
+    [PSCustomObject]@{ Report = 'it has no connectionString= part'; Note = 'the storage location part is missing' }
+    [PSCustomObject]@{ Report = "the connectionString= key is not written exactly 'connectionString=' (capital S)"; Note = 'the storage location part is not spelled with the exact capitals FSLogix requires' }
+)
+
+$script:CloudCacheLocationDetails = @{
+    Smb          = 'Cloud Cache SMB location.'
+    SmbNoPath    = 'Cloud Cache SMB location has no share path to test.'
+    SmbNotUnc    = 'Cloud Cache SMB location is not a plain file share path, so it was not tested.'
+    Azure        = 'Cloud Cache location of type azure is not a file share, so it was not tested.'
+    Unknown      = 'Cloud Cache location has no type this tool recognises (smb or azure), so it was not tested.'
+    VhdSecret    = 'A VHDLocations entry looks like a storage key rather than a share path, so it was not tested.'
+}
+
+function Get-FSLogixCloudCacheProviderType {
+    <#
+    .SYNOPSIS
+        Returns the provider type of one CCDLocations entry as smb, azure or unknown - never the
+        raw text, which a malformed entry can run on into the connection string.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProviderString
+    )
+
+    $rawType = (Get-FSLogixCloudCacheProviderField -ProviderString $ProviderString -FieldName 'type').ToLowerInvariant()
+    if (@('smb', 'azure') -contains $rawType) {
+        return $rawType
+    }
+
+    return 'unknown'
+}
+
+function Test-FSLogixPlainSharePath {
+    <#
+    .SYNOPSIS
+        True when a configured location is a plain \\server\share path that is safe to show and
+        test. Anything with ; or = in it has run on into other parts of the setting.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()]
+        [string]$Path
+    )
+
+    return ($Path.StartsWith('\\') -and $Path -notmatch '[;=]' -and $Path -notmatch $script:SecretLikePattern)
+}
+
 function Test-FSLogixCloudCacheProviderSpelling {
     <#
     .SYNOPSIS
@@ -320,28 +380,30 @@ function Test-FSLogixCloudCacheProviderSpelling {
         [string]$ProviderString
     )
 
+    # Each problem is fixed wording from $script:CloudCacheSpellingProblems: it names the part
+    # that is wrong and never repeats a value from the entry, which can hold a storage key.
     $problems = @()
     $typeMatch = [regex]::Match($ProviderString, '(?i)(?:^|,)\s*(type)\s*=\s*([^,]*)')
     if (-not $typeMatch.Success) {
-        $problems += 'it has no type= part'
+        $problems += $script:CloudCacheSpellingProblems[0].Report
     }
     else {
         if ($typeMatch.Groups[1].Value -cne 'type') {
-            $problems += ("'{0}=' must be written 'type='" -f $typeMatch.Groups[1].Value)
+            $problems += $script:CloudCacheSpellingProblems[1].Report
         }
 
         $typeValue = $typeMatch.Groups[2].Value.Trim()
         if (@('smb', 'azure') -cnotcontains $typeValue) {
-            $problems += ("type '{0}' must be exactly 'smb' or 'azure' (lower case)" -f $typeValue)
+            $problems += $script:CloudCacheSpellingProblems[2].Report
         }
     }
 
     $connectionMatch = [regex]::Match($ProviderString, '(?i)(?:^|,)\s*(connectionstring)\s*=')
     if (-not $connectionMatch.Success) {
-        $problems += 'it has no connectionString= part'
+        $problems += $script:CloudCacheSpellingProblems[3].Report
     }
     elseif ($connectionMatch.Groups[1].Value -cne 'connectionString') {
-        $problems += ("'{0}=' must be written 'connectionString='" -f $connectionMatch.Groups[1].Value)
+        $problems += $script:CloudCacheSpellingProblems[4].Report
     }
 
     return @($problems)
@@ -354,22 +416,25 @@ function ConvertTo-RedactedFSLogixCloudCacheProviderEntry {
         [string]$ProviderString
     )
 
-    $providerType = (Get-FSLogixCloudCacheProviderField -ProviderString $ProviderString -FieldName 'type').ToLowerInvariant()
+    $providerType = Get-FSLogixCloudCacheProviderType -ProviderString $ProviderString
     $providerName = Get-FSLogixCloudCacheProviderField -ProviderString $ProviderString -FieldName 'name'
     $connectionString = Get-FSLogixCloudCacheProviderField -ProviderString $ProviderString -FieldName 'connectionString'
-    $parts = @()
-
-    if (-not [string]::IsNullOrWhiteSpace($providerType)) {
-        $parts += "type=$providerType"
-    }
+    $parts = @("type=$providerType")
 
     if (-not [string]::IsNullOrWhiteSpace($providerName)) {
-        $parts += "name=$($providerName.Trim())"
+        # A name that runs on into other parts (a missing comma) can carry the connection string.
+        $trimmedName = $providerName.Trim()
+        if ($trimmedName -match '[;=]' -or $trimmedName -match $script:SecretLikePattern) {
+            $parts += 'name=[REDACTED]'
+        }
+        else {
+            $parts += "name=$trimmedName"
+        }
     }
 
     if (-not [string]::IsNullOrWhiteSpace($connectionString)) {
         $trimmedConnectionString = $connectionString.Trim()
-        if ($providerType -eq 'smb' -and $trimmedConnectionString.StartsWith('\\')) {
+        if ($providerType -eq 'smb' -and (Test-FSLogixPlainSharePath -Path $trimmedConnectionString)) {
             $parts += "connectionString=$trimmedConnectionString"
         }
         else {
@@ -378,11 +443,7 @@ function ConvertTo-RedactedFSLogixCloudCacheProviderEntry {
         }
     }
 
-    if ($parts.Count -gt 0) {
-        return ($parts -join ',')
-    }
-
-    return '[REDACTED]'
+    return ($parts -join ',')
 }
 
 function ConvertTo-RedactedFSLogixRegistryValue {
@@ -409,7 +470,17 @@ function ConvertTo-RedactedFSLogixRegistryValue {
     }
 
     if ($Value -is [System.Array]) {
-        return @(ConvertTo-StringArray -Value $Value)
+        $items = @()
+        foreach ($item in @(ConvertTo-StringArray -Value $Value)) {
+            if ($item -match $script:SecretLikePattern) { $items += '[REDACTED]' } else { $items += $item }
+        }
+
+        return @($items)
+    }
+
+    if ([string]$Value -match $script:SecretLikePattern) {
+        # A storage connection string pasted into another setting (VHDLocations, say).
+        return '[REDACTED]'
     }
 
     if ($null -eq $Value) {
@@ -433,6 +504,21 @@ function Resolve-FSLogixProfileStorageLocations {
     $locations = @()
     if ($ValueName -eq 'VHDLocations') {
         foreach ($entry in @(Split-FSLogixRegistryLocationEntries -Value $Value)) {
+            if ($entry -match '=' -or $entry -match $script:SecretLikePattern) {
+                # Not a path at all: a storage key or connection string pasted into VHDLocations
+                # (split on ';' it becomes Name=value pieces). Never test it (the path would be
+                # echoed into the finding) and never show it.
+                $locations += [PSCustomObject]@{
+                    ValueName      = $ValueName
+                    SourceValue    = '[REDACTED]'
+                    ProviderType   = 'direct'
+                    TestPath       = ''
+                    ShouldTestPath = $false
+                    Detail         = $script:CloudCacheLocationDetails.VhdSecret
+                }
+                continue
+            }
+
             $locations += [PSCustomObject]@{
                 ValueName      = $ValueName
                 SourceValue    = $entry
@@ -446,26 +532,32 @@ function Resolve-FSLogixProfileStorageLocations {
         return @($locations)
     }
 
+    # Every Detail below is fixed wording from $script:CloudCacheLocationDetails, and the type is
+    # only ever smb, azure or unknown: nothing read from the entry is repeated, because a
+    # malformed entry can run on into its connection string.
     foreach ($entry in @(Split-FSLogixCloudCacheProviderEntries -Value $Value)) {
-        $providerType = (Get-FSLogixCloudCacheProviderField -ProviderString $entry -FieldName 'type').ToLowerInvariant()
-        $connectionString = Get-FSLogixCloudCacheProviderField -ProviderString $entry -FieldName 'connectionString'
+        $providerType = Get-FSLogixCloudCacheProviderType -ProviderString $entry
+        $connectionString = (Get-FSLogixCloudCacheProviderField -ProviderString $entry -FieldName 'connectionString').Trim()
         $redactedSourceValue = ConvertTo-RedactedFSLogixCloudCacheProviderEntry -ProviderString $entry
-        if ([string]::IsNullOrWhiteSpace($providerType)) {
-            $providerType = 'unknown'
-        }
 
         $shouldTestPath = $false
         $testPath = ''
-        $detail = "Cloud Cache location of type '$providerType' is not a file share, so it was not tested."
+        $detail = $script:CloudCacheLocationDetails.Unknown
 
-        if ($providerType -eq 'smb') {
-            if (-not [string]::IsNullOrWhiteSpace($connectionString)) {
-                $testPath = $connectionString.Trim()
+        if ($providerType -eq 'azure') {
+            $detail = $script:CloudCacheLocationDetails.Azure
+        }
+        elseif ($providerType -eq 'smb') {
+            if ([string]::IsNullOrWhiteSpace($connectionString)) {
+                $detail = $script:CloudCacheLocationDetails.SmbNoPath
+            }
+            elseif (Test-FSLogixPlainSharePath -Path $connectionString) {
+                $testPath = $connectionString
                 $shouldTestPath = $true
-                $detail = 'Cloud Cache SMB location.'
+                $detail = $script:CloudCacheLocationDetails.Smb
             }
             else {
-                $detail = 'Cloud Cache SMB location has no connectionString path to test.'
+                $detail = $script:CloudCacheLocationDetails.SmbNotUnc
             }
         }
 
@@ -918,8 +1010,11 @@ function Invoke-CitrixFSLogixTriage {
                     -Action 'Users get a local or temporary profile. Escalate: the FSLogix policy is not fully applied to this server.'
             }
             else {
+                # Only a short number is repeated; anything else in Enabled is described, not
+                # echoed, so a stray value cannot carry data into the report or the note.
+                $enabledShown = if ([string]$enabled -match '^-?\d{1,10}$') { 'Enabled = {0}' -f $enabled } else { 'Enabled is set, but not to 1' }
                 $evidence += New-EvidenceItem -Name 'FSLogix profiles switched on' -Status 'Fail' `
-                    -Detail "FSLogix profile containers are switched off (Enabled = $enabled)." `
+                    -Detail "FSLogix profile containers are switched off ($enabledShown)." `
                     -Action 'Users get a local or temporary profile. Escalate: check whether this server should be using FSLogix.'
             }
 
@@ -1125,7 +1220,7 @@ function Invoke-CitrixFSLogixTriage {
                 $rawOutput.ProfilePaths += [PSCustomObject]@{
                     ConfiguredPath = [string]$profileLocation.SourceValue
                     TestedPath     = ''
-                    Context        = 'Cloud Cache provider'
+                    Context        = $(if ($profileLocation.ValueName -eq 'CCDLocations') { 'Cloud Cache provider' } else { 'VHDLocations entry' })
                     Reachable      = $false
                     Error          = [string]$profileLocation.Detail
                 }
@@ -1325,7 +1420,9 @@ function ConvertTo-CitrixFSLogixTriageTicketNote {
 
         The FSLogix settings block (RawOutput.Registry) never goes into the note, and neither
         does a Cloud Cache entry: a misspelled-entry finding keeps only what is wrong with it,
-        because the entry holds the connection string.
+        because the entry holds the connection string. Spelling and not-tested Cloud Cache lines
+        are rebuilt from the tool's fixed wording, and any line that still looks like a
+        connection string, account key or SAS token ($script:SecretLikePattern) is replaced.
 
         Next steps are the result's RecommendedNextSteps. The headline is the report's own
         (Get-TriageHeadline), and the stamp scope is the session host that was checked.
@@ -1342,12 +1439,31 @@ function ConvertTo-CitrixFSLogixTriageTicketNote {
     foreach ($e in @($Result.Evidence)) {
         $text = [string]$e.Detail
         if ($e.Name -eq 'Cloud Cache location spelling') {
-            # "CCDLocations entry '<entry>' is misspelled: <problems>. ..." - drop the entry.
-            $text = $text -replace "^CCDLocations entry '.*' is misspelled: ", 'A Cloud Cache (CCDLocations) entry is misspelled: '
+            # Built from fixed wording only: the report's detail quotes the (redacted) entry, and
+            # the note says what is wrong without the entry or its key names.
+            $wrong = @($script:CloudCacheSpellingProblems | Where-Object { $text.Contains($_.Report) } | ForEach-Object { $_.Note })
+            $text = if ($wrong.Count -gt 0) {
+                'A Cloud Cache (CCDLocations) entry is misspelled: {0}. FSLogix treats these names as case sensitive.' -f ($wrong -join '; ')
+            }
+            else {
+                'A Cloud Cache (CCDLocations) entry is misspelled. FSLogix treats these names as case sensitive.'
+            }
+        }
+        elseif ($e.Name -eq 'Profile storage reachable') {
+            # A location that was not tested; only the tool's own fixed sentences pass through.
+            if (@($script:CloudCacheLocationDetails.Values) -notcontains $text) {
+                $text = 'A profile storage location was not tested.'
+            }
         }
         elseif ($e.Name -like 'Disk ?:*') {
             # The detail is only the numbers; the drive is in the name.
             $text = '{0} {1}' -f $e.Name, $text
+        }
+
+        # Last line of defence: whatever the wording above, a line that looks like a connection
+        # string, account key or SAS token never reaches the note (or the clipboard).
+        if ($text -match $script:SecretLikePattern) {
+            $text = '{0}: details left out of this note because they looked like a storage key.' -f $e.Name
         }
 
         $notChecked = ($e.PSObject.Properties.Name -contains 'NotChecked') -and [bool]$e.NotChecked
@@ -1374,9 +1490,10 @@ function ConvertTo-CitrixFSLogixTriageTicketNote {
         $stampArgs['Now'] = $started
     }
     $stamp = New-TicketNoteStamp @stampArgs
+    $nextSteps = @(@($Result.RecommendedNextSteps) | Where-Object { [string]$_ -notmatch $script:SecretLikePattern })
 
     return New-TicketNote -Tool 'Citrix-FSLogix-Triage' -Headline (Get-TriageHeadline -Result $Result) -ScopeLine $scopeLine `
-        -Items $items.ToArray() -NextSteps @($Result.RecommendedNextSteps) -Stamp $stamp -EvidencePaths $EvidencePaths
+        -Items $items.ToArray() -NextSteps $nextSteps -Stamp $stamp -EvidencePaths $EvidencePaths
 }
 
 # The ticket-note kit ships beside this script (a copy of TicketNote\CaseKit.ps1). Without it

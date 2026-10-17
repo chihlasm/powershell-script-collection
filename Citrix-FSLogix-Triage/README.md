@@ -96,7 +96,7 @@ Evidence: FSLogixTriage_CTXVDA01_2026-10-17_093012.txt, FSLogixTriage_CTXVDA01_2
 ```
 
 - **Ruled out** only lists checks that really ran. Anything the tool could not read (ping, services, registry, event logs, disks), a profile share it could not confirm from the server (the double hop below; the line says whether it worked from your PC), and a Cloud Cache location it does not test are listed under **Could not check**. In the report they stay warnings, as before.
-- The FSLogix settings block and Cloud Cache entries (their connection strings) never go into the note. They stay in the text report.
+- The FSLogix settings block and Cloud Cache entries (their connection strings) never go into the note. They stay in the text report, with secrets redacted. A misspelled Cloud Cache entry is reported by which part is wrong, never by repeating the entry, so a typo such as a missing comma cannot carry a storage key into the report, the note or the clipboard. As a last check, any note line that still looks like a connection string, account key or SAS token is replaced.
 - **Where the files go:**
   - `-TicketNumber 482113`: the text report, the CSV and `Note_<date>_<time>_Citrix-FSLogix-Triage.txt` go into `Ticket_482113` under `-OutputPath`, or under `%USERPROFILE%\Documents\TicketNotes` when `-OutputPath` is not given. A ticket number that does not fit (letters, digits, `-` or `_`, up to 32 characters) is refused with a `[FAIL]` line and exit code 3, before anything is checked.
   - `-OutputPath` alone: the note is saved next to the reports.

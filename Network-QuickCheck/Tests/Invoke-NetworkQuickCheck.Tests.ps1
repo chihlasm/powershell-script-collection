@@ -191,42 +191,55 @@ Describe 'ticket note (adapter)' {
         Mock Test-Connection { throw 'Testing connection to computer filesrv01 failed: No such host is known.' }
         $r = Invoke-NetworkQuickCheck -TargetAddress filesrv01 -Port 445
         $n = Get-NoteLines $r
-        @(Get-NoteSection $n.Lines 'Could not check:' | Where-Object { $_ -match '(?i)ping' }).Count | Should -BeGreaterThan 0
-        @(Get-NoteSection $n.Lines 'Ruled out:' | Where-Object { $_ -match '(?i)ping' }).Count | Should -Be 0
-        @(Get-NoteSection $n.Lines 'Checked:' | Where-Object { $_ -match '(?i)ping' }).Count | Should -Be 0 -Because 'a ping that could not run is not a finding'
+        $section = Get-NoteSection $n.Lines 'Could not check:'
+        @($section | Where-Object { $_ -match '(?i)ping' }).Count | Should -BeGreaterThan 0
+        $section = Get-NoteSection $n.Lines 'Ruled out:'
+        @($section | Where-Object { $_ -match '(?i)ping' }).Count | Should -Be 0
+        $section = Get-NoteSection $n.Lines 'Checked:'
+        @($section | Where-Object { $_ -match '(?i)ping' }).Count | Should -Be 0 -Because 'a ping that could not run is not a finding'
 
         Mock Test-Connection { $true }
         $n = Get-NoteLines (Invoke-NetworkQuickCheck -TargetAddress filesrv01 -Port 445)
-        @(Get-NoteSection $n.Lines 'Ruled out:' | Where-Object { $_ -match 'answered a ping' }).Count | Should -Be 1
-        @(Get-NoteSection $n.Lines 'Could not check:' | Where-Object { $_ -match '(?i)ping' }).Count | Should -Be 0
+        $section = Get-NoteSection $n.Lines 'Ruled out:'
+        @($section | Where-Object { $_ -match 'answered a ping' }).Count | Should -Be 1
+        $section = Get-NoteSection $n.Lines 'Could not check:'
+        @($section | Where-Object { $_ -match '(?i)ping' }).Count | Should -Be 0
 
         Mock Test-TcpPort -ParameterFilter { $Port -eq 445 } { [PSCustomObject]@{ Succeeded = $false; LocalAddress = ''; RemoteAddress = ''; Error = 'No answer within 3000 ms' } }
         $n = Get-NoteLines (Invoke-NetworkQuickCheck -TargetAddress filesrv01 -Port 445)
-        @(Get-NoteSection $n.Lines 'Checked:' | Where-Object { $_ -like '- PROBLEM: *' -and $_ -match 'port 445' }).Count | Should -Be 1
-        @(Get-NoteSection $n.Lines 'Ruled out:' | Where-Object { $_ -match 'port 445' }).Count | Should -Be 0
+        $section = Get-NoteSection $n.Lines 'Checked:'
+        @($section | Where-Object { $_ -like '- PROBLEM: *' -and $_ -match 'port 445' }).Count | Should -Be 1
+        $section = Get-NoteSection $n.Lines 'Ruled out:'
+        @($section | Where-Object { $_ -match 'port 445' }).Count | Should -Be 0
     }
 
     It 'NetworkMapping_PingBlocked: a ping that ran and got no answer is a WARNING under Checked, in neither other section' {
         Mock Test-Connection { $false }
         $n = Get-NoteLines (Invoke-NetworkQuickCheck -TargetAddress filesrv01 -Port 445)
-        @(Get-NoteSection $n.Lines 'Checked:' | Where-Object { $_ -like '- WARNING: *' -and $_ -match 'did not answer a ping' }).Count | Should -Be 1
-        @(Get-NoteSection $n.Lines 'Ruled out:' | Where-Object { $_ -match '(?i)ping' }).Count | Should -Be 0
-        @(Get-NoteSection $n.Lines 'Could not check:' | Where-Object { $_ -match '(?i)ping' }).Count | Should -Be 0
+        $section = Get-NoteSection $n.Lines 'Checked:'
+        @($section | Where-Object { $_ -like '- WARNING: *' -and $_ -match 'did not answer a ping' }).Count | Should -Be 1
+        $section = Get-NoteSection $n.Lines 'Ruled out:'
+        @($section | Where-Object { $_ -match '(?i)ping' }).Count | Should -Be 0
+        $section = Get-NoteSection $n.Lines 'Could not check:'
+        @($section | Where-Object { $_ -match '(?i)ping' }).Count | Should -Be 0
     }
 
     It 'NetworkMapping_RouteReadFails: a routing table that could not be read is Could not check, not Ruled out' {
         Mock Get-NetRoute { throw 'Access denied' }
         $r = Invoke-NetworkQuickCheck -TargetAddress filesrv01 -Port 445
         $n = Get-NoteLines $r
-        @(Get-NoteSection $n.Lines 'Could not check:' | Where-Object { $_ -match 'Could not read the routing table' }).Count | Should -Be 1
-        @(Get-NoteSection $n.Lines 'Ruled out:' | Where-Object { $_ -match '(?i)gateway|routing' }).Count | Should -Be 0
+        $section = Get-NoteSection $n.Lines 'Could not check:'
+        @($section | Where-Object { $_ -match 'Could not read the routing table' }).Count | Should -Be 1
+        $section = Get-NoteSection $n.Lines 'Ruled out:'
+        @($section | Where-Object { $_ -match '(?i)gateway|routing' }).Count | Should -Be 0
         $r.Status | Should -Be 'Warn' -Because 'the verdict is unchanged: the gate only moves the note'
     }
 
     It 'NetworkMapping_NameNotFound: a name missing from DNS is a PROBLEM under Checked' {
         Mock Resolve-TargetName { throw 'filesrv99 : DNS name does not exist' }
         $n = Get-NoteLines (Invoke-NetworkQuickCheck -TargetAddress filesrv99 -Port 445)
-        @(Get-NoteSection $n.Lines 'Checked:' | Where-Object { $_ -like '- PROBLEM: *could not be found in DNS*' }).Count | Should -Be 1
+        $section = Get-NoteSection $n.Lines 'Checked:'
+        @($section | Where-Object { $_ -like '- PROBLEM: *could not be found in DNS*' }).Count | Should -Be 1
     }
 
     It 'AC28_NetworkNoRouteCmdlet: no Get-NetRoute -> Could not check says so; verdict and exit status are unchanged' {
@@ -236,7 +249,8 @@ Describe 'ticket note (adapter)' {
         $n = Get-NoteLines $r
         $could = Get-NoteSection $n.Lines 'Could not check:'
         $could | Should -Contain '- Default gateway: not checked (this Windows version has no Get-NetRoute)'
-        @(Get-NoteSection $n.Lines 'Ruled out:' | Where-Object { $_ -match '(?i)gateway' }).Count | Should -Be 0
+        $section = Get-NoteSection $n.Lines 'Ruled out:'
+        @($section | Where-Object { $_ -match '(?i)gateway' }).Count | Should -Be 0
         $r.Status | Should -Be $withRoute.Status
         $r.Answer | Should -Be $withRoute.Answer
         @($r.Evidence | Where-Object { $_.Name -eq 'Default gateway' }).Count | Should -Be 0 -Because 'the note-only item must not become a new evidence item (it would change the verdict)'
@@ -244,8 +258,10 @@ Describe 'ticket note (adapter)' {
 
     It 'AC29_NetworkIpTarget: an IP target leaves the name-lookup item out of Ruled out and Could not check, and the scope line says so' {
         $n = Get-NoteLines (Invoke-NetworkQuickCheck -TargetAddress 10.0.0.5 -Port 445)
-        @(Get-NoteSection $n.Lines 'Ruled out:' | Where-Object { $_ -match '(?i)name lookup|dns' }).Count | Should -Be 0
-        @(Get-NoteSection $n.Lines 'Could not check:' | Where-Object { $_ -match '(?i)name lookup|dns' }).Count | Should -Be 0
+        $section = Get-NoteSection $n.Lines 'Ruled out:'
+        @($section | Where-Object { $_ -match '(?i)name lookup|dns' }).Count | Should -Be 0
+        $section = Get-NoteSection $n.Lines 'Could not check:'
+        @($section | Where-Object { $_ -match '(?i)name lookup|dns' }).Count | Should -Be 0
         $checked = Get-NoteSection $n.Lines 'Checked:'
         $checked[0] | Should -Match '(?i)no name lookup was needed'
     }
@@ -307,6 +323,7 @@ Describe 'ticket note (script, in-process)' {
     AfterAll {
         Clear-NqcAliases
         Remove-Item -LiteralPath Function:\NqcFake-TcpPort, Function:\NqcFake-Resolve, Function:\NqcFake-Clipboard, Function:\NqcFake-DefaultRoot, Function:\NqcFake-Throw -ErrorAction SilentlyContinue
+        Remove-Variable -Name NqcTcpOk, NqcRoot -Scope Global -ErrorAction SilentlyContinue
     }
 
     It 'loading the functions also loads the kit (the adapter can call New-TicketNote)' {

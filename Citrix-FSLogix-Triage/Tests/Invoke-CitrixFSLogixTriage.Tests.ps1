@@ -201,6 +201,72 @@ Describe 'Secrets stay out of the output' {
     It 'keeps an SMB path readable' {
         ConvertTo-RedactedFSLogixCloudCacheProviderEntry -ProviderString 'type=smb,connectionString=\\fs02\p' | Should -Be 'type=smb,connectionString=\\fs02\p'
     }
+
+    # Regression: with the comma after type= (or name=) missing, the field read ran on to the end
+    # of the entry, and "type '<rest of the entry>'" put the storage key in the findings.
+    It 'never echoes a malformed entry into the findings, console, text report or CSV (<Case>)' -ForEach @(
+        @{ Case = 'comma missing after type='; Misspelled = 1; Entry = 'type=azure;name=BLOB;connectionString="DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=SECRETKEY"' }
+        @{ Case = 'comma missing after name='; Misspelled = 1; Entry = 'type=azure,name=BLOB;connectionString="DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=SECRETKEY"' }
+        @{ Case = 'smb with a connection string'; Misspelled = 0; Entry = 'type=smb,connectionString="DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=SECRETKEY"' }
+    ) {
+        Set-HealthyHost -Profile @{ Enabled = '1'; CCDLocations = $Entry }
+        $r = Invoke-CitrixFSLogixTriage -ComputerName RDSH01
+        $leak = 'SECRETKEY|AccountKey|AccountName|DefaultEndpointsProtocol'
+        ($r.Evidence | Out-String -Width 4096) | Should -Not -Match $leak
+        ($r.RawOutput | ConvertTo-Json -Depth 5) | Should -Not -Match $leak
+        $r.Error | Should -Not -Match $leak
+        (Get-Evidence $r 'Cloud Cache location spelling').Count | Should -Be $Misspelled
+        (Get-Evidence $r 'Profile storage reachable').Detail | Should -Match 'was not tested'
+        Should -Invoke Invoke-Command -Times 0 -Exactly
+        Should -Invoke Test-Path -Times 0 -Exactly
+
+        $console = @(Write-TriageConsole -Result $r 6>&1 | ForEach-Object { "$_" }) -join "`n"
+        $console | Should -Match 'Profile storage reachable'
+        $console | Should -Not -Match $leak
+
+        # Test-Path is mocked to $true here, so the report goes straight into $TestDrive.
+        $files = @(Export-TriageReport -Result $r -OutputPath $TestDrive)
+        $files.Count | Should -Be 2
+        foreach ($file in $files) {
+            [System.IO.File]::ReadAllText($file) | Should -Not -Match $leak
+        }
+    }
+
+    It 'names the misspelled key, never its value' {
+        $problems = @(Test-FSLogixCloudCacheProviderSpelling -ProviderString 'TYPE=Azure-SECRETKEY,ConnectionString="AccountKey=SECRETKEY"')
+        $problems.Count | Should -Be 3
+        ($problems -join "`n") | Should -Not -MatchExactly 'SECRETKEY|Azure-|AccountKey|TYPE|ConnectionString='
+        $problems | Should -Contain "the type= key is not written exactly 'type=' (lower case)"
+        $problems | Should -Contain "the connectionString= key is not written exactly 'connectionString=' (capital S)"
+    }
+
+    It 'shows the provider type only as smb, azure or unknown' {
+        Get-FSLogixCloudCacheProviderType -ProviderString 'type=SMB,connectionString=\\fs02\p' | Should -Be 'smb'
+        Get-FSLogixCloudCacheProviderType -ProviderString 'type=azure,connectionString="|fslogix/k|"' | Should -Be 'azure'
+        Get-FSLogixCloudCacheProviderType -ProviderString 'type=azure;AccountKey=SECRETKEY' | Should -Be 'unknown'
+        Get-FSLogixCloudCacheProviderType -ProviderString 'connectionString=\\fs02\p' | Should -Be 'unknown'
+    }
+
+    It 'does not test or echo a VHDLocations entry that is really a connection string' {
+        Set-HealthyHost -Profile @{ Enabled = '1'; VHDLocations = 'DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=SECRETKEY' }
+        $r = Invoke-CitrixFSLogixTriage -ComputerName RDSH01
+        $leak = 'SECRETKEY|AccountKey|AccountName|DefaultEndpointsProtocol'
+        ($r.Evidence | Out-String -Width 4096) | Should -Not -Match $leak
+        ($r.RawOutput | ConvertTo-Json -Depth 5) | Should -Not -Match $leak
+        (ConvertTo-TriageText -Result $r) -join "`n" | Should -Not -Match $leak
+        (Get-Evidence $r 'Profile storage reachable').Detail | Should -Match 'looks like a storage key'
+        Should -Invoke Invoke-Command -Times 0 -Exactly
+    }
+
+    It 'describes, rather than repeats, an Enabled value that is not a number' {
+        Set-HealthyHost -Profile @{ Enabled = 'AccountKey=SECRETKEY'; VHDLocations = '\\fs01\profiles' }
+        $r = Invoke-CitrixFSLogixTriage -ComputerName RDSH01
+        $item = Get-Evidence $r 'FSLogix profiles switched on'
+        $item.Status | Should -Be 'Fail'
+        $item.Detail | Should -Be 'FSLogix profile containers are switched off (Enabled is set, but not to 1).'
+        Set-HealthyHost -Profile @{ Enabled = '0'; VHDLocations = '\\fs01\profiles' }
+        (Get-Evidence (Invoke-CitrixFSLogixTriage -ComputerName RDSH01) 'FSLogix profiles switched on').Detail | Should -Be 'FSLogix profile containers are switched off (Enabled = 0).'
+    }
 }
 
 Describe 'Profile share reachability and the double hop' {
@@ -356,9 +422,12 @@ Describe 'ticket note (adapter)' {
         $r = Invoke-CitrixFSLogixTriage -ComputerName RDSH01 -UserName jdoe
         $r.Status | Should -Be 'Warn'
         $n = Get-NoteLines $r
-        @(Get-NoteSection $n.Lines 'Could not check:' | Where-Object { $_ -match [regex]::Escape($Find) }).Count | Should -BeGreaterThan 0
-        @(Get-NoteSection $n.Lines 'Ruled out:' | Where-Object { $_ -match $NotRuledOut }).Count | Should -Be 0
-        @(Get-NoteSection $n.Lines 'Checked:' | Where-Object { $_ -match [regex]::Escape($Find) }).Count | Should -Be 0 -Because 'a check that could not run is not a finding'
+        $section = Get-NoteSection $n.Lines 'Could not check:'
+        @($section | Where-Object { $_ -match [regex]::Escape($Find) }).Count | Should -BeGreaterThan 0
+        $section = Get-NoteSection $n.Lines 'Ruled out:'
+        @($section | Where-Object { $_ -match $NotRuledOut }).Count | Should -Be 0
+        $section = Get-NoteSection $n.Lines 'Checked:'
+        @($section | Where-Object { $_ -match [regex]::Escape($Find) }).Count | Should -Be 0 -Because 'a check that could not run is not a finding'
     }
 
     It 'AC31_TriageDoubleHop: share not confirmed from the server -> Could not check, and says whether it worked from your PC (<Case>)' -ForEach @(
@@ -369,18 +438,23 @@ Describe 'ticket note (adapter)' {
         if ($FromPc) { Mock Test-Path { $true } } else { Mock Test-Path { $false } }
         $r = Invoke-CitrixFSLogixTriage -ComputerName RDSH01 -UserName jdoe
         $n = Get-NoteLines $r
-        $could = @(Get-NoteSection $n.Lines 'Could not check:' | Where-Object { $_ -match 'could not be confirmed from RDSH01' })
+        $section = Get-NoteSection $n.Lines 'Could not check:'
+        $could = @($section | Where-Object { $_ -match 'could not be confirmed from RDSH01' })
         $could.Count | Should -Be 1
         $could[0] | Should -Match ([regex]::Escape($Says))
-        @(Get-NoteSection $n.Lines 'Ruled out:' | Where-Object { $_ -match '(?i)profile share|fs01' }).Count | Should -Be 0
-        @(Get-NoteSection $n.Lines 'Checked:' | Where-Object { $_ -match 'could not be confirmed' }).Count | Should -Be 0
+        $section = Get-NoteSection $n.Lines 'Ruled out:'
+        @($section | Where-Object { $_ -match '(?i)profile share|fs01' }).Count | Should -Be 0
+        $section = Get-NoteSection $n.Lines 'Checked:'
+        @($section | Where-Object { $_ -match 'could not be confirmed' }).Count | Should -Be 0
     }
 
     It 'AC31_TriageCloudCacheNotTested: a Cloud Cache location that is not a file share is Could not check' {
         Set-HealthyHost -Profile @{ Enabled = '1'; CCDLocations = 'type=azure,name="BLOB",connectionString="|fslogix/k|"' }
         $n = Get-NoteLines (Invoke-CitrixFSLogixTriage -ComputerName RDSH01)
-        @(Get-NoteSection $n.Lines 'Could not check:' | Where-Object { $_ -match 'was not tested' }).Count | Should -Be 1
-        @(Get-NoteSection $n.Lines 'Ruled out:' | Where-Object { $_ -match 'was not tested|Cloud Cache location' }).Count | Should -Be 0
+        $section = Get-NoteSection $n.Lines 'Could not check:'
+        @($section | Where-Object { $_ -match 'was not tested' }).Count | Should -Be 1
+        $section = Get-NoteSection $n.Lines 'Ruled out:'
+        @($section | Where-Object { $_ -match 'was not tested|Cloud Cache location' }).Count | Should -Be 0
     }
 
     It 'AC32_TriageSettingsStayOut: Cloud Cache connection strings and the FSLogix settings block never reach the note' {
@@ -399,13 +473,51 @@ Describe 'ticket note (adapter)' {
         $all | Should -Not -Match 'CCDLocations=|VHDLocations=|Enabled='
     }
 
+    It 'AC32_TriageSettingsStayOut: a misspelled Cloud Cache entry says what is wrong without the entry (<Case>)' -ForEach @(
+        @{ Case = 'comma missing after type='; Entry = 'type=azure;name=BLOB;connectionString="DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=SECRETKEY"' }
+        @{ Case = 'comma missing after name='; Entry = 'type=azure,name=BLOB;connectionString="DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=SECRETKEY"' }
+        @{ Case = 'key in the wrong case'; Entry = 'type=AZURE,name="BLOB",connectionstring="DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=SECRETKEY"' }
+    ) {
+        Set-HealthyHost -Profile @{ Enabled = '1'; CCDLocations = $Entry }
+        $r = Invoke-CitrixFSLogixTriage -ComputerName RDSH01 -UserName jdoe
+        $n = Get-NoteLines $r
+        $checked = Get-NoteSection $n.Lines 'Checked:'
+        @($checked | Where-Object { $_ -like '- PROBLEM: A Cloud Cache (CCDLocations) entry is misspelled*' }).Count | Should -Be 1
+        foreach ($pasteSafe in $false, $true) {
+            $all = (ConvertTo-TicketNoteText -Note $n.Note -PasteSafe:$pasteSafe) -join "`n"
+            $all | Should -Not -Match '(?i)connection\s?string'
+            $all | Should -Not -Match 'SECRETKEY|AccountKey|AccountName|DefaultEndpointsProtocol'
+            $all | Should -Not -Match 'secrets redacted'
+            $all | Should -Not -Match 'CCDLocations=|VHDLocations=|Enabled='
+        }
+    }
+
+    It 'NoteSecretFilter: a finding or next step that looks like a key is replaced, whatever its wording' {
+        $r = New-CitrixFSLogixResult -Status 'Warn' -Summary 's' -StartedAt '2026-10-17 09:00:00' -Errors @() `
+            -Evidence @(
+                New-EvidenceItem -Name 'Odd finding' -Status 'Warn' -Detail 'Saw AccountKey=SECRETKEY here.'
+                New-EvidenceItem -Name 'Odd pass' -Status 'Pass' -Detail 'sv=2022&sig=SECRETSIG'
+                New-EvidenceItem -Name 'Profile storage reachable' -Status 'Warn' -NotChecked -Detail 'type ''azure;AccountName=acct'' was not tested'
+            ) `
+            -RecommendedNextSteps @('Use DefaultEndpointsProtocol=https;AccountKey=SECRETKEY', 'Start with the first problem listed.') `
+            -RawOutput ([PSCustomObject]@{ AffectedDevice = 'RDSH01'; AffectedUser = ''; EventLookbackHours = 24 })
+        $n = Get-NoteLines $r
+        $all = $n.Lines -join "`n"
+        $all | Should -Not -Match 'SECRETKEY|SECRETSIG|AccountName|AccountKey|DefaultEndpointsProtocol'
+        $n.Lines | Should -Contain '- WARNING: Odd finding: details left out of this note because they looked like a storage key.'
+        $n.Lines | Should -Contain '- Start with the first problem listed.'
+        $could = Get-NoteSection $n.Lines 'Could not check:'
+        $could | Should -Contain '- A profile storage location was not tested.'
+    }
+
     It 'AC33_TriageFindingsAndClears: a missing event log is a WARNING under Checked; a running frxsvc is Ruled out' {
         Mock Get-WinEvent { throw ('There is not an event log on the RDSH01 computer that matches "{0}".' -f $FilterHashtable.LogName) }
         $n = Get-NoteLines (Invoke-CitrixFSLogixTriage -ComputerName RDSH01)
         $checked = Get-NoteSection $n.Lines 'Checked:'
         @($checked | Where-Object { $_ -like '- WARNING: *Microsoft-FSLogix-Apps/Operational does not exist*' }).Count | Should -Be 1
         @($checked | Where-Object { $_ -like '- WARNING: *' }).Count | Should -Be 4 -Because 'four logs are missing'
-        @(Get-NoteSection $n.Lines 'Could not check:' | Where-Object { $_ -match 'does not exist' }).Count | Should -Be 0
+        $section = Get-NoteSection $n.Lines 'Could not check:'
+        @($section | Where-Object { $_ -match 'does not exist' }).Count | Should -Be 0
         $ruled = Get-NoteSection $n.Lines 'Ruled out:'
         $ruled | Should -Contain '- FSLogix Apps Services is running.'
     }
@@ -418,8 +530,10 @@ Describe 'ticket note (adapter)' {
             )
         }
         $n = Get-NoteLines (Invoke-CitrixFSLogixTriage -ComputerName RDSH01)
-        @(Get-NoteSection $n.Lines 'Checked:' | Where-Object { $_ -like '- PROBLEM: FSLogix Apps Services is Stopped*' }).Count | Should -Be 1
-        @(Get-NoteSection $n.Lines 'Ruled out:' | Where-Object { $_ -match 'FSLogix Apps Services' }).Count | Should -Be 0
+        $section = Get-NoteSection $n.Lines 'Checked:'
+        @($section | Where-Object { $_ -like '- PROBLEM: FSLogix Apps Services is Stopped*' }).Count | Should -Be 1
+        $section = Get-NoteSection $n.Lines 'Ruled out:'
+        @($section | Where-Object { $_ -match 'FSLogix Apps Services' }).Count | Should -Be 0
     }
 
     It 'TriageMapping_HeadlineStampSteps: headline reuses the triage headline, stamp is the target, next steps and evidence are listed' {
@@ -469,6 +583,14 @@ Describe 'ticket note (script, in-process)' {
                 [PSCustomObject]@{ Label = 'Policies path (not documented for profile settings)'; Path = 'HKLM:\SOFTWARE\Policies\FSLogix\Profiles'; Found = $false; Error = '' }
             )
         }
+        # A CCDLocations entry with the comma after type= missing (regression: it used to leak
+        # the storage key into the findings, the note and the clipboard).
+        function global:TrgFake-RegistryMalformed { param($ComputerName, $IsLocal)
+            @(
+                [PSCustomObject]@{ Label = 'Profile settings'; Path = 'HKLM:\SOFTWARE\FSLogix\Profiles'; Found = $true; Error = ''; Values = [PSCustomObject]@{ Enabled = '1'; CCDLocations = 'type=azure;name=BLOB;connectionString="DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=SECRETKEY"' } }
+                [PSCustomObject]@{ Label = 'Policies path (not documented for profile settings)'; Path = 'HKLM:\SOFTWARE\Policies\FSLogix\Profiles'; Found = $false; Error = '' }
+            )
+        }
         function global:TrgFake-Clipboard { param($Text) }
         function global:TrgFake-DefaultRoot { $global:TrgRoot }
         function global:TrgFake-Throw { throw 'simulated note failure' }
@@ -504,7 +626,8 @@ Describe 'ticket note (script, in-process)' {
     AfterEach { Clear-TrgAliases }
     AfterAll {
         Clear-TrgAliases
-        Remove-Item -LiteralPath Function:\TrgFake-Registry, Function:\TrgFake-Clipboard, Function:\TrgFake-DefaultRoot, Function:\TrgFake-Throw -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath Function:\TrgFake-Registry, Function:\TrgFake-RegistryMalformed, Function:\TrgFake-Clipboard, Function:\TrgFake-DefaultRoot, Function:\TrgFake-Throw -ErrorAction SilentlyContinue
+        Remove-Variable -Name TrgRoot -Scope Global -ErrorAction SilentlyContinue
     }
 
     It 'loading the functions also loads the kit (the adapter can call New-TicketNote)' {
@@ -576,6 +699,34 @@ Describe 'ticket note (script, in-process)' {
     It 'Wiring_ClipboardIsPasteSafe: the clipboard text is redacted by default' {
         $null = Invoke-Trg @{ ComputerName = 'RDSH01' }
         Should -Invoke Set-Clipboard -Times 1 -Exactly -ParameterFilter { $Value -notmatch 'fs01' -and $Value -match '\[Ticket note\] Citrix-FSLogix-Triage' }
+    }
+
+    It 'Wiring_MalformedCloudCacheStaysOut: a malformed entry never reaches the clipboard, console, reports or either note (regression)' {
+        Set-Alias -Name Get-FSLogixRegistrySnapshot -Value TrgFake-RegistryMalformed -Scope Global
+        $leak = 'SECRETKEY|AccountKey|AccountName|DefaultEndpointsProtocol'
+        $safe = Join-Path $TestDrive 'malformed-safe'
+        $full = Join-Path $TestDrive 'malformed-full'
+
+        $x = Invoke-Trg @{ ComputerName = 'RDSH01'; OutputPath = $safe }
+        $x.ExitCode | Should -Be 2 -Because 'the misspelled entry is a problem'
+        $x.Text | Should -Match 'Cloud Cache location spelling'
+        $x.Text | Should -Not -Match $leak
+        Should -Invoke Set-Clipboard -Times 1 -Exactly
+        Should -Invoke Set-Clipboard -Times 1 -Exactly -ParameterFilter { $Value -match '\[Ticket note\]' -and $Value -notmatch 'SECRETKEY|AccountKey|AccountName|DefaultEndpointsProtocol' }
+
+        $null = Invoke-Trg @{ ComputerName = 'RDSH01'; OutputPath = $full; NoClipboard = $true; FullDetail = $true }
+        foreach ($dir in $safe, $full) {
+            $files = @(Get-ChildItem -LiteralPath $dir -File)
+            @($files | Where-Object { $_.Name -like 'FSLogixTriage_*.txt' }).Count | Should -Be 1
+            @($files | Where-Object { $_.Name -like 'FSLogixTriage_*.csv' }).Count | Should -Be 1
+            @($files | Where-Object { $_.Name -like 'Note_*_Citrix-FSLogix-Triage.txt' }).Count | Should -Be 1
+            foreach ($file in $files) {
+                [System.IO.File]::ReadAllText($file.FullName) | Should -Not -Match $leak -Because $file.Name
+            }
+        }
+        $fullNote = [System.IO.File]::ReadAllText((Get-ChildItem -LiteralPath $full -Filter 'Note_*.txt')[0].FullName)
+        $fullNote | Should -Match 'A Cloud Cache \(CCDLocations\) entry is misspelled'
+        $fullNote | Should -Not -Match '(?i)connection\s?string'
     }
 
     It 'Wiring_ExitCodesUnchanged: with the note on, exit is 0 when healthy, 1 on a warning, 2 on a problem' {
