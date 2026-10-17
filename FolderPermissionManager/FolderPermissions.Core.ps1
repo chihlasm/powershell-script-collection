@@ -59,6 +59,30 @@
       object) and GetSecurityDescriptorSddlForm:
       https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.objectsecurity.setsecuritydescriptorsddlform
       https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.objectsecurity.getsecuritydescriptorsddlform
+    - Copy permissions (Copy-FolderPermission, add only, owner decision D-031):
+      FileSystemAccessRule (account, rights, Allow/Deny and how the rule is propagated),
+      AuthorizationRule.IsInherited (explicitly set or inherited from the parent; the SDDL ACE
+      flag "ID" is INHERITED_ACE), InheritanceFlags and PropagationFlags, and
+      FileSystemSecurity.AddAccessRule (adds a rule, never removes one):
+      https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.filesystemaccessrule
+      https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.authorizationrule.isinherited
+      https://learn.microsoft.com/windows/win32/secauthz/ace-strings
+      https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.inheritanceflags
+      https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.propagationflags
+      https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.filesystemsecurity.addaccessrule
+      FileSystemRights (Synchronize "is automatically set when allowing access and
+      automatically excluded when denying access", so it is left out of the rights shown):
+      https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.filesystemrights
+      Setting a DACL propagates inheritable ACEs to existing child objects; a child whose DACL
+      is protected (SE_DACL_PROTECTED, "inheritance disabled") is not modified by inheritable
+      ACEs, so subfolders that block inheritance are left as they are:
+      https://learn.microsoft.com/windows/win32/api/aclapi/nf-aclapi-setnamedsecurityinfow
+      https://learn.microsoft.com/windows/win32/secauthz/security-descriptor-control
+      NOT VERIFIED: which Win32 call Set-Acl uses (Learn does not say).
+    - -LiteralPath on Test-Path, Get-Item, Get-ChildItem, Get-Acl and Set-Acl: with -Path, [ ]
+      is a wildcard character range, so "HR [old]" matches "HR o" and not itself:
+      https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_wildcards
+      https://learn.microsoft.com/powershell/module/microsoft.powershell.management/test-path
     - RemoveAccessRuleAll removes every rule for the rule's account, whatever its rights:
       https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.filesystemsecurity.removeaccessruleall
       https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.commonobjectsecurity.removeaccessruleall
@@ -727,6 +751,13 @@ function Invoke-SingleItemAclChange {
         Change items whose current permissions cannot be read; the backup lists them as
         'Could not read' (D-027). Only Take ownership uses this: it exists for folders the
         administrator is locked out of.
+    .PARAMETER Plan
+        Optional script block run per existing item with ($Path, $ItemType), before
+        ShouldProcess and without changing anything. It returns $null to go ahead with -Detail,
+        or an object with Detail (this item's Detail instead of -Detail) and/or Result and
+        ErrorText (the item is not changed or backed up, and its row gets that Result). A Plan
+        that throws leaves the item to the normal flow, where an item whose permissions cannot
+        be read is refused. Only Copy permissions uses this.
     #>
     [CmdletBinding()]
     param(
@@ -737,19 +768,26 @@ function Invoke-SingleItemAclChange {
         [Parameter(Mandatory)][string]$Detail,
         [Parameter(Mandatory)][string]$LogFolder,
         [Parameter(Mandatory)][scriptblock]$Change,
-        [switch]$ProceedWhenUnreadable
+        [switch]$ProceedWhenUnreadable,
+        [scriptblock]$Plan
     )
 
     $items = @(foreach ($p in $Path) {
         $itemType = Get-AclItemType -Path $p
+        $planned = $null
+        if ($itemType -and $Plan) {
+            try { $planned = & $Plan $p $itemType } catch { $planned = $null }
+        }
+        $itemDetail = if ($planned -and $planned.Detail) { "$($planned.Detail)" } else { $Detail }
         $state = if (-not $itemType) { 'NotFound' }
-                 elseif ($Cmdlet.ShouldProcess($p, "$Action ($Detail)")) { 'Change' }
+                 elseif ($planned -and $planned.Result) { 'Planned' }
+                 elseif ($Cmdlet.ShouldProcess($p, "$Action ($itemDetail)")) { 'Change' }
                  else { 'WhatIf' }
         $readError = $null
         if ($state -eq 'Change' -and -not $ProceedWhenUnreadable) {
             try { $null = Get-Acl -LiteralPath $p -ErrorAction Stop } catch { $state = 'Unreadable'; $readError = $_.Exception.Message }
         }
-        [PSCustomObject]@{ Path = $p; ItemType = $itemType; State = $state; ReadError = $readError }
+        [PSCustomObject]@{ Path = $p; ItemType = $itemType; State = $state; ReadError = $readError; Detail = $itemDetail; Planned = $planned }
     })
     $toChange = @($items | Where-Object { $_.State -eq 'Change' })
 
@@ -766,22 +804,27 @@ function Invoke-SingleItemAclChange {
     foreach ($item in $items) {
         if ($item.State -eq 'NotFound') {
             $why = if ([string]::IsNullOrWhiteSpace($item.Path)) { 'No path was given.' } else { 'The folder or file does not exist.' }
-            New-PermissionChangeEntry -Action $Action -Target "$($item.Path)" -ItemType 'Unknown' -Detail $Detail `
+            New-PermissionChangeEntry -Action $Action -Target "$($item.Path)" -ItemType 'Unknown' -Detail $item.Detail `
                 -Result 'Skipped (not found)' -ErrorText $why
             continue
         }
+        if ($item.State -eq 'Planned') {
+            New-PermissionChangeEntry -Action $Action -Target $item.Path -ItemType $item.ItemType -Detail $item.Detail `
+                -Result "$($item.Planned.Result)" -ErrorText "$($item.Planned.ErrorText)"
+            continue
+        }
         if ($item.State -eq 'WhatIf') {
-            New-PermissionChangeEntry -Action $Action -Target $item.Path -ItemType $item.ItemType -Detail $Detail -Result 'Skipped (WhatIf)'
+            New-PermissionChangeEntry -Action $Action -Target $item.Path -ItemType $item.ItemType -Detail $item.Detail -Result 'Skipped (WhatIf)'
             continue
         }
         if ($item.State -eq 'Unreadable') {
-            New-PermissionChangeEntry -Action $Action -Target $item.Path -ItemType $item.ItemType -Detail $Detail `
+            New-PermissionChangeEntry -Action $Action -Target $item.Path -ItemType $item.ItemType -Detail $item.Detail `
                 -OldValue 'Could not read' -Result 'Failed' `
                 -ErrorText ("Could not read the current permissions, so nothing was changed. $(Format-Sentence $item.ReadError)".Trim())
             continue
         }
         if ($backupError) {
-            New-PermissionChangeEntry -Action $Action -Target $item.Path -ItemType $item.ItemType -Detail $Detail `
+            New-PermissionChangeEntry -Action $Action -Target $item.Path -ItemType $item.ItemType -Detail $item.Detail `
                 -Result 'Failed' -ErrorText $backupError
             continue
         }
@@ -799,11 +842,11 @@ function Invoke-SingleItemAclChange {
             } elseif ($after -cne $old) {
                 $text += ' The permissions were partly changed and no longer match the backup.'
             }
-            New-PermissionChangeEntry -Action $Action -Target $item.Path -ItemType $item.ItemType -Detail $Detail `
+            New-PermissionChangeEntry -Action $Action -Target $item.Path -ItemType $item.ItemType -Detail $item.Detail `
                 -OldValue $old -NewValue $after -Result 'Failed' -ErrorText $text -BackupFile $backupFile
             continue
         }
-        New-PermissionChangeEntry -Action $Action -Target $item.Path -ItemType $item.ItemType -Detail $Detail `
+        New-PermissionChangeEntry -Action $Action -Target $item.Path -ItemType $item.ItemType -Detail $item.Detail `
             -OldValue $old -NewValue (Get-ItemSddl -Path $item.Path) -Result 'Done' -BackupFile $backupFile
     }
 }
@@ -927,11 +970,115 @@ function Set-ItemOwnerToCurrentUser {
     }
 }
 
+function Format-PermissionRights {
+    <#
+    .SYNOPSIS
+        File-system rights in the words the Add permission dialog uses ('Full control', 'Modify',
+        'Read & execute', 'Read', 'Write'); any other combination as the .NET name
+        ('ReadData, AppendData').
+    .DESCRIPTION
+        Synchronize is left out: Windows sets it on every Allow rule and leaves it off Deny rules,
+        so 'Modify, Synchronize' is what Explorer and the dialog call Modify.
+        https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.filesystemrights
+    #>
+    param([Parameter(Mandatory)][System.Security.AccessControl.FileSystemRights]$Rights)
+
+    $sync = [int][System.Security.AccessControl.FileSystemRights]::Synchronize
+    $value = [int]$Rights -band (-bnot $sync)
+    if ($value -eq 0) { return $Rights.ToString() }
+    $labels = [ordered]@{ FullControl = 'Full control'; Modify = 'Modify'; ReadAndExecute = 'Read & execute'; Read = 'Read'; Write = 'Write' }
+    foreach ($name in $labels.Keys) {
+        if ($value -eq ([int][System.Security.AccessControl.FileSystemRights]$name -band (-bnot $sync))) { return $labels[$name] }
+    }
+    ([System.Security.AccessControl.FileSystemRights]$value).ToString()
+}
+
+function Format-PermissionRule {
+    # 'Allow Modify for BUILTIN\Users': one rule in the words of the change log and status bar.
+    param([Parameter(Mandatory)][System.Security.AccessControl.FileSystemAccessRule]$Rule)
+    "$($Rule.AccessControlType) $(Format-PermissionRights $Rule.FileSystemRights) for $($Rule.IdentityReference.Value)"
+}
+
+function Get-PermissionCopyPlan {
+    <#
+    .SYNOPSIS
+        Reads the target's permissions and adds, in memory only, each rule it does not already
+        have as one of its OWN (explicit) rules. Returns Acl (the changed ACL object, for
+        Set-Acl) and Added (the rules that changed it; empty when nothing would change). Throws
+        when the target's permissions cannot be read.
+    .DESCRIPTION
+        A rule matches when the account, rights, Allow/Deny and the inheritance and propagation
+        flags are all the same. Inherited rules on the target do not count: a rule set on the
+        target itself stays when the parent changes, an inherited one does not.
+        AddAccessRule only adds, and can merge a rule into an existing one for the same account
+        (Read into an existing Modify); when the result is the same security descriptor, Added
+        is empty.
+        https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.filesystemsecurity.addaccessrule
+        https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.authorizationrule.isinherited
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Rule
+    )
+
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $before = $acl.Sddl
+    $added = @(foreach ($r in $Rule) {
+        $exists = @($acl.Access | Where-Object {
+            -not $_.IsInherited -and
+            $_.IdentityReference -eq $r.IdentityReference -and
+            $_.FileSystemRights -eq $r.FileSystemRights -and
+            $_.AccessControlType -eq $r.AccessControlType -and
+            $_.InheritanceFlags -eq $r.InheritanceFlags -and
+            $_.PropagationFlags -eq $r.PropagationFlags
+        })
+        if ($exists.Count -eq 0) {
+            $acl.AddAccessRule($r)
+            $r
+        }
+    })
+    if ($acl.Sddl -ceq $before) { $added = @() }
+    [PSCustomObject]@{ Acl = $acl; Added = $added }
+}
+
+function Get-CopySourceText {
+    # The source folder named in a Copy permissions row's Detail ("Copied from <source>: ..."),
+    # or '' for other rows. A Windows path cannot contain ':' followed by a space.
+    param([AllowNull()][object]$Entry)
+    if ($null -ne $Entry -and "$($Entry.Detail)" -match '^Copied from (.+?): ') { return $Matches[1] }
+    ''
+}
+
 function Copy-FolderPermission {
     <#
     .SYNOPSIS
-        Copies the source folder's rules onto each target (this folder only): rules the target
-        does not already have are added, nothing is removed. Backed up first; one row per target.
+        Adds the permissions set directly on the source folder to each target folder. Nothing is
+        removed, and nothing below a target is written. Backed up first; one row per target.
+    .DESCRIPTION
+        Owner decision D-031 (add only):
+        - Only the source's own (explicit) rules are copied. Rules it inherits from its parent
+          are not: copied onto the target they would become the target's own rules, and later
+          changes higher up the share would no longer reach it. When the source has none, every
+          target is 'Skipped (nothing to copy)' and nothing is read or changed.
+        - Each rule is added as the source's own FileSystemAccessRule object, so the rights,
+          Allow/Deny and "applies to" (inheritance and propagation flags) arrive exactly as they
+          are, with no translation to icacls.
+          https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.filesystemaccessrule
+          https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.inheritanceflags
+          https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.propagationflags
+        - Rules already on the target stay. A target that already has every rule is
+          'Skipped (nothing to copy)' and is not written.
+        - One Set-Acl on the target folder. Windows then passes the new inheritable rules down to
+          the subfolders and files that inherit permissions ("the system automatically
+          propagates any inheritable access control entries (ACEs) to existing child objects"),
+          and not to those that block inheritance (SE_DACL_PROTECTED "prevents the DACL of the
+          security descriptor from being modified by inheritable ACEs"), which are left as they
+          are.
+          https://learn.microsoft.com/windows/win32/api/aclapi/nf-aclapi-setnamedsecurityinfow
+          https://learn.microsoft.com/windows/win32/secauthz/security-descriptor-control
+          NOT VERIFIED: Learn does not say which Win32 call Set-Acl uses to write a folder's
+          permissions; Add permission has always relied on the same propagation.
+        - A target that is a file is refused: the copied rules are for folders.
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param(
@@ -940,7 +1087,8 @@ function Copy-FolderPermission {
         [Parameter(Mandatory)][string]$LogFolder
     )
 
-    $detail = "Permissions copied from $SourcePath"
+    $action = 'Copy permissions'
+    $detail = "Copy the permissions set on $SourcePath"
     try {
         if ([string]::IsNullOrWhiteSpace($SourcePath)) { throw 'No source folder was given.' }
         $sourceAcl = Get-Acl -LiteralPath $SourcePath -ErrorAction Stop
@@ -949,27 +1097,43 @@ function Copy-FolderPermission {
         foreach ($t in $TargetPath) {
             $itemType = Get-AclItemType -Path $t
             if (-not $itemType) { $itemType = 'Unknown' }
-            New-PermissionChangeEntry -Action 'Copy permissions' -Target "$t" -ItemType $itemType -Detail $detail -Result 'Failed' -ErrorText $reason
+            New-PermissionChangeEntry -Action $action -Target "$t" -ItemType $itemType -Detail $detail -Result 'Failed' -ErrorText $reason
         }
         return
     }
-    $sourceRules = @($sourceAcl.Access)
+    $allRules = @($sourceAcl.Access)
+    $sourceRules = @($allRules | Where-Object { -not $_.IsInherited })
 
-    Invoke-SingleItemAclChange -Cmdlet $PSCmdlet -Path $TargetPath -Action 'Copy permissions' -ActionSlug 'CopyPermissions' `
-        -Detail $detail -LogFolder $LogFolder -Change {
-        param($p, $itemType)
-        $acl = Get-Acl -LiteralPath $p -ErrorAction Stop
-        foreach ($rule in $sourceRules) {
-            $exists = @($acl.Access | Where-Object {
-                $_.IdentityReference -eq $rule.IdentityReference -and
-                $_.FileSystemRights -eq $rule.FileSystemRights -and
-                $_.AccessControlType -eq $rule.AccessControlType -and
-                $_.InheritanceFlags -eq $rule.InheritanceFlags -and
-                $_.PropagationFlags -eq $rule.PropagationFlags
-            })
-            if ($exists.Count -eq 0) { $acl.AddAccessRule($rule) }
+    if ($sourceRules.Count -eq 0) {
+        $nothing = "Nothing to copy: $SourcePath has no permissions of its own."
+        # Split-Path -Parent is a string operation: no wildcards, nothing is read.
+        $parent = Split-Path -Path $SourcePath -Parent
+        if ($allRules.Count -gt 0 -and $parent) { $nothing += " All of its permissions come from $parent." }
+        foreach ($t in $TargetPath) {
+            $itemType = Get-AclItemType -Path $t
+            if (-not $itemType) { $itemType = 'Unknown' }
+            New-PermissionChangeEntry -Action $action -Target "$t" -ItemType $itemType -Detail $nothing -Result 'Skipped (nothing to copy)'
         }
-        Set-Acl -LiteralPath $p -AclObject $acl -ErrorAction Stop
+        return
+    }
+
+    Invoke-SingleItemAclChange -Cmdlet $PSCmdlet -Path $TargetPath -Action $action -ActionSlug 'CopyPermissions' `
+        -Detail $detail -LogFolder $LogFolder -Plan {
+        param($p, $itemType)
+        if ($itemType -eq 'File') {
+            return [PSCustomObject]@{ Result = 'Failed'; ErrorText = "$p is a file. Copy permissions copies to folders only." }
+        }
+        # Throws when the target cannot be read: the normal flow then refuses it.
+        $copy = Get-PermissionCopyPlan -Path $p -Rule $sourceRules
+        if ($copy.Added.Count -eq 0) {
+            return [PSCustomObject]@{ Result = 'Skipped (nothing to copy)'; Detail = 'Already has these permissions; nothing changed.' }
+        }
+        [PSCustomObject]@{ Detail = "Copied from $($SourcePath): $((@($copy.Added | ForEach-Object { Format-PermissionRule $_ })) -join '; ')" }
+    } -Change {
+        param($p, $itemType)
+        # Read again: the target may have changed since it was checked.
+        $copy = Get-PermissionCopyPlan -Path $p -Rule $sourceRules
+        if ($copy.Added.Count -gt 0) { Set-Acl -LiteralPath $p -AclObject $copy.Acl -ErrorAction Stop }
     }
 }
 
@@ -1480,9 +1644,14 @@ function Get-ChangeResultMessage {
             else { "Removed $($first.Detail)", 'from' }
         }
         'Take ownership'    { 'Took ownership', 'of' }
-        'Copy permissions'  { $first.Detail, 'to' }
+        'Copy permissions'  {
+            # Each Done row's Detail lists the rules added to that target; the line names the source.
+            $source = Get-CopySourceText @($done)[0]
+            if ($source) { "Permissions copied from $source", 'to' } else { $first.Detail, 'to' }
+        }
         default             { $first.Action, 'on' }
     }
+    $upToDate = @($all | Where-Object { $_.Result -eq 'Skipped (nothing to copy)' })
     $types = @($all | ForEach-Object { $_.ItemType } | Where-Object { $_ -ne 'Unknown' } | Sort-Object -Unique)
     $noun = if ($types.Count -eq 1 -and $types[0] -eq 'File') { 'files' } elseif ($types.Count -eq 1 -and $types[0] -eq 'Folder') { 'folders' } else { 'items' }
     $backup = @($all | Where-Object { $_.BackupFile } | ForEach-Object { $_.BackupFile } | Select-Object -First 1)
@@ -1496,6 +1665,11 @@ function Get-ChangeResultMessage {
     if ($done.Count -gt 0) {
         $where = if ($all.Count -eq 1) { $first.Target } else { "$($done.Count) of $($all.Count) $noun" }
         $parts.Add("$phrase $preposition $where.")
+        if ($first.Action -eq 'Copy permissions') {
+            # One Set-Acl on each target: Windows passes the new rules to the items below that
+            # inherit, never to those that block inheritance (see Copy-FolderPermission).
+            $parts.Add('Subfolders and files that inherit permissions get them too. Any that block inheritance were not changed.')
+        }
     } elseif ($whatIf.Count -eq $all.Count) {
         $parts.Add("WhatIf: nothing was changed ($($all.Count) $noun would be).")
     } elseif ($all.Count -eq 1 -and $failed.Count -eq 1) {
@@ -1509,8 +1683,18 @@ function Get-ChangeResultMessage {
         } else {
             $parts.Add("$($first.Action) failed on $($first.Target): $err Nothing was changed.")
         }
-    } elseif ($touched.Count -eq 0) {
+    } elseif ($touched.Count -eq 0 -and $upToDate.Count -lt $all.Count) {
         $parts.Add('Nothing was changed.')
+    }
+    if ($upToDate.Count -gt 0) {
+        # The source has no permissions of its own: every row carries the same sentence.
+        $noOwn = @($upToDate | Where-Object { $_.Detail -like 'Nothing to copy:*' })
+        if ($noOwn.Count -gt 0) { $parts.Add($noOwn[0].Detail) }
+        $already = @($upToDate | Where-Object { $_.Detail -notlike 'Nothing to copy:*' })
+        if ($already.Count -gt 0) {
+            if ($all.Count -eq 1) { $parts.Add("$($first.Target) already has these permissions, so nothing was changed.") }
+            else { $parts.Add("$($already.Count) folder(s) already had these permissions and were not changed.") }
+        }
     }
     if ($failed.Count -gt 0 -and $all.Count -gt 1) {
         $parts.Add("$($failed.Count) failed. First error ($($f.Target)): $err")

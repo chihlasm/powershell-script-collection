@@ -13,7 +13,7 @@ A browser-based interface for managing folder permissions across local drives an
 - View ownership, inheritance status, and full ACL entries for any folder
 - Take ownership (single folder or recursive)
 - Add and remove permission entries (identity, rights, allow/deny)
-- Replicate parent permissions to selected child folders
+- Copy a folder's own permissions to other folders (adds only, nothing is removed)
 - Export permissions report as CSV
 - Dark/light theme toggle
 
@@ -43,11 +43,39 @@ why. This covers:
 
 - Add permission and Remove permission (folder, or selected files)
 - Take ownership of this folder only, or of selected files
-- Copy permissions to other folders, when "apply recursively" is not ticked
+- Copy permissions to other folders
 - Take ownership of a folder **and all its subfolders and files**: the current owner of every
   item is saved first (see the owner snapshot below)
 
-Copying permissions with "apply recursively" ticked is **not backed up or logged yet**.
+### Copy Permissions To...
+
+**Copy only adds.** It takes the permissions set directly on the current folder and adds them
+to each folder you list. Nothing already on a target folder is removed.
+
+- Only the current folder's **own** permissions are copied. Permissions it only inherits from
+  its parent are not, so later changes higher up the share still reach the target. If the
+  folder has no permissions of its own, nothing changes and the status bar says
+  `Nothing to copy: <folder> has no permissions of its own. All of its permissions come from <parent>.`
+- Each permission arrives exactly as it is: the same person or group, the same level of access
+  (Read & execute stays Read & execute; special combinations stay as they are), Allow or Deny,
+  and the same "applies to" setting.
+- A target that already has every one of those permissions is not changed
+  (`Skipped (nothing to copy)`, "Already has these permissions; nothing changed.").
+- Each target folder is changed once. **Subfolders and files under it that inherit permissions
+  get the new ones automatically**, as they would in Explorer.
+- A target that is a file is refused: "<path> is a file. Copy permissions copies to folders only."
+- Folder names with `[` or `]` (such as `HR [old]`) work, here and everywhere else in the tool.
+
+**Known limitation: subfolders that block inheritance are not changed.** A subfolder under a
+target with inheritance turned off (often on purpose, such as `HR\Confidential`) keeps exactly
+the permissions it had. Windows only passes inheritable permissions to children that inherit
+([SetNamedSecurityInfo](https://learn.microsoft.com/windows/win32/api/aclapi/nf-aclapi-setnamedsecurityinfow),
+[SE_DACL_PROTECTED](https://learn.microsoft.com/windows/win32/secauthz/security-descriptor-control)).
+Add the permission to such a subfolder yourself if it needs it. The status bar says this after
+every copy.
+
+The older "Apply recursively" option is gone. It reset every custom permission below the target
+and could turn Read & execute into a broken command.
 
 After each change the status bar says what was done and where it was logged, for example
 `Added Allow Modify for CONTOSO\HR-Staff on \\FS01\Data\HR. Backed up to ...\Backups\2026-10-17_142233_AddPermission.csv and logged to ...\Changes_2026-10-17.csv.`
@@ -60,7 +88,7 @@ The console shows the log folder at startup.
 | `Logs\Backups\<yyyy-MM-dd_HHmmss>_TakeOwnership.csv` (whole folder) | The owner snapshot written before taking ownership of a folder and everything under it: `Path`, `ItemType`, `Owner`, `OwnerSid`, one row for the folder and every subfolder and file under it (hidden ones too). |
 | `Logs\Backups\<yyyy-MM-dd_HHmmss>_TakeOwnership_Permissions.csv` (whole folder, only when some folders could not be opened) | The permissions of the folders the tool could not open, saved before taking ownership because `takeown` replaces them (see below): `Path`, `ItemType`, `Sddl`, same format as the other permission backups. |
 
-`Result` is one of `Done`, `Partly done`, `Failed`, `Skipped (not found)` or `Skipped (WhatIf)`. A `Failed`
+`Result` is one of `Done`, `Partly done`, `Failed`, `Skipped (not found)`, `Skipped (nothing to copy)` or `Skipped (WhatIf)`. A `Failed`
 row whose `NewValue` differs from its `OldValue` was **partly changed** (for example, takeown
 gave the folder to Administrators but the owner could not then be set to you); the status bar
 says so and points at the backup. Each row is written as soon as that item is done, so a batch
@@ -248,8 +276,9 @@ decides the result by reading the owners back and only shows the tools' output.
 ### FolderPermissionManager.ps1 (CLI)
 
 For servers without a browser. It takes ownership of a folder and everything under it, shows
-the permissions and the owner of each subfolder, and then copies the top folder's permissions to
-every subfolder (entries a subfolder lacks are added; nothing is removed). **It asks before
+the permissions and the owner of each subfolder, and then copies the permissions set directly on
+the top folder (not the ones it inherits) to every subfolder (entries a subfolder lacks as its
+own are added; nothing is removed; nothing is copied when the top folder has none of its own). **It asks before
 taking ownership and again before copying**, and every change is backed up and logged exactly
 as in the GUI (owner snapshot before taking ownership, SDDL backup before copying, same
 `Changes_<yyyy-MM-dd>.csv`). Changes anything? **Yes**: owners and permissions.

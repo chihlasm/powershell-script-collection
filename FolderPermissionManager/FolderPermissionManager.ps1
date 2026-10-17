@@ -14,9 +14,11 @@
        is saved to <LogFolder>\Backups\<yyyy-MM-dd_HHmmss>_TakeOwnership.csv first; if that
        file cannot be written, nothing is changed.
     2. Shows the top folder's owner and permissions, and the owner of each subfolder.
-    3. Copies the top folder's permissions to every subfolder: entries a subfolder does not
-       already have are added, nothing is removed. The permissions of every subfolder are
-       saved to <LogFolder>\Backups\<yyyy-MM-dd_HHmmss>_CopyPermissions.csv first.
+    3. Copies the permissions set directly on the top folder (not the ones it inherits) to
+       every subfolder: entries a subfolder does not already have as its own are added,
+       nothing is removed. If the top folder has no permissions of its own, nothing is copied.
+       The permissions of every subfolder that changes are saved to
+       <LogFolder>\Backups\<yyyy-MM-dd_HHmmss>_CopyPermissions.csv first.
 
     Before each change it prints the scope with [WARN] (for ownership, the number of items,
     counted read-only first) and asks "Continue? (y/N)". The copy step does not depend on

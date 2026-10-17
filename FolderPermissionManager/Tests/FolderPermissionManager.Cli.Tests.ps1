@@ -134,6 +134,14 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
     # --- Fix round 1 (SQ-014 review) ---------------------------------------------------------
 
     It 'AC20_Cli_OwnershipDeclinedThenCopyAccepted_CopiesThroughTheCoreWithABackupAndLeavesOwnersAlone' {
+        # Fixture (SQ-015): copy only copies the top folder's own rules, and a new $TestDrive
+        # folder only inherits, so it gets one rule of its own (in memory, nothing is written).
+        $script:RealGetAcl = Get-Command Get-Acl -CommandType Cmdlet
+        Mock Get-Acl {
+            $acl = & $script:RealGetAcl -LiteralPath $LiteralPath
+            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule -ArgumentList 'BUILTIN\Users', 'Modify', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))
+            $acl
+        } -ParameterFilter { $LiteralPath -eq $script:Dir }
         $script:Answers.Enqueue('n')   # take ownership: no
         $script:Answers.Enqueue('y')   # copy permissions to subfolders: yes
 
@@ -247,6 +255,14 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
     }
 
     It 'AC16_Cli_JunctionIsCountedInTheWarningAndTheResultAndIsSkippedByTheCopy' {
+        # Fixture (SQ-015): copy only copies the top folder's own rules, and a new $TestDrive
+        # folder only inherits, so it gets one rule of its own (in memory, nothing is written).
+        $script:RealGetAcl = Get-Command Get-Acl -CommandType Cmdlet
+        Mock Get-Acl {
+            $acl = & $script:RealGetAcl -LiteralPath $LiteralPath
+            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule -ArgumentList 'BUILTIN\Users', 'Modify', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))
+            $acl
+        } -ParameterFilter { $LiteralPath -eq $script:Dir }
         $elsewhere = Join-Path $TestDrive ('cli-junction-target-' + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path (Join-Path $elsewhere 'inside') -Force | Out-Null
         $link = Join-Path $script:Dir 'link'
@@ -265,6 +281,14 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
     }
 
     It 'AC20_Cli_CopyStepListsSubfoldersWithoutRecursingGetChildItem' {
+        # Fixture (SQ-015): copy only copies the top folder's own rules, and a new $TestDrive
+        # folder only inherits, so it gets one rule of its own (in memory, nothing is written).
+        $script:RealGetAcl = Get-Command Get-Acl -CommandType Cmdlet
+        Mock Get-Acl {
+            $acl = & $script:RealGetAcl -LiteralPath $LiteralPath
+            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule -ArgumentList 'BUILTIN\Users', 'Modify', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))
+            $acl
+        } -ParameterFilter { $LiteralPath -eq $script:Dir }
         New-Item -ItemType Directory -Path (Join-Path $script:Dir 'sub1\deeper') -Force | Out-Null
         $script:Answers.Enqueue('n')   # take ownership: no
         $script:Answers.Enqueue('y')   # copy: yes

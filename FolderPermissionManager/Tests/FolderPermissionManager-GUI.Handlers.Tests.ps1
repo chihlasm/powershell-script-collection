@@ -129,6 +129,15 @@ Describe 'GUI single-item change endpoints' {
     It 'replicate without "apply recursively" copies through the core and skips a missing target' {
         $source = Join-Path $TestDrive 'source'
         New-Item -ItemType Directory -Path $source -Force | Out-Null
+        # Fixture (SQ-015): copy only copies the source's own rules, and a new $TestDrive folder
+        # only inherits, so the source gets one rule of its own (in memory, nothing is written).
+        $script:CopySource = $source
+        $script:RealGetAcl = Get-Command Get-Acl -CommandType Cmdlet
+        Mock Get-Acl {
+            $acl = & $script:RealGetAcl -LiteralPath $LiteralPath
+            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule -ArgumentList 'BUILTIN\Users', 'Modify', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))
+            $acl
+        } -ParameterFilter { $LiteralPath -eq $script:CopySource }
         $missing = Join-Path $TestDrive 'nope'
         $r = Invoke-Handler 'Invoke-ReplicatePermissions' @{ sourcePath = $source; targetPaths = @($script:Dir, $missing); recursive = $false }
 
@@ -157,6 +166,15 @@ Describe 'GUI single-item change endpoints' {
     It 'replicate drops blank target lines, and only blanks is a 400 with no change' {
         $source = Join-Path $TestDrive 'source-blank'
         New-Item -ItemType Directory -Path $source -Force | Out-Null
+        # Fixture (SQ-015): copy only copies the source's own rules, and a new $TestDrive folder
+        # only inherits, so the source gets one rule of its own (in memory, nothing is written).
+        $script:CopySource = $source
+        $script:RealGetAcl = Get-Command Get-Acl -CommandType Cmdlet
+        Mock Get-Acl {
+            $acl = & $script:RealGetAcl -LiteralPath $LiteralPath
+            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule -ArgumentList 'BUILTIN\Users', 'Modify', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))
+            $acl
+        } -ParameterFilter { $LiteralPath -eq $script:CopySource }
         $r = Invoke-Handler 'Invoke-ReplicatePermissions' @{ sourcePath = $source; targetPaths = @('', $script:Dir); recursive = $false }
         @($r.Data.results).Count | Should -Be 1
 

@@ -11,7 +11,7 @@
     - Viewing folder ownership and ACL entries
     - Taking ownership (single or recursive)
     - Adding/removing permission entries
-    - Replicating parent permissions to child folders
+    - Copying a folder's own permissions to other folders (adds only, nothing is removed)
     - Exporting permissions reports to CSV
 
 .PARAMETER Port
@@ -41,16 +41,23 @@
     Press Ctrl+C in the PowerShell window to stop the server.
 
     Before every change to one folder or to selected files (add or remove a permission, take
-    ownership of this folder only, copy permissions without "apply recursively"), the current
-    permissions are saved to <LogFolder>\Backups. If that fails, nothing is changed. Each
-    change is then logged to <LogFolder>\Changes_<yyyy-MM-dd>.csv. See README "Undo a change".
+    ownership of this folder only, copy permissions), the current permissions are saved to
+    <LogFolder>\Backups. If that fails, nothing is changed. Each change is then logged to
+    <LogFolder>\Changes_<yyyy-MM-dd>.csv. See README "Undo a change".
     Taking ownership of all subfolders and files first saves the owner of every item to
     <LogFolder>\Backups\<yyyy-MM-dd_HHmmss>_TakeOwnership.csv and logs one row for the folder.
-    Copying permissions with "apply recursively" is still not backed up or logged.
+    Copy Permissions To... adds the permissions set directly on the current folder (not the
+    ones it inherits) to each target folder with one change per target. Nothing is removed.
+    Subfolders and files under a target that inherit permissions get the new ones from Windows;
+    subfolders that block inheritance are not changed. A target that is a file is refused.
     The logic lives in FolderPermissions.Core.ps1, which must stay next to this script.
 
     REFERENCES
-    - See FolderPermissions.Core.ps1 for Get-Acl, Set-Acl, SDDL, takeown and icacls.
+    - See FolderPermissions.Core.ps1 for Get-Acl, Set-Acl, SDDL, takeown, icacls, and how a
+      copied permission reaches subfolders that inherit (and not those that block inheritance).
+    - -LiteralPath on every Test-Path, Get-ChildItem and Get-Acl call: with -Path, [ ] is a
+      wildcard range, so a folder named "HR [old]" would not be found:
+      https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_wildcards
 #>
 
 [CmdletBinding()]
@@ -177,11 +184,14 @@ function ConvertTo-ChangeResultRow {
     param([object[]]$Entries)
     @($Entries | Where-Object { $null -ne $_ } | ForEach-Object {
         $status = switch ($_.Result) {
-            'Done'                { 'success' }
-            'Skipped (not found)' { 'skipped' }
-            default               { 'error' }
+            'Done'                      { 'success' }
+            'Skipped (not found)'       { 'skipped' }
+            'Skipped (nothing to copy)' { 'skipped' }
+            default                     { 'error' }
         }
-        [PSCustomObject]@{ path = $_.Target; status = $status; message = $(if ($_.Error) { $_.Error } else { $_.Result }) }
+        # Nothing to copy says why in Detail ("Already has these permissions; nothing changed.").
+        $text = if ($_.Error) { $_.Error } elseif ($_.Result -eq 'Skipped (nothing to copy)') { $_.Detail } else { $_.Result }
+        [PSCustomObject]@{ path = $_.Target; status = $status; message = $text }
     })
 }
 
@@ -281,14 +291,14 @@ function Get-Children {
     )
 
     $folderPath = Resolve-MappedDrive $Request.QueryString['path']
-    if (-not $folderPath -or -not (Test-Path $folderPath -PathType Container)) {
+    if (-not $folderPath -or -not (Test-Path -LiteralPath $folderPath -PathType Container)) {
         $Response.StatusCode = 400
         Send-Json $Response @{ error = "Invalid or missing path parameter" }
         return
     }
 
     try {
-        $items = Get-ChildItem -Path $folderPath -Directory -Force -ErrorAction Stop
+        $items = Get-ChildItem -LiteralPath $folderPath -Directory -Force -ErrorAction Stop
     }
     catch [System.UnauthorizedAccessException] {
         $Response.StatusCode = 403
@@ -304,7 +314,7 @@ function Get-Children {
     $children = @($items | ForEach-Object {
         $hasChildren = $false
         try {
-            $hasChildren = @(Get-ChildItem -Path $_.FullName -Directory -Force -ErrorAction SilentlyContinue | Select-Object -First 1).Count -gt 0
+            $hasChildren = @(Get-ChildItem -LiteralPath $_.FullName -Directory -Force -ErrorAction SilentlyContinue | Select-Object -First 1).Count -gt 0
         } catch {}
 
         [PSCustomObject]@{
@@ -324,14 +334,14 @@ function Get-Files {
     )
 
     $folderPath = Resolve-MappedDrive $Request.QueryString['path']
-    if (-not $folderPath -or -not (Test-Path $folderPath -PathType Container)) {
+    if (-not $folderPath -or -not (Test-Path -LiteralPath $folderPath -PathType Container)) {
         $Response.StatusCode = 400
         Send-Json $Response @{ error = "Invalid or missing path parameter" }
         return
     }
 
     try {
-        $items = Get-ChildItem -Path $folderPath -File -Force -ErrorAction Stop
+        $items = Get-ChildItem -LiteralPath $folderPath -File -Force -ErrorAction Stop
     }
     catch [System.UnauthorizedAccessException] {
         $Response.StatusCode = 403
@@ -372,14 +382,14 @@ function Get-FolderAcl {
     )
 
     $folderPath = Resolve-MappedDrive $Request.QueryString['path']
-    if (-not $folderPath -or -not (Test-Path $folderPath -PathType Container)) {
+    if (-not $folderPath -or -not (Test-Path -LiteralPath $folderPath -PathType Container)) {
         $Response.StatusCode = 400
         Send-Json $Response @{ error = "Invalid or missing path parameter" }
         return
     }
 
     try {
-        $acl = Get-Acl -Path $folderPath -ErrorAction Stop
+        $acl = Get-Acl -LiteralPath $folderPath -ErrorAction Stop
         $entries = @($acl.Access | ForEach-Object {
             [PSCustomObject]@{
                 identity         = $_.IdentityReference.ToString()
@@ -442,7 +452,8 @@ function Invoke-ReplicatePermissions {
     $sourcePath = Resolve-MappedDrive $body.sourcePath
     # Blank lines in the target list are dropped rather than reported as missing folders.
     $targetPaths = @($body.targetPaths | Where-Object { $null -ne $_ -and "$_".Trim() } | ForEach-Object { Resolve-MappedDrive "$_".Trim() })
-    $recursive = $body.recursive -eq $true
+    # An older page may still send "recursive"; it is ignored (owner decision D-031: copy only
+    # adds, with one change per target folder, and never resets anything below it).
 
     if (-not $sourcePath -or -not (Test-Path -LiteralPath $sourcePath -PathType Container)) {
         $Response.StatusCode = 400
@@ -455,63 +466,8 @@ function Invoke-ReplicatePermissions {
         return
     }
 
-    if (-not $recursive) {
-        # This folder only: backed up and logged by the core; missing targets are skipped.
-        Send-BatchChangeResult $Response { Copy-FolderPermission -SourcePath $sourcePath -TargetPath $targetPaths -LogFolder $script:ChangeLogFolder }
-        return
-    }
-
-    # All subfolders and files: unchanged here (SQ-015 replaces it).
-    $sourceAcl = Get-Acl -Path $sourcePath -ErrorAction Stop
-    $results = [System.Collections.Generic.List[object]]::new()
-
-    foreach ($target in $targetPaths) {
-        try {
-            if (-not (Test-Path $target)) {
-                $results.Add([PSCustomObject]@{ path = $target; status = 'skipped'; message = 'Path not found' })
-                continue
-            }
-
-            # Use icacls to reset inheritance and apply parent ACLs to all files and subfolders
-            # /reset re-enables inheritance and pushes inheritable ACEs from parent down to all children
-            $output = icacls $target /reset /T /C /Q 2>&1
-            if ($LASTEXITCODE -ge 2) {
-                $results.Add([PSCustomObject]@{ path = $target; status = 'warning'; message = "icacls /reset completed with exit code $LASTEXITCODE" })
-            } else {
-                # Now apply source ACL rules via icacls /grant for each non-inherited rule
-                $grantErrors = 0
-                foreach ($rule in $sourceAcl.Access) {
-                    if ($rule.IsInherited) { continue }
-                    $identity = $rule.IdentityReference.ToString()
-                    $perm = switch -Wildcard ($rule.FileSystemRights.ToString()) {
-                        '*FullControl*'      { 'F' }
-                        '*Modify*'           { 'M' }
-                        '*ReadAndExecute*'   { 'RX' }
-                        '*Read*'             { 'R' }
-                        '*Write*'            { 'W' }
-                        default              { 'R' }
-                    }
-                    $inheritFlag = '(OI)(CI)'  # Apply to this folder, subfolders, and files
-                    if ($rule.AccessControlType -eq 'Allow') {
-                        $icaclsOut = icacls $target /grant "${identity}:${inheritFlag}${perm}" /T /C /Q 2>&1
-                    } else {
-                        $icaclsOut = icacls $target /deny "${identity}:${inheritFlag}${perm}" /T /C /Q 2>&1
-                    }
-                    if ($LASTEXITCODE -ge 2) { $grantErrors++ }
-                }
-                if ($grantErrors -gt 0) {
-                    $results.Add([PSCustomObject]@{ path = $target; status = 'warning'; message = "Replicated recursively with $grantErrors permission errors" })
-                } else {
-                    $results.Add([PSCustomObject]@{ path = $target; status = 'success'; message = 'Permissions replicated to all subfolders and files' })
-                }
-            }
-        }
-        catch {
-            $results.Add([PSCustomObject]@{ path = $target; status = 'error'; message = $_.Exception.Message })
-        }
-    }
-
-    Send-Json $Response @{ status = 'complete'; results = @($results) }
+    # Backed up and logged by the core; missing targets are skipped, files are refused.
+    Send-BatchChangeResult $Response { Copy-FolderPermission -SourcePath $sourcePath -TargetPath $targetPaths -LogFolder $script:ChangeLogFolder }
 }
 
 function Invoke-AddAce {
@@ -563,18 +519,18 @@ function Invoke-ExportReport {
     )
 
     $folderPath = Resolve-MappedDrive $Request.QueryString['path']
-    if (-not $folderPath -or -not (Test-Path $folderPath -PathType Container)) {
+    if (-not $folderPath -or -not (Test-Path -LiteralPath $folderPath -PathType Container)) {
         $Response.StatusCode = 400
         Send-Json $Response @{ error = "Invalid or missing path parameter" }
         return
     }
 
     $rows = [System.Collections.Generic.List[object]]::new()
-    $folders = @($folderPath) + @(Get-ChildItem -Path $folderPath -Recurse -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+    $folders = @($folderPath) + @(Get-ChildItem -LiteralPath $folderPath -Recurse -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
 
     foreach ($folder in $folders) {
         try {
-            $acl = Get-Acl -Path $folder -ErrorAction Stop
+            $acl = Get-Acl -LiteralPath $folder -ErrorAction Stop
             foreach ($entry in $acl.Access) {
                 $rows.Add([PSCustomObject]@{
                     Path             = $folder
@@ -612,14 +568,14 @@ function Get-FileAcl {
     )
 
     $filePath = Resolve-MappedDrive $Request.QueryString['path']
-    if (-not $filePath -or -not (Test-Path $filePath -PathType Leaf)) {
+    if (-not $filePath -or -not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
         $Response.StatusCode = 400
         Send-Json $Response @{ error = "Invalid or missing path parameter" }
         return
     }
 
     try {
-        $acl = Get-Acl -Path $filePath -ErrorAction Stop
+        $acl = Get-Acl -LiteralPath $filePath -ErrorAction Stop
         $entries = @($acl.Access | ForEach-Object {
             [PSCustomObject]@{
                 identity         = $_.IdentityReference.ToString()
@@ -736,7 +692,7 @@ function Invoke-RobocopyFiles {
         return
     }
 
-    if (-not $sourceDir -or -not (Test-Path $sourceDir -PathType Container)) {
+    if (-not $sourceDir -or -not (Test-Path -LiteralPath $sourceDir -PathType Container)) {
         $Response.StatusCode = 400
         Send-Json $Response @{ error = "Invalid or missing sourceDir" }
         return
@@ -749,7 +705,7 @@ function Invoke-RobocopyFiles {
     }
 
     # Validate each file exists as a leaf before invoking robocopy
-    $invalidFiles = $files | Where-Object { -not (Test-Path (Join-Path $sourceDir $_) -PathType Leaf) }
+    $invalidFiles = $files | Where-Object { -not (Test-Path -LiteralPath (Join-Path $sourceDir $_) -PathType Leaf) }
     if ($invalidFiles) {
         $Response.StatusCode = 400
         Send-Json $Response @{ error = "Files not found in sourceDir: $($invalidFiles -join ', ')" }
@@ -825,7 +781,7 @@ function Invoke-Robocopy {
     $logFile = $body.logFile    # log path — defaults to destination folder if true/empty
     $extraFlags = $body.extraFlags  # optional raw flags string
 
-    if (-not $source -or -not (Test-Path $source -PathType Container)) {
+    if (-not $source -or -not (Test-Path -LiteralPath $source -PathType Container)) {
         $Response.StatusCode = 400
         Send-Json $Response @{ error = "Invalid or missing source path" }
         return
@@ -878,14 +834,14 @@ function Invoke-Robocopy {
 
     try {
         # Create destination if it doesn't exist
-        if (-not (Test-Path $destination -PathType Container)) {
+        if (-not (Test-Path -LiteralPath $destination -PathType Container)) {
             New-Item -Path $destination -ItemType Directory -Force | Out-Null
         }
 
         # If logFile path was provided, ensure its parent directory exists
         if ($logFile) {
             $logDir = Split-Path -Path $logFile -Parent
-            if ($logDir -and -not (Test-Path $logDir -PathType Container)) {
+            if ($logDir -and -not (Test-Path -LiteralPath $logDir -PathType Container)) {
                 New-Item -Path $logDir -ItemType Directory -Force | Out-Null
             }
         }
@@ -933,7 +889,7 @@ function Get-RobocopyPreview {
     $source = Resolve-MappedDrive $Request.QueryString['source']
     $destination = Resolve-MappedDrive $Request.QueryString['destination']
 
-    if (-not $source -or -not (Test-Path $source -PathType Container)) {
+    if (-not $source -or -not (Test-Path -LiteralPath $source -PathType Container)) {
         $Response.StatusCode = 400
         Send-Json $Response @{ error = "Invalid source path" }
         return
@@ -1489,9 +1445,8 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
 <div class="modal-overlay" id="replicateModal">
   <div class="modal">
     <h3>Copy Permissions To...</h3>
-    <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">Copies the current folder's permissions to each destination path you list below (one per line).</p>
-    <div class="form-row"><label>Target paths</label><textarea id="replicateTargets" rows="5" style="width:100%;background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:6px 8px;font-size:12px;resize:vertical;" placeholder="C:\Shares\FolderA&#10;C:\Shares\FolderB"></textarea></div>
-    <div class="form-row"><label><input type="checkbox" id="replicateRecursive"> Apply recursively</label></div>
+    <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">Adds the current folder's own permissions to each folder you list (one per line). Nothing is removed. Subfolders that inherit permissions get them too; subfolders that block inheritance are not changed.</p>
+    <div class="form-row"><label>Folders to copy to</label><textarea id="replicateTargets" rows="5" style="width:100%;background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:6px 8px;font-size:12px;resize:vertical;" placeholder="C:\Shares\FolderA&#10;C:\Shares\FolderB"></textarea></div>
     <div class="modal-actions">
       <button class="btn btn-secondary" onclick="closeModal('replicateModal')">Cancel</button>
       <button class="btn btn-primary" onclick="submitReplicate()">Copy Permissions</button>
@@ -1615,7 +1570,8 @@ function showChangeResult(r) {
     // A partly done whole-tree change already starts "Partly done:"; never say it twice.
     if (type === 'warning' && msg.indexOf('Partly done:') !== 0) {
         var res = r.results || [];
-        var partial = res.some(function(x) { return x.status !== 'success'; });
+        // Partly done only when something was done: a copy with nothing to copy changed nothing.
+        var partial = res.some(function(x) { return x.status === 'success'; }) && res.some(function(x) { return x.status !== 'success'; });
         msg = (partial ? 'Partly done: ' : 'Check this: ') + msg;
     }
     setStatus(msg, type);
@@ -2040,32 +1996,20 @@ function takeOwnership(recursive) {
 
 function showReplicateModal() {
     document.getElementById('replicateTargets').value = '';
-    document.getElementById('replicateRecursive').checked = false;
     openModal('replicateModal');
 }
 
 function submitReplicate() {
     var raw = document.getElementById('replicateTargets').value;
     var targets = raw.split('\n').map(function(s) { return s.trim(); }).filter(Boolean);
-    if (!targets.length) { setStatus('Enter at least one target path', 'error'); return; }
+    if (!targets.length) { setStatus('Enter at least one folder to copy to', 'error'); return; }
     if (changeIsBusy()) return;
     closeModal('replicateModal');
     ownershipBusy = true;
-    var recursive = document.getElementById('replicateRecursive').checked;
-    setStatus(recursive ? 'Replicating permissions...' : 'Backing up and copying permissions...', 'info');
-    api('/api/replicate', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ sourcePath: currentFolder, targetPaths: targets, recursive: recursive }) })
-        .then(function(r) {
-            ownershipBusy = false;
-            // This folder only: backed up and logged, and the server's message says so.
-            if (!recursive) { showChangeResult(r); return; }
-            var failed = (r.results || []).filter(function(x) { return x.status === 'error'; });
-            if (failed.length) { setStatus(failed.length + ' target(s) failed. First: ' + failed[0].message, 'error'); }
-            else { setStatus('Permissions replicated to ' + targets.length + ' target(s). Not backed up or logged.', 'success'); }
-        }).catch(function(e) {
-            ownershipBusy = false;
-            if (recursive) { setStatus('Failed: ' + e.message, 'error'); }
-            else { showChangeError(e); }
-        });
+    setStatus('Backing up and copying permissions...', 'info');
+    api('/api/replicate', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ sourcePath: currentFolder, targetPaths: targets }) })
+        .then(function(r) { ownershipBusy = false; showChangeResult(r); })
+        .catch(function(e) { ownershipBusy = false; showChangeError(e); });
 }
 
 function exportReport() {
