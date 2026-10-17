@@ -337,6 +337,87 @@ Describe 'AC10 blocking failure codes' {
             (New-SignInRow -Ago (New-TimeSpan -Hours 1) -Code 50053 -FailureReason 'Locked.'))
         (Get-M365UserAssessment -Facts (New-Facts @{ SignIns = $rows })).Verdict | Should -Be 'NO'
     }
+
+    It 'AC10_BlockingFailureOlderThanADay: the reason says how many days ago and to try again first' {
+        $rows = @((New-SignInRow -Ago (New-TimeSpan -Days 3 -Hours 2) -Code 50053 -FailureReason 'Locked.'))
+        $r = Get-Reason (Get-M365UserAssessment -Facts (New-Facts @{ SignIns = $rows })) 'BlockingSignInFailure'
+        $r.Message | Should -Match 'This was 3 days ago - ask them to try again first'
+    }
+
+    It 'AC10_BlockingFailureWithinADay: a recent block carries no "days ago" note' {
+        $rows = @((New-SignInRow -Ago (New-TimeSpan -Hours 23) -Code 50053 -FailureReason 'Locked.'))
+        $r = Get-Reason (Get-M365UserAssessment -Facts (New-Facts @{ SignIns = $rows })) 'BlockingSignInFailure'
+        $r.Message | Should -Not -Match 'days? ago'
+    }
+}
+
+Describe 'Mapped but not blocking: 50126' {
+    It 'LatestSignInFailed_50126: wrong password -> PROBABLY NOT, cited next step and the lookup link' {
+        $rows = @((New-SignInRow -Code 50126 -FailureReason 'Error validating credentials due to invalid username or password.'))
+        $a = Get-M365UserAssessment -Facts (New-Facts @{ SignIns = $rows })
+        $a.Verdict | Should -Be 'PROBABLY NOT'
+        $a.ExitCode | Should -Be 1
+        $r = Get-Reason $a 'LatestSignInFailed'
+        $r.Level | Should -Be 'Probable'
+        $text = Get-ReasonText $r
+        $text | Should -Match 'meaning per Microsoft, may change'
+        $text | Should -Match ([regex]::Escape('https://login.microsoftonline.com/error?code=50126'))
+        $text | Should -Match ([regex]::Escape('invalid username or password'))
+        Get-Reason $a 'BlockingSignInFailure' | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Personal data and CSV safety' {
+    It 'Select-M365SignInFields: keeps the needed fields, drops device detail, keeps CA results' {
+        $row = New-SignInRow -Code 53003 -Policies @(@{ id = 'p1'; displayName = 'Block'; result = 'failure'; enforcedGrantControls = @('Block') })
+        $row['deviceDetail'] = @{ displayName = 'LAPTOP-123'; operatingSystem = 'Windows' }
+        $row['userAgent'] = 'Mozilla/5.0'
+        $t = Select-M365SignInFields -Row $row
+        $t.ContainsKey('deviceDetail') | Should -BeFalse
+        $t.ContainsKey('userAgent') | Should -BeFalse
+        $t.status.errorCode | Should -Be 53003
+        $t.location.city | Should -Be 'Springfield'
+        $t.ipAddress | Should -Be '203.0.113.7'
+        @($t.appliedConditionalAccessPolicies)[0].displayName | Should -Be 'Block'
+        @($t.appliedConditionalAccessPolicies)[0].ContainsKey('enforcedGrantControls') | Should -BeFalse
+    }
+
+    It 'Select-M365SignInFields: a row WITHOUT appliedConditionalAccessPolicies stays without it (AC13 depends on absence)' {
+        $t = Select-M365SignInFields -Row (New-SignInRow -Code 0)
+        $t.ContainsKey('appliedConditionalAccessPolicies') | Should -BeFalse
+        (Get-M365ConditionalAccessGate -SignIns @($t)).State | Should -Not -Be 'Available'
+        $e = Select-M365SignInFields -Row (New-SignInRow -Code 0 -Policies @())
+        $e.ContainsKey('appliedConditionalAccessPolicies') | Should -BeTrue
+        (Get-M365ConditionalAccessGate -SignIns @($e)).State | Should -Be 'Available'
+    }
+
+    It 'ConvertTo-M365CsvValue: <in> -> <out>' -ForEach @(
+        @{ in = '=1+1'; out = '''=1+1' }, @{ in = '+cmd'; out = '''+cmd' }, @{ in = '-2'; out = '''-2' },
+        @{ in = '@SUM(A1)'; out = '''@SUM(A1)' }, @{ in = "`tx"; out = "'`tx" },
+        @{ in = 'Jane Doe'; out = 'Jane Doe' }, @{ in = ''; out = '' },
+        @{ in = 'from 203.0.113.7 today'; out = 'from [IP removed] today' }
+    ) {
+        ConvertTo-M365CsvValue -Text $in | Should -BeExactly $out
+    }
+}
+
+Describe 'Fallback lookup requests' {
+    It 'Find-M365User: mail and proxy address are separate requests, merged by id' {
+        $script:Uris = New-Object System.Collections.Generic.List[string]
+        Mock Invoke-MgGraphRequest {
+            $u = [uri]::UnescapeDataString([string]$Uri)
+            $script:Uris.Add($u)
+            if ($u -match 'userPrincipalName eq') { return @{ value = @() } }
+            return @{ value = @(@{ id = 'same-id'; displayName = 'Jane Doe'; userPrincipalName = 'jane@contoso.com'; accountEnabled = $true }) }
+        }
+        $r = Find-M365User -UserPrincipalName 'jdoe@contoso.com'
+        $r.Status | Should -Be 'Found'
+        # Compare the $filter part only: $select also names mail and proxyAddresses.
+        $filters = @($script:Uris | ForEach-Object { [regex]::Match($_, '\$filter=(?<f>[^&]*)').Groups['f'].Value })
+        @($filters | Where-Object { $_ -eq "mail eq 'jdoe@contoso.com'" }).Count | Should -Be 1
+        @($filters | Where-Object { $_ -eq "proxyAddresses/any(p:p eq 'smtp:jdoe@contoso.com')" }).Count | Should -Be 1
+        @($filters | Where-Object { $_ -match '\bor\b' }).Count | Should -Be 0
+    }
 }
 
 Describe 'AC11 unmapped failure code' {

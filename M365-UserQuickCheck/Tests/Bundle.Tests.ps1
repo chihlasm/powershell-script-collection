@@ -32,7 +32,10 @@ Describe 'AC29 bundle and index' {
     }
 
     It 'AC29_BundleAndIndex: .gitignore keeps the saved reports out of git (Customer data)' {
-        (Read-Repo '.gitignore') | Should -Match '(?m)^M365-UserQuickCheck/\*\*/M365UserCheck_\*\s*$'
+        # Repo-wide: -OutputPath can point anywhere in a working copy, not only at this folder.
+        $ignore = Read-Repo '.gitignore'
+        $ignore | Should -Match '(?m)^\*\*/M365UserCheck_\*\.html\s*$'
+        $ignore | Should -Match '(?m)^\*\*/M365UserCheck_\*\.csv\s*$'
     }
 
     It 'AC29_BundleAndIndex: the tool folder has a README' {

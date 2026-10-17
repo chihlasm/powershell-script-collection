@@ -128,8 +128,9 @@ It checks whether sign-in is blocked, whether a licence is assigned and working,
 latest sign-in (the error code, Microsoft's own reason, and which Conditional Access policy
 blocked it), MFA methods, and whether ID Protection flags the user as risky.
 
-Add `-OutputPath C:\Temp` to save an HTML report, and `-TicketNumber 482113` for the
-[ticket note](#one-note-for-the-whole-ticket).
+Add `-TicketNumber 482113` to save the [ticket note](#one-note-for-the-whole-ticket) in the
+ticket's folder, and `-OutputPath C:\Temp` to also save an HTML report and a CSV (with both, all
+three go into `C:\Temp\Ticket_482113`). Without `-OutputPath` no report is written.
 
 **Things to know:**
 - **PROBABLY YES** means nothing blocking was found, but the tenant has no Entra ID P1, so

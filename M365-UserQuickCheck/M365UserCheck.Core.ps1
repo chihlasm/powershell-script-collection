@@ -27,11 +27,13 @@
 .NOTES
     REFERENCES
       List signIns: v1.0 returns interactive user sign-ins (and successful federated ones),
-      newest first; $filter and $top supported; AuditLog.Read.All; roles Global Reader,
-      Reports Reader, Security Administrator, Security Operator, Security Reader;
+      newest first; only $top, $skiptoken and $filter are documented (no $select, so rows are
+      trimmed after they arrive); AuditLog.Read.All; roles Global Reader, Reports Reader,
+      Security Administrator, Security Operator, Security Reader;
       appliedConditionalAccessPolicies is OMITTED unless the role can read CA data (Global
       Reader, Security Administrator, Security Reader, Conditional Access Administrator) and the
-      app holds Policy.Read.All (or Policy.Read.ConditionalAccess)
+      app holds Policy.Read.All, Policy.Read.ConditionalAccess or
+      Policy.ReadWrite.ConditionalAccess
         https://learn.microsoft.com/graph/api/signin-list?view=graph-rest-1.0
       signIn: userId supports $filter (eq); createdDateTime supports $filter (eq, le, ge), UTC
         https://learn.microsoft.com/graph/api/resources/signin?view=graph-rest-1.0
@@ -59,14 +61,19 @@
       ProhibitedInUsageLocationViolation, UniquenessViolation, Other
         https://learn.microsoft.com/graph/api/resources/licenseassignmentstate?view=graph-rest-1.0
         https://learn.microsoft.com/entra/identity/users/licensing-groups-resolve-problems
-      $filter on users by userPrincipalName eq, mail eq and proxyAddresses/any(p:p eq ...) works
-      by default (no ConsistencyLevel header); OData cast on memberOf needs ConsistencyLevel:
-      eventual and $count=true
+      $filter on users by userPrincipalName eq, mail eq and proxyAddresses/any(p:p eq ...) each
+      works by default (no ConsistencyLevel header); Learn does not say the same for an "or" of
+      them, so they are separate requests. OData cast on transitiveMemberOf needs
+      ConsistencyLevel: eventual and $count=true; transitiveMemberOf returns directory roles held
+      directly or through a group; least privilege for /me is User.Read (Directory.Read.All
+      covers it)
         https://learn.microsoft.com/graph/aad-advanced-queries
-        https://learn.microsoft.com/graph/api/user-list-memberof?view=graph-rest-1.0
+        https://learn.microsoft.com/graph/api/user-list-transitivememberof?view=graph-rest-1.0
+      CSV cells starting with = + - @ are neutralised with a leading ' (CSV injection)
+        https://owasp.org/www-community/attacks/CSV_Injection
       OData string literals: a single quote is escaped by doubling it
         https://learn.microsoft.com/graph/query-parameters
-      List users / domains / organization / memberOf: Directory.Read.All covers each
+      List users / domains / organization / transitiveMemberOf: Directory.Read.All covers each
         https://learn.microsoft.com/graph/api/user-list?view=graph-rest-1.0
         https://learn.microsoft.com/graph/api/domain-list?view=graph-rest-1.0
         https://learn.microsoft.com/graph/api/organization-list?view=graph-rest-1.0
@@ -111,7 +118,12 @@ $script:M365GraphRoot = 'https://graph.microsoft.com/v1.0'
 # AuditLog.Read.All: sign-ins. UserAuthenticationMethod.Read.All: MFA methods.
 # IdentityRiskyUser.Read.All: risky user. Policy.Read.All: without it Graph omits
 # appliedConditionalAccessPolicies from every sign-in row (signin-list), so the blocking policy
-# could never be named.
+# could never be named. signin-list accepts Policy.Read.All, Policy.Read.ConditionalAccess or
+# Policy.ReadWrite.ConditionalAccess; the narrower Policy.Read.ConditionalAccess would do, but
+# it does not END in .Read / .Read.All, and the read-only rule (AC3: every scope matches
+# \.Read(\.All)?$) is what lets a reviewer see at a glance that this token cannot write. So
+# Policy.Read.All stays.
+# https://learn.microsoft.com/graph/api/signin-list?view=graph-rest-1.0
 $script:M365Scopes = @(
     'Directory.Read.All'
     'AuditLog.Read.All'
@@ -229,6 +241,59 @@ function ConvertTo-M365SafeText {
             $ip = $null
             if ([System.Net.IPAddress]::TryParse($m.Value, [ref]$ip) -and $ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6) { '[IP removed]' } else { $m.Value }
         })
+}
+
+function ConvertTo-M365CsvValue {
+    <#
+    .SYNOPSIS
+        One CSV cell: IP addresses removed (ConvertTo-M365SafeText), and a value that starts
+        with = + - @, a tab or a carriage return prefixed with ' so a spreadsheet shows it as
+        text instead of running it as a formula. Display names and failure reasons come from
+        the client's tenant, so they are untrusted.
+        https://owasp.org/www-community/attacks/CSV_Injection
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$Text)
+    $t = ConvertTo-M365SafeText -Text $Text
+    if (-not [string]::IsNullOrEmpty($t) -and $t -match "^[=+\-@`t`r]") { return ("'" + $t) }
+    return $t
+}
+
+function Select-M365SignInFields {
+    <#
+    .SYNOPSIS
+        A sign-in row cut down to what the verdict and the report use: time, app, client app,
+        status, Conditional Access results, city and country, and the IP address (local HTML
+        report only). Device details, user agent and the rest are dropped on arrival.
+    .DESCRIPTION
+        appliedConditionalAccessPolicies is copied only when the row HAS it: its absence means
+        the signed-in account cannot read Conditional Access data (signin-list), and that must
+        survive the trim (Get-M365ConditionalAccessGate).
+    #>
+    param([Parameter(Mandatory = $true)][object]$Row)
+    $status = Get-M365Prop -Object $Row -Name 'status'
+    $loc = Get-M365Prop -Object $Row -Name 'location'
+    $out = @{
+        id = Get-M365Prop -Object $Row -Name 'id'
+        createdDateTime = Get-M365Prop -Object $Row -Name 'createdDateTime'
+        appDisplayName = Get-M365Prop -Object $Row -Name 'appDisplayName'
+        clientAppUsed = Get-M365Prop -Object $Row -Name 'clientAppUsed'
+        ipAddress = Get-M365Prop -Object $Row -Name 'ipAddress'
+        status = @{
+            errorCode = Get-M365Prop -Object $status -Name 'errorCode'
+            failureReason = Get-M365Prop -Object $status -Name 'failureReason'
+            additionalDetails = Get-M365Prop -Object $status -Name 'additionalDetails'
+        }
+        location = @{
+            city = Get-M365Prop -Object $loc -Name 'city'
+            countryOrRegion = Get-M365Prop -Object $loc -Name 'countryOrRegion'
+        }
+    }
+    if (Test-M365Prop -Object $Row -Name 'appliedConditionalAccessPolicies') {
+        $out['appliedConditionalAccessPolicies'] = @(@(Get-M365Prop -Object $Row -Name 'appliedConditionalAccessPolicies') | Where-Object { $null -ne $_ } | ForEach-Object {
+                @{ id = Get-M365Prop -Object $_ -Name 'id'; displayName = Get-M365Prop -Object $_ -Name 'displayName'; result = Get-M365Prop -Object $_ -Name 'result' }
+            })
+    }
+    return $out
 }
 
 # =============================================================================
@@ -565,6 +630,13 @@ function Get-M365UserAssessment {
                     $action = '{0} ({1}: {2})' -f $step, $script:M365MeaningLabel, $link
                     $level = if ($script:M365BlockingCodes -contains $code) { 'Blocker' } else { 'Probable' }
                     $reasonCode = if ($level -eq 'Blocker') { 'BlockingSignInFailure' } else { 'LatestSignInFailed' }
+                    # A block from days ago may have cleared on its own (a lockout ends, a CA
+                    # condition changes): say how old it is before anyone acts on it.
+                    $nowUtc = ConvertTo-M365UtcTime -Value $Facts.Now
+                    if ($level -eq 'Blocker' -and $nowUtc -and $latest.Time -and ($nowUtc - $latest.Time).TotalHours -gt 24) {
+                        $ago = [int][math]::Floor(($nowUtc - $latest.Time).TotalDays)
+                        $message += ' This was {0} {1} ago - ask them to try again first.' -f $ago, $(if ($ago -eq 1) { 'day' } else { 'days' })
+                    }
                     Add-Reason $level $reasonCode $message $action
                 }
             }
@@ -628,9 +700,10 @@ function Get-M365TenantContext {
     .DESCRIPTION
         GET /organization must answer, or this throws: Connect-MgGraph can succeed on a session
         whose every request then fails (Get-M365SecurityEvidence.ps1, preflight). The signed-in
-        account's directory roles come from /me/memberOf cast to directoryRole, which needs
-        ConsistencyLevel: eventual and $count=true (user-list-memberof). Roles not readable is
-        reported in RolesNote, never fatal.
+        account's directory roles come from /me/transitiveMemberOf cast to directoryRole, so a
+        role held through a role-assignable group is shown too; the cast needs ConsistencyLevel:
+        eventual and $count=true (user-list-transitivememberof). Roles not readable is reported
+        in RolesNote, never fatal.
     #>
     param([Parameter(Mandatory = $true)][object]$Context)
     $org = Invoke-M365GraphGet -Uri "$script:M365GraphRoot/organization?`$select=id,displayName,verifiedDomains,onPremisesLastSyncDateTime"
@@ -643,7 +716,7 @@ function Get-M365TenantContext {
 
     $roles = @(); $rolesNote = ''
     try {
-        $r = Invoke-M365GraphGet -Uri "$script:M365GraphRoot/me/memberOf/microsoft.graph.directoryRole?`$count=true&`$select=displayName" -Headers @{ ConsistencyLevel = 'eventual' }
+        $r = Invoke-M365GraphGet -Uri "$script:M365GraphRoot/me/transitiveMemberOf/microsoft.graph.directoryRole?`$count=true&`$select=displayName" -Headers @{ ConsistencyLevel = 'eventual' }
         $roles = @(@(Get-M365Prop -Object $r -Name 'value') | Where-Object {
                 $null -ne $_ -and ((-not (Test-M365Prop -Object $_ -Name '@odata.type')) -or [string](Get-M365Prop -Object $_ -Name '@odata.type') -eq '#microsoft.graph.directoryRole')
             } | ForEach-Object { [string](Get-M365Prop -Object $_ -Name 'displayName') } | Where-Object { $_ } | Sort-Object -Unique)
@@ -700,23 +773,35 @@ function Find-M365User {
         Finds exactly one Microsoft 365 user, or reports NotFound / Ambiguous with candidates.
         Never guesses.
     .DESCRIPTION
-        userPrincipalName eq first, then mail eq or proxyAddresses/any(p:p eq 'smtp:<x>'). Both
-        filters work without advanced query headers (aad-advanced-queries). The value is an
-        OData literal (quotes doubled) and URL-encoded, so a guest's #EXT# or an apostrophe
-        cannot break the request. Errors are thrown to the caller.
+        userPrincipalName eq first, then mail eq, then proxyAddresses/any(p:p eq 'smtp:<x>').
+        Each of the three filters works by default, without advanced query headers
+        (aad-advanced-queries, user properties table). The two fallbacks are separate requests,
+        merged by id, because Learn does not say whether joining them with "or" in one filter
+        still works without ConsistencyLevel: eventual. The value is an OData literal (quotes
+        doubled) and URL-encoded, so a guest's #EXT# or an apostrophe cannot break the request.
+        Errors are thrown to the caller.
     #>
     param([Parameter(Mandatory = $true)][string]$UserPrincipalName)
     $name = $UserPrincipalName.Trim()
     $lit = ConvertTo-M365ODataLiteral -Value $name
     $select = "&`$select=$script:M365UserSelect"
+    $getUsers = {
+        param([string]$Filter)
+        $r = Invoke-M365GraphGet -Uri ("$script:M365GraphRoot/users?`$filter=" + [uri]::EscapeDataString($Filter) + $select)
+        @(@(Get-M365Prop -Object $r -Name 'value') | Where-Object { $null -ne $_ })
+    }
 
-    $byUpn = Invoke-M365GraphGet -Uri ("$script:M365GraphRoot/users?`$filter=" + [uri]::EscapeDataString("userPrincipalName eq $lit") + $select)
-    $found = @(@(Get-M365Prop -Object $byUpn -Name 'value') | Where-Object { $null -ne $_ })
+    $found = @(& $getUsers "userPrincipalName eq $lit")
     $matchedBy = 'UserPrincipalName'
     if ($found.Count -eq 0) {
         $smtp = ConvertTo-M365ODataLiteral -Value ("smtp:$name")
-        $byMail = Invoke-M365GraphGet -Uri ("$script:M365GraphRoot/users?`$filter=" + [uri]::EscapeDataString("mail eq $lit or proxyAddresses/any(p:p eq $smtp)") + $select)
-        $found = @(@(Get-M365Prop -Object $byMail -Name 'value') | Where-Object { $null -ne $_ })
+        $byId = [ordered]@{}
+        foreach ($u in @(& $getUsers "mail eq $lit") + @(& $getUsers "proxyAddresses/any(p:p eq $smtp)")) {
+            $key = [string](Get-M365Prop -Object $u -Name 'id')
+            if (-not $key) { $key = [guid]::NewGuid().ToString() }
+            if (-not $byId.Contains($key)) { $byId[$key] = $u }
+        }
+        $found = @($byId.Values)
         $matchedBy = 'mail or proxy address'
     }
 
@@ -745,6 +830,9 @@ function Get-M365UserFacts {
     .DESCRIPTION
         Sign-ins: one page of $top=50, filtered on userId eq and createdDateTime ge (signin-list,
         signin). The call's own outcome is the gate (P-001): a licence label never overrides it.
+        Each row keeps only the fields the verdict and the report need (Select-M365SignInFields);
+        that includes ipAddress, for the local HTML report only. MFA methods keep only their
+        type and id.
     #>
     param(
         [Parameter(Mandatory = $true)][object]$User,
@@ -760,8 +848,10 @@ function Get-M365UserFacts {
     $signIns = @()
     try {
         $filter = 'userId eq {0} and createdDateTime ge {1}' -f (ConvertTo-M365ODataLiteral -Value $id), $since
+        # No $select: signin-list documents only $top, $skiptoken and $filter for this request,
+        # so the rows are trimmed here instead (Select-M365SignInFields).
         $r = Invoke-M365GraphGet -Uri ("$script:M365GraphRoot/auditLogs/signIns?`$filter=" + [uri]::EscapeDataString($filter) + "&`$top=$script:M365SignInPageSize")
-        $signIns = @(@(Get-M365Prop -Object $r -Name 'value') | Where-Object { $null -ne $_ })
+        $signIns = @(@(Get-M365Prop -Object $r -Name 'value') | Where-Object { $null -ne $_ } | ForEach-Object { Select-M365SignInFields -Row $_ })
         $signInGate = New-M365Gate -Source 'Sign-in history' -State Available
     } catch {
         $signInGate = Get-M365GateFromError -Source 'Sign-in history' -Message (Get-M365ErrorText -ErrorRecord $_)
@@ -775,7 +865,11 @@ function Get-M365UserFacts {
     $methods = @()
     try {
         $m = Invoke-M365GraphGet -Uri "$script:M365GraphRoot/users/$idPath/authentication/methods"
-        $methods = @(@(Get-M365Prop -Object $m -Name 'value') | Where-Object { $null -ne $_ })
+        # Only the method type is needed (is there a second factor?); phone numbers, email
+        # addresses and device names are dropped as soon as they arrive (personal-data profile).
+        $methods = @(@(Get-M365Prop -Object $m -Name 'value') | Where-Object { $null -ne $_ } | ForEach-Object {
+                @{ '@odata.type' = Get-M365Prop -Object $_ -Name '@odata.type'; id = Get-M365Prop -Object $_ -Name 'id' }
+            })
         $mfaGate = New-M365Gate -Source 'MFA methods' -State Available
     } catch {
         $mfaGate = Get-M365GateFromError -Source 'MFA methods' -Message (Get-M365ErrorText -ErrorRecord $_)

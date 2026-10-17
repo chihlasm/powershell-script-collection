@@ -115,6 +115,37 @@ BeforeAll {
         }
         $out
     }
+    # The Graph fake: dispatches on -Uri to the synthetic scenario in $script:Scn.
+    $script:FakeGraph = {
+        $u = [uri]::UnescapeDataString([string]$Uri)
+        $script:Events.Add("GET $u")
+        $s = $script:Scn
+        switch -Regex ($u) {
+            '/me/(transitive)?memberOf' { return @{ value = @($s.Roles | ForEach-Object { @{ '@odata.type' = '#microsoft.graph.directoryRole'; displayName = $_ } }) } }
+            '/me\b' { return @{ id = 'dddddddd-0000-0000-0000-000000000001'; userPrincipalName = $s.Me; displayName = 'Admin Tech' } }
+            '/organization' {
+                return @{ value = @(@{ id = $script:TenantId; displayName = $s.TenantName; onPremisesLastSyncDateTime = $null
+                            verifiedDomains = @($s.Domains | ForEach-Object { @{ name = $_; isDefault = ($_ -eq $s.Domains[0]); isInitial = ($_ -like '*.onmicrosoft.com') } }) }) }
+            }
+            '/domains' { return @{ value = @($s.Domains | ForEach-Object { @{ id = $_; isVerified = $true; isDefault = ($_ -eq $s.Domains[0]) } }) } }
+            '/subscribedSkus' { return @{ value = @() } }
+            '/auditLogs/signIns' {
+                if ($s.SignInStatus) { throw (Get-FakeGraphError $s.SignInStatus $s.SignInBody) }
+                return @{ value = @($s.SignIns) }
+            }
+            '/identityProtection/riskyUsers' {
+                if ($s.RiskyStatus -eq 'NotFound' -and $null -eq $s.RiskyUser) { throw (Get-FakeGraphError 'NotFound' '{"error":{"code":"Request_ResourceNotFound"}}') }
+                return $s.RiskyUser
+            }
+            '/authentication/methods' { return @{ value = @($s.MfaMethods) } }
+            '/users' {
+                if ($s.ThrowOnUsers) { throw 'boom: synthetic failure while looking up the user' }
+                if ($u -match 'userPrincipalName eq') { return @{ value = @($s.UpnMatches) } }
+                return @{ value = @($s.FallbackMatches) }
+            }
+            default { return @{ value = @() } }
+        }
+    }
     function New-OutDir { $d = Join-Path $TestDrive ([guid]::NewGuid().ToString()); $null = New-Item -ItemType Directory -Path $d; $d }
 }
 
@@ -128,36 +159,7 @@ Describe 'running the check' {
         Mock Disconnect-MgGraph { $script:Events.Add('DISCONNECT') }
         Mock Set-Clipboard { }
         Mock Write-Host { $script:Events.Add('HOST:' + ($Object -join ' ')) }
-        Mock Invoke-MgGraphRequest {
-            $u = [uri]::UnescapeDataString([string]$Uri)
-            $script:Events.Add("GET $u")
-            $s = $script:Scn
-            switch -Regex ($u) {
-                '/me/memberOf' { return @{ value = @($s.Roles | ForEach-Object { @{ '@odata.type' = '#microsoft.graph.directoryRole'; displayName = $_ } }) } }
-                '/me\b' { return @{ id = 'dddddddd-0000-0000-0000-000000000001'; userPrincipalName = $s.Me; displayName = 'Admin Tech' } }
-                '/organization' {
-                    return @{ value = @(@{ id = $script:TenantId; displayName = $s.TenantName; onPremisesLastSyncDateTime = $null
-                                verifiedDomains = @($s.Domains | ForEach-Object { @{ name = $_; isDefault = ($_ -eq $s.Domains[0]); isInitial = ($_ -like '*.onmicrosoft.com') } }) }) }
-                }
-                '/domains' { return @{ value = @($s.Domains | ForEach-Object { @{ id = $_; isVerified = $true; isDefault = ($_ -eq $s.Domains[0]) } }) } }
-                '/subscribedSkus' { return @{ value = @() } }
-                '/auditLogs/signIns' {
-                    if ($s.SignInStatus) { throw (Get-FakeGraphError $s.SignInStatus $s.SignInBody) }
-                    return @{ value = @($s.SignIns) }
-                }
-                '/identityProtection/riskyUsers' {
-                    if ($s.RiskyStatus -eq 'NotFound' -and $null -eq $s.RiskyUser) { throw (Get-FakeGraphError 'NotFound' '{"error":{"code":"Request_ResourceNotFound"}}') }
-                    return $s.RiskyUser
-                }
-                '/authentication/methods' { return @{ value = @($s.MfaMethods) } }
-                '/users' {
-                    if ($s.ThrowOnUsers) { throw 'boom: synthetic failure while looking up the user' }
-                    if ($u -match 'userPrincipalName eq') { return @{ value = @($s.UpnMatches) } }
-                    return @{ value = @($s.FallbackMatches) }
-                }
-                default { return @{ value = @() } }
-            }
-        }
+        Mock Invoke-MgGraphRequest -MockWith $script:FakeGraph
     }
 
     Context 'AC1 banner' {
@@ -262,7 +264,7 @@ Describe 'running the check' {
                 $script:Events.Add("GET $u")
                 $s = $script:Scn
                 switch -Regex ($u) {
-                    '/me/memberOf' { return @{ value = @() } }
+                    '/me/(transitive)?memberOf' { return @{ value = @() } }
                     '/me\b' { return @{ userPrincipalName = $s.Me } }
                     '/organization' { return @{ value = @(@{ id = $script:TenantId; displayName = $s.TenantName; verifiedDomains = @(@{ name = 'contoso.com'; isDefault = $true }) }) } }
                     '/domains' { return @{ value = @(@{ id = 'contoso.com'; isVerified = $true; isDefault = $true }) } }
@@ -284,6 +286,14 @@ Describe 'running the check' {
             $null = Invoke-Entry
             Should -Invoke Disconnect-MgGraph -Times 1 -Exactly -Scope It
             Should -Invoke Connect-MgGraph -Times 1 -Exactly -Scope It
+        }
+
+        It 'AC17_DisconnectAlways: Get-MgContext throwing after Connect-MgGraph still disconnects exactly once' {
+            Mock Get-MgContext { throw 'synthetic failure reading the Graph context' }
+            $r = Invoke-Entry
+            $r.ExitCode | Should -Be 3
+            Should -Invoke Connect-MgGraph -Times 1 -Exactly -Scope It
+            Should -Invoke Disconnect-MgGraph -Times 1 -Exactly -Scope It
         }
 
         It 'AC17_DisconnectAlways: a normal run disconnects once too' {
@@ -320,6 +330,17 @@ Describe 'running the check' {
             $noteFile = @(Get-ChildItem -LiteralPath (Join-Path $out 'Ticket_T1002') -Filter 'Note_*.txt' -ErrorAction SilentlyContinue)
             $noteFile.Count | Should -Be 1
             [System.IO.File]::ReadAllText($noteFile[0].FullName) | Should -Not -Match '203\.0\.113\.'
+            (Get-HostText) | Should -Not -Match '203\.0\.113\.' -Because 'the console is screen-shared and pasted from; IPs belong in the local HTML only'
+        }
+
+        It 'AC26_FullDetailWarns: -FullDetail prints a [WARN] that the note will include IP addresses and share paths' {
+            $null = Invoke-Entry @{ FullDetail = $true }
+            @($script:Events | Where-Object { $_ -match '^HOST:\[WARN\] .*IP addresses and share paths' }).Count | Should -Be 1
+        }
+
+        It 'AC26_NoFullDetailNoWarning: without -FullDetail there is no such warning' {
+            $null = Invoke-Entry
+            @($script:Events | Where-Object { $_ -match 'IP addresses and share paths' }).Count | Should -Be 0
         }
     }
 
@@ -362,6 +383,158 @@ Describe 'running the check' {
             $r | Should -Not -BeNullOrEmpty -Because "the check must run and return a result"
             @(Get-ChildItem -LiteralPath $dir -Recurse -File).Count | Should -Be 0
         }
+
+        It 'AC28_ReportFiles: -TicketNumber without -OutputPath writes only the note, in the default ticket folder' {
+            $script:DefaultRoot = New-OutDir
+            # CaseKit.ps1 defines the real one when the script runs; the mock (an alias) wins over
+            # it, so the user's Documents folder is never touched.
+            function Get-TicketNoteDefaultRoot { }
+            Mock Get-TicketNoteDefaultRoot { $script:DefaultRoot }
+            $cwd = New-OutDir
+            Push-Location -LiteralPath $cwd
+            try { $r = Invoke-Entry @{ TicketNumber = 'T1003' } } finally { Pop-Location }
+            $r | Should -Not -BeNullOrEmpty
+            $r.TicketNote | Should -Not -BeNullOrEmpty
+            $files = @(Get-ChildItem -LiteralPath $script:DefaultRoot -Recurse -File)
+            @($files | Where-Object { $_.Name -like 'Note_*.txt' -and $_.Directory.Name -eq 'Ticket_T1003' }).Count | Should -Be 1
+            @($files | Where-Object { $_.Name -like 'M365UserCheck_*' }).Count | Should -Be 0 -Because 'reports are written only with -OutputPath'
+            $files.Count | Should -Be 1
+            @(Get-ChildItem -LiteralPath $cwd -Recurse -File).Count | Should -Be 0
+        }
+
+        It 'AC28_ReportFiles: -TicketNumber with -OutputPath puts the reports and the note in <OutputPath>\Ticket_<n>' {
+            $out = New-OutDir
+            $null = Invoke-Entry @{ TicketNumber = 'T1004'; OutputPath = $out }
+            $names = @(Get-ChildItem -LiteralPath (Join-Path $out 'Ticket_T1004') -File | ForEach-Object Name)
+            @($names | Where-Object { $_ -like 'M365UserCheck_*.html' }).Count | Should -Be 1
+            @($names | Where-Object { $_ -like 'M365UserCheck_*.csv' }).Count | Should -Be 1
+            @($names | Where-Object { $_ -like 'Note_*.txt' }).Count | Should -Be 1
+        }
+
+        It 'AC28_CsvIsSafe: free text has no IP and a leading = + - @ is neutralised with a quote' {
+            New-Scenario @{
+                UpnMatches = @((New-User @{ displayName = '=HYPERLINK("http://example.com","x")'; mail = '@jdoe@contoso.com' }))
+                SignIns = @((New-SignInRow -Code 99999 -FailureReason 'Rejected from 203.0.113.9.'))
+            }
+            $out = New-OutDir
+            $null = Invoke-Entry @{ OutputPath = $out }
+            $csv = @(Get-ChildItem -LiteralPath $out -Filter '*.csv')
+            $csv.Count | Should -Be 1
+            $row = @(Import-Csv -LiteralPath $csv[0].FullName)[0]
+            $row.DisplayName | Should -BeExactly '''=HYPERLINK("http://example.com","x")'
+            $row.Mail | Should -BeExactly '''@jdoe@contoso.com'
+            foreach ($p in $row.PSObject.Properties) {
+                $p.Value | Should -Not -Match '^[=+\-@]' -Because "column $($p.Name) must not start a formula"
+            }
+            [System.IO.File]::ReadAllText($csv[0].FullName) | Should -Not -Match '203\.0\.113\.'
+        }
+    }
+
+    Context 'connect' {
+        It 'Connect_DisableWamUsesDeviceCode: -DisableWam passes -UseDeviceCode to Connect-MgGraph' {
+            $null = Invoke-Entry @{ DisableWam = $true }
+            Should -Invoke Connect-MgGraph -Times 1 -Exactly -Scope It -ParameterFilter { $UseDeviceCode -eq $true }
+        }
+
+        It 'Connect_ContextScopeProcess: a normal run asks for ContextScope Process and NoWelcome' {
+            $null = Invoke-Entry
+            Should -Invoke Connect-MgGraph -Times 1 -Exactly -Scope It -ParameterFilter { [string]$ContextScope -eq 'Process' -and $NoWelcome -eq $true }
+        }
+
+        It 'Connect_ContextScopeNotProcessWarns: a session that is not Process-scoped gets a [WARN]' {
+            Mock Get-MgContext { [PSCustomObject]@{ Account = $script:Scn.Me; TenantId = $script:TenantId; ContextScope = 'CurrentUser' } }
+            $null = Invoke-Entry
+            @($script:Events | Where-Object { $_ -match '^HOST:\[WARN\] .*not limited to this PowerShell window.*CurrentUser' }).Count | Should -Be 1
+        }
+
+        It 'Connect_ProcessScopeNoWarning: a Process-scoped session gets no such warning' {
+            $null = Invoke-Entry
+            @($script:Events | Where-Object { $_ -match 'not limited to this PowerShell window' }).Count | Should -Be 0
+        }
+    }
+
+    Context 'tenant domains' {
+        It 'AC2_DomainsUnreadableIsNotWrongTenant: an empty domain list stops with exit 3 and never blames the UPN' {
+            New-Scenario @{ Domains = @() }
+            $r = Invoke-Entry
+            $r.ExitCode | Should -Be 3
+            $r.Status | Should -Not -Be 'WrongTenant'
+            $r.Message | Should -Match "could not read the tenant's domains"
+            ((Get-HostText) + "`n" + $r.Message) | Should -Not -Match 'Wrong tenant'
+            @($script:Events | Where-Object { $_ -match '^GET .*/users' }).Count | Should -Be 0
+        }
+    }
+
+    Context 'data kept' {
+        It 'PersonalData_MfaMethodsKeepTypeAndIdOnly: phone numbers and other method details are dropped' {
+            New-Scenario @{ MfaMethods = @(@{ '@odata.type' = '#microsoft.graph.phoneAuthenticationMethod'; id = 'eeeeeeee-0000-0000-0000-000000000001'; phoneNumber = '+1 555 0100'; phoneType = 'mobile' }) }
+            $r = Invoke-Entry
+            @($r.Facts.MfaMethods).Count | Should -Be 1
+            @(@($r.Facts.MfaMethods)[0].Keys | Sort-Object) | Should -Be @('@odata.type', 'id')
+        }
+
+        It 'Banner_RolesFromTransitiveMemberOf: the roles request uses transitiveMemberOf (roles held through a group count)' {
+            $null = Invoke-Entry
+            @($script:Events | Where-Object { $_ -match '^GET .*/me/transitiveMemberOf/microsoft\.graph\.directoryRole' }).Count | Should -Be 1
+        }
+    }
+}
+
+Describe 'older Microsoft.Graph.Authentication modules' {
+    # Each Context defines its own Connect-MgGraph stub BEFORE it is mocked, because a mock keeps
+    # the parameters of the command it replaced, and the script checks them with Get-Command.
+    Context 'Connect-MgGraph without -NoWelcome' {
+        BeforeAll {
+            function Connect-MgGraph {
+                [CmdletBinding()]
+                param([string[]]$Scopes, [string]$TenantId, [string]$ClientId, $ContextScope, [string]$Environment,
+                    [switch]$UseDeviceCode, [double]$ClientTimeout)
+            }
+        }
+        BeforeEach {
+            New-Scenario
+            $script:Events = New-Object System.Collections.Generic.List[string]
+            Mock Import-Module { }
+            Mock Connect-MgGraph { $script:Events.Add('CONNECT') }
+            Mock Get-MgContext { [PSCustomObject]@{ Account = $script:Scn.Me; TenantId = $script:TenantId; ContextScope = 'Process' } }
+            Mock Disconnect-MgGraph { $script:Events.Add('DISCONNECT') }
+            Mock Set-Clipboard { }
+            Mock Write-Host { $script:Events.Add('HOST:' + ($Object -join ' ')) }
+            Mock Invoke-MgGraphRequest -MockWith $script:FakeGraph
+        }
+            It 'Connect_OldModuleWithoutNoWelcome: NoWelcome is dropped, ContextScope Process is still passed' {
+                $r = Invoke-Entry
+                $script:LastError | Should -BeNullOrEmpty
+                Should -Invoke Connect-MgGraph -Times 1 -Exactly -Scope It -ParameterFilter { [string]$ContextScope -eq 'Process' }
+                $r.Status | Should -Be 'Ok'
+            }
+    }
+
+    Context 'Connect-MgGraph without -ContextScope' {
+        BeforeAll {
+            function Connect-MgGraph {
+                [CmdletBinding()]
+                param([string[]]$Scopes, [string]$TenantId, [string]$ClientId, [string]$Environment, [switch]$UseDeviceCode, [switch]$NoWelcome)
+            }
+        }
+        BeforeEach {
+            New-Scenario
+            $script:Events = New-Object System.Collections.Generic.List[string]
+            Mock Import-Module { }
+            Mock Connect-MgGraph { $script:Events.Add('CONNECT') }
+            Mock Get-MgContext { [PSCustomObject]@{ Account = $script:Scn.Me; TenantId = $script:TenantId; ContextScope = 'Process' } }
+            Mock Disconnect-MgGraph { $script:Events.Add('DISCONNECT') }
+            Mock Set-Clipboard { }
+            Mock Write-Host { $script:Events.Add('HOST:' + ($Object -join ' ')) }
+            Mock Invoke-MgGraphRequest -MockWith $script:FakeGraph
+        }
+            It 'Connect_ModuleWithoutContextScopeStops: no sign-in, exit 3, a plain message to update the module' {
+                $r = Invoke-Entry
+                $r.ExitCode | Should -Be 3
+                $r.Message | Should -Match 'Update-Module Microsoft\.Graph\.Authentication'
+                Should -Invoke Connect-MgGraph -Times 0 -Exactly -Scope It
+                @($script:Events | Where-Object { $_ -match '^GET ' }).Count | Should -Be 0
+            }
     }
 }
 
@@ -418,6 +591,18 @@ Describe 'AC3 read-only by construction' {
         }
         $notRead = @($scopeLike | Where-Object { $_ -notmatch '\.Read(\.All)?$' })
         $notRead | Should -BeNullOrEmpty
+    }
+
+    It 'AC3_ReadOnlyByConstruction: Policy.Read.All is requested (Conditional Access detail), not Policy.Read.ConditionalAccess' {
+        # signin-list omits appliedConditionalAccessPolicies unless the app holds Policy.Read.All,
+        # Policy.Read.ConditionalAccess or Policy.ReadWrite.ConditionalAccess. The narrower one
+        # does not end in .Read / .Read.All, which the read-only rule above requires.
+        $consts = @()
+        foreach ($name in $script:Asts.Keys) {
+            $consts += @($script:Asts[$name].FindAll({ param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true) | ForEach-Object { $_.Value })
+        }
+        $consts | Should -Contain 'Policy.Read.All'
+        $consts | Should -Not -Contain 'Policy.Read.ConditionalAccess'
     }
 }
 

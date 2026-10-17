@@ -30,7 +30,7 @@ Works on Windows PowerShell 5.1 and PowerShell 7.
 
 A browser window opens. **Sign in with an account in the client's tenant.**
 
-**At the permissions prompt, consent for yourself only. Leave "Consent on behalf of your organization" unticked.** The tool asks for these read-only permissions: `Directory.Read.All`, `AuditLog.Read.All`, `UserAuthenticationMethod.Read.All`, `IdentityRiskyUser.Read.All`, `Policy.Read.All` (without the last one Microsoft hides which Conditional Access policy applied).
+**At the permissions prompt, consent for yourself only. Leave "Consent on behalf of your organization" unticked.** The tool asks for these read-only permissions: `Directory.Read.All`, `AuditLog.Read.All`, `UserAuthenticationMethod.Read.All`, `IdentityRiskyUser.Read.All`, `Policy.Read.All` (without the last one Microsoft hides which Conditional Access policy applied). Microsoft also accepts the narrower `Policy.Read.ConditionalAccess` for that, but the tool keeps to permissions whose names end in `.Read` or `.Read.All`, so anyone can see at a glance that it cannot change anything.
 
 Other options:
 
@@ -40,10 +40,10 @@ Other options:
 | `-Days 30` | Read 30 days of sign-ins instead of 7 (1 to 30). |
 | `-DisableWam` | Windows keeps picking your own work account? This signs in with a device code instead, so you choose the account. |
 | `-UseDeviceCode` | Sign in with a device code (for example from a server without a browser). |
-| `-OutputPath C:\Temp` | Also saves an HTML report and a one-row CSV named `M365UserCheck_<sign-in name>_<date>_<time>`. Without it, console only. |
-| `-TicketNumber 482113` | Save the HTML, the CSV and the ticket note in the ticket's folder. See [Ticket note](#ticket-note). |
+| `-OutputPath C:\Temp` | Also saves an HTML report and a one-row CSV named `M365UserCheck_<sign-in name>_<date>_<time>`. Without it, no report is written. |
+| `-TicketNumber 482113` | Save the ticket note in the ticket's folder (and the HTML and CSV too, when `-OutputPath` is given). See [Ticket note](#ticket-note). |
 | `-NoClipboard` | Do not copy the ticket note to the clipboard. |
-| `-FullDetail` | Keep IP addresses in the ticket note (removed by default). |
+| `-FullDetail` | Keep IP addresses and share paths in the ticket note (removed by default). The tool prints a warning to check the note before pasting it. |
 | `-PassThru` / `-Quiet` | For scripts: return the result object instead of an exit code, and write nothing to the console. |
 | `-SkipOnPremises`, `-Server`, `-Credential` | For the on-premises AD comparison, which is not in this version yet. |
 
@@ -120,8 +120,15 @@ Evidence: (none saved)
 
 - **Ruled out** only lists checks the tool could really make. Without Entra ID P1, nothing about sign-ins is ever ruled out.
 - The stamp names the tenant and the account you signed in as.
-- IP addresses are removed from the note by default (`-FullDetail` keeps them). They are in the HTML report only, never in the CSV.
-- **Where the files go:** with `-TicketNumber 482113`, the HTML, the CSV and the note go into `Ticket_482113` under `-OutputPath`, or under `%USERPROFILE%\Documents\TicketNotes`. With `-OutputPath` alone, the note is saved next to the reports. With neither, no files.
+- IP addresses are removed from the note and the console by default (`-FullDetail` keeps them in the note). They are in the HTML report only, never in the CSV. CSV cells that start with `=`, `+`, `-` or `@` get a leading `'`, so a spreadsheet never runs a client-supplied name as a formula.
+- **Where the files go:**
+
+  | You give | Files written |
+  |---|---|
+  | `-TicketNumber 482113 -OutputPath C:\Temp` | HTML, CSV and note in `C:\Temp\Ticket_482113` |
+  | `-TicketNumber 482113` | Only the note, in `%USERPROFILE%\Documents\TicketNotes\Ticket_482113`. No report: the HTML and CSV hold client data, so they are written only when you ask with `-OutputPath`. |
+  | `-OutputPath C:\Temp` | HTML, CSV and note in `C:\Temp` |
+  | neither | No files. The note goes to the clipboard (or is printed). |
 - Ran several tools on the same ticket? `..\TicketNote\Join-TicketNotes.ps1 -TicketNumber 482113` joins their notes.
 - The note is built by `CaseKit.ps1` in this folder. Keep it next to the script.
 
@@ -132,8 +139,9 @@ Evidence: (none saved)
 - **Conditional Access detail** (which policy blocked them) needs Global Reader, Security Reader, Security Administrator or Conditional Access Administrator. Without it the policy cannot be named, and nothing says Conditional Access was ruled out.
 - **Risky user needs Entra ID P2.** Microsoft does not document which error a tenant without P2 returns, so a "not allowed" answer is reported as "needs Entra ID P2, or a role that can read it".
 - **Guests** are checked like members and labelled; their home organization is not examined.
-- The Graph session is opened for this PowerShell process only and closed at the end of every run.
-- **Exit codes** (for scripts): `0` can sign in (YES or PROBABLY YES), `1` cannot or probably not, `2` no user matched or the address matches several users (they are listed), `3` could not run (module missing, sign-in failed, wrong tenant, or a ticket number that does not fit).
+- The Graph session is opened for this PowerShell process only and closed at the end of every run. If your Graph module is too old to do that, the tool stops and asks you to update it (`Update-Module Microsoft.Graph.Authentication`) rather than leave the client's sign-in in your token cache.
+- **Admin roles** in the banner include roles held through a group, not only roles assigned to the account directly.
+- **Exit codes** (for scripts): `0` can sign in (YES or PROBABLY YES), `1` cannot or probably not, `2` no user matched or the address matches several users (they are listed), `3` could not run (module missing or too old, sign-in failed, the tenant's domains could not be read, wrong tenant, or a ticket number that does not fit).
 
 ## What it does not check
 

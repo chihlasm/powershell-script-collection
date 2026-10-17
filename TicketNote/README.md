@@ -80,7 +80,7 @@ The note is paste-safe by default (no IP addresses or share paths), but it still
 
 `CaseKit.ps1` builds the four-part note (Checked, Ruled out, Could not check, Next step), the stamp (where, by whom, when, and whether anything was changed), saves it as UTF-8 with BOM, and copies it to the clipboard.
 
-- **This folder holds the master copy.** Each tool that writes a note keeps an identical copy in its own folder, so every folder still runs on its own. After changing `CaseKit.ps1` here, copy it to `AD-UserQuickCheck`, `Network-QuickCheck` and `Citrix-FSLogix-Triage`. `Tests\CaseKitParity.Tests.ps1` fails if a copy drifts.
+- **This folder holds the master copy.** Each tool that writes a note keeps an identical copy in its own folder, so every folder still runs on its own. After changing `CaseKit.ps1` here, copy it to `AD-UserQuickCheck`, `Network-QuickCheck`, `Citrix-FSLogix-Triage` and `M365-UserQuickCheck`. `Tests\CaseKitParity.Tests.ps1` fails if a copy drifts.
 - **"Ruled out" needs proof.** A check is only ruled out when the tool says it really looked (`New-TicketNoteItem -Kind Clear -CouldLook $true`). Without that it goes under "Could not check".
 - **Paste-safe.** IP addresses and share paths become `[IP removed]` / `[share path removed]` unless the tool is run with `-FullDetail`. Evidence shows file names only.
 - **Clipboard.** `Set-Clipboard` where it exists (Windows PowerShell 5.0 and later), the Windows Forms clipboard on 3.0 and 4.0, marked to stay out of clipboard history (see [The clipboard](#the-clipboard)). Never `clip.exe`, which mangles names like Müller on Windows PowerShell 5.1. If there is no clipboard (a server with no desktop), the note is saved or printed instead.

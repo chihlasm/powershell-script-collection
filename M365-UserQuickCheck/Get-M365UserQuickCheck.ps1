@@ -70,20 +70,25 @@
     only changes the reason shown.
 .PARAMETER OutputPath
     Optional folder. When given, an HTML report and a one-row CSV named
-    M365UserCheck_<sign-in name>_<yyyy-MM-dd_HHmmss> are written there. When omitted the tool is
-    console-only. With -TicketNumber, this is the folder that holds Ticket_<number>.
+    M365UserCheck_<sign-in name>_<yyyy-MM-dd_HHmmss> are written there. When omitted no report
+    is written (only the ticket note, when -TicketNumber is given). With -TicketNumber, this is
+    the folder that holds Ticket_<number>, and the reports go into Ticket_<number>.
 .PARAMETER TicketNumber
-    Optional ticket number (letters, digits, - or _, up to 32 characters). The HTML, the CSV and
-    the ticket note are saved in <root>\Ticket_<number>, where root is -OutputPath if given, else
-    %USERPROFILE%\Documents\TicketNotes. A number that does not fit is refused with a [FAIL] line
-    and exit code 3, before anything is checked.
+    Optional ticket number (letters, digits, - or _, up to 32 characters). The ticket note is
+    saved in <root>\Ticket_<number>, where root is -OutputPath if given, else
+    %USERPROFILE%\Documents\TicketNotes. The HTML and the CSV are saved there too, but only when
+    -OutputPath is given. A number that does not fit is refused with a [FAIL] line and exit code
+    3, before anything is checked.
 .PARAMETER NoClipboard
     Do not copy the ticket note to the clipboard.
 .PARAMETER FullDetail
-    Keep IP addresses in the ticket note. By default the note is paste-safe.
+    Keep IP addresses and share paths in the ticket note. By default the note is paste-safe
+    (owner decision D-009). The tool prints a [WARN] line as a reminder.
 .PARAMETER PassThru
     Return the result object (Status, ExitCode, UserPrincipalName, Message, Candidates, MatchedBy,
     Tenant, User, Facts, Assessment, Now, TicketNote) instead of setting an exit code.
+    Facts.SignIns holds the trimmed sign-in rows, including each row's ipAddress (the HTML
+    report shows it): treat the object as client data and do not log or export it as is.
 .PARAMETER Quiet
     Do not write the console report. Combine with -PassThru or -OutputPath. Also leaves the
     clipboard alone, because another script is the caller.
@@ -97,13 +102,16 @@
     Same, in a named tenant, reading 30 days of sign-ins, and saving an HTML report and a CSV row.
 .EXAMPLE
     .\Get-M365UserQuickCheck.ps1 jdoe@contoso.com -TicketNumber 482113
-    The HTML, the CSV and the ticket note go into %USERPROFILE%\Documents\TicketNotes\Ticket_482113,
-    and the note is copied to the clipboard.
+    The ticket note goes into %USERPROFILE%\Documents\TicketNotes\Ticket_482113 and onto the
+    clipboard. No report is written.
+.EXAMPLE
+    .\Get-M365UserQuickCheck.ps1 jdoe@contoso.com -TicketNumber 482113 -OutputPath C:\Temp
+    The HTML, the CSV and the ticket note go into C:\Temp\Ticket_482113.
 .NOTES
     Exit codes (without -PassThru): 0 = can sign in (YES or PROBABLY YES), 1 = cannot / probably
-    not, 2 = user not found or ambiguous, 3 = could not run (Graph module missing, sign-in or
-    preflight failed, the sign-in name's domain is not in this tenant, or an unusable
-    -TicketNumber).
+    not, 2 = user not found or ambiguous, 3 = could not run (Graph module missing or too old to
+    keep the sign-in to this window, sign-in or preflight failed, the tenant's domains could not
+    be read, the sign-in name's domain is not in this tenant, or an unusable -TicketNumber).
 
     Needs the Microsoft.Graph.Authentication module (Install-Module Microsoft.Graph.Authentication
     -Scope CurrentUser) and an account in the client's tenant that can read users. Sign-in history
@@ -122,6 +130,8 @@
       Connect-MgGraph: -Scopes, -TenantId, -ContextScope Process (this process only, so the
       client's token stays out of your persistent cache), -UseDeviceCode, -NoWelcome
         https://learn.microsoft.com/powershell/module/microsoft.graph.authentication/connect-mggraph
+      Get-MgContext: reports the session's ContextScope
+        https://learn.microsoft.com/powershell/module/microsoft.graph.authentication/get-mgcontext
       Invoke-MgGraphRequest (-Method, -Uri, -Headers, -OutputType)
         https://learn.microsoft.com/powershell/module/microsoft.graph.authentication/invoke-mggraphrequest
       Set-MgGraphOption -DisableLoginByWAM: only takes effect with a custom ClientId; persists
@@ -214,7 +224,7 @@ function Get-M365SafeFileName {
 function Write-M365CheckBanner {
     # Always first: where you are, as whom, and that nothing is changed (D-002).
     param([Parameter(Mandatory = $true)][object]$Tenant)
-    $roles = if (@($Tenant.Roles).Count -gt 0) { @($Tenant.Roles) -join ', ' } elseif ($Tenant.RolesNote) { $Tenant.RolesNote } else { 'none (no directory role is active for this account)' }
+    $roles = if (@($Tenant.Roles).Count -gt 0) { @($Tenant.Roles) -join ', ' } elseif ($Tenant.RolesNote) { $Tenant.RolesNote } else { 'none (no active directory role, directly or through a group)' }
     $domain = if ($Tenant.DefaultDomain) { $Tenant.DefaultDomain } else { 'not known' }
     Write-Host ''
     Write-Host ('=' * 70) -ForegroundColor DarkGray
@@ -270,6 +280,11 @@ function Invoke-M365UserQuickCheck {
         return $result
     }
     $domains = @(Get-M365VerifiedDomain -Fallback @($tenant.VerifiedDomains))
+    if ($domains.Count -eq 0) {
+        # No domain list means no evidence either way: never call the UPN wrong.
+        $result.Message = "Could not read the tenant's domains for $($tenant.DisplayName), so the tool cannot tell whether $upn belongs to this tenant. Nothing was checked. Run it again; if it keeps happening, check that the signed-in account can read the directory (Directory.Read.All)."
+        return $result
+    }
     if (-not (Test-M365UpnInTenant -UserPrincipalName $upn -VerifiedDomains $domains)) {
         $upnDomain = $upn.Substring($upn.LastIndexOf('@') + 1)
         $list = if ($domains.Count -gt 0) { ' (' + (($domains | Select-Object -First 6) -join ', ') + $(if ($domains.Count -gt 6) { ', ...' } else { '' }) + ')' } else { '' }
@@ -398,16 +413,20 @@ function Get-M365SignInTable {
 }
 
 function Write-M365UserCheckConsole {
+    # Text from the tenant (reasons quote the log's failureReason, which can hold an IP address)
+    # goes through ConvertTo-M365SafeText: IPs belong in the local HTML report only, and a
+    # console is often screen-shared or pasted from.
     param([Parameter(Mandatory = $true)][object]$Result)
+    $safe = { param($s) ConvertTo-M365SafeText -Text ([string]$s) }
 
     if ($Result.Status -eq 'Ambiguous') {
-        Write-Status $Result.Message 'FAIL'
+        Write-Status (& $safe $Result.Message) 'FAIL'
         foreach ($c in @($Result.Candidates)) {
             Write-Host ("       {0,-30} {1,-40} {2}" -f $c.DisplayName, $c.UserPrincipalName, $(if ($c.AccountEnabled) { 'sign-in allowed' } else { 'sign-in blocked' })) -ForegroundColor Gray
         }
         return
     }
-    if ($Result.Status -ne 'Ok') { Write-Status $Result.Message 'FAIL'; return }
+    if ($Result.Status -ne 'Ok') { Write-Status (& $safe $Result.Message) 'FAIL'; return }
 
     $f = $Result.Facts; $a = $Result.Assessment
     Write-Host ''
@@ -427,41 +446,41 @@ function Write-M365UserCheckConsole {
     if ($block.Count -gt 0) {
         Write-Host 'Why not:' -ForegroundColor White
         foreach ($r in $block) {
-            Write-Status $r.Message $(if ($r.Level -eq 'Blocker') { 'FAIL' } else { 'WARN' })
-            Write-Host ("       What to do: {0}" -f $r.Action) -ForegroundColor Gray
+            Write-Status (& $safe $r.Message) $(if ($r.Level -eq 'Blocker') { 'FAIL' } else { 'WARN' })
+            Write-Host ("       What to do: {0}" -f (& $safe $r.Action)) -ForegroundColor Gray
         }
     }
     if ($notes.Count -gt 0) {
         Write-Host ''
         Write-Host $(if ($block.Count -gt 0) { 'Also worth knowing:' } else { 'Worth knowing:' }) -ForegroundColor White
         foreach ($r in $notes) {
-            Write-Status $r.Message $(if ($r.Level -eq 'Warning') { 'WARN' } else { 'INFO' })
-            Write-Host ("       What to do: {0}" -f $r.Action) -ForegroundColor Gray
+            Write-Status (& $safe $r.Message) $(if ($r.Level -eq 'Warning') { 'WARN' } else { 'INFO' })
+            Write-Host ("       What to do: {0}" -f (& $safe $r.Action)) -ForegroundColor Gray
         }
     }
     if (@($a.Passes).Count -gt 0) {
         Write-Host ''
         Write-Host 'Looks fine:' -ForegroundColor White
-        foreach ($p in $a.Passes) { Write-Status $p 'PASS' }
+        foreach ($p in $a.Passes) { Write-Status (& $safe $p) 'PASS' }
     }
     if (@($a.CouldNotCheck).Count -gt 0) {
         Write-Host ''
         Write-Host 'Could not check:' -ForegroundColor White
-        foreach ($c in $a.CouldNotCheck) { Write-Status ('{0}: {1}' -f $c.Source, $c.Reason) 'WARN' }
+        foreach ($c in $a.CouldNotCheck) { Write-Status (& $safe ('{0}: {1}' -f $c.Source, $c.Reason)) 'WARN' }
         if ($f.SignInGate.State -ne 'Available') { Write-Host ("       What to do: {0}" -f $script:M365NoSignInHistoryStep) -ForegroundColor Gray }
     }
 
     Write-Host ''
     Write-Host 'Details' -ForegroundColor White
     Write-Host ('-' * 70) -ForegroundColor DarkGray
-    foreach ($d in (Get-M365UserCheckDetail -Result $Result)) { Write-Host ("{0,-28} {1}" -f $d.Item, $d.Value) -ForegroundColor Gray }
+    foreach ($d in (Get-M365UserCheckDetail -Result $Result)) { Write-Host ("{0,-28} {1}" -f $d.Item, (& $safe $d.Value)) -ForegroundColor Gray }
 
     if ($f.SignInGate.State -eq 'Available' -and @($f.SignIns).Count -gt 0) {
         Write-Host ''
         Write-Host 'Recent sign-ins (newest first, IP addresses in the HTML report only)' -ForegroundColor White
         Write-Host ('-' * 70) -ForegroundColor DarkGray
         foreach ($s in @(Get-M365SignInTable -Facts $f | Select-Object -First 10)) {
-            Write-Host ("{0,-21} {1,-14} {2,-30} {3}" -f $s.Time, $s.Result, $s.App, $s.Location) -ForegroundColor $(if ($s.Result -eq 'Success') { 'Gray' } else { 'Yellow' })
+            Write-Host ("{0,-21} {1,-14} {2,-30} {3}" -f $s.Time, $s.Result, (& $safe $s.App), (& $safe $s.Location)) -ForegroundColor $(if ($s.Result -eq 'Success') { 'Gray' } else { 'Yellow' })
         }
     }
     Write-Host ''
@@ -469,18 +488,18 @@ function Write-M365UserCheckConsole {
 }
 
 function Get-M365UserCheckCsvRow {
-    # One row for the ticket. Never an IP address: free text goes through ConvertTo-M365SafeText.
+    # One row for the ticket. Never an IP address, and never a formula: every text column goes
+    # through ConvertTo-M365CsvValue (IPs removed, a leading = + - @ neutralised) at the end.
     param([Parameter(Mandatory = $true)][object]$Result)
     $u = $Result.User; $f = $Result.Facts; $a = $Result.Assessment; $t = $Result.Tenant
     $rows = @(Get-M365SignInRows -SignIns @($f.SignIns))
     $latest = if ($rows.Count -gt 0) { $rows[0] } else { $null }
-    $safe = { param($s) ConvertTo-M365SafeText -Text ([string]$s) }
-    return [PSCustomObject]@{
+    $row = [PSCustomObject]@{
         CheckedAt = (Format-M365Time $Result.Now)
         Tenant = $t.DisplayName; TenantId = $t.TenantId; SignedInAs = $t.Account
         Verdict = $a.Verdict; VerdictNote = $a.VerdictNote
-        Reasons = (& $safe ((@($a.Reasons | Where-Object { $_.Level -eq 'Blocker' -or $_.Level -eq 'Probable' } | ForEach-Object { $_.Message })) -join ' | '))
-        Warnings = (& $safe ((@($a.Reasons | Where-Object { $_.Level -eq 'Warning' } | ForEach-Object { $_.Message })) -join ' | '))
+        Reasons = ((@($a.Reasons | Where-Object { $_.Level -eq 'Blocker' -or $_.Level -eq 'Probable' } | ForEach-Object { $_.Message })) -join ' | ')
+        Warnings = ((@($a.Reasons | Where-Object { $_.Level -eq 'Warning' } | ForEach-Object { $_.Message })) -join ' | ')
         CouldNotCheck = (@($a.CouldNotCheck | ForEach-Object { '{0}: {1}' -f $_.Source, $_.Reason }) -join ' | ')
         DisplayName = [string](Get-M365Prop -Object $u -Name 'displayName')
         UserPrincipalName = [string](Get-M365Prop -Object $u -Name 'userPrincipalName')
@@ -498,6 +517,10 @@ function Get-M365UserCheckCsvRow {
         RiskyUser = $(if ($f.RiskGate.State -ne 'Available') { $f.RiskGate.State } elseif ($null -eq $f.RiskyUser) { 'NotFlagged' } else { '{0}/{1}' -f (Get-M365Prop -Object $f.RiskyUser -Name 'riskLevel'), (Get-M365Prop -Object $f.RiskyUser -Name 'riskState') })
         DaysChecked = $f.Days
     }
+    foreach ($p in $row.PSObject.Properties) {
+        if ($p.Value -is [string]) { $p.Value = ConvertTo-M365CsvValue -Text $p.Value }
+    }
+    return $row
 }
 
 function ConvertTo-M365UserCheckHtml {
@@ -685,6 +708,11 @@ try {
     exit 3
 }
 
+if ($FullDetail -and -not $Quiet) {
+    # Owner decision D-009: paste-safe by default; -FullDetail opts out, so say what that means.
+    Write-Status '-FullDetail: the ticket note will include IP addresses and share paths. Check it before you paste it anywhere the client or a third party can read.' 'WARN'
+}
+
 if ($DisableWam -and -not $UseDeviceCode) {
     # Set-MgGraphOption -DisableLoginByWAM is not used: Microsoft documents that it only takes
     # effect with a custom ClientId (this tool uses the default one) and that it persists
@@ -695,8 +723,20 @@ if ($DisableWam -and -not $UseDeviceCode) {
     if (-not $Quiet) { Write-Status '-DisableWam: signing in with a device code instead, so you can choose the client account (Windows would otherwise pick your own account).' 'INFO' }
 }
 
-# ContextScope Process keeps the client's token out of the tech's persistent token cache.
-$connectParams = @{ Scopes = $script:M365Scopes; NoWelcome = $true; ContextScope = 'Process' }
+# ContextScope Process keeps the client's token out of the tech's persistent token cache
+# ("This accepts Process for the current process, or CurrentUser for all sessions started by
+# user", connect-mggraph). Without it this tool does not sign in at all: a client's Global
+# Administrator token must never be left behind for the tech's later sessions. -NoWelcome only
+# hides a banner, so an older module without it just shows the banner.
+$connectCommand = Get-Command -Name Connect-MgGraph -ErrorAction SilentlyContinue
+if (-not $connectCommand -or -not $connectCommand.Parameters.ContainsKey('ContextScope')) {
+    $msg = 'The installed Microsoft.Graph.Authentication module cannot keep the sign-in to this PowerShell window (it has no Connect-MgGraph -ContextScope), so the tool did not sign in: the client''s token would stay in your token cache. Update the module (Update-Module Microsoft.Graph.Authentication), open a new PowerShell window and run it again.'
+    if (-not $Quiet) { Write-Status $msg 'FAIL' }
+    if ($PassThru) { return (New-M365CheckStartFailure $msg) }
+    exit 3
+}
+$connectParams = @{ Scopes = $script:M365Scopes; ContextScope = 'Process' }
+if ($connectCommand.Parameters.ContainsKey('NoWelcome')) { $connectParams['NoWelcome'] = $true }
 if ($TenantId) { $connectParams['TenantId'] = $TenantId }
 if ($UseDeviceCode) { $connectParams['UseDeviceCode'] = $true }
 
@@ -706,16 +746,15 @@ try {
     try {
         if (-not $Quiet) { Write-Status 'Signing in to Microsoft Graph (read-only permissions; consent for yourself only)...' 'INFO' }
         $connectAttempted = $true
-        try {
-            Connect-MgGraph @connectParams -ErrorAction Stop | Out-Null
-        } catch [System.Management.Automation.ParameterBindingException] {
-            # Older module versions have no -NoWelcome / -ContextScope (Get-M365SecurityEvidence
-            # does the same). Any other failure, such as a cancelled sign-in, is not retried.
-            $connectParams.Remove('NoWelcome'); $connectParams.Remove('ContextScope')
-            Connect-MgGraph @connectParams -ErrorAction Stop | Out-Null
-        }
+        Connect-MgGraph @connectParams -ErrorAction Stop | Out-Null
         $context = Get-MgContext
         if (-not $context) { throw 'Connect-MgGraph finished without a Graph context.' }
+        # Get-MgContext reports the session's ContextScope (get-mgcontext). Anything but Process
+        # means the token may outlive this window; the finally block below still signs out.
+        $scopeNow = [string](Get-M365Prop -Object $context -Name 'ContextScope')
+        if ($scopeNow -ne 'Process' -and -not $Quiet) {
+            Write-Status ("The Graph sign-in is not limited to this PowerShell window (ContextScope {0}), so the client's token may be kept for your later sessions. The tool signs out when it finishes; if it is stopped early, run Disconnect-MgGraph." -f $(if ($scopeNow) { $scopeNow } else { 'not reported' })) 'WARN'
+        }
     } catch {
         $result = New-M365CheckStartFailure "Could not sign in to Microsoft Graph: $($_.Exception.Message)"
     }
@@ -735,30 +774,34 @@ try {
 
 if (-not $Quiet) { Write-M365UserCheckConsole -Result $result }
 
-# Where the files go: with -TicketNumber, <OutputPath or the default root>\Ticket_<n> (reports
-# and note together); with only -OutputPath, that folder; with neither, no files (the note goes
-# to the clipboard, or the console).
+# Where the files go (AC28): the HTML and CSV only when -OutputPath is given, so nothing with
+# client data is written unasked. With -TicketNumber and -OutputPath, reports and note go into
+# <OutputPath>\Ticket_<n>; with -TicketNumber alone, only the note, in
+# <default root>\Ticket_<n> (owner decision D-012); with -OutputPath alone, everything in that
+# folder; with neither, no files (the note goes to the clipboard, or the console, D-013).
+$reportFolder = $OutputPath
 $folder = $OutputPath
 if ($TicketNumber) {
     $root = if ($OutputPath) { $OutputPath } else { Get-TicketNoteDefaultRoot }
     try {
         $folder = Resolve-TicketFolder -TicketNumber $TicketNumber -Root $root
+        if ($OutputPath) { $reportFolder = $folder }
     } catch {
         if (-not $Quiet) { Write-Status "Could not create the ticket folder under ${root}: $($_.Exception.Message)" 'WARN' }
     }
 }
 
 $evidence = @()
-if ($folder -and $result.Status -eq 'Ok') {
+if ($reportFolder -and $result.Status -eq 'Ok') {
     try {
-        $files = Export-M365UserCheckReport -Result $result -OutputPath $folder
+        $files = Export-M365UserCheckReport -Result $result -OutputPath $reportFolder
         $evidence = @($files.Html, $files.Csv)
         if (-not $Quiet) {
             Write-Status "Report saved: $($files.Html)" 'PASS'
             Write-Status "CSV saved   : $($files.Csv)" 'PASS'
         }
     } catch {
-        if (-not $Quiet) { Write-Status "Could not write the report to ${folder}: $($_.Exception.Message)" 'WARN' }
+        if (-not $Quiet) { Write-Status "Could not write the report to ${reportFolder}: $($_.Exception.Message)" 'WARN' }
     }
 }
 
