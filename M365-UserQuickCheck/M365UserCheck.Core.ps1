@@ -24,8 +24,38 @@
     property is told apart from a null one with Test-M365Prop. That matters for
     appliedConditionalAccessPolicies, which Graph OMITS for a role that cannot read
     Conditional Access data.
+
+    ON-PREMISES AD (SQ-011). Get-M365OnPremisesFacts imports ActiveDirectory at run time and
+    only calls Get-ADUser; the address-conflict lookups are GETs on /users, /groups and
+    /contacts. Get-M365OnPremisesAssessment compares the result with the cloud user. No
+    domain controller, or no module, is the 'On-premises AD' gate's reason, never a failure
+    of the check (owner decision D-014).
 .NOTES
     REFERENCES
+      onPremisesProvisioningError: category (only value PropertyConflict), occurredDateTime,
+      propertyCausingError, value
+        https://learn.microsoft.com/graph/api/resources/onpremisesprovisioningerror?view=graph-rest-1.0
+      user.onPremisesSecurityIdentifier: the on-premises SID of a synced user (needs $select);
+      user.onPremisesProvisioningErrors: sync errors (needs $select)
+        https://learn.microsoft.com/graph/api/resources/user?view=graph-rest-1.0
+      organization.onPremisesLastSyncDateTime: when the tenant last synced with on-premises
+      AD, UTC
+        https://learn.microsoft.com/graph/api/resources/organization?view=graph-rest-1.0
+      $filter mail eq and proxyAddresses/any(p:p eq ...) on groups and orgContacts, and
+      userPrincipalName / mail / proxyAddresses on users: "works by default" (no
+      ConsistencyLevel: eventual, no $count) in the property tables
+        https://learn.microsoft.com/graph/aad-advanced-queries
+      List groups (GET /groups) and List orgContacts (GET /contacts): Directory.Read.All is
+      among the delegated permissions
+        https://learn.microsoft.com/graph/api/group-list?view=graph-rest-1.0
+        https://learn.microsoft.com/graph/api/orgcontact-list?view=graph-rest-1.0
+      Entra Connect Sync: "By default every 30 minutes a synchronization cycle is run"
+        https://learn.microsoft.com/entra/identity/hybrid/connect/how-to-connect-sync-feature-scheduler
+      Get-ADUser: -Identity takes a DN, GUID, SID or SAM account name; -LDAPFilter, -Properties
+      (beyond the default set), -Server, -Credential
+        https://learn.microsoft.com/powershell/module/activedirectory/get-aduser
+      Block marker msDS-cloudExtensionAttribute10 = BlockCloudSignIn: the BlockCloudSignIn
+      rule in M365-SyncedUserFixes/SyncedUserFixes.Core.ps1:111-112
       List signIns: v1.0 returns interactive user sign-ins (and successful federated ones),
       newest first; only $top, $skiptoken and $filter are documented (no $select, so rows are
       trimmed after they arrive); AuditLog.Read.All; roles Global Reader, Reports Reader,
@@ -99,6 +129,9 @@
         a role that can read it", because the two cannot be told apart from Learn.
       - That a user ID that was never flagged returns 404 from riskyUsers/{id}. Treated as
         "not flagged" (Available), never as a failure.
+      - Whether the proxyAddresses/any(p:p eq 'smtp:...') comparison ignores case. The value
+        is sent with a lower-case smtp: prefix, as in Find-M365User; mail eq is also sent, so
+        an object whose mail is the address is found either way.
 #>
 
 [CmdletBinding()]
@@ -167,6 +200,32 @@ $script:M365NoP1VerdictNote = 'sign-in history not available (no Entra ID P1)'
 # Next step when sign-in history could not be read. Free tenants keep seven days of sign-ins in
 # the admin center (reference-reports-data-retention); the path is from concept-sign-ins.
 $script:M365NoSignInHistoryStep = 'Look at their recent sign-ins in the Microsoft Entra admin center (Entra ID > Monitoring & health > Sign-in logs, filtered to this user). A tenant without Entra ID P1 keeps seven days of sign-ins there.'
+
+# --- On-premises AD stage (SQ-011) ---------------------------------------------------------
+
+# The M365-SyncedUserFixes block marker. That tool writes this value to this attribute, and its
+# Entra Connect rule either flows accountEnabled False or filters the user out of sync (the
+# account is then deleted from Microsoft 365). Source: the BlockCloudSignIn rule definition,
+# M365-SyncedUserFixes/SyncedUserFixes.Core.ps1:111-112 (SourceAttribute, MarkerValue).
+# Compared case-sensitively, as written by that tool.
+$script:M365BlockMarkerAttribute = 'msDS-cloudExtensionAttribute10'
+$script:M365BlockMarkerValue = 'BlockCloudSignIn'
+
+# What the AD stage reads (Get-ADUser -Properties). Enabled, UserPrincipalName,
+# DistinguishedName and SamAccountName are in the default set but are named so the request
+# says what it needs. pwdLastSet is shown in the details table only.
+# https://learn.microsoft.com/powershell/module/activedirectory/get-aduser
+$script:M365AdUserProperties = @(
+    'Enabled', 'UserPrincipalName', 'SamAccountName', 'DisplayName', 'DistinguishedName',
+    'mail', 'proxyAddresses', 'pwdLastSet', $script:M365BlockMarkerAttribute
+)
+
+# Entra Connect Sync runs a sync cycle every 30 minutes by default
+# (how-to-connect-sync-feature-scheduler). More than 3 hours (six missed cycles) is stale;
+# exactly 3 hours is not.
+# https://learn.microsoft.com/entra/identity/hybrid/connect/how-to-connect-sync-feature-scheduler
+$script:M365SyncIntervalText = 'every 30 minutes'
+$script:M365StaleSyncHours = 3
 
 # =============================================================================
 # Small helpers (pure)
@@ -395,10 +454,21 @@ function Get-M365GateFromError {
 
 function Format-M365SourceLine {
     # One banner line: "<Source>: available" or "<Source>: not available (<Reason>)".
+    # On-premises AD reads "could not check (<Reason>)" instead: it is not a licence or a role
+    # that is missing but a domain controller this computer could not reach (D-014).
     param([Parameter(Mandatory = $true)][object]$Gate)
     if ($Gate.State -eq 'Available') { return ('{0}: available' -f $Gate.Source) }
     $reason = if ($Gate.Reason) { $Gate.Reason } else { 'no reason given' }
+    if ($Gate.Source -eq 'On-premises AD') { return ('{0}: could not check ({1})' -f $Gate.Source, $reason) }
     return ('{0}: not available ({1})' -f $Gate.Source, $reason)
+}
+
+function Format-M365CouldNotCheckLine {
+    # One "Could not check" line: "<Source>: <Reason>", or for on-premises AD the same
+    # "On-premises AD: could not check (<Reason>)" as the banner.
+    param([Parameter(Mandatory = $true)][object]$Item)
+    if ($Item.Source -eq 'On-premises AD') { return ('{0}: could not check ({1})' -f $Item.Source, $Item.Reason) }
+    return ('{0}: {1}' -f $Item.Source, $Item.Reason)
 }
 
 function Get-M365ConditionalAccessGate {
@@ -430,6 +500,178 @@ function Test-M365UserSynced {
     # onPremisesSyncEnabled true = synced from on-premises AD; null, false or absent = cloud-only.
     param([object]$User)
     return ((Get-M365Prop -Object $User -Name 'onPremisesSyncEnabled') -eq $true)
+}
+
+function Test-M365BlockMarker {
+    # True when the AD account carries the M365-SyncedUserFixes block marker.
+    param([object]$AdUser)
+    return ([string](Get-M365Prop -Object $AdUser -Name $script:M365BlockMarkerAttribute) -ceq $script:M365BlockMarkerValue)
+}
+
+function Get-M365PrimarySmtp {
+    # The primary SMTP address: the proxyAddresses entry with the upper-case SMTP: prefix (user
+    # resource, proxyAddresses), else mail. '' when neither is set.
+    param([object]$Object)
+    $primary = @(@(Get-M365Prop -Object $Object -Name 'proxyAddresses') | Where-Object { [string]$_ -cmatch '^SMTP:.' } | Select-Object -First 1)
+    if ($primary.Count -gt 0) { return ([string]$primary[0]).Substring(5) }
+    return [string](Get-M365Prop -Object $Object -Name 'mail')
+}
+
+function Format-M365Age {
+    # "45 minutes", "4 hours", "3 days": whole units, rounded down.
+    param([Parameter(Mandatory = $true)][TimeSpan]$Span)
+    if ($Span.TotalHours -lt 1) { $n = [int][math]::Floor($Span.TotalMinutes); $unit = 'minute' }
+    elseif ($Span.TotalHours -lt 48) { $n = [int][math]::Floor($Span.TotalHours); $unit = 'hour' }
+    else { $n = [int][math]::Floor($Span.TotalDays); $unit = 'day' }
+    return ('{0} {1}{2}' -f $n, $unit, $(if ($n -eq 1) { '' } else { 's' }))
+}
+
+function Get-M365OnPremisesAssessment {
+    <#
+    .SYNOPSIS
+        The on-premises AD comparison part of the assessment (AC19-AC25), for
+        Get-M365UserAssessment.
+    .DESCRIPTION
+        Reads the cloud user's provisioning errors (Graph data, so checked whatever the AD gate
+        says), the tenant's last sync time (for synced users and for "no cloud user"), and,
+        only when the On-premises AD gate is Available, the AD account and the address
+        conflicts found in Microsoft 365.
+
+        Returns { Reasons; Cleared; BlockedAction }: Reasons and Cleared in the assessment's
+        shapes, and BlockedAction, the SignInBlocked next step to use when the AD account
+        explains the block ($null keeps the default one).
+    #>
+    param([Parameter(Mandatory = $true)][object]$Facts)
+    $reasons = New-Object System.Collections.Generic.List[object]
+    $cleared = New-Object System.Collections.Generic.List[object]
+    function Add-Reason($Level, $Code, $Message, $Action) {
+        $reasons.Add([PSCustomObject]@{ Level = $Level; Code = $Code; Message = $Message; Action = $Action })
+    }
+    function Add-Pass($Code, $Message) {
+        $cleared.Add([PSCustomObject]@{ Code = $Code; Message = $Message; CouldLook = $true })
+    }
+    function Add-AddressConflictReasons {
+        # AC22: one Blocker per other object holding the AD account's UPN or primary SMTP address.
+        $typeNames = @{ user = 'a cloud-only user'; group = 'a group'; contact = 'a contact' }
+        foreach ($c in @(@(Get-M365Prop -Object $Facts -Name 'AddressConflicts') | Where-Object { $null -ne $_ })) {
+            $type = [string](Get-M365Prop -Object $c -Name 'Type')
+            $label = if ($typeNames.ContainsKey($type)) { $typeNames[$type] } else { "an object ($type)" }
+            Add-Reason 'Blocker' 'AddressHeld' ("The address {0} is already held in Microsoft 365 by {1}, '{2}', so sync cannot give it to this account." -f `
+                    [string](Get-M365Prop -Object $c -Name 'Address'), $label, [string](Get-M365Prop -Object $c -Name 'DisplayName')) `
+                'Find that object in the Microsoft 365 admin center and remove the address from it (or delete it if it is a leftover copy), then wait for the next sync. Ask the senior engineer if you are not sure which one is right.'
+        }
+        $err = [string](Get-M365Prop -Object $Facts -Name 'AddressCheckError')
+        if ($err) {
+            Add-Reason 'Info' 'AddressCheckFailed' ("Could not check whether another Microsoft 365 object holds this account's addresses: $err") `
+                'Run the check again; if it keeps failing, search the address in the Microsoft 365 admin center.'
+        }
+    }
+    function New-Result($BlockedAction) {
+        [PSCustomObject]@{ Reasons = $reasons.ToArray(); Cleared = $cleared.ToArray(); BlockedAction = $BlockedAction }
+    }
+
+    $user = $Facts.User
+    $synced = Test-M365UserSynced -User $user
+    $gate = Get-M365Prop -Object $Facts -Name 'OnPremisesGate'
+    $adAvailable = ($null -ne $gate -and $gate.State -eq 'Available')
+    $adUser = if ($adAvailable) { Get-M365Prop -Object $Facts -Name 'AdUser' } else { $null }
+    $marker = Test-M365BlockMarker -AdUser $adUser
+    $nowUtc = ConvertTo-M365UtcTime -Value $Facts.Now
+    if (-not $nowUtc) { $nowUtc = [datetime]::UtcNow }
+    $lastSync = ConvertTo-M365UtcTime -Value (Get-M365Prop -Object $Facts -Name 'TenantLastSync')
+    $lastSyncText = if ($lastSync) { "The tenant last received changes from on-premises AD at $(Format-M365Time $lastSync)." } else { "The tenant's last sync time is not known." }
+    $blockedAction = $null
+
+    # --- No Microsoft 365 user, but an AD account (AC20) -------------------------------------
+    if ($null -eq $user) {
+        if ($adAvailable -and $null -ne $adUser) {
+            $adUpn = [string](Get-M365Prop -Object $adUser -Name 'UserPrincipalName')
+            if ($marker) {
+                Add-Reason 'Blocker' 'NeverSynced' ("This account exists in AD but not in Microsoft 365: it was removed from Microsoft 365 on purpose by M365-SyncedUserFixes (its AD account carries the block marker {0} = {1})." -f $script:M365BlockMarkerAttribute, $script:M365BlockMarkerValue) `
+                    'If they should have Microsoft 365 again, remove the marker with M365-SyncedUserFixes and wait for the next sync. Their old mailbox and licences may already be gone; check with the senior engineer first.'
+            } else {
+                Add-Reason 'Blocker' 'NeverSynced' ("This account exists in AD but not in Microsoft 365 (AD sign-in name {0}, in {1}). It has never synced, or it is no longer synced." -f $adUpn, [string](Get-M365Prop -Object $adUser -Name 'DistinguishedName')) `
+                    'Check the sync scope: is the account in an OU that Entra Connect synchronizes (OU filtering), and is it excluded by a filtering rule? Then check on the Entra Connect server that sync is running and shows no export error for this account.'
+            }
+        }
+    }
+
+    # --- Provisioning errors on the cloud user (AC21) -----------------------------------------
+    # onPremisesProvisioningError: category (PropertyConflict), propertyCausingError, value.
+    # https://learn.microsoft.com/graph/api/resources/onpremisesprovisioningerror?view=graph-rest-1.0
+    foreach ($e in @(@(Get-M365Prop -Object $user -Name 'onPremisesProvisioningErrors') | Where-Object { $null -ne $_ })) {
+        $when = ConvertTo-M365UtcTime -Value (Get-M365Prop -Object $e -Name 'occurredDateTime')
+        Add-Reason 'Blocker' 'ProvisioningError' ("Sync reports an error for this account: {0} on {1}, value '{2}'{3}. Changes from on-premises AD are not reaching Microsoft 365 for it." -f `
+                [string](Get-M365Prop -Object $e -Name 'category'), [string](Get-M365Prop -Object $e -Name 'propertyCausingError'), [string](Get-M365Prop -Object $e -Name 'value'), $(if ($when) { " (since $(Format-M365Time $when))" } else { '' })) `
+            'Another object already uses that value. Find it (Microsoft 365 admin center, or search the address in Exchange), remove or change the value on the wrong object, then wait for the next sync.'
+    }
+
+    # --- Tenant sync freshness (AC24), only where sync is involved -----------------------------
+    if (($synced -or $null -eq $user) -and $lastSync) {
+        $age = $nowUtc - $lastSync
+        if ($age.TotalHours -gt $script:M365StaleSyncHours) {
+            Add-Reason 'Warning' 'StaleTenantSync' ("Microsoft 365 last received changes from on-premises AD {0} ago (at {1})." -f (Format-M365Age -Span $age), (Format-M365Time $lastSync)) `
+                "Sync normally runs $script:M365SyncIntervalText, so changes made in AD since then (enabling, unlocking, a new password) have not arrived. Check the Entra Connect server: is the sync service running and is the scheduler enabled?"
+        } else {
+            Add-Pass 'TenantSyncRecent' ('Sync from on-premises AD is running: last sync at {0}.' -f (Format-M365Time $lastSync))
+        }
+    }
+
+    if (-not $adAvailable -or $null -eq $user) {
+        if ($adAvailable) { Add-AddressConflictReasons }
+        return (New-Result $blockedAction)
+    }
+
+    # --- Cloud-only user (AC19) ------------------------------------------------------------
+    if (-not $synced) {
+        if ($null -eq $adUser) {
+            Add-Pass 'CloudOnly' 'Cloud-only account: sync is not involved.'
+        } else {
+            Add-Reason 'Warning' 'AdAccountNotSynced' ("This Microsoft 365 account is cloud-only, but an on-premises AD account has the same sign-in name ({0}). They are two separate accounts: a password change in AD does not reach this one." -f [string](Get-M365Prop -Object $adUser -Name 'UserPrincipalName')) `
+                'Make sure the user signs in to Microsoft 365 with the cloud password. If the two should be one account, ask the senior engineer about matching them in Entra Connect.'
+        }
+        return (New-Result $blockedAction)
+    }
+
+    # --- Synced user: compare with the AD account ------------------------------------------
+    if ($null -eq $adUser) {
+        Add-Reason 'Warning' 'AdAccountNotFound' 'This account syncs from on-premises AD, but no AD account with its security identifier (SID) or sign-in name was found in the domain checked.' `
+            'It may be in another domain or forest: run the check again with -Server <domain controller of that domain>. If it was deleted from AD, ask the senior engineer before anything else is changed.'
+        return (New-Result $blockedAction)
+    }
+
+    $cloudEnabled = Get-M365Prop -Object $user -Name 'accountEnabled'
+    $adEnabled = Get-M365Prop -Object $adUser -Name 'Enabled'
+    if ($cloudEnabled -eq $false) {
+        if ($marker) {
+            Add-Reason 'Info' 'BlockedOnPurpose' ("Sign-in was blocked on purpose with M365-SyncedUserFixes: the AD account carries the block marker {0} = {1}." -f $script:M365BlockMarkerAttribute, $script:M365BlockMarkerValue) `
+                'Ask who blocked it and why before changing anything (a leaver, a security incident).'
+            $blockedAction = 'It was blocked on purpose with M365-SyncedUserFixes (block marker on the AD account). If that is wrong, remove the marker with M365-SyncedUserFixes, then wait for the next sync.'
+        } elseif ($adEnabled -eq $false) {
+            $blockedAction = 'The on-premises AD account is disabled, and sync carries that to Microsoft 365. If it should be in use, enable it in AD (AD-UserQuickCheck shows its state), then wait for the next sync.'
+        } elseif ($adEnabled -eq $true) {
+            Add-Reason 'Probable' 'AdEnabledMismatch' 'On-premises AD has this account enabled, but Microsoft 365 has sign-in blocked: AD and Microsoft 365 disagree.' `
+                ("$lastSyncText If the AD account was enabled after that, wait for the next sync (normally $script:M365SyncIntervalText). If it stays blocked, check the Entra Connect server for a sync rule or an export error for this account.")
+            $blockedAction = 'On-premises AD has the account enabled and without the M365-SyncedUserFixes block marker, so the block has not come from AD this sync: see "AD and Microsoft 365 disagree".'
+        }
+    } elseif ($cloudEnabled -eq $true -and $adEnabled -eq $false) {
+        Add-Reason 'Warning' 'AdDisabledCloudEnabled' 'On-premises AD has this account disabled, but Microsoft 365 still allows sign-in: AD and Microsoft 365 disagree, and sync normally carries the AD state across.' `
+            ("$lastSyncText If they should be able to sign in, enable the AD account (AD-UserQuickCheck shows its state).")
+    }
+
+    # --- UPN mismatch (AC25) -----------------------------------------------------------------
+    $cloudUpn = [string](Get-M365Prop -Object $user -Name 'userPrincipalName')
+    $adUpn = [string](Get-M365Prop -Object $adUser -Name 'UserPrincipalName')
+    if ($adUpn -and $cloudUpn -and $adUpn -ne $cloudUpn) {
+        Add-Reason 'Warning' 'UpnMismatch' ("The sign-in name differs: on-premises AD has {0}, Microsoft 365 has {1}." -f $adUpn, $cloudUpn) `
+            ('They sign in to Microsoft 365 as {0}. If AD was changed recently, wait for the next sync; if it stays different, check that the AD sign-in name uses a domain verified in this tenant, then ask the senior engineer to look at the Entra Connect server.' -f $cloudUpn)
+    }
+
+    Add-AddressConflictReasons
+    if (@($reasons | Where-Object { $_.Code -in 'AdEnabledMismatch', 'UpnMismatch', 'AdDisabledCloudEnabled' }).Count -eq 0) {
+        Add-Pass 'AdAgrees' ('On-premises AD account found (matched by {0}) and agrees with Microsoft 365 on enabled state and sign-in name.' -f $(if ((Get-M365Prop -Object $Facts -Name 'AdMatchedBy') -eq 'SID') { 'security identifier' } else { 'sign-in name' }))
+    }
+    return (New-Result $blockedAction)
 }
 
 function Get-M365LookupLink {
@@ -505,8 +747,15 @@ function Get-M365UserAssessment {
         not Available, with its reason. Nothing is ever cleared from a source that could not be
         read.
 
-        Facts: User; SignInGate; ConditionalAccessGate; MfaGate; RiskGate; (OnPremisesGate);
-        SignIns; MfaMethods; RiskyUser; Days; Now.
+        Facts: User; SignInGate; ConditionalAccessGate; MfaGate; RiskGate; SignIns; MfaMethods;
+        RiskyUser; Days; Now; and, from the on-premises AD stage (all optional, absent means
+        not collected): OnPremisesGate; AdUser; AdMatchedBy; AddressConflicts;
+        AddressCheckError; TenantLastSync. The AD facts are used only when OnPremisesGate is
+        Available (Get-M365OnPremisesAssessment).
+
+        User may be $null when no Microsoft 365 user matched but an AD account did (AC20); the
+        other gates are then NotChecked and add nothing. The entry script only assesses that
+        case when the AD account was found.
     #>
     param([Parameter(Mandatory = $true)][object]$Facts)
 
@@ -524,11 +773,15 @@ function Get-M365UserAssessment {
     $user = $Facts.User
     $synced = Test-M365UserSynced -User $user
     $days = if ($Facts.Days) { [int]$Facts.Days } else { 7 }
+    # The on-premises comparison first: what it found in AD can explain a cloud block.
+    $onPrem = Get-M365OnPremisesAssessment -Facts $Facts
 
     # --- Account blocked -------------------------------------------------------------------
     # accountEnabled false = sign-in blocked (user resource).
     if ((Get-M365Prop -Object $user -Name 'accountEnabled') -eq $false) {
-        if ($synced) {
+        if ($synced -and $onPrem.BlockedAction) {
+            $action = $onPrem.BlockedAction
+        } elseif ($synced) {
             $action = 'This account syncs from on-premises AD, so the block comes from there: check whether the AD account is disabled (AD-UserQuickCheck), or whether it carries the M365-SyncedUserFixes block marker (msDS-cloudExtensionAttribute10 = BlockCloudSignIn). Change it in on-premises AD if it is wrong, then wait for the next sync.'
         } else {
             $action = 'Check with their manager that the account should be in use, then unblock sign-in for the user in the Microsoft 365 admin center.'
@@ -651,6 +904,10 @@ function Get-M365UserAssessment {
             }
         }
     }
+
+    # --- On-premises AD comparison (computed above) ----------------------------------------
+    foreach ($r in @($onPrem.Reasons)) { $reasons.Add($r) }
+    foreach ($c in @($onPrem.Cleared)) { $passes.Add($c.Message); $cleared.Add($c) }
 
     # --- Could not check -------------------------------------------------------------------
     $couldNot = New-Object System.Collections.Generic.List[object]
@@ -833,12 +1090,18 @@ function Get-M365UserFacts {
         Each row keeps only the fields the verdict and the report need (Select-M365SignInFields);
         that includes ipAddress, for the local HTML report only. MFA methods keep only their
         type and id.
+
+        -OnPremises is Get-M365OnPremisesFacts's result; its gate, AD account and address
+        conflicts are copied into the facts. -OnPremisesGate alone (for -SkipOnPremises) sets
+        only the gate. -TenantLastSync is the organization's onPremisesLastSyncDateTime.
     #>
     param(
         [Parameter(Mandatory = $true)][object]$User,
         [ValidateRange(1, 30)][int]$Days = 7,
         [datetime]$Now = [datetime]::UtcNow,
-        [object]$OnPremisesGate
+        [object]$OnPremisesGate,
+        [object]$OnPremises,
+        [object]$TenantLastSync
     )
     $id = [string](Get-M365Prop -Object $User -Name 'id')
     $idPath = [uri]::EscapeDataString($id)
@@ -884,25 +1147,203 @@ function Get-M365UserFacts {
         $risky = $null
     }
 
+    if ($OnPremises) { $OnPremisesGate = $OnPremises.Gate }
     if ($null -eq $OnPremisesGate) {
-        $OnPremisesGate = New-M365Gate -Source 'On-premises AD' -State NotChecked -Reason 'not checked in this version'
+        $OnPremisesGate = New-M365Gate -Source 'On-premises AD' -State NotChecked -Reason 'not requested'
     }
 
     return [PSCustomObject]@{
         User = $User; SignInGate = $signInGate; ConditionalAccessGate = $caGate; MfaGate = $mfaGate; RiskGate = $riskGate
         OnPremisesGate = $OnPremisesGate
+        AdUser = $(if ($OnPremises) { $OnPremises.AdUser }); AdMatchedBy = $(if ($OnPremises) { $OnPremises.AdMatchedBy } else { '' })
+        AddressConflicts = $(if ($OnPremises) { @($OnPremises.AddressConflicts) } else { @() })
+        AddressCheckError = $(if ($OnPremises) { $OnPremises.AddressCheckError } else { '' })
+        TenantLastSync = $TenantLastSync
         SignIns = $signIns; MfaMethods = $methods; RiskyUser = $risky; Days = $Days; Now = $nowUtc
     }
 }
 
+function New-M365NoCloudUserFacts {
+    <#
+    .SYNOPSIS
+        Facts for "no Microsoft 365 user matched, but the AD stage found the account" (AC20).
+        Nothing is read from Graph for a user that does not exist: every cloud source is
+        NotChecked with the reason, so none of them can add a reason or a pass.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][object]$OnPremises,
+        [object]$TenantLastSync,
+        [int]$Days = 7,
+        [datetime]$Now = [datetime]::UtcNow
+    )
+    $nc = 'there is no Microsoft 365 user to read it for'
+    return [PSCustomObject]@{
+        User = $null
+        SignInGate = (New-M365Gate -Source 'Sign-in history' -State NotChecked -Reason $nc)
+        ConditionalAccessGate = (New-M365Gate -Source 'Conditional Access detail' -State NotChecked -Reason $nc)
+        MfaGate = (New-M365Gate -Source 'MFA methods' -State NotChecked -Reason $nc)
+        RiskGate = (New-M365Gate -Source 'Risky user' -State NotChecked -Reason $nc)
+        OnPremisesGate = $OnPremises.Gate; AdUser = $OnPremises.AdUser; AdMatchedBy = $OnPremises.AdMatchedBy
+        AddressConflicts = @($OnPremises.AddressConflicts); AddressCheckError = $OnPremises.AddressCheckError
+        TenantLastSync = $TenantLastSync
+        SignIns = @(); MfaMethods = @(); RiskyUser = $null; Days = $Days; Now = (ConvertTo-M365UtcTime -Value $Now)
+    }
+}
+
+# =============================================================================
+# On-premises AD access (read only: Get-ADUser, and GET on Graph for address conflicts)
+# =============================================================================
+
+function ConvertTo-LdapFilterValue {
+    # RFC 4515 escaping so a name containing ( ) * \ cannot change the filter.
+    # Copied from AD-UserQuickCheck/Get-ADUserQuickCheck.ps1 (self-contained folders).
+    param([string]$Value)
+    $Value.Replace('\', '\5c').Replace('*', '\2a').Replace('(', '\28').Replace(')', '\29').Replace([string][char]0, '\00')
+}
+
+function Test-M365AdNotFound {
+    # Get-ADUser -Identity throws ADIdentityNotFoundException ("Cannot find an object with
+    # identity ...") when nothing matches; that is "not found", not "no domain controller".
+    param([Parameter(Mandatory = $true)][System.Management.Automation.ErrorRecord]$ErrorRecord)
+    return ($ErrorRecord.Exception.GetType().Name -match 'ADIdentityNotFound' -or
+        [string]$ErrorRecord.Exception.Message -match '^Cannot find an object with identity')
+}
+
+function Find-M365AddressConflict {
+    <#
+    .SYNOPSIS
+        Other Microsoft 365 objects that already hold one of the given addresses (AC22).
+    .DESCRIPTION
+        GET only. Users by userPrincipalName, mail and proxyAddresses; groups and organizational
+        contacts (/contacts) by mail and proxyAddresses. Each of these $filter forms works by
+        default, without ConsistencyLevel: eventual or $count (aad-advanced-queries: group,
+        orgContact and user property tables). They are separate requests, never joined with
+        "or", for the same reason as in Find-M365User. Directory.Read.All covers all three lists
+        (user-list, group-list, orgcontact-list). The object with -ExcludeId (the cloud user
+        itself) is never a conflict. Errors are thrown to the caller.
+    #>
+    param([string[]]$Address = @(), [string]$ExcludeId)
+    $targets = @(
+        @{ Type = 'user'; Path = 'users'; Filters = @('userPrincipalName', 'mail', 'proxy') }
+        @{ Type = 'group'; Path = 'groups'; Filters = @('mail', 'proxy') }
+        @{ Type = 'contact'; Path = 'contacts'; Filters = @('mail', 'proxy') }
+    )
+    $byKey = [ordered]@{}
+    foreach ($addr in @($Address | Where-Object { $_ })) {
+        $lit = ConvertTo-M365ODataLiteral -Value $addr
+        $smtp = ConvertTo-M365ODataLiteral -Value ("smtp:$addr")
+        foreach ($t in $targets) {
+            foreach ($kind in $t.Filters) {
+                $filter = switch ($kind) {
+                    'userPrincipalName' { "userPrincipalName eq $lit" }
+                    'mail' { "mail eq $lit" }
+                    'proxy' { "proxyAddresses/any(p:p eq $smtp)" }
+                }
+                $r = Invoke-M365GraphGet -Uri ("$script:M365GraphRoot/$($t.Path)?`$filter=" + [uri]::EscapeDataString($filter) + "&`$select=id,displayName")
+                foreach ($o in @(@(Get-M365Prop -Object $r -Name 'value') | Where-Object { $null -ne $_ })) {
+                    $id = [string](Get-M365Prop -Object $o -Name 'id')
+                    if ($ExcludeId -and $id -eq $ExcludeId) { continue }
+                    $key = '{0}|{1}' -f $t.Type, $id
+                    if ($byKey.Contains($key)) { continue }
+                    $byKey[$key] = [PSCustomObject]@{ Type = $t.Type; DisplayName = [string](Get-M365Prop -Object $o -Name 'displayName'); Address = $addr; Id = $id }
+                }
+            }
+        }
+    }
+    return @($byKey.Values)
+}
+
 function Get-M365OnPremisesFacts {
-    # STUB (SQ-011): the on-premises AD stage is not implemented yet.
+    <#
+    .SYNOPSIS
+        The on-premises AD stage: finds the user's AD account and the Microsoft 365 objects that
+        hold its addresses. Never throws: anything that stops it becomes the gate's reason.
+    .DESCRIPTION
+        ActiveDirectory is imported here at run time, in try/catch (no #Requires -Modules):
+        without RSAT the Graph verdict still stands, with "On-premises AD: could not check".
+
+        Synced user with onPremisesSecurityIdentifier: Get-ADUser -Identity <SID> (Identity
+        takes a DN, GUID, SID or SAM account name, get-aduser). Not found there, or a cloud-only
+        user, or no cloud user at all: one LDAP search on userPrincipalName (the name typed,
+        or the cloud UPN when that differs), RFC 4515 escaped.
+        -Server and -Credential reach Get-ADUser only when given. Any other Get-ADUser error
+        means no domain controller answered (D-014), and the gate says so.
+
+        Address conflicts are looked up for a synced user or for no cloud user, not for a
+        cloud-only one (its AD namesake is a separate account, and the cloud user holds its own
+        addresses).
+
+        Returns { Gate; AdUser; AdMatchedBy; AddressConflicts; AddressCheckError }.
+    #>
     param(
         [object]$User,
         [Parameter(Mandatory = $true)][string]$UserPrincipalName,
         [string]$Server,
         [pscredential]$Credential
     )
-    throw 'Get-M365OnPremisesFacts: not implemented (SQ-011)'
+    $source = 'On-premises AD'
+    $out = [PSCustomObject]@{ Gate = $null; AdUser = $null; AdMatchedBy = ''; AddressConflicts = @(); AddressCheckError = '' }
+
+    try {
+        Import-Module ActiveDirectory -ErrorAction Stop -Verbose:$false
+    } catch {
+        $out.Gate = New-M365Gate -Source $source -State Failed -Reason ("the ActiveDirectory module is not available on this computer ({0}). Install the RSAT Active Directory tools, or run the check on a server that has them" -f (Get-M365ErrorSummary -Message $_.Exception.Message))
+        return $out
+    }
+
+    # Pass-through only when given; the credential itself is never written anywhere.
+    $ad = @{}
+    if ($Server) { $ad['Server'] = $Server }
+    if ($Credential) { $ad['Credential'] = $Credential }
+
+    $synced = Test-M365UserSynced -User $User
+    # onPremisesSecurityIdentifier: "the on-premises security identifier (SID) for the user that
+    # was synchronized from on-premises to the cloud" (user resource; $select'ed by Find-M365User).
+    # https://learn.microsoft.com/graph/api/resources/user?view=graph-rest-1.0
+    $sid = [string](Get-M365Prop -Object $User -Name 'onPremisesSecurityIdentifier')
+    # The name the tech typed, and the cloud user's UPN when it differs (a user found by an
+    # email or proxy address): either can be the AD account's userPrincipalName.
+    $names = @(@($UserPrincipalName.Trim(), [string](Get-M365Prop -Object $User -Name 'userPrincipalName')) | Where-Object { $_ } | Sort-Object -Unique)
+    $upn = $names -join ' or '
+
+    $adUser = $null
+    try {
+        if ($synced -and $sid) {
+            try {
+                $adUser = Get-ADUser -Identity $sid @ad -Properties $script:M365AdUserProperties -ErrorAction Stop
+                $out.AdMatchedBy = 'SID'
+            } catch {
+                if (-not (Test-M365AdNotFound -ErrorRecord $_)) { throw }
+            }
+        }
+        if ($null -eq $adUser) {
+            $upnFilter = ($names | ForEach-Object { '(userPrincipalName={0})' -f (ConvertTo-LdapFilterValue $_) }) -join ''
+            if ($names.Count -gt 1) { $upnFilter = "(|$upnFilter)" }
+            $found = @(Get-ADUser @ad -LDAPFilter "(&(objectCategory=person)(objectClass=user)$upnFilter)" -Properties $script:M365AdUserProperties -ErrorAction Stop |
+                    Where-Object { $null -ne $_ })
+            if ($found.Count -gt 1) {
+                $out.Gate = New-M365Gate -Source $source -State Failed -Reason ("{0} AD accounts have the sign-in name {1}, so the tool cannot tell which one syncs" -f $found.Count, $upn)
+                return $out
+            }
+            if ($found.Count -eq 1) { $adUser = $found[0]; $out.AdMatchedBy = 'UserPrincipalName' }
+        }
+    } catch {
+        $where = if ($Server) { "domain controller $Server did not answer" } else { 'no domain controller answered' }
+        $out.Gate = New-M365Gate -Source $source -State Failed -Reason ("{0} ({1}). Run it on a domain-joined computer, or add -Server <domain controller> and -Credential" -f $where, (Get-M365ErrorSummary -Message $_.Exception.Message))
+        return $out
+    }
+    $out.AdUser = $adUser
+    $out.Gate = New-M365Gate -Source $source -State Available
+
+    if ($null -ne $adUser -and ($synced -or $null -eq $User)) {
+        $addresses = @(@([string](Get-M365Prop -Object $adUser -Name 'UserPrincipalName'), (Get-M365PrimarySmtp -Object $adUser)) |
+                Where-Object { $_ } | Sort-Object -Unique)
+        try {
+            $out.AddressConflicts = @(Find-M365AddressConflict -Address $addresses -ExcludeId ([string](Get-M365Prop -Object $User -Name 'id')))
+        } catch {
+            $out.AddressCheckError = Get-M365ErrorSummary -Message (Get-M365ErrorText -ErrorRecord $_)
+        }
+    }
+    return $out
 }
 if ($LoadFunctionsOnly) { return }

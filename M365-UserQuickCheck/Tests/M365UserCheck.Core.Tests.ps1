@@ -956,3 +956,33 @@ Describe 'SQ-011 Get-M365OnPremisesFacts (AD and Graph faked)' {
         @($script:GraphUris | Where-Object { $_ -match 'alias@contoso\.com' }).Count | Should -Be 0
     }
 }
+
+Describe 'SQ-011 mocks cannot lie about Get-ADUser parameter names' {
+    # SQUAD.md "Mocks can lie": where RSAT is installed, check the stub above and the core's
+    # calls against the real Get-ADUser. Run in a child pwsh so this session keeps the stub.
+    BeforeAll {
+        $script:RealAdParams = @()
+        $json = & pwsh -NoProfile -Command @'
+$c = Get-Command Get-ADUser -Module ActiveDirectory -ErrorAction SilentlyContinue
+if ($c) { @($c.Parameters.Keys) | ConvertTo-Json -Compress }
+'@
+        if ($json) { $script:RealAdParams = @($json | ConvertFrom-Json) }
+    }
+
+    It 'the Get-ADUser stub and every Get-ADUser call in the core use parameters the real cmdlet has' {
+        if ($script:RealAdParams.Count -eq 0) { Set-ItResult -Skipped -Because 'the ActiveDirectory module (RSAT) is not installed'; return }
+        foreach ($p in 'Identity', 'LDAPFilter', 'Filter', 'Server', 'Credential', 'Properties', 'SearchBase', 'ResultSetSize') {
+            $script:RealAdParams | Should -Contain $p -Because "the stub declares -$p"
+        }
+        $tokens = $null; $errs = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:CorePath, [ref]$tokens, [ref]$errs)
+        $calls = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Get-ADUser' }, $true))
+        $calls.Count | Should -BeGreaterThan 0
+        $real = @($script:RealAdParams) + [System.Management.Automation.PSCmdlet]::CommonParameters
+        foreach ($c in $calls) {
+            foreach ($e in @($c.CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] })) {
+                @($real | Where-Object { $_ -like "$($e.ParameterName)*" }).Count | Should -BeGreaterThan 0 -Because "line $($c.Extent.StartLineNumber) uses -$($e.ParameterName)"
+            }
+        }
+    }
+}
