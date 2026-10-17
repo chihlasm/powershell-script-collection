@@ -15,6 +15,7 @@ handed out, so it always matches this repository.
 | Folder | What it does |
 |---|---|
 | [ServiceDesk-Toolkit](ServiceDesk-Toolkit/) | Builds the service desk bundle and its START HERE page |
+| [TicketNote](TicketNote/) | Joins every quick check's ticket note for one ticket into a single note to paste, and holds the shared note kit (`CaseKit.ps1`) |
 
 ### Active Directory and Group Policy
 

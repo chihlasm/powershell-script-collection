@@ -23,6 +23,7 @@ Every tool writes a report (HTML and/or CSV) you can attach to the ticket.
 | "I can't reach the server" / "the app won't connect" / "is port 445 open?" | [Network-QuickCheck](#cant-reach-a-server-or-app)            | No                |
 | "Hide this person from the address book (GAL)"                      | [M365-SyncedUserFixes](#hide-someone-from-the-address-book)  | **Yes — AD**      |
 | "Block this user from Microsoft 365 but keep their PC login"        | [M365-SyncedUserFixes](#block-someone-from-microsoft-365)    | **Yes — AD**      |
+| Ran several checks on one ticket and want one note to paste         | [TicketNote](#one-note-for-the-whole-ticket)                 | No                |
 
 Each folder has its own `README.md` with the full detail. This page covers when to use
 each tool and the one command to start with.
@@ -83,6 +84,11 @@ sign-in across every domain controller, and any restrictions on which computers 
 person can sign in.
 
 Add `-OutputPath C:\Temp` to save an HTML report you can attach to the ticket.
+
+When it finishes, a **ticket note** is on your clipboard, ready to paste into the ticket:
+what was checked, what is ruled out, what it could not check, and the next step. Add
+`-TicketNumber 482113` to save the report and the note in that ticket's folder
+(`Documents\TicketNotes\Ticket_482113`). See [One note for the whole ticket](#one-note-for-the-whole-ticket).
 
 **Things to know:**
 - If it says the account is **locked out** and the user keeps getting locked again, go to
@@ -357,6 +363,30 @@ and the default gateway.
 Common ports: **445** file shares, **3389** Remote Desktop, **443** websites and most cloud
 apps, **1494 / 2598** Citrix, **1433** SQL Server. A failed **ping** on its own is usually
 fine, because many servers block it. A failed **port** is what matters.
+
+---
+
+## One note for the whole ticket
+
+**Folder:** `TicketNote`  It only writes one text file in the ticket folder; it changes nothing.
+
+Run the quick checks with the same `-TicketNumber`, then join their notes:
+
+```powershell
+..\AD-UserQuickCheck\Get-ADUserQuickCheck.ps1 -Identity jdoe -TicketNumber 482113
+.\Join-TicketNotes.ps1 -TicketNumber 482113
+```
+
+It asks "What did the user report?" and "What did you already try by hand?" (press Enter to
+skip), then saves `TicketNotes_Combined_<date>_<time>.txt` in
+`Documents\TicketNotes\Ticket_482113` and copies it to the clipboard.
+
+**Things to know:**
+- Read **Could not check** before closing the ticket. Those checks did not happen, so they
+  are not ruled out.
+- IP addresses and share paths are removed from the note by default, so it is safe to paste.
+  Add `-FullDetail` to the tool to keep them.
+- Add `-NoClipboard` to leave your clipboard alone.
 
 ---
 

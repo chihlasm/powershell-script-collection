@@ -78,6 +78,7 @@ $manifest = @(
     @{ Source = 'M365-SyncedUserFixes';                                  Destination = 'M365-SyncedUserFixes' }
     @{ Source = 'Network-QuickCheck';                                    Destination = 'Network-QuickCheck' }
     @{ Source = 'RDS-FSLogix-EventExport';                               Destination = 'RDS-FSLogix-EventExport' }
+    @{ Source = 'TicketNote';                                            Destination = 'TicketNote' }
     @{ Source = 'ServiceDesk-Toolkit/README.md';                         Destination = 'README.md' }
 )
 
