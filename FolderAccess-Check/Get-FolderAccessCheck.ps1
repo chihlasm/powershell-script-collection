@@ -70,12 +70,15 @@
 
     Read-only by construction: it calls Get-ADUser, Get-ADGroup, Get-ADDomain, Get-Acl,
     Get-CimInstance, Get-CimAssociatedInstance and Invoke-CimMethod with GetSecurityDescriptor
-    only. Reading the share permissions needs administrator rights on the file server; without
+    only (Tests\Get-FolderAccessCheck.Tests.ps1 holds an allowlist of every command and .NET
+    method the script calls). Reading the share permissions needs administrator rights on the file server; without
     them the share layer is CAN'T TELL, never assumed.
 
     Not checked: files and subfolders inside the folder, central access policy (Dynamic Access
     Control), ownership rights, integrity labels. Access-based enumeration only hides what the
-    user can't read anyway, so it does not change the answer.
+    user can't read anyway, so it does not change the answer. A standalone DFS namespace path
+    (\\FS01\Public\Link) is checked as an ordinary share: the share permissions are the
+    namespace root's share, not the share the link points to.
 
     The helpers Get-PrivilegedGroupDefinition, Get-NameOnlyPrivilegedGroup and
     Find-PrivilegedGroupBySid are copied verbatim from
@@ -118,9 +121,11 @@
         https://learn.microsoft.com/previous-versions/windows/desktop/secrcw32prov/win32-trustee
       Win32_ComputerSystem.DomainRole (4 backup DC, 5 primary DC)
         https://learn.microsoft.com/windows/win32/cimwin32prov/win32-computersystem
-      Win32_Group (LocalAccount=TRUE limits the query to the machine's own groups), Win32_GroupUser
+      Win32_Group (LocalAccount=TRUE limits the query to the machine's own groups), Win32_GroupUser,
+      Win32_UserAccount (LocalAccount=TRUE; query one instance, not the whole domain)
         https://learn.microsoft.com/windows/win32/cimwin32prov/win32-group
         https://learn.microsoft.com/windows/win32/cimwin32prov/win32-groupuser
+        https://learn.microsoft.com/windows/win32/cimwin32prov/win32-useraccount
       New-CimSessionOption -Protocol Dcom, Get-CimAssociatedInstance, Invoke-CimMethod
         https://learn.microsoft.com/powershell/module/cimcmdlets/new-cimsessionoption
         https://learn.microsoft.com/powershell/module/cimcmdlets/get-cimassociatedinstance
@@ -147,7 +152,9 @@
     BUILTIN groups (Learn and MS-ADTS defer to the MS-DRSR algorithm). It only matters when the
     file server is itself a DC, where BUILTIN entries are matched against tokenGroups directly.
     Also not stated on Learn: whether WMI returns an empty share DACL as an empty array or as
-    NULL. A present-but-NULL DACL is treated as "everyone", as Win32_SecurityDescriptor documents.
+    NULL. A descriptor with SE_DACL_PRESENT set but a NULL DACL is therefore not guessed at: the
+    share layer is "not read" (CAN'T TELL when the folder would allow it). Present bit unset
+    (documented: everyone) and present with an empty list (no one) are evaluated.
 #>
 [CmdletBinding(DefaultParameterSetName = 'Check')]
 param(
@@ -234,6 +241,11 @@ $script:AdminShareMessage = "administrative share: run it again with the folder'
 $script:DfsMessage = "this is a DFS path: run it again with the real server path (find it in the folder's Properties > DFS tab)"
 $script:ConditionalMessage = 'this folder uses claims-based conditions; only Effective Access can evaluate them'
 $script:CimTimeoutSeconds = 30
+# A standalone DFS namespace path (\\FS01\Public\Link) looks like an ordinary share path, and
+# without the DFSN module the only share this tool can see is the namespace root's share.
+# https://learn.microsoft.com/windows-server/storage/dfs-namespaces/dfs-overview
+$script:NotCheckedFooter = 'Not checked: files and subfolders inside the folder, central access policy, ownership rights. ' +
+    "For a standalone DFS namespace path (\\FS01\Public\Link) the share permissions shown are the namespace root's share, not the share the link points to."
 
 # =============================================================================
 # Small helpers
@@ -514,7 +526,7 @@ function ConvertFrom-FolderSddl {
             Sid = $sid; Principal = $null; Type = $(if ($kind -match 'Denied') { 'Deny' } else { 'Allow' })
             Mask = $mask; Inherited = (($flags -band 0x10) -ne 0); InheritOnly = (($flags -band 0x8) -ne 0)
             Unresolved = $false; IsServerLocal = $false; AppliesTo = (Get-AceAppliesTo -AceFlags $flags)
-            Conditional = $isCallback; Unsupported = (-not $isCommon)
+            Conditional = $isCallback; Unsupported = (-not $isCommon); AceKind = $kind
         })
     }
     $state = if ($aces.Count -eq 0) { 'Empty' } else { 'Present' }
@@ -526,19 +538,27 @@ function ConvertFrom-ShareDescriptor {
     .SYNOPSIS
         Win32_SecurityDescriptor (from GetSecurityDescriptor) -> DaclState and ACE objects.
     .DESCRIPTION
-        SE_DACL_PRESENT (0x4) "not set, or set and the DACL is NULL" = full access to everyone
-        (DaclState Null); present with no entries = no one (Empty).
+        SE_DACL_PRESENT (0x4) not set = no DACL = full access to everyone (DaclState Null);
+        present with no entries = no one (Empty).
         https://learn.microsoft.com/previous-versions/windows/desktop/secrcw32prov/win32-securitydescriptor
         https://learn.microsoft.com/windows/win32/secauthz/null-dacls-and-empty-dacls
         Win32_ACE: AceType 0 = access allowed, 1 = access denied; AccessMask; Trustee.SIDString.
         https://learn.microsoft.com/previous-versions/windows/desktop/secrcw32prov/win32-ace
+
+        Present bit set but DACL $null (DaclState Unreadable): Win32_SecurityDescriptor calls
+        that a NULL DACL, but Learn does not say whether WMI hands an EMPTY DACL back as an
+        empty array or as NULL, and the two mean the opposite (everyone vs no one). Guessing
+        either way could be a confident wrong answer, so it is not evaluated.
     #>
     param([Parameter(Mandatory = $true)][object]$Descriptor)
     $flags = 0
     if ($null -ne $Descriptor.ControlFlags) { $flags = [int]$Descriptor.ControlFlags }
     $dacl = $Descriptor.DACL
-    if ((($flags -band $script:SE_DACL_PRESENT) -eq 0) -or $null -eq $dacl) {
+    if (($flags -band $script:SE_DACL_PRESENT) -eq 0) {
         return [PSCustomObject]@{ DaclState = 'Null'; Aces = @() }
+    }
+    if ($null -eq $dacl) {
+        return [PSCustomObject]@{ DaclState = 'Unreadable'; Aces = @() }
     }
     $aces = New-Object System.Collections.Generic.List[object]
     foreach ($a in @($dacl)) {
@@ -624,7 +644,7 @@ function Invoke-DaclWalk {
         $isUnsupported = ($ace.PSObject.Properties['Unsupported'] -and [bool]$ace.Unsupported)
 
         # Does it match the user, and how?
-        $match = $false; $via = ''; $unknown = $null; $soft = $null
+        $match = $false; $via = ''; $unknown = $null
         if ($sidSet.Contains($sid)) {
             $match = $true
             $via = Get-AccessVia -Sid $sid -UserName $UserName -UserSid $userSid -GroupPaths $GroupPaths
@@ -644,8 +664,10 @@ function Invoke-DaclWalk {
                 $unknown = "couldn't read the members of $groupName on $Server$err"
             }
         } elseif ([bool]$ace.IsServerLocal -and -not $ServerIsDomainController) {
-            # Nothing was read from the server at all (unreachable, or a DFS path).
-            $soft = "members of $principal on ${Server}: not read"
+            # A server-local group with no expansion at all: nothing was read from the server
+            # (unreachable, or a DFS path). Its members are unknown, so it is handled exactly
+            # like an unreadable group: it decides the answer when it could change it (AC13).
+            $unknown = "couldn't read the members of $principal on $Server (nothing could be read from the server)"
         } elseif ([bool]$ace.Unresolved) {
             $unknown = if ($ace.Principal) { "$($ace.Principal) ($sid) is from another domain" } else { "unknown account $sid" }
         }
@@ -664,9 +686,6 @@ function Invoke-DaclWalk {
                 if ($ace.Type -eq 'Deny') { $couldDeny = $true } else { $couldAllow = $true }
                 $deciding.Add($unknown)
             }
-        } elseif ($soft) {
-            $effect = "not checked: $soft"
-            $notChecked.Add($soft)
         } elseif ($match) {
             $matchedAny = $true
             if ($ace.Type -eq 'Deny') {
@@ -729,7 +748,7 @@ function Get-FolderAccessAssessment {
         [bool]$ServerIsDomainController = $false,
         [string[]]$UserSids, [hashtable]$GroupPaths = @{},
         [object[]]$FolderAces, [string]$FolderError, [bool]$FolderConditional = $false,
-        [object[]]$ShareAces, [ValidateSet('Present', 'Null', 'Empty')][string]$ShareDaclState = 'Present', [string]$ShareError,
+        [object[]]$ShareAces, [ValidateSet('Present', 'Null', 'Empty', 'Unreadable')][string]$ShareDaclState = 'Present', [string]$ShareError,
         [hashtable]$LocalGroupExpansions = @{}
     )
 
@@ -755,6 +774,10 @@ function Get-FolderAccessAssessment {
     if ($PathKind -eq 'Admin') { $shareWhy = $script:AdminShareMessage; Add-CouldNot 'share permissions: not read (administrative share)' }
     elseif ($PathKind -eq 'Dfs') { $shareWhy = $script:DfsMessage; Add-CouldNot 'share permissions: not read (DFS path)' }
     elseif ($ShareError) { $shareWhy = "couldn't read the share permissions on $Server"; Add-CouldNot "share permissions: not read ($ShareError)" }
+    elseif ($ShareDaclState -eq 'Unreadable') {
+        $shareWhy = "the share's permission list on $Server came back empty or unreadable; check it in Computer Management"
+        Add-CouldNot 'share permissions: not read (the permission list came back empty or unreadable)'
+    }
     elseif ($ShareDaclState -eq 'Null') { $shareState = 'Yes' }
     elseif ($ShareDaclState -eq 'Empty') { $shareState = 'No' }
     else {
@@ -807,7 +830,7 @@ function Get-FolderAccessAssessment {
         $reasons.Add($script:ConditionalMessage)
         Add-Step 'Use Effective Access (the last step): it is the only place the claims-based conditions on this folder are evaluated.'
     } elseif ($folderState -eq 'Unsupported') {
-        $kinds = @($unsupported | ForEach-Object { $_.Type }) -join ', '
+        $kinds = @($unsupported | ForEach-Object { if ($_.PSObject.Properties['AceKind'] -and $_.AceKind) { $_.AceKind } else { $_.Type } } | Select-Object -Unique) -join ', '
         $reasons.Add("this folder has a permission entry type this tool doesn't evaluate ($kinds); only Effective Access can")
     } elseif ($folderState -eq 'No') {
         $verdict = 'PROBABLY NO'
@@ -816,7 +839,7 @@ function Get-FolderAccessAssessment {
         if ($folder.DenyRow) {
             Add-Step ("Find out why {0} is denied before changing anything: removing a Deny opens the folder to everyone else in {0} as well." -f $folder.DenyRow.Principal)
         } else {
-            Add-Step 'Ask whoever owns the folder which group should have access, then add that group (not the user) with FolderPermissionManager.'
+            Add-Step "Ask whoever owns the folder whether $UserName should have access, and through which group."
         }
     } elseif ($shareState -eq 'No') {
         $verdict = 'PROBABLY NO'; $limitedBy = 'share permissions'
@@ -833,7 +856,7 @@ function Get-FolderAccessAssessment {
         if ($ShareDaclState -eq 'Null') { $reasons.Add('the share has no permission list at all (a null DACL), which lets everyone in') }
         elseif ($share) { $reasons.Add((Get-YesReason $share 'share')) }
         $reasons.Add((Get-YesReason $folder 'folder'))
-        Add-Step "If $UserName still gets 'Access denied', check they are using this exact path, and if they were added to a group recently ask them to sign out and back in."
+        Add-Step "If $UserName still gets 'Access denied', check they are using this exact path."
     }
 
     # Next steps for whatever could not be checked, then the share-layer fix, then Effective Access.
@@ -845,6 +868,7 @@ function Get-FolderAccessAssessment {
         if ($PathKind -eq 'Dfs') { Add-Step "Find the real server path in the folder's Properties > DFS tab, then run it again with that path." }
         elseif ($PathKind -eq 'Admin') { Add-Step 'Run it again with the path the user actually opens (their mapped drive or shortcut), not an administrative share.' }
         elseif ($ShareError) { Add-Step "Check that $Server answers WinRM or WMI (DCOM) from this machine and that your account is an administrator there, then run it again; or read the share permissions in Computer Management on $Server." }
+        elseif ($ShareDaclState -eq 'Unreadable') { Add-Step "Read the share permissions in Computer Management on $Server (Shared Folders > Shares > Properties > Share Permissions)." }
     }
     if (@($couldNot | Where-Object { $_ -match 'unknown account|from another domain' }).Count -gt 0) {
         Add-Step "Look at the unknown entries in the folder's Properties > Security tab: an entry shown only as a SID is usually a deleted account or one from another domain."
@@ -879,7 +903,7 @@ function Resolve-QuickCheckUser {
     param([string]$Identity, [string]$Server, [System.Management.Automation.PSCredential]$Credential)
 
     $ad = Get-AdSplat -Server $Server -Credential $Credential
-    $props = @('DisplayName', 'SamAccountName', 'UserPrincipalName', 'DistinguishedName', 'Department', 'userAccountControl')
+    $props = @('DisplayName', 'SamAccountName', 'UserPrincipalName', 'DistinguishedName', 'userAccountControl')
     $id = $Identity.Trim()
     $found = @()
     $matchedBy = ''
@@ -1134,13 +1158,22 @@ function Get-ServerLocalGroup {
         is the whole membership; domain groups among the members are matched against tokenGroups.
         https://learn.microsoft.com/windows/win32/cimwin32prov/win32-group
         https://learn.microsoft.com/windows/win32/cimwin32prov/win32-groupuser
-        A group that doesn't exist on the server has no members (Readable, Found = $false).
+        A custom local group (S-1-5-21-<machine>-<RID>) that doesn't exist on the server has no
+        members (Readable, Found = $false). A BUILTIN group (S-1-5-32-*) always exists on a
+        member server, so "not found" there means the query didn't really answer: it is
+        unreadable, never "no members".
+        https://learn.microsoft.com/windows-server/identity/ad-ds/manage/understand-security-identifiers
     #>
     param([Parameter(Mandatory = $true)]$Session, [string]$Server, [string]$Sid, [string]$FallbackName)
     try {
         $g = Get-CimInstance -CimSession $Session -ClassName Win32_Group -Filter "LocalAccount = TRUE AND SID = '$Sid'" -ErrorAction Stop
         $g = @($g)[0]
-        if (-not $g) { return [PSCustomObject]@{ Readable = $true; Found = $false; Name = $FallbackName; MemberSids = @(); Error = $null } }
+        if (-not $g) {
+            if ($Sid -match '^S-1-5-32-') {
+                return [PSCustomObject]@{ Readable = $false; Found = $false; Name = $FallbackName; MemberSids = @(); Error = "$Server didn't return this built-in group" }
+            }
+            return [PSCustomObject]@{ Readable = $true; Found = $false; Name = $FallbackName; MemberSids = @(); Error = $null }
+        }
         $name = if ($g.Domain) { "$($g.Domain)\$($g.Name)" } else { [string]$g.Name }
         $members = @(Get-CimAssociatedInstance -CimSession $Session -InputObject $g -Association Win32_GroupUser -ErrorAction Stop)
         return [PSCustomObject]@{
@@ -1150,6 +1183,30 @@ function Get-ServerLocalGroup {
     } catch {
         return [PSCustomObject]@{ Readable = $false; Found = $false; Name = $FallbackName; MemberSids = @(); Error = $_.Exception.Message }
     }
+}
+
+function Get-ServerLocalUser {
+    <#
+    .SYNOPSIS
+        One local user account on the file server, by SID, over the CIM session.
+    .DESCRIPTION
+        Win32_UserAccount with LocalAccount = TRUE ("the account is defined on the local
+        computer") and that SID; querying one instance avoids enumerating the domain's accounts,
+        which Learn warns is slow on a large network.
+        https://learn.microsoft.com/windows/win32/cimwin32prov/win32-useraccount
+        Returns Found and Name ("FS01\scanner"), or Found = $false when there is no such account
+        or it couldn't be read.
+    #>
+    param([Parameter(Mandatory = $true)]$Session, [string]$Sid)
+    try {
+        $u = @(Get-CimInstance -CimSession $Session -ClassName Win32_UserAccount -Filter "LocalAccount = TRUE AND SID = '$Sid'" -ErrorAction Stop)[0]
+    } catch {
+        Write-Verbose "Win32_UserAccount $Sid on the file server: $($_.Exception.Message)"
+        $u = $null
+    }
+    if (-not $u) { return [PSCustomObject]@{ Found = $false; Name = $null } }
+    $name = if ($u.Domain) { "$($u.Domain)\$($u.Name)" } else { [string]$u.Name }
+    return [PSCustomObject]@{ Found = $true; Name = $name }
 }
 
 function Resolve-FolderAccessPrincipal {
@@ -1163,7 +1220,8 @@ function Resolve-FolderAccessPrincipal {
         - the user, and groups from the walk, by the names already read
         - other SIDs of the user's domain via Get-ADGroup / Get-ADUser; not found = orphaned
         - any other account SID: a local group of the file server if Win32_Group finds it there,
-          otherwise an unknown account (deleted, or from another domain)
+          a local user of the file server if Win32_UserAccount does (never matches a domain
+          user), otherwise an unknown account (deleted, or from another domain)
     #>
     param([Parameter(Mandatory = $true)][object]$Ace, [Parameter(Mandatory = $true)][hashtable]$Context)
     $sid = [string]$Ace.Sid
@@ -1198,7 +1256,15 @@ function Resolve-FolderAccessPrincipal {
             $local = $null
             if ($c.Session -and -not $c.ServerIsDC -and $sid -match '^S-1-5-21-') {
                 $local = Get-ServerLocalGroup -Session $c.Session -Server $c.Server -Sid $sid -FallbackName $Ace.Principal
-                if ($local.Found) { $c.LocalGroups[$sid] = $local }
+                if (-not $local.Found) {
+                    # A local user account on the server: known, but a domain user's network
+                    # logon never carries it, so its "expansion" has no members to match.
+                    $lu = Get-ServerLocalUser -Session $c.Session -Sid $sid
+                    if ($lu.Found) {
+                        $local = [PSCustomObject]@{ Readable = $true; Found = $true; Name = "$($lu.Name) (local account on $($c.Server))"; MemberSids = @(); Error = $null }
+                    }
+                }
+                if ($local.Found) { $c.LocalAccounts[$sid] = $local }
             }
             if ($local -and $local.Found) { $info.Principal = $local.Name; $info.IsServerLocal = $true }
             else { $info.Unresolved = $true }
@@ -1281,7 +1347,8 @@ function Invoke-FolderAccessCheck {
 
     # 5. The file server: DC or not, share permissions, local groups. Not for a DFS path, whose
     #    server part is the domain rather than the server holding the folder.
-    $session = $null; $isDc = $false; $shareAces = @(); $shareState = 'Present'; $shareError = $null
+    $session = $null; $isDc = $false; $roleKnown = $false; $roleError = ''
+    $shareAces = @(); $shareState = 'Present'; $shareError = $null
     $expansions = @{}
     try {
         if ($parsed.Kind -ne 'Dfs') {
@@ -1293,8 +1360,13 @@ function Invoke-FolderAccessCheck {
                     $cs = @(Get-CimInstance -CimSession $session -ClassName Win32_ComputerSystem -ErrorAction Stop)[0]
                     # DomainRole 4 = backup DC, 5 = primary DC; on a DC the BUILTIN groups are domain groups.
                     # https://learn.microsoft.com/windows/win32/cimwin32prov/win32-computersystem
-                    $isDc = ($null -ne $cs -and [int]$cs.DomainRole -ge 4)
-                } catch { Write-Verbose "Win32_ComputerSystem on $($parsed.Server): $($_.Exception.Message)" }
+                    if ($null -ne $cs -and $null -ne $cs.DomainRole) {
+                        $isDc = ([int]$cs.DomainRole -ge 4); $roleKnown = $true
+                    } else { $roleError = 'Win32_ComputerSystem returned no DomainRole' }
+                } catch {
+                    $roleError = $_.Exception.Message
+                    Write-Verbose "Win32_ComputerSystem on $($parsed.Server): $roleError"
+                }
                 if ($parsed.Kind -eq 'Normal') {
                     $sh = Get-ShareSecurity -Session $session -Server $parsed.Server -Share $parsed.Share
                     if ($sh.Error) { $shareError = $sh.Error } else { $shareAces = @($sh.Aces); $shareState = $sh.DaclState }
@@ -1307,17 +1379,33 @@ function Invoke-FolderAccessCheck {
         $ctx = @{
             UserSid = $sidSet.UserSid; UserLabel = "$($domain.NetBIOSName)\$($sidSet.SamAccountName)"; GroupNames = $sidSet.GroupNames
             DomainSid = $sidSet.DomainSid; NetBios = [string]$domain.NetBIOSName; Ad = $ad; Session = $session; ServerIsDC = $isDc
-            Server = $parsed.Server; Cache = @{}; LocalGroups = @{}
+            Server = $parsed.Server; Cache = @{}; LocalAccounts = @{}
         }
         foreach ($ace in @($folderAces) + @($shareAces)) {
             if ($null -eq $ace -or -not $ace.Sid) { continue }
             Resolve-FolderAccessPrincipal -Ace $ace -Context $ctx
         }
-        if ($session -and -not $isDc) {
+        # Members of every server-local group an entry names. When they can't be read (no
+        # session, a DFS path, or the server role unknown for a BUILTIN group) the expansion
+        # says so, and the walk decides whether that entry could change the answer (AC13).
+        if (-not $isDc) {
+            $noSessionWhy = if ($parsed.Kind -eq 'Dfs') { "this is a DFS path, so the server holding the folder isn't known" }
+                            else { "couldn't connect to $($parsed.Server)" }
             foreach ($ace in @($folderAces) + @($shareAces)) {
                 if ($null -eq $ace -or -not $ace.IsServerLocal -or $ace.InheritOnly -or $expansions.ContainsKey($ace.Sid)) { continue }
                 if (@($sidSet.Sids) -contains $ace.Sid) { continue }
-                $lg = if ($ctx.LocalGroups.ContainsKey($ace.Sid)) { $ctx.LocalGroups[$ace.Sid] } else { Get-ServerLocalGroup -Session $session -Server $parsed.Server -Sid $ace.Sid -FallbackName $ace.Principal }
+                $isBuiltin = ([string]$ace.Sid -match '^S-1-5-32-')
+                $lg = if (-not $session) {
+                    [PSCustomObject]@{ Readable = $false; Found = $false; Name = $ace.Principal; MemberSids = @(); Error = $noSessionWhy }
+                } elseif ($isBuiltin -and -not $roleKnown) {
+                    # On a DC the BUILTIN groups are domain groups (already in tokenGroups); on a
+                    # member server they are local. Without the role, neither can be assumed.
+                    [PSCustomObject]@{ Readable = $false; Found = $false; Name = $ace.Principal; MemberSids = @(); Error = "couldn't tell whether $($parsed.Server) is a domain controller: $roleError" }
+                } elseif ($ctx.LocalAccounts.ContainsKey($ace.Sid)) {
+                    $ctx.LocalAccounts[$ace.Sid]
+                } else {
+                    Get-ServerLocalGroup -Session $session -Server $parsed.Server -Sid $ace.Sid -FallbackName $ace.Principal
+                }
                 $expansions[$ace.Sid] = $lg
             }
         }
@@ -1344,13 +1432,6 @@ function Invoke-FolderAccessCheck {
 # Output
 # =============================================================================
 
-function Format-ConsoleLine {
-    # The console never shows a bare yes/no word outside the verdict (AC21), so the "no ...
-    # permission entry matches" reason is worded "none of the ... entries match" on screen.
-    param([string]$Text)
-    return ($Text -replace '\bno (folder|share) permission entry matches\b', 'none of the $1 permission entries match')
-}
-
 function Write-FolderAccessConsole {
     param([Parameter(Mandatory = $true)][object]$Result)
 
@@ -1373,16 +1454,16 @@ function Write-FolderAccessConsole {
     Write-Host ('=' * 70) -ForegroundColor DarkGray
     if ($a.LimitedBy) { Write-Host ("Limited by: {0}" -f $a.LimitedBy) -ForegroundColor White }
     Write-Host 'Why:' -ForegroundColor White
-    foreach ($r in @($a.Reasons)) { Write-Status (Format-ConsoleLine $r) $level }
+    foreach ($r in @($a.Reasons)) { Write-Status $r $level }
     if (@($a.CouldNotCheck).Count -gt 0) {
         Write-Host ''
         Write-Host "Couldn't check:" -ForegroundColor White
-        foreach ($n in @($a.CouldNotCheck)) { Write-Status (Format-ConsoleLine $n) 'WARN' }
+        foreach ($n in @($a.CouldNotCheck)) { Write-Status $n 'WARN' }
     }
     Write-Host ''
     Write-Host 'Next steps:' -ForegroundColor White
     $i = 0
-    foreach ($s in @($a.NextSteps)) { $i++; Write-Host ("  {0}. {1}" -f $i, (Format-ConsoleLine $s)) -ForegroundColor Gray }
+    foreach ($s in @($a.NextSteps)) { $i++; Write-Host ("  {0}. {1}" -f $i, $s) -ForegroundColor Gray }
 
     foreach ($layer in 'Share', 'Folder') {
         $rows = @($a.EvidenceRows | Where-Object { $_.Layer -eq $layer })
@@ -1410,7 +1491,7 @@ function Write-FolderAccessConsole {
         Write-Status "CSV saved   : $($Result.Files.Csv)" 'PASS'
     }
     if ($Result.ReportError) { Write-Status $Result.ReportError 'WARN' }
-    Write-Status 'This only reads permissions; it changes nothing. Not checked: files and subfolders inside the folder, central access policy, ownership rights.' 'INFO'
+    Write-Status "This only reads permissions; it changes nothing. $script:NotCheckedFooter" 'INFO'
 }
 
 function ConvertTo-FolderAccessCsvValue {
@@ -1475,7 +1556,7 @@ function ConvertTo-FolderAccessHtml {
     }
     [void]$sb.AppendLine("<h2>$(Enc $Result.User.SamAccountName)'s groups</h2><table><tr><th>Group</th><th>SID</th><th>How</th><th>Path</th></tr>")
     foreach ($g in @($Result.Groups)) { [void]$sb.AppendLine("<tr><td>$(Enc $g.GroupName)</td><td><code>$(Enc $g.GroupSid)</code></td><td>$(Enc $g.MembershipType)</td><td>$(Enc $g.Via)</td></tr>") }
-    [void]$sb.AppendLine('</table><p class="INFO">This only reads permissions; it changes nothing. Not checked: files and subfolders inside the folder, central access policy, ownership rights. Effective Access is the final word.</p></body></html>')
+    [void]$sb.AppendLine("</table><p class=`"INFO`">This only reads permissions; it changes nothing. $(Enc $script:NotCheckedFooter) Effective Access is the final word.</p></body></html>")
     return $sb.ToString()
 }
 

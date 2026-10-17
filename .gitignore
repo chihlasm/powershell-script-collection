@@ -5,7 +5,7 @@ work-in-progress/
 Get-M365SecurityEvidence/*_SecurityEvidence_*/
 AD-GroupMembership-Export/Uploads/
 AD-LockoutDiagnostics/**/Case_*/
-FolderAccess-Check/**/FolderAccessCheck_*
+**/FolderAccessCheck_*
 
 # --- Runtime artifacts from running the tools ---
 Entra-DeviceActivityTimeline/Reports/

@@ -190,9 +190,8 @@ and a CSV for the ticket. Add `-Access Modify` to check "can they change files i
   share on the server, a DFS path, an admin share like `D$`) and what to do instead.
 - **Always finish in Effective Access**: the folder's *Properties → Security → Advanced →
   Effective Access* tab, for the user. It is Windows' final word.
-- **Don't add the user to the folder directly.** Ask the folder's owner which group should
-  have access, then add that group with FolderPermissionManager.
-- **Just added them to a group?** They must sign out and back in before it works.
+- **The saved report holds client data** (group memberships, servers, paths): attach it to the
+  ticket, then delete the local copy.
 
 ---
 

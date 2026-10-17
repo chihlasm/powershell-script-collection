@@ -43,7 +43,7 @@ Limited by: folder permissions
 
 | Answer | Meaning |
 |---|---|
-| **PROBABLY YES** | Both the share permissions and the folder permissions let them in. If they still can't, check the exact path they use, and whether they were added to a group since they last signed in. |
+| **PROBABLY YES** | Both the share permissions and the folder permissions let them in. If they still can't, check the exact path they use. |
 | **PROBABLY NO** | The folder permissions or the share permissions don't let them in, or a Deny entry blocks them. "Limited by" says which. |
 | **CAN'T TELL** | Something that decides the answer couldn't be read. The reason says what, and the next steps say what to do instead. This is a normal answer, not an error. |
 
@@ -66,6 +66,7 @@ Below the answer you see the evidence: every share and folder permission entry *
 |---|---|
 | Your account can't read this folder's permissions | Run it again as an account that can (for example a file server admin). |
 | Couldn't read the share permissions on FS01 | WinRM and WMI (DCOM) both refused, or you aren't an admin there. Both errors are listed. Check the share in Computer Management on the server. |
+| The share's permission list came back empty or unreadable | The server answered, but without a permission list this tool can safely interpret. Check the share in Computer Management on the server. |
 | Administrative share (`C$`, `D$`, `ADMIN$`) | Run it again with the path the user actually opens, not an admin share. |
 | This is a DFS path | The server part is your domain name (`\\contoso.com\...`), so the real file server isn't known. Find it on the folder's **Properties > DFS** tab and run it again with that path. The folder permissions are still shown. |
 | Claims-based conditions | The folder uses Dynamic Access Control conditions. Only Effective Access can evaluate them. |
@@ -78,8 +79,8 @@ If the folder permissions alone already rule the user out, the answer is PROBABL
 
 - **Order matters.** Windows checks entries top to bottom and stops as soon as it has an answer. An explicit Allow above an inherited Deny wins; a Deny above an Allow wins. The tool walks the list the same way rather than treating any Deny as "no".
 - **Groups come from the directory's own list of every group the user is in** (`tokenGroups`), including nested groups and the primary group, so nothing is missed. The path shown next to each match is from walking the user's groups upward; if a group is too deep, it shows "nested (path not traced)".
-- **Local groups on the file server** (for example `BUILTIN\Users`, which by default contains Domain Users) are read from that server, that group only. If the server can't be reached at all, those entries are listed under "Couldn't check".
-- **Recently added to a group?** The user's sign-in still carries the old groups until they sign out and back in (locking and unlocking is not enough).
+- **Local groups on the file server** (for example `BUILTIN\Users`, which by default contains Domain Users) are read from that server, that group only. If they can't be read (the server can't be reached, it's a DFS path, or the server didn't answer for the group), the entry is listed under "Couldn't check", and the answer is CAN'T TELL when that entry could change it. Local user accounts on the server are recognised and never match a domain user.
+- **Standalone DFS paths** (`\\FS01\Public\Link`, where `FS01` is the namespace server) look like ordinary share paths. The share permissions shown are the namespace root's share, not the share the link points to. If in doubt, use the real server path from the folder's **Properties > DFS** tab.
 - **Exit codes** (for scripts): `0` PROBABLY YES, `1` PROBABLY NO, `2` bad path or user not found or ambiguous, `3` AD module or connection failure, `4` CAN'T TELL.
 
 ## What it does not check
@@ -88,7 +89,11 @@ If the folder permissions alone already rule the user out, the answer is PROBABL
 - Central access policy (Dynamic Access Control), ownership rights, integrity labels, offline files.
 - Access-based enumeration: it only hides what the user can't open anyway, so it doesn't change the answer.
 - Users or groups from other forests beyond matching their SIDs.
-- To change permissions, use FolderPermissionManager, and add a **group** rather than the user.
+- For a standalone DFS namespace path, the share behind the link (see above).
+
+## The saved reports hold client data
+
+The HTML and CSV from `-OutputPath` contain the client's group memberships (with SIDs), server, share and folder names and paths. Attach them to the ticket, then delete the local copy. They are ignored by git (`FolderAccessCheck_*`) so they can't be committed by accident.
 
 ## Tests
 
