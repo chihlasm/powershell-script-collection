@@ -199,6 +199,11 @@ foreach ($row in Import-Csv -LiteralPath $backup) {
 }
 ```
 
+A Copy permissions backup can also hold rows for folders that turned out to need no change:
+they already had the permissions by the time of the change, and the change log shows them as
+`Skipped (nothing to copy)`. The tool did not change those folders: leave their rows out when
+you restore, or a later change to them made by someone else would be undone.
+
 Remove the rows for items you do not want to restore first. Use `-LiteralPath`, not `-Path`:
 folder names with `[` or `]` are otherwise read as wildcards. Run this in an elevated
 PowerShell window: changing permissions with `Set-Acl` needs the right to change them, and
@@ -322,7 +327,10 @@ used; and `0` otherwise, including `-WhatIf` and declined steps.
 
 The copy step lists the subfolders the same way as the owner snapshot: it does not go into
 junctions or symbolic links and skips them (they can point outside the folder), and it skips
-folders it cannot open; both are named in the console. If taking ownership is interrupted, see
+folders it cannot open; both are named in the console. Subfolders that block inheritance
+(inheritance turned off, often locked down on purpose) are not changed, and neither are the
+folders inside them: the `[WARN]` before the question names them, and the result lists them
+again with `[INFO]` (leaving them alone is not a failure). If taking ownership is interrupted, see
 the note on interrupted runs above.
 
 ## Requirements

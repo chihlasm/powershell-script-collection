@@ -313,6 +313,97 @@ Describe 'Copy-FolderPermission (SQ-015, add-only)' {
         $message | Should -BeLike '*Subfolders and files that inherit permissions get them too. Any that block inheritance were not changed.*'
     }
 
+    # --- Fix round 2 (SQ-015 review): an inherited copy is not an exact copy -----------------
+    # What a child inherits differs from the parent's rule: "inherit only" is dropped, "no
+    # propagate" clears the flags, and generic rights are mapped in the entry that applies.
+    # https://learn.microsoft.com/windows/win32/secauthz/ace-inheritance-rules
+
+    It 'Review2_TargetUnderTheSource_InheritsTheRuleInItsOwnForm_NotWritten' -ForEach @(
+        @{ Name = 'inherit only (IO)';       Source = '(A;CIIO;0x1301bf;;;S-1-5-32-545)';   Child = '(A;CIID;0x1301bf;;;S-1-5-32-545)' }
+        @{ Name = 'no propagate (NP)';       Source = '(A;OICINP;0x1301bf;;;S-1-5-32-545)'; Child = '(A;ID;0x1301bf;;;S-1-5-32-545)' }
+        @{ Name = 'generic all (GA)';        Source = '(A;OICI;GA;;;S-1-5-32-545)';         Child = '(A;ID;FA;;;S-1-5-32-545)' }
+        @{ Name = 'generic read (GR)';       Source = '(A;OICI;GR;;;S-1-5-32-545)';         Child = '(A;ID;FR;;;S-1-5-32-545)(A;OICIIOID;GR;;;S-1-5-32-545)' }
+        @{ Name = 'generic write (GW)';      Source = '(A;OICI;GW;;;S-1-5-32-545)';         Child = '(A;ID;FW;;;S-1-5-32-545)' }
+        @{ Name = 'generic execute (GX)';    Source = '(A;OICI;GX;;;S-1-5-32-545)';         Child = '(A;ID;FX;;;S-1-5-32-545)' }
+        @{ Name = 'generic write, Deny';     Source = '(D;OICI;GW;;;S-1-5-32-545)';         Child = '(D;ID;FW;;;S-1-5-32-545)' }
+    ) {
+        $tag = [guid]::NewGuid().ToString('N').Substring(0, 8)
+        $src = New-TestFolder "r2i-$tag"
+        $dst = New-TestFolder "r2i-$tag\child"
+        $log = Join-Path $TestDrive "r2i-$tag-logs"
+        $script:Seed[$src] = "O:BAG:SYD:AI$Source"
+        $script:Seed[$dst] = "O:BAG:SYD:AI$Child"
+
+        $rows = @(Copy-FolderPermission -SourcePath $src -TargetPath $dst -LogFolder $log)
+
+        Should -Invoke Set-Acl -Times 0 -Exactly -Scope It -Because "the child already inherits the $Name rule"
+        $rows[0].Result | Should -Be 'Skipped (nothing to copy)'
+        $rows[0].Detail | Should -Be 'Already has these permissions; nothing changed.'
+    }
+
+    It 'Review2_TargetUnderTheSource_InheritingLessOrTheOtherType_StillGetsTheRule' -ForEach @(
+        @{ Name = 'fewer rights';          Child = '(A;OICIID;0x1200a9;;;S-1-5-32-545)' }
+        @{ Name = 'Deny instead of Allow'; Child = '(D;OICIID;0x1301bf;;;S-1-5-32-545)' }
+        @{ Name = 'another account';       Child = '(A;OICIID;0x1301bf;;;S-1-5-32-551)' }
+    ) {
+        $tag = [guid]::NewGuid().ToString('N').Substring(0, 8)
+        $src = New-TestFolder "r2n-$tag"
+        $dst = New-TestFolder "r2n-$tag\child"
+        $log = Join-Path $TestDrive "r2n-$tag-logs"
+        $script:Seed[$src] = 'O:BAG:SYD:AI(A;OICI;0x1301bf;;;S-1-5-32-545)'
+        $script:Seed[$dst] = "O:BAG:SYD:AI$Child"
+
+        $rows = @(Copy-FolderPermission -SourcePath $src -TargetPath $dst -LogFolder $log)
+
+        $rows[0].Result | Should -Be 'Done' -Because "an inherited rule with $Name is not the source's rule"
+        Should -Invoke Set-Acl -Times 1 -Exactly -Scope It -ParameterFilter { $LiteralPath -eq $dst }
+    }
+
+    It 'Review2_UnrelatedTarget_InheritedGenericRule_DoesNotCount' {
+        # Outside the source an inherited rule comes from somewhere else, however it looks.
+        $src = New-TestFolder 'r2u-src'
+        $dst = New-TestFolder 'r2u-other'
+        $log = Join-Path $TestDrive 'r2u-logs'
+        $script:Seed[$src] = 'O:BAG:SYD:AI(A;OICI;GA;;;S-1-5-32-545)'
+        $script:Seed[$dst] = 'O:BAG:SYD:AI(A;ID;FA;;;S-1-5-32-545)(A;OICIIOID;GA;;;S-1-5-32-545)'
+
+        $rows = @(Copy-FolderPermission -SourcePath $src -TargetPath $dst -LogFolder $log)
+
+        $rows[0].Result | Should -Be 'Done' -Because $rows[0].Error
+        Should -Invoke Set-Acl -Times 1 -Exactly -Scope It -ParameterFilter { $LiteralPath -eq $dst }
+        # Regression: describing a generic-rights rule threw (a cast refuses GENERIC_ALL), so the
+        # row failed. GA is full control on a folder.
+        $rows[0].Detail | Should -BeLike '*: Allow Full control for *'
+    }
+
+    It 'Review2_ConvertToSpecificFileRight_MapsGenericRightsToFileRights' {
+        # FILE_GENERIC_READ 0x120089, FILE_GENERIC_WRITE 0x120116, FILE_GENERIC_EXECUTE 0x1200a0
+        # (the SDDL FR, FW and FX strings), GENERIC_ALL is full control. Generic rights are not
+        # named enum values, so they are built with Enum.ToObject (a cast refuses them).
+        $fs = [System.Security.AccessControl.FileSystemRights]
+        ConvertTo-SpecificFileRight ([System.Enum]::ToObject($fs, 0x10000000)) | Should -Be ([int64][int]$fs::FullControl)
+        ConvertTo-SpecificFileRight ([System.Enum]::ToObject($fs, [int]-2147483648)) | Should -Be ([int64]0x120089)
+        ConvertTo-SpecificFileRight ([System.Enum]::ToObject($fs, 0x40000000)) | Should -Be ([int64]0x120116)
+        ConvertTo-SpecificFileRight ([System.Enum]::ToObject($fs, 0x20000000)) | Should -Be ([int64]0x1200a0)
+        ConvertTo-SpecificFileRight $fs::Modify | Should -Be ([int64][int]$fs::Modify)
+    }
+
+    It 'Review2_ResultMessage_NoInheritanceNote_LeavesTheSentenceOut' {
+        $src = New-TestFolder 'r2m-src'
+        $dst = New-TestFolder 'r2m-dst'
+        $log = Join-Path $TestDrive 'r2m-logs'
+        $script:Seed[$src] = Get-TwoRuleSddl
+        $script:Seed[$dst] = (New-FakeAcl).Sddl
+        $rows = @(Copy-FolderPermission -SourcePath $src -TargetPath $dst -LogFolder $log)
+
+        $with = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $log 'Changes.csv') -LogFolder $log
+        $without = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $log 'Changes.csv') -LogFolder $log -NoInheritanceNote
+
+        $with | Should -BeLike '*Any that block inheritance were not changed.*'
+        $without | Should -Not -BeLike '*block inheritance*'
+        $without | Should -BeLike "Permissions copied from $([WildcardPattern]::Escape($src)) to *"
+    }
+
     # --- Fix round 1 (SQ-015 review) ---------------------------------------------------------
 
     It 'Review1_TargetUnderTheSourceThatInheritsTheRule_NotWrittenAndNothingToCopy' {
@@ -680,5 +771,22 @@ Describe 'GUI page: copy result and dialog wording (SQ-015 fix round 1)' {
 
         $submit = [regex]::Match($script:GuiRaw, '(?s)function submitReplicate\(\) \{.*?\n\}').Value
         $submit | Should -Match "setStatus\('Enter at least one folder to copy to, one per line\.', 'error'\)"
+    }
+
+    It 'Review2_CopyDialog_NeverShowsAnotherFoldersDenyPermissions' {
+        # Regression: a failed or slow load left the previous folder's entries in place, so the
+        # Deny note described the wrong folder.
+        $load = [regex]::Match($script:GuiRaw, '(?s)function loadFolderAcl\(path\) \{.*?\n\}').Value
+        $load | Should -Not -BeNullOrEmpty
+        $beforeRequest = $load.Substring(0, $load.IndexOf("api('/api/acl"))
+        $beforeRequest | Should -Match 'currentFolderEntries = \[\];'
+        $beforeRequest | Should -Match 'currentFolderEntriesPath = null;'
+        $load | Should -Match '(?s)currentFolderEntries = data\.entries \|\| \[\];\s*currentFolderEntriesPath = path;'
+        $catch = $load.Substring($load.IndexOf('.catch('))
+        $catch | Should -Match 'currentFolderEntries = \[\];'
+        $catch | Should -Match 'currentFolderEntriesPath = null;'
+
+        $show = [regex]::Match($script:GuiRaw, '(?s)function showReplicateModal\(\) \{.*?\n\}').Value
+        $show | Should -Match '(?s)if \(currentFolderEntriesPath !== currentFolder\) \{.*?are not loaded.*?\} else if \(denies\.length\)'
     }
 }

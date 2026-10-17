@@ -17,7 +17,9 @@
     3. Copies the permissions set directly on the top folder (not the ones it inherits) to
        every subfolder: entries a subfolder does not already have, as its own or inherited
        from the top folder, are added; nothing is removed. A subfolder that already inherits
-       them is not changed. If the top folder has no permissions of its own, nothing is copied.
+       them is not changed. Subfolders that block inheritance (inheritance turned off), and the
+       folders inside them, are not changed either: they are named before asking and in the
+       result. If the top folder has no permissions of its own, nothing is copied.
        The permissions of every subfolder that changes are saved to
        <LogFolder>\Backups\<yyyy-MM-dd_HHmmss>_CopyPermissions.csv first.
 
@@ -83,6 +85,9 @@
     REFERENCES
     - See FolderPermissions.Core.ps1 for takeown /R /A /D, icacls /setowner /T /C /Q,
       Get-Acl, Set-Acl and GetOwner.
+    - ObjectSecurity.AreAccessRulesProtected (true when the folder blocks inheritance; such
+      subfolders, and the folders inside them, are not copied to):
+      https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.objectsecurity.areaccessrulesprotected
     - #Requires and its PowerShell versions:
       https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_requires
     - WindowsPrincipal.IsInRole(WindowsBuiltInRole.Administrator) is true only in an elevated
@@ -298,10 +303,15 @@ function Invoke-FolderPermissionCli {
     $listing = Get-CliSubfolder -Path $Path
     $subFolders = @($listing.Folders)
     Write-Host "Subfolders and their owners ($($subFolders.Count)):"
+    $blocked = New-Object System.Collections.Generic.List[string]
     foreach ($folder in $subFolders) {
         try {
             $folderAcl = Get-Acl -LiteralPath $folder -ErrorAction Stop
             Write-Host "  $folder - Owner: $($folderAcl.Owner)"
+            # A protected DACL (SE_DACL_PROTECTED, "inheritance turned off") is locked on
+            # purpose more often than not (HR\Confidential): D-031 leaves it as it is.
+            # https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.objectsecurity.areaccessrulesprotected
+            if ($folderAcl.AreAccessRulesProtected) { $blocked.Add($folder) }
         } catch {
             Write-Host "[WARN] Cannot read $($folder): $($_.Exception.Message)" -ForegroundColor Yellow
         }
@@ -317,15 +327,34 @@ function Invoke-FolderPermissionCli {
         return $exitCode
     }
 
-    # 3. Copy the top folder's permissions to every subfolder.
+    # 3. Copy the top folder's permissions to every subfolder, except those that block
+    # inheritance and the folders inside them (which get their permissions from them, so
+    # writing the top folder's rules there would open up what was locked).
+    $inside = @($subFolders | Where-Object {
+        $f = $_
+        -not $blocked.Contains($f) -and @($blocked | Where-Object { Test-PathWithin -Path $f -Root $_ }).Count -gt 0
+    })
+    $targets = @($subFolders | Where-Object { -not $blocked.Contains($_) -and $inside -notcontains $_ })
+    $blockedText = ''
+    if ($blocked.Count -gt 0) {
+        $blockedText = "$($blocked.Count) subfolder(s) block inheritance and will not be changed: $(@($blocked) -join '; ')."
+        if ($inside.Count -gt 0) { $blockedText += " Nor will the $($inside.Count) folder(s) inside them." }
+    }
     Write-Host ''
-    Write-Host "[WARN] Copying adds the permissions of $Path to $($subFolders.Count) subfolder(s). Their current permissions are saved to a backup first. Nothing is removed." -ForegroundColor Yellow
+    if ($targets.Count -eq 0) {
+        Write-Host "[INFO] $blockedText There are no other subfolders to copy the permissions to." -ForegroundColor Cyan
+        return $exitCode
+    }
+    $warning = "[WARN] Copying adds $Path's own permissions to $($targets.Count) subfolder(s). Their current permissions are saved to a backup first. Nothing is removed."
+    if ($blockedText) { $warning += " $blockedText" }
+    Write-Host $warning -ForegroundColor Yellow
     $copy = $whatIf -or $Force -or (Confirm-CliStep)
     if (-not $copy) {
         Write-Host '[INFO] Permissions were not copied.' -ForegroundColor Cyan
         return $exitCode
     }
-    $targets = $subFolders
+    # The folders that block inheritance are left out of the targets, so the result's "Any that
+    # block inheritance were not changed" holds and -NoInheritanceNote is not needed.
     if ($whatIf) {
         $rows = @(Copy-FolderPermission -SourcePath $Path -TargetPath $targets -LogFolder $logFolderUsed -WhatIf)
         $null = Write-CliChangeResult -Entries $rows -LogFolder $logFolderUsed
@@ -334,6 +363,12 @@ function Invoke-FolderPermissionCli {
             Copy-FolderPermission -SourcePath $Path -TargetPath $targets -LogFolder $logFolderUsed -WhatIf:$false
         }
         if (Write-CliChangeResult -Entries $result.Entries -LogPath $result.LogPath -LogFolder $logFolderUsed) { $exitCode = 1 }
+    }
+    if ($blocked.Count -gt 0) {
+        # Informational: leaving them alone is the intended result, not a shortfall.
+        $notChanged = "[INFO] $($blocked.Count) subfolder(s) block inheritance and were not changed: $(@($blocked) -join '; ')."
+        if ($inside.Count -gt 0) { $notChanged += " Nor were the $($inside.Count) folder(s) inside them." }
+        Write-Host $notChanged -ForegroundColor Cyan
     }
     $exitCode
 }

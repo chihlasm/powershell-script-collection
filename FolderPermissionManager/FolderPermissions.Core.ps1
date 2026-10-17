@@ -1,4 +1,4 @@
-# 3.0 so the command-line script can share this file on old file servers (Server 2012 ships
+﻿# 3.0 so the command-line script can share this file on old file servers (Server 2012 ships
 # PowerShell 3.0). No ::new(), classes or .ForEach()/.Where() here; Tests\PSVersionFloor.Tests.ps1
 # guards it. The GUI that dot-sources it declares 5.1 on its own.
 #Requires -Version 3.0
@@ -79,6 +79,14 @@
       https://learn.microsoft.com/windows/win32/api/aclapi/nf-aclapi-setnamedsecurityinfow
       https://learn.microsoft.com/windows/win32/secauthz/security-descriptor-control
       NOT VERIFIED: which Win32 call Set-Acl uses (Learn does not say).
+      What a child inherits: "inherit only" is dropped and "no propagate" clears the
+      inheritance flags on the child, and generic rights (GA, GR, GW, GX) are mapped to file
+      rights in the entry that applies to the child, so an inherited copy of a source rule is
+      matched by account, Allow/Deny and rights after mapping (Test-InheritedCopyOfRule):
+      https://learn.microsoft.com/windows/win32/secauthz/ace-inheritance-rules
+      https://learn.microsoft.com/windows/win32/secauthz/generic-access-rights
+      https://learn.microsoft.com/windows/win32/fileio/file-security-and-access-rights
+      https://learn.microsoft.com/windows/win32/fileio/file-access-rights-constants
     - -LiteralPath on Test-Path, Get-Item, Get-ChildItem, Get-Acl and Set-Acl: with -Path, [ ]
       is a wildcard character range, so "HR [old]" matches "HR o" and not itself:
       https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_wildcards
@@ -998,14 +1006,18 @@ function Format-PermissionRights {
     #>
     param([Parameter(Mandatory)][System.Security.AccessControl.FileSystemRights]$Rights)
 
-    $sync = [int][System.Security.AccessControl.FileSystemRights]::Synchronize
-    $value = [int]$Rights -band (-bnot $sync)
+    $fs = [System.Security.AccessControl.FileSystemRights]
+    $sync = [int]$fs::Synchronize
+    # Generic rights (a rule set as GA, GR, GW or GX) are shown as the file rights they stand
+    # for; after mapping the value fits in an Int32 again.
+    $value = [int](ConvertTo-SpecificFileRight $Rights) -band (-bnot $sync)
     if ($value -eq 0) { return $Rights.ToString() }
     $labels = [ordered]@{ FullControl = 'Full control'; Modify = 'Modify'; ReadAndExecute = 'Read & execute'; Read = 'Read'; Write = 'Write' }
     foreach ($name in $labels.Keys) {
         if ($value -eq ([int][System.Security.AccessControl.FileSystemRights]$name -band (-bnot $sync))) { return $labels[$name] }
     }
-    ([System.Security.AccessControl.FileSystemRights]$value).ToString()
+    # Enum.ToObject, not a cast: a cast refuses a value with bits that have no enum name.
+    ([System.Enum]::ToObject($fs, $value)).ToString()
 }
 
 function Format-PermissionRule {
@@ -1031,6 +1043,71 @@ function Test-PathWithin {
         $p.StartsWith("$r\", [System.StringComparison]::OrdinalIgnoreCase)
 }
 
+function ConvertTo-SpecificFileRight {
+    <#
+    .SYNOPSIS
+        The access mask of file-system rights as a non-negative number, with the generic rights
+        (GA, GR, GW, GX) replaced by the file and folder rights they stand for.
+    .DESCRIPTION
+        GENERIC_ALL (0x10000000) is "all possible access rights" (FILE_ALL_ACCESS, FullControl);
+        GENERIC_READ (0x80000000), GENERIC_WRITE (0x40000000) and GENERIC_EXECUTE (0x20000000)
+        map to FILE_GENERIC_READ, FILE_GENERIC_WRITE and FILE_GENERIC_EXECUTE. Windows does
+        the same mapping when a child inherits a rule as an effective ACE.
+        https://learn.microsoft.com/windows/win32/secauthz/generic-access-rights
+        https://learn.microsoft.com/windows/win32/fileio/file-security-and-access-rights
+        https://learn.microsoft.com/windows/win32/fileio/file-access-rights-constants
+        https://learn.microsoft.com/windows/win32/secauthz/ace-inheritance-rules
+    #>
+    param([Parameter(Mandatory)][System.Security.AccessControl.FileSystemRights]$Rights)
+
+    $fs = [System.Security.AccessControl.FileSystemRights]
+    # GENERIC_READ is the sign bit of the Int32 enum, so work in Int64 without the sign.
+    $value = [int64][int]$Rights -band [int64]4294967295
+    $map = @(
+        @{ Generic = [int64]0x10000000; Specific = [int64][int]$fs::FullControl }
+        # FILE_GENERIC_READ: FILE_READ_DATA, FILE_READ_EA, FILE_READ_ATTRIBUTES,
+        # STANDARD_RIGHTS_READ (READ_CONTROL), SYNCHRONIZE.
+        @{ Generic = [int64]2147483648; Specific = [int64][int]($fs::Read -bor $fs::Synchronize) }
+        # FILE_GENERIC_WRITE: FILE_WRITE_DATA, FILE_APPEND_DATA, FILE_WRITE_EA,
+        # FILE_WRITE_ATTRIBUTES, STANDARD_RIGHTS_WRITE (READ_CONTROL), SYNCHRONIZE.
+        @{ Generic = [int64]0x40000000; Specific = [int64][int]($fs::Write -bor $fs::ReadPermissions -bor $fs::Synchronize) }
+        # FILE_GENERIC_EXECUTE: FILE_EXECUTE, FILE_READ_ATTRIBUTES, STANDARD_RIGHTS_EXECUTE
+        # (READ_CONTROL), SYNCHRONIZE.
+        @{ Generic = [int64]0x20000000; Specific = [int64][int]($fs::ExecuteFile -bor $fs::ReadAttributes -bor $fs::ReadPermissions -bor $fs::Synchronize) }
+    )
+    $result = $value
+    foreach ($m in $map) {
+        if ($value -band $m.Generic) { $result = ($result -band (-bnot $m.Generic)) -bor $m.Specific }
+    }
+    $result
+}
+
+function Test-InheritedCopyOfRule {
+    <#
+    .SYNOPSIS
+        True when Ace is an inherited entry that a child gets from Rule (a rule that applies to
+        subfolders): same account, same Allow/Deny, and at least Rule's rights.
+    .DESCRIPTION
+        The inherited entry does not carry the source rule's exact flags or rights: Windows
+        removes "inherit only" (INHERIT_ONLY_ACE) on the child, clears the inheritance flags for
+        "this folder and its direct children only" (NO_PROPAGATE_INHERIT_ACE), and maps generic
+        rights to specific ones in the entry that applies to the child (splitting it from an
+        inherit-only entry that keeps the generic rights). So the flags are not compared, and
+        the rights are compared after mapping generic rights on both sides.
+        https://learn.microsoft.com/windows/win32/secauthz/ace-inheritance-rules
+    #>
+    param(
+        [Parameter(Mandatory)][System.Security.AccessControl.FileSystemAccessRule]$Ace,
+        [Parameter(Mandatory)][System.Security.AccessControl.FileSystemAccessRule]$Rule
+    )
+
+    $containerInherit = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit
+    if (-not $Ace.IsInherited -or -not ($Rule.InheritanceFlags -band $containerInherit)) { return $false }
+    if ($Ace.AccessControlType -ne $Rule.AccessControlType -or $Ace.IdentityReference -ne $Rule.IdentityReference) { return $false }
+    $need = ConvertTo-SpecificFileRight $Rule.FileSystemRights
+    ((ConvertTo-SpecificFileRight $Ace.FileSystemRights) -band $need) -eq $need
+}
+
 function Get-PermissionCopyPlan {
     <#
     .SYNOPSIS
@@ -1043,7 +1120,10 @@ function Get-PermissionCopyPlan {
         set on the target itself stays when the parent changes, an inherited one does not.
         With -CountInherited (the target is the source or under it), an inherited match counts
         too: the target already gets that rule from the source, and adding it again as its own
-        would leave it behind when the rule is later removed from the source.
+        would leave it behind when the rule is later removed from the source. An inherited rule
+        is matched as Windows writes it on the child, not by exact flags (Test-InheritedCopyOfRule:
+        "inherit only", "this folder and direct children only" and generic rights all look
+        different on the child).
         AddAccessRule only adds, and can merge a rule into an existing one for the same account
         (Read into an existing Modify), so each rule counts as added only when it changed the
         security descriptor.
@@ -1065,6 +1145,9 @@ function Get-PermissionCopyPlan {
             $_.InheritanceFlags -eq $r.InheritanceFlags -and
             $_.PropagationFlags -eq $r.PropagationFlags
         })
+        if ($exists.Count -eq 0 -and $CountInherited) {
+            $exists = @($Acl.Access | Where-Object { Test-InheritedCopyOfRule -Ace $_ -Rule $r })
+        }
         if ($exists.Count -eq 0) {
             $before = $Acl.Sddl
             $Acl.AddAccessRule($r)
@@ -1669,12 +1752,19 @@ function Get-ChangeResultMessage {
         The plain-English status line for a change: what was done and where, how many items
         failed (with the first error), whether anything was left partly changed, and where the
         backup and the log are.
+    .PARAMETER NoInheritanceNote
+        Leave out, for a copy, the sentence that subfolders and files that inherit get the
+        permissions too and those that block inheritance were not changed. It is true when every
+        target got one Set-Acl and the items below it were left to Windows (the GUI), and when
+        the caller left out the folders that block inheritance (the command line skips them).
+        A caller that writes to such folders, or to the items below a target, must pass it.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Entries,
         [AllowNull()][string]$LogPath,
-        [Parameter(Mandatory)][string]$LogFolder
+        [Parameter(Mandatory)][string]$LogFolder,
+        [switch]$NoInheritanceNote
     )
 
     $all = @($Entries | Where-Object { $null -ne $_ })
@@ -1723,7 +1813,7 @@ function Get-ChangeResultMessage {
     if ($done.Count -gt 0) {
         $where = if ($all.Count -eq 1) { $first.Target } else { "$($done.Count) of $($all.Count) $noun" }
         $parts.Add("$phrase $preposition $where.")
-        if ($first.Action -eq 'Copy permissions') {
+        if ($first.Action -eq 'Copy permissions' -and -not $NoInheritanceNote) {
             # One Set-Acl on each target: Windows passes the new rules to the items below that
             # inherit, never to those that block inheritance (see Copy-FolderPermission).
             $parts.Add('Subfolders and files that inherit permissions get them too. Any that block inheritance were not changed.')

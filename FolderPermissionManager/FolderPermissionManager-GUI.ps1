@@ -1505,7 +1505,8 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
 
 // --- State ---
 var currentFolder  = null;   // currently selected folder path
-var currentFolderEntries = []; // permission entries of currentFolder, as last loaded
+var currentFolderEntries = []; // permission entries of currentFolderEntriesPath, as last loaded
+var currentFolderEntriesPath = null; // the folder currentFolderEntries belong to (null: none loaded)
 var currentFiles   = [];     // array of file objects for current folder
 var checkedFiles   = new Set(); // paths of checked files
 var addAceTarget   = 'folder'; // 'folder' or 'files'
@@ -1761,12 +1762,17 @@ function loadFolderAcl(path) {
     document.getElementById('folder-acl-section').style.display = 'block';
     document.getElementById('files-section').style.display = 'flex';
     document.getElementById('folderAclTitle').textContent = path.split('\\').pop() || path;
+    // Forget the previous folder's entries until this one's arrive, so the copy dialog never
+    // describes another folder's Deny permissions.
+    currentFolderEntries = [];
+    currentFolderEntriesPath = null;
 
     api('/api/acl?path=' + encodeURIComponent(path)).then(function(data) {
         document.getElementById('folderOwner').textContent = data.owner || '—';
         var tbody = document.getElementById('folderAclBody');
         tbody.innerHTML = '';
         currentFolderEntries = data.entries || [];
+        currentFolderEntriesPath = path;
         (data.entries || []).forEach(function(e) {
             var tr = document.createElement('tr');
             tr.innerHTML =
@@ -1776,7 +1782,11 @@ function loadFolderAcl(path) {
                 '<td>' + (e.isInherited ? '<span class="badge badge-inherited" title="This permission was inherited from a parent folder">Inherited</span>' : '') + '</td>';
             tbody.appendChild(tr);
         });
-    }).catch(function(e) { setStatus('Failed to load ACL: ' + e.message, 'error'); });
+    }).catch(function(e) {
+        currentFolderEntries = [];
+        currentFolderEntriesPath = null;
+        setStatus('Failed to load ACL: ' + e.message, 'error');
+    });
 }
 
 // --- Files list ---
@@ -2014,7 +2024,12 @@ function showReplicateModal() {
     // Copy only copies the folder's own permissions, so only those Deny entries are copied.
     var denies = currentFolderEntries.filter(function(e) { return !e.isInherited && e.type === 'Deny'; });
     var note = document.getElementById('replicateDenyNote');
-    if (denies.length) {
+    if (currentFolderEntriesPath !== currentFolder) {
+        // Still loading, failed to load, or a late reply for the folder opened before: say so
+        // rather than describe the wrong folder.
+        note.textContent = 'The permissions of this folder are not loaded, so it cannot be checked for Deny permissions of its own. Wait a moment or open the folder again before copying.';
+        note.style.display = 'block';
+    } else if (denies.length) {
         note.textContent = 'This folder has ' + denies.length + ' Deny permission(s) of its own (' +
             denies.map(function(e) { return e.identity; }).join(', ') +
             '). They are copied too, and a Deny blocks access even where another permission allows it.';

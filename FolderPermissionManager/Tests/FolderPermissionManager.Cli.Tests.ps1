@@ -361,5 +361,74 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
             $result.Count | Should -Be 1
             $result[0] | Should -BeLike '`[PASS`] *1 folder(s) already had these permissions*'
         }
+
+        # --- Fix round 2 (SQ-015 review): subfolders that block inheritance (D-031) ----------
+
+        It 'Review2_Cli_SubfolderThatBlocksInheritance_IsNotWrittenAndIsNamedBeforeAndAfter' {
+            # Regression: the top folder's rules were written onto a subfolder with inheritance
+            # turned off (P flag), while the result said those were not changed.
+            $locked = Join-Path $script:Dir 'sub2'
+            $script:Sddl[$locked] = 'O:BAG:SYD:PAI(A;OICI;0x1f01ff;;;S-1-5-32-544)'
+
+            $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
+
+            $code | Should -Be 0
+            Should -Invoke Set-Acl -Times 0 -Exactly -Scope It -ParameterFilter { $LiteralPath -eq $locked }
+            Should -Invoke Set-Acl -Times 0 -Exactly -Scope It -Because 'sub1 inherits the rule already'
+            $scope = @($script:Lines | Where-Object { $_ -like '`[WARN`] Copying adds *' })
+            $scope.Count | Should -Be 1
+            $scope[0] | Should -BeLike "*Copying adds $([WildcardPattern]::Escape($script:Dir))'s own permissions to 1 subfolder(s).*"
+            $scope[0] | Should -BeLike "*1 subfolder(s) block inheritance and will not be changed: $([WildcardPattern]::Escape($locked)).*"
+            $after = @($script:Lines | Where-Object { $_ -like '*block inheritance and were not changed*' })
+            $after.Count | Should -Be 1
+            $after[0] | Should -Be "[INFO] 1 subfolder(s) block inheritance and were not changed: $locked."
+            $result = @($script:Lines | Where-Object { $_ -like "*$([WildcardPattern]::Escape((Join-Path $script:Dir 'sub1'))) already has these permissions*" })
+            $result.Count | Should -Be 1
+            $result[0] | Should -BeLike '`[INFO`] *' -Because 'sub1 was up to date and sub2 was left alone on purpose: nothing failed'
+        }
+
+        It 'Review2_Cli_DoneSubfolderNextToABlockedOne_ResultIsTrueAndAPass' {
+            $locked = Join-Path $script:Dir 'sub2'
+            $script:Sddl[(Join-Path $script:Dir 'sub1')] = 'O:BAG:SYD:AI'
+            $script:Sddl[$locked] = 'O:BAG:SYD:PAI(A;OICI;0x1f01ff;;;S-1-5-32-544)'
+
+            $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
+
+            $code | Should -Be 0
+            Should -Invoke Set-Acl -Times 1 -Exactly -Scope It
+            Should -Invoke Set-Acl -Times 1 -Exactly -Scope It -ParameterFilter { $LiteralPath -eq (Join-Path $script:Dir 'sub1') }
+            $result = @($script:Lines | Where-Object { $_ -like '*Permissions copied from *' })
+            $result.Count | Should -Be 1
+            $result[0] | Should -BeLike '`[PASS`] *Any that block inheritance were not changed.*'
+            @($script:Lines | Where-Object { $_ -eq "[INFO] 1 subfolder(s) block inheritance and were not changed: $locked." }).Count | Should -Be 1
+        }
+
+        It 'Review2_Cli_FolderInsideABlockedSubfolder_IsNotWrittenEither' {
+            # sub2\inner gets its permissions from sub2, which blocks inheritance: writing the top
+            # folder's rule there would open up what sub2 locks.
+            $locked = Join-Path $script:Dir 'sub2'
+            $inner = Join-Path $locked 'inner'
+            New-Item -ItemType Directory -Path $inner -Force | Out-Null
+            $script:Sddl[$locked] = 'O:BAG:SYD:PAI(A;OICI;0x1f01ff;;;S-1-5-32-544)'
+            $script:Sddl[$inner] = 'O:BAG:SYD:AI(A;OICIID;0x1f01ff;;;S-1-5-32-544)'
+
+            $null = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
+
+            Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
+            $scope = @($script:Lines | Where-Object { $_ -like '`[WARN`] Copying adds *' })
+            $scope[0] | Should -BeLike '*block inheritance and will not be changed: *. Nor will the 1 folder(s) inside them.'
+        }
+
+        It 'Review2_Cli_EverySubfolderBlocksInheritance_NothingIsAskedOrWritten' {
+            $script:Sddl[(Join-Path $script:Dir 'sub1')] = 'O:BAG:SYD:PAI(A;OICI;0x1f01ff;;;S-1-5-32-544)'
+            $script:Sddl[(Join-Path $script:Dir 'sub2')] = 'O:BAG:SYD:PAI(A;OICI;0x1f01ff;;;S-1-5-32-544)'
+
+            $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
+
+            $code | Should -Be 0
+            Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
+            Should -Invoke Read-Host -Times 1 -Exactly -Scope It -Because 'only ownership is asked; there is nothing to copy to'
+            @($script:Lines | Where-Object { $_ -like '`[INFO`] 2 subfolder(s) block inheritance and will not be changed: *There are no other subfolders to copy the permissions to.' }).Count | Should -Be 1
+        }
     }
 }
