@@ -60,6 +60,9 @@ dist/
 **/EntraConnectSettings.json
 M365-SyncedUserFixes/Logs/
 
+# FolderPermissionManager: permission backups and the change log (client paths, accounts, SIDs)
+FolderPermissionManager/Logs/
+
 # Squad plugin (runtime state and logs)
 squad/.state/
 squad/logs/

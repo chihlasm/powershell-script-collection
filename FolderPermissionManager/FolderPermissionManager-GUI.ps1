@@ -20,15 +20,34 @@
 .PARAMETER NoBrowserOpen
     Do not automatically open the browser on launch.
 
+.PARAMETER LogFolder
+    Folder for permission backups and the change log. Defaults to the Logs folder next to this
+    script (not the current directory, which is C:\Windows\System32 when started "as
+    administrator"). If the script is on a network share or any drive that is not a local fixed
+    disk, or that folder is read-only, %LOCALAPPDATA%\FolderPermissionManager\Logs is used
+    instead. A folder passed here is used as given (with a warning if it is on the network).
+
 .EXAMPLE
     .\FolderPermissionManager-GUI.ps1
 
 .EXAMPLE
     .\FolderPermissionManager-GUI.ps1 -Port 9090 -NoBrowserOpen
 
+.EXAMPLE
+    .\FolderPermissionManager-GUI.ps1 -LogFolder 'D:\Tickets\12345\PermissionChanges'
+
 .NOTES
     Must run as Administrator for ownership operations.
     Press Ctrl+C in the PowerShell window to stop the server.
+
+    Before every change to one folder or to selected files (add or remove a permission, take
+    ownership of this folder only, copy permissions without "apply recursively"), the current
+    permissions are saved to <LogFolder>\Backups. If that fails, nothing is changed. Each
+    change is then logged to <LogFolder>\Changes_<yyyy-MM-dd>.csv. See README "Undo a change".
+    The logic lives in FolderPermissions.Core.ps1, which must stay next to this script.
+
+    REFERENCES
+    - See FolderPermissions.Core.ps1 for Get-Acl, Set-Acl, SDDL, takeown and icacls.
 #>
 
 [CmdletBinding()]
@@ -38,11 +57,32 @@ param(
     [int]$Port = 8271,
 
     [Parameter()]
-    [switch]$NoBrowserOpen
+    [switch]$NoBrowserOpen,
+
+    [Parameter()]
+    [string]$LogFolder
 )
 
 $ErrorActionPreference = 'Continue'
 $baseUrl = "http://localhost:$Port/"
+
+# Backups, the change log and the single-item changes live in the core (testable without a GUI).
+$corePath = Join-Path $PSScriptRoot 'FolderPermissions.Core.ps1'
+if (-not (Test-Path -LiteralPath $corePath)) {
+    Write-Host "[FAIL] FolderPermissions.Core.ps1 is missing from $PSScriptRoot. Keep all the files in the folder together." -ForegroundColor Red
+    exit 1
+}
+. $corePath -LoadFunctionsOnly
+# Not $script:LogFolder: at script scope that IS the -LogFolder parameter, and the startup
+# notice needs to know whether -LogFolder was passed.
+$defaultLogFolder = Join-Path $PSScriptRoot 'Logs'
+try {
+    $script:ChangeLogFolder = Resolve-ChangeLogFolder -LogFolder $LogFolder -DefaultFolder $defaultLogFolder
+}
+catch {
+    Write-Host "[FAIL] $($_.Exception.Message)" -ForegroundColor Red
+    exit 1
+}
 
 # Cache mapped network drives from the user session via WMI
 # Elevated processes can't see drive mappings, so we grab them here
@@ -104,6 +144,68 @@ function Read-RequestBody {
     $json = $reader.ReadToEnd()
     $reader.Close()
     return $json | ConvertFrom-Json
+}
+
+# Runs one core change function, logging each item as soon as it completes, and builds the
+# fields every change endpoint adds to its JSON: the plain-English status-bar message, the log
+# and backup paths, and how many changed items cannot be restored from the backup (their
+# permissions could not be read first). Returns the rows (Entries) and those fields (Data).
+# $Change is the handler's { Add-FolderPermission ... } block; it runs in a child scope of this
+# call chain and reads the handler's variables ($folderPath, $filePaths, ...), so the functions
+# between the handler and the core must not define variables with those names.
+function Complete-PermissionChange {
+    param([scriptblock]$Change)
+    $result = Invoke-LoggedPermissionChange -Change $Change -LogFolder $script:ChangeLogFolder
+    $entries = @($result.Entries)
+    $backup = @($entries | Where-Object { $_.BackupFile } | Select-Object -First 1)
+    [PSCustomObject]@{
+        Entries = $entries
+        Data    = @{
+            message      = Get-ChangeResultMessage -Entries $entries -LogPath $result.LogPath -LogFolder $script:ChangeLogFolder
+            logPath      = $result.LogPath
+            backupPath   = $(if ($backup.Count -gt 0) { $backup[0].BackupFile } else { $null })
+            unrestorable = @($entries | Where-Object { $_.Result -eq 'Done' -and $_.OldValue -eq 'Could not read' }).Count
+        }
+    }
+}
+
+# Per-item results in the shape the page already reads: path, status, message.
+function ConvertTo-ChangeResultRow {
+    param([object[]]$Entries)
+    @($Entries | Where-Object { $null -ne $_ } | ForEach-Object {
+        $status = switch ($_.Result) {
+            'Done'                { 'success' }
+            'Skipped (not found)' { 'skipped' }
+            default               { 'error' }
+        }
+        [PSCustomObject]@{ path = $_.Target; status = $status; message = $(if ($_.Error) { $_.Error } else { $_.Result }) }
+    })
+}
+
+# Sends the result of a change to ONE folder: 200 with status 'success', or the existing error
+# shape (400 when the folder does not exist, 500 otherwise) with the same added fields.
+function Send-SingleChangeResult {
+    param([System.Net.HttpListenerResponse]$Response, [scriptblock]$Change)
+    $completed = Complete-PermissionChange -Change $Change
+    $entries = @($completed.Entries)
+    $data = $completed.Data
+    if ($entries.Count -gt 0 -and @($entries | Where-Object { $_.Result -ne 'Done' }).Count -eq 0) {
+        $data['status'] = 'success'
+    } else {
+        $Response.StatusCode = if (@($entries | Where-Object { $_.Result -eq 'Skipped (not found)' }).Count -gt 0) { 400 } else { 500 }
+        $data['error'] = $data.message
+    }
+    Send-Json $Response $data
+}
+
+# Sends the result of a change to several items in the existing batch shape.
+function Send-BatchChangeResult {
+    param([System.Net.HttpListenerResponse]$Response, [scriptblock]$Change)
+    $completed = Complete-PermissionChange -Change $Change
+    $data = $completed.Data
+    $data['status'] = 'complete'
+    $data['results'] = @(ConvertTo-ChangeResultRow -Entries $completed.Entries)
+    Send-Json $Response $data
 }
 
 # --- API Endpoint Functions ---
@@ -304,32 +406,28 @@ function Invoke-TakeOwnership {
     $folderPath = Resolve-MappedDrive $body.path
     $recursive = $body.recursive -eq $true
 
-    if (-not $folderPath -or -not (Test-Path $folderPath -PathType Container)) {
+    if (-not $folderPath -or -not (Test-Path -LiteralPath $folderPath -PathType Container)) {
         $Response.StatusCode = 400
         Send-Json $Response @{ error = "Invalid or missing path" }
         return
     }
 
+    if (-not $recursive) {
+        # This folder only: backed up and logged by the core, which never throws.
+        Send-SingleChangeResult $Response { Set-ItemOwnerToCurrentUser -Path $folderPath -LogFolder $script:ChangeLogFolder }
+        return
+    }
+
+    # All subfolders and files: unchanged here; backup and logging come with SQ-014.
     try {
-        if ($recursive) {
-            # takeown first to force ownership on folders and files (uses SE_TAKE_OWNERSHIP privilege)
-            $takeownOutput = takeown /F $folderPath /R /A /D Y 2>&1
-            # Then set the current user as owner via icacls on all files and folders
-            $icaclsOutput = icacls $folderPath /setowner $env:USERNAME /T /C /Q 2>&1
-            if ($LASTEXITCODE -ne 0) {
-                throw "icacls failed: $icaclsOutput"
-            }
-            Send-Json $Response @{ status = 'success'; message = "Ownership taken recursively on all folders and files in $folderPath" }
+        # takeown first to force ownership on folders and files (uses SE_TAKE_OWNERSHIP privilege)
+        $takeownOutput = takeown /F $folderPath /R /A /D Y 2>&1
+        # Then set the current user as owner via icacls on all files and folders
+        $icaclsOutput = icacls $folderPath /setowner $env:USERNAME /T /C /Q 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "icacls failed: $icaclsOutput"
         }
-        else {
-            # takeown on just this folder and its immediate files
-            $takeownOutput = takeown /F $folderPath /A /D Y 2>&1
-            $acl = Get-Acl -Path $folderPath
-            $owner = [System.Security.Principal.NTAccount]::new($env:USERDOMAIN, $env:USERNAME)
-            $acl.SetOwner($owner)
-            Set-Acl -Path $folderPath -AclObject $acl -ErrorAction Stop
-            Send-Json $Response @{ status = 'success'; message = "Ownership taken on $folderPath" }
-        }
+        Send-Json $Response @{ status = 'success'; message = "Ownership taken recursively on all folders and files in $folderPath" }
     }
     catch {
         $Response.StatusCode = 500
@@ -345,15 +443,28 @@ function Invoke-ReplicatePermissions {
 
     $body = Read-RequestBody $Request
     $sourcePath = Resolve-MappedDrive $body.sourcePath
-    $targetPaths = @($body.targetPaths | ForEach-Object { Resolve-MappedDrive $_ })
+    # Blank lines in the target list are dropped rather than reported as missing folders.
+    $targetPaths = @($body.targetPaths | Where-Object { $null -ne $_ -and "$_".Trim() } | ForEach-Object { Resolve-MappedDrive "$_".Trim() })
     $recursive = $body.recursive -eq $true
 
-    if (-not $sourcePath -or -not (Test-Path $sourcePath -PathType Container)) {
+    if (-not $sourcePath -or -not (Test-Path -LiteralPath $sourcePath -PathType Container)) {
         $Response.StatusCode = 400
         Send-Json $Response @{ error = "Invalid source path" }
         return
     }
+    if ($targetPaths.Count -eq 0) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Missing required field: targetPaths" }
+        return
+    }
 
+    if (-not $recursive) {
+        # This folder only: backed up and logged by the core; missing targets are skipped.
+        Send-BatchChangeResult $Response { Copy-FolderPermission -SourcePath $sourcePath -TargetPath $targetPaths -LogFolder $script:ChangeLogFolder }
+        return
+    }
+
+    # All subfolders and files: unchanged here (SQ-015 replaces it).
     $sourceAcl = Get-Acl -Path $sourcePath -ErrorAction Stop
     $results = [System.Collections.Generic.List[object]]::new()
 
@@ -364,58 +475,38 @@ function Invoke-ReplicatePermissions {
                 continue
             }
 
-            if ($recursive) {
-                # Use icacls to reset inheritance and apply parent ACLs to all files and subfolders
-                # /reset re-enables inheritance and pushes inheritable ACEs from parent down to all children
-                $output = icacls $target /reset /T /C /Q 2>&1
-                if ($LASTEXITCODE -ge 2) {
-                    $results.Add([PSCustomObject]@{ path = $target; status = 'warning'; message = "icacls /reset completed with exit code $LASTEXITCODE" })
-                } else {
-                    # Now apply source ACL rules via icacls /grant for each non-inherited rule
-                    $grantErrors = 0
-                    foreach ($rule in $sourceAcl.Access) {
-                        if ($rule.IsInherited) { continue }
-                        $identity = $rule.IdentityReference.ToString()
-                        $perm = switch -Wildcard ($rule.FileSystemRights.ToString()) {
-                            '*FullControl*'      { 'F' }
-                            '*Modify*'           { 'M' }
-                            '*ReadAndExecute*'   { 'RX' }
-                            '*Read*'             { 'R' }
-                            '*Write*'            { 'W' }
-                            default              { 'R' }
-                        }
-                        $inheritFlag = '(OI)(CI)'  # Apply to this folder, subfolders, and files
-                        if ($rule.AccessControlType -eq 'Allow') {
-                            $icaclsOut = icacls $target /grant "${identity}:${inheritFlag}${perm}" /T /C /Q 2>&1
-                        } else {
-                            $icaclsOut = icacls $target /deny "${identity}:${inheritFlag}${perm}" /T /C /Q 2>&1
-                        }
-                        if ($LASTEXITCODE -ge 2) { $grantErrors++ }
-                    }
-                    if ($grantErrors -gt 0) {
-                        $results.Add([PSCustomObject]@{ path = $target; status = 'warning'; message = "Replicated recursively with $grantErrors permission errors" })
-                    } else {
-                        $results.Add([PSCustomObject]@{ path = $target; status = 'success'; message = 'Permissions replicated to all subfolders and files' })
-                    }
-                }
-            }
-            else {
-                # Non-recursive: apply to this single item only
-                $targetAcl = Get-Acl -Path $target
+            # Use icacls to reset inheritance and apply parent ACLs to all files and subfolders
+            # /reset re-enables inheritance and pushes inheritable ACEs from parent down to all children
+            $output = icacls $target /reset /T /C /Q 2>&1
+            if ($LASTEXITCODE -ge 2) {
+                $results.Add([PSCustomObject]@{ path = $target; status = 'warning'; message = "icacls /reset completed with exit code $LASTEXITCODE" })
+            } else {
+                # Now apply source ACL rules via icacls /grant for each non-inherited rule
+                $grantErrors = 0
                 foreach ($rule in $sourceAcl.Access) {
-                    $exists = $targetAcl.Access | Where-Object {
-                        $_.IdentityReference -eq $rule.IdentityReference -and
-                        $_.FileSystemRights -eq $rule.FileSystemRights -and
-                        $_.AccessControlType -eq $rule.AccessControlType -and
-                        $_.InheritanceFlags -eq $rule.InheritanceFlags -and
-                        $_.PropagationFlags -eq $rule.PropagationFlags
+                    if ($rule.IsInherited) { continue }
+                    $identity = $rule.IdentityReference.ToString()
+                    $perm = switch -Wildcard ($rule.FileSystemRights.ToString()) {
+                        '*FullControl*'      { 'F' }
+                        '*Modify*'           { 'M' }
+                        '*ReadAndExecute*'   { 'RX' }
+                        '*Read*'             { 'R' }
+                        '*Write*'            { 'W' }
+                        default              { 'R' }
                     }
-                    if (-not $exists) {
-                        $targetAcl.AddAccessRule($rule)
+                    $inheritFlag = '(OI)(CI)'  # Apply to this folder, subfolders, and files
+                    if ($rule.AccessControlType -eq 'Allow') {
+                        $icaclsOut = icacls $target /grant "${identity}:${inheritFlag}${perm}" /T /C /Q 2>&1
+                    } else {
+                        $icaclsOut = icacls $target /deny "${identity}:${inheritFlag}${perm}" /T /C /Q 2>&1
                     }
+                    if ($LASTEXITCODE -ge 2) { $grantErrors++ }
                 }
-                Set-Acl -Path $target -AclObject $targetAcl -ErrorAction Stop
-                $results.Add([PSCustomObject]@{ path = $target; status = 'success'; message = 'Permissions replicated' })
+                if ($grantErrors -gt 0) {
+                    $results.Add([PSCustomObject]@{ path = $target; status = 'warning'; message = "Replicated recursively with $grantErrors permission errors" })
+                } else {
+                    $results.Add([PSCustomObject]@{ path = $target; status = 'success'; message = 'Permissions replicated to all subfolders and files' })
+                }
             }
         }
         catch {
@@ -436,7 +527,7 @@ function Invoke-AddAce {
     $folderPath = Resolve-MappedDrive $body.path
     $identity = $body.identity
     $rights = $body.rights
-    $type = $body.type
+    $type = if ($body.type -eq 'Deny') { 'Deny' } else { 'Allow' }
 
     if (-not $folderPath -or -not $identity -or -not $rights) {
         $Response.StatusCode = 400
@@ -444,24 +535,7 @@ function Invoke-AddAce {
         return
     }
 
-    try {
-        $acl = Get-Acl -Path $folderPath -ErrorAction Stop
-        $accessType = if ($type -eq 'Deny') { [System.Security.AccessControl.AccessControlType]::Deny } else { [System.Security.AccessControl.AccessControlType]::Allow }
-        $fileRights = [System.Security.AccessControl.FileSystemRights]$rights
-        $inheritance = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
-        $propagation = [System.Security.AccessControl.PropagationFlags]::None
-        $account = [System.Security.Principal.NTAccount]::new($identity)
-
-        $rule = [System.Security.AccessControl.FileSystemAccessRule]::new($account, $fileRights, $inheritance, $propagation, $accessType)
-        $acl.AddAccessRule($rule)
-        Set-Acl -Path $folderPath -AclObject $acl -ErrorAction Stop
-
-        Send-Json $Response @{ status = 'success'; message = "Added $type $rights for $identity" }
-    }
-    catch {
-        $Response.StatusCode = 500
-        Send-Json $Response @{ error = "Failed to add ACE: $($_.Exception.Message)" }
-    }
+    Send-SingleChangeResult $Response { Add-FolderPermission -Path $folderPath -Identity $identity -Rights $rights -Type $type -LogFolder $script:ChangeLogFolder }
 }
 
 function Invoke-RemoveAce {
@@ -474,7 +548,7 @@ function Invoke-RemoveAce {
     $folderPath = Resolve-MappedDrive $body.path
     $identity = $body.identity
     $rights = $body.rights
-    $type = $body.type
+    $type = if ($body.type -eq 'Deny') { 'Deny' } else { 'Allow' }
 
     if (-not $folderPath -or -not $identity -or -not $rights) {
         $Response.StatusCode = 400
@@ -482,24 +556,7 @@ function Invoke-RemoveAce {
         return
     }
 
-    try {
-        $acl = Get-Acl -Path $folderPath -ErrorAction Stop
-        $accessType = if ($type -eq 'Deny') { [System.Security.AccessControl.AccessControlType]::Deny } else { [System.Security.AccessControl.AccessControlType]::Allow }
-        $fileRights = [System.Security.AccessControl.FileSystemRights]$rights
-        $inheritance = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
-        $propagation = [System.Security.AccessControl.PropagationFlags]::None
-        $account = [System.Security.Principal.NTAccount]::new($identity)
-
-        $rule = [System.Security.AccessControl.FileSystemAccessRule]::new($account, $fileRights, $inheritance, $propagation, $accessType)
-        $acl.RemoveAccessRuleAll($rule)
-        Set-Acl -Path $folderPath -AclObject $acl -ErrorAction Stop
-
-        Send-Json $Response @{ status = 'success'; message = "Removed $type $rights for $identity" }
-    }
-    catch {
-        $Response.StatusCode = 500
-        Send-Json $Response @{ error = "Failed to remove ACE: $($_.Exception.Message)" }
-    }
+    Send-SingleChangeResult $Response { Remove-FolderPermission -Path $folderPath -Identity $identity -Rights $rights -Type $type -LogFolder $script:ChangeLogFolder }
 }
 
 function Invoke-ExportReport {
@@ -601,10 +658,11 @@ function Invoke-AddFileAce {
     )
 
     $body     = Read-RequestBody $Request
-    $paths    = @($body.paths)
+    # Blank entries are dropped, so a selection with no real paths gets the 400 below.
+    $paths    = @($body.paths | Where-Object { $null -ne $_ -and "$_".Trim() })
     $identity = $body.identity
     $rights   = $body.rights
-    $type     = $body.type
+    $type     = if ($body.type -eq 'Deny') { 'Deny' } else { 'Allow' }
 
     if (-not $paths -or $paths.Count -eq 0 -or -not $identity -or -not $rights) {
         $Response.StatusCode = 400
@@ -612,30 +670,9 @@ function Invoke-AddFileAce {
         return
     }
 
-    $results = [System.Collections.Generic.List[object]]::new()
-    foreach ($rawPath in $paths) {
-        $filePath = Resolve-MappedDrive $rawPath
-        if (-not $filePath -or -not (Test-Path $filePath -PathType Leaf)) {
-            $results.Add([PSCustomObject]@{ path = $rawPath; status = 'error'; message = 'Path not found or not a file' })
-            continue
-        }
-        try {
-            $acl        = Get-Acl -Path $filePath -ErrorAction Stop
-            $accessType = if ($type -eq 'Deny') { [System.Security.AccessControl.AccessControlType]::Deny } else { [System.Security.AccessControl.AccessControlType]::Allow }
-            $fileRights = [System.Security.AccessControl.FileSystemRights]$rights
-            $inheritance = [System.Security.AccessControl.InheritanceFlags]::None
-            $propagation = [System.Security.AccessControl.PropagationFlags]::None
-            $account    = [System.Security.Principal.NTAccount]::new($identity)
-            $rule       = [System.Security.AccessControl.FileSystemAccessRule]::new($account, $fileRights, $inheritance, $propagation, $accessType)
-            $acl.AddAccessRule($rule)
-            Set-Acl -Path $filePath -AclObject $acl -ErrorAction Stop
-            $results.Add([PSCustomObject]@{ path = $filePath; status = 'success'; message = "Added $type $rights for $identity" })
-        }
-        catch {
-            $results.Add([PSCustomObject]@{ path = $rawPath; status = 'error'; message = $_.Exception.Message })
-        }
-    }
-    Send-Json $Response @{ status = 'complete'; results = @($results) }
+    # One backup for the whole selection; a file that fails does not stop the others.
+    $filePaths = @($paths | ForEach-Object { Resolve-MappedDrive "$_" })
+    Send-BatchChangeResult $Response { Add-FolderPermission -Path $filePaths -Identity $identity -Rights $rights -Type $type -LogFolder $script:ChangeLogFolder }
 }
 
 function Invoke-RemoveFileAce {
@@ -645,10 +682,11 @@ function Invoke-RemoveFileAce {
     )
 
     $body     = Read-RequestBody $Request
-    $paths    = @($body.paths)
+    # Blank entries are dropped, so a selection with no real paths gets the 400 below.
+    $paths    = @($body.paths | Where-Object { $null -ne $_ -and "$_".Trim() })
     $identity = $body.identity
     $rights   = $body.rights
-    $type     = $body.type
+    $type     = if ($body.type -eq 'Deny') { 'Deny' } else { 'Allow' }
 
     if (-not $paths -or $paths.Count -eq 0 -or -not $identity -or -not $rights) {
         $Response.StatusCode = 400
@@ -656,30 +694,9 @@ function Invoke-RemoveFileAce {
         return
     }
 
-    $results = [System.Collections.Generic.List[object]]::new()
-    foreach ($rawPath in $paths) {
-        $filePath = Resolve-MappedDrive $rawPath
-        if (-not $filePath -or -not (Test-Path $filePath -PathType Leaf)) {
-            $results.Add([PSCustomObject]@{ path = $rawPath; status = 'error'; message = 'Path not found or not a file' })
-            continue
-        }
-        try {
-            $acl        = Get-Acl -Path $filePath -ErrorAction Stop
-            $accessType = if ($type -eq 'Deny') { [System.Security.AccessControl.AccessControlType]::Deny } else { [System.Security.AccessControl.AccessControlType]::Allow }
-            $fileRights = [System.Security.AccessControl.FileSystemRights]$rights
-            $inheritance = [System.Security.AccessControl.InheritanceFlags]::None
-            $propagation = [System.Security.AccessControl.PropagationFlags]::None
-            $account    = [System.Security.Principal.NTAccount]::new($identity)
-            $rule       = [System.Security.AccessControl.FileSystemAccessRule]::new($account, $fileRights, $inheritance, $propagation, $accessType)
-            $acl.RemoveAccessRuleAll($rule)
-            Set-Acl -Path $filePath -AclObject $acl -ErrorAction Stop
-            $results.Add([PSCustomObject]@{ path = $filePath; status = 'success'; message = "Removed $type $rights for $identity" })
-        }
-        catch {
-            $results.Add([PSCustomObject]@{ path = $rawPath; status = 'error'; message = $_.Exception.Message })
-        }
-    }
-    Send-Json $Response @{ status = 'complete'; results = @($results) }
+    # One backup for the whole selection; a file that fails does not stop the others.
+    $filePaths = @($paths | ForEach-Object { Resolve-MappedDrive "$_" })
+    Send-BatchChangeResult $Response { Remove-FolderPermission -Path $filePaths -Identity $identity -Rights $rights -Type $type -LogFolder $script:ChangeLogFolder }
 }
 
 function Invoke-TakeFileOwnership {
@@ -689,7 +706,8 @@ function Invoke-TakeFileOwnership {
     )
 
     $body  = Read-RequestBody $Request
-    $paths = @($body.paths)
+    # Blank entries are dropped, so a selection with no real paths gets the 400 below.
+    $paths = @($body.paths | Where-Object { $null -ne $_ -and "$_".Trim() })
 
     if (-not $paths -or $paths.Count -eq 0) {
         $Response.StatusCode = 400
@@ -697,31 +715,9 @@ function Invoke-TakeFileOwnership {
         return
     }
 
-    # Resolve the current identity once — $env:USERNAME is unreliable under SYSTEM/service accounts
-    $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $ownerAccount    = [System.Security.Principal.NTAccount]::new($currentIdentity)
-
-    $results = [System.Collections.Generic.List[object]]::new()
-    foreach ($rawPath in $paths) {
-        $filePath = Resolve-MappedDrive $rawPath
-        if (-not $filePath -or -not (Test-Path $filePath -PathType Leaf)) {
-            $results.Add([PSCustomObject]@{ path = $rawPath; status = 'error'; message = 'Path not found or not a file' })
-            continue
-        }
-        try {
-            # takeown forces OS-level ownership grant (uses SE_TAKE_OWNERSHIP privilege)
-            $null = takeown /F $filePath /A /D Y 2>&1
-            # Then set owner via .NET ACL API — same pattern as folder ownership in Invoke-TakeOwnership
-            $acl = Get-Acl -Path $filePath -ErrorAction Stop
-            $acl.SetOwner($ownerAccount)
-            Set-Acl -Path $filePath -AclObject $acl -ErrorAction Stop
-            $results.Add([PSCustomObject]@{ path = $filePath; status = 'success'; message = "Ownership taken by $currentIdentity" })
-        }
-        catch {
-            $results.Add([PSCustomObject]@{ path = $rawPath; status = 'error'; message = $_.Exception.Message })
-        }
-    }
-    Send-Json $Response @{ status = 'complete'; results = @($results) }
+    # takeown, then the owner set to the current account; backed up and logged by the core.
+    $filePaths = @($paths | ForEach-Object { Resolve-MappedDrive "$_" })
+    Send-BatchChangeResult $Response { Set-ItemOwnerToCurrentUser -Path $filePaths -LogFolder $script:ChangeLogFolder }
 }
 
 function Invoke-RobocopyFiles {
@@ -1125,7 +1121,7 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* Status bar */
-.status-bar { padding: 6px 16px; font-size: 12px; background: var(--bg-card); border-top: 1px solid var(--border); flex-shrink: 0; min-height: 34px; line-height: 1.5; display: flex; align-items: center; }
+.status-bar { padding: 6px 16px; font-size: 12px; background: var(--bg-card); border-top: 1px solid var(--border); flex-shrink: 0; min-height: 34px; line-height: 1.5; display: flex; align-items: center; overflow-wrap: anywhere; }
 .status-bar.success { color: var(--success); }
 .status-bar.error   { color: var(--danger); }
 .status-bar.info    { color: var(--accent); }
@@ -1426,7 +1422,7 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
 
     </div><!-- /pane-robocopy -->
 
-    <div class="status-bar" id="statusBar">Ready</div>
+    <div class="status-bar" id="statusBar" role="status" aria-live="polite">Ready</div>
 
   </div><!-- /panel-right -->
 </div><!-- /main -->
@@ -1561,17 +1557,56 @@ var fileAclCache   = {};     // path -> acl object, for inline expand + diff che
 // --- Utilities ---
 function setStatus(msg, type) {
     var el = document.getElementById('statusBar');
+    // Errors interrupt a screen reader (alert); everything else is announced when it is idle.
+    el.setAttribute('role', type === 'error' ? 'alert' : 'status');
+    el.setAttribute('aria-live', type === 'error' ? 'assertive' : 'polite');
     el.textContent = msg;
     el.className = 'status-bar ' + (type || '');
 }
 
 function api(url, opts) {
-    return fetch(url, opts).then(function(r) {
-        return r.json().then(function(d) {
-            if (!r.ok) throw new Error(d.error || r.statusText);
+    return fetch(url, opts).catch(function(e) {
+        // The request never got an answer: the server is not running or not reachable.
+        e.network = true; throw e;
+    }).then(function(r) {
+        return r.json().catch(function() {
+            var bad = new Error('The server sent a reply that could not be read (HTTP ' + r.status + ').');
+            bad.badReply = true; throw bad;
+        }).then(function(d) {
+            if (!r.ok) { var err = new Error(d.error || r.statusText); err.fromServer = true; throw err; }
             return d;
         });
     });
+}
+
+// Permission changes: the server's message already says what was done, where it was backed up
+// and logged, or why nothing was changed.
+function showChangeError(e) {
+    if (e.fromServer) { setStatus(e.message, 'error'); return; }
+    if (e.network) {
+        setStatus('Could not reach the Folder Permission Manager server. Is the PowerShell window still running? If it was closed, start the tool again. (' + e.message + ')', 'error');
+        return;
+    }
+    setStatus('The change may or may not have been made. Check the folder\'s permissions. (' + e.message + ')', 'error');
+}
+function changeStatusType(r) {
+    var res = r.results || [];
+    var failed = res.filter(function(x) { return x.status === 'error'; }).length;
+    var done = res.filter(function(x) { return x.status === 'success'; }).length;
+    if (res.length && failed && !done) return 'error';
+    if (failed || done < res.length || !r.logPath || r.unrestorable) return 'warning';
+    return 'success';
+}
+// Shows a change result; a warning is also spelled out in words, not only in colour.
+function showChangeResult(r) {
+    var type = changeStatusType(r);
+    var msg = r.message;
+    if (type === 'warning') {
+        var res = r.results || [];
+        var partial = res.some(function(x) { return x.status !== 'success'; });
+        msg = (partial ? 'Partly done: ' : 'Check this: ') + msg;
+    }
+    setStatus(msg, type);
 }
 
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
@@ -1906,18 +1941,15 @@ function submitAddAce() {
 
     if (addAceTarget === 'files') {
         var paths = Array.from(checkedFiles);
-        setStatus('Adding ACE to ' + paths.length + ' file(s)...', 'info');
+        setStatus('Backing up and adding the permission to ' + paths.length + ' file(s)...', 'info');
         api('/api/file-acl/add', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ paths: paths, identity: identity, rights: rights, type: type }) })
-            .then(function(r) {
-                var failed = (r.results || []).filter(function(x) { return x.status === 'error'; });
-                if (failed.length) { setStatus(failed.length + ' file(s) failed. First error: ' + failed[0].message, 'error'); }
-                else { setStatus('ACE added to ' + paths.length + ' file(s)', 'success'); }
-            }).catch(function(e) { setStatus('Failed: ' + e.message, 'error'); });
+            .then(function(r) { showChangeResult(r); })
+            .catch(showChangeError);
     } else {
-        setStatus('Adding ACE...', 'info');
+        setStatus('Backing up and adding the permission...', 'info');
         api('/api/add-ace', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: currentFolder, identity: identity, rights: rights, type: type }) })
-            .then(function() { setStatus('ACE added', 'success'); loadFolderAcl(currentFolder); })
-            .catch(function(e) { setStatus('Failed: ' + e.message, 'error'); });
+            .then(function(r) { showChangeResult(r); loadFolderAcl(currentFolder); })
+            .catch(showChangeError);
     }
 }
 
@@ -1957,18 +1989,15 @@ function submitRemoveAce() {
 
     if (removeAceTarget === 'files') {
         var paths = Array.from(checkedFiles);
-        setStatus('Removing ACE from ' + paths.length + ' file(s)...', 'info');
+        setStatus('Backing up and removing the permission from ' + paths.length + ' file(s)...', 'info');
         api('/api/file-acl/remove', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ paths: paths, identity: identity, rights: rights, type: type }) })
-            .then(function(r) {
-                var failed = (r.results || []).filter(function(x) { return x.status === 'error'; });
-                if (failed.length) { setStatus(failed.length + ' file(s) failed. First error: ' + failed[0].message, 'error'); }
-                else { setStatus('ACE removed from ' + paths.length + ' file(s)', 'success'); }
-            }).catch(function(e) { setStatus('Failed: ' + e.message, 'error'); });
+            .then(function(r) { showChangeResult(r); })
+            .catch(showChangeError);
     } else {
-        setStatus('Removing ACE...', 'info');
+        setStatus('Backing up and removing the permission...', 'info');
         api('/api/remove-ace', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: currentFolder, identity: identity, rights: rights, type: type }) })
-            .then(function() { setStatus('ACE removed', 'success'); loadFolderAcl(currentFolder); })
-            .catch(function(e) { setStatus('Failed: ' + e.message, 'error'); });
+            .then(function(r) { showChangeResult(r); loadFolderAcl(currentFolder); })
+            .catch(showChangeError);
     }
 }
 
@@ -1978,10 +2007,18 @@ function takeOwnership(recursive) {
         ? 'This will change ownership on ALL files and subfolders under:\n\n' + currentFolder + '\n\nThis cannot be undone. Continue?'
         : 'Take ownership of:\n\n' + currentFolder + '?';
     if (!confirm(msg)) return;
-    setStatus('Taking ownership...', 'info');
+    setStatus(recursive ? 'Taking ownership...' : 'Backing up and taking ownership...', 'info');
     api('/api/take-ownership', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: currentFolder, recursive: recursive }) })
-        .then(function(r) { setStatus(r.message || 'Ownership taken', 'success'); loadFolderAcl(currentFolder); })
-        .catch(function(e) { setStatus('Failed: ' + e.message, 'error'); });
+        .then(function(r) {
+            // The whole-tree action is not backed up or logged yet (SQ-014), and says so.
+            if (recursive) { setStatus((r.message || 'Ownership taken') + '. Not backed up or logged.', 'success'); }
+            else { showChangeResult(r); }
+            loadFolderAcl(currentFolder);
+        })
+        .catch(function(e) {
+            if (recursive) { setStatus('Failed: ' + e.message, 'error'); }
+            else { showChangeError(e); }
+        });
 }
 
 function showReplicateModal() {
@@ -1995,13 +2032,19 @@ function submitReplicate() {
     var targets = raw.split('\n').map(function(s) { return s.trim(); }).filter(Boolean);
     if (!targets.length) { setStatus('Enter at least one target path', 'error'); return; }
     closeModal('replicateModal');
-    setStatus('Replicating permissions...', 'info');
-    api('/api/replicate', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ sourcePath: currentFolder, targetPaths: targets, recursive: document.getElementById('replicateRecursive').checked }) })
+    var recursive = document.getElementById('replicateRecursive').checked;
+    setStatus(recursive ? 'Replicating permissions...' : 'Backing up and copying permissions...', 'info');
+    api('/api/replicate', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ sourcePath: currentFolder, targetPaths: targets, recursive: recursive }) })
         .then(function(r) {
+            // This folder only: backed up and logged, and the server's message says so.
+            if (!recursive) { showChangeResult(r); return; }
             var failed = (r.results || []).filter(function(x) { return x.status === 'error'; });
             if (failed.length) { setStatus(failed.length + ' target(s) failed. First: ' + failed[0].message, 'error'); }
-            else { setStatus('Permissions replicated to ' + targets.length + ' target(s)', 'success'); }
-        }).catch(function(e) { setStatus('Failed: ' + e.message, 'error'); });
+            else { setStatus('Permissions replicated to ' + targets.length + ' target(s). Not backed up or logged.', 'success'); }
+        }).catch(function(e) {
+            if (recursive) { setStatus('Failed: ' + e.message, 'error'); }
+            else { showChangeError(e); }
+        });
 }
 
 function exportReport() {
@@ -2014,13 +2057,10 @@ function takeFileOwnership() {
     var paths = Array.from(checkedFiles);
     if (!paths.length) return;
     if (!confirm('Take ownership of ' + paths.length + ' file(s)?')) return;
-    setStatus('Taking ownership of ' + paths.length + ' file(s)...', 'info');
+    setStatus('Backing up and taking ownership of ' + paths.length + ' file(s)...', 'info');
     api('/api/file-acl/take-ownership', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ paths: paths }) })
-        .then(function(r) {
-            var failed = (r.results || []).filter(function(x) { return x.status === 'error'; });
-            if (failed.length) { setStatus(failed.length + ' file(s) failed. First: ' + failed[0].message, 'error'); }
-            else { setStatus('Ownership taken on ' + paths.length + ' file(s)', 'success'); }
-        }).catch(function(e) { setStatus('Failed: ' + e.message, 'error'); });
+        .then(function(r) { showChangeResult(r); })
+        .catch(showChangeError);
 }
 
 // --- Copy files modal ---
@@ -2212,6 +2252,10 @@ $listener.Prefixes.Add($baseUrl)
 try {
     $listener.Start()
     Write-Host "[INFO] Folder Permission Manager running at $baseUrl" -ForegroundColor Cyan
+    foreach ($notice in @(Get-ChangeLogFolderNotice -LogFolder $LogFolder -ResolvedFolder $script:ChangeLogFolder -DefaultFolder $defaultLogFolder)) {
+        Write-Host "[WARN] $notice" -ForegroundColor Yellow
+    }
+    Write-Host "[INFO] Changes are backed up and logged to $($script:ChangeLogFolder)" -ForegroundColor Cyan
     Write-Host "[INFO] Press Ctrl+C to stop." -ForegroundColor Cyan
 }
 catch {
