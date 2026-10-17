@@ -42,13 +42,29 @@
 .PARAMETER OutputPath
     Optional folder. When given, a text report ready to paste into a ticket and a CSV of the
     findings are written there, named FSLogixTriage_<computer>_<yyyy-MM-dd_HHmmss>. When
-    omitted the tool is console-only.
+    omitted the tool is console-only. With -TicketNumber, this is the folder that holds
+    Ticket_<number>.
+.PARAMETER TicketNumber
+    Optional ticket number (letters, digits, - or _, up to 32 characters). The text report, the
+    CSV and the ticket note are saved in <root>\Ticket_<number>, where root is -OutputPath if
+    given, else %USERPROFILE%\Documents\TicketNotes. TicketNote\Join-TicketNotes.ps1 later
+    joins every tool's note in that folder into one. A number that does not fit is refused
+    with a [FAIL] line and exit code 3, before anything is checked.
+.PARAMETER NoClipboard
+    Do not copy the ticket note to the clipboard. Without it the note goes to the clipboard,
+    where it can enter clipboard history (Win+V) or the cloud clipboard on Windows PowerShell
+    5.0 and later, and travels over RDP clipboard redirection.
+.PARAMETER FullDetail
+    Keep IP addresses and share paths in the ticket note. By default the note is paste-safe:
+    they are replaced by [IP removed] / [share path removed]. The question at the top is
+    never changed.
 .PARAMETER PassThru
     Return the result object (CheckId, Status, Summary, Evidence, RecommendedNextSteps,
-    RawOutput, StartedAt, FinishedAt, Error) instead of setting an exit code. Use this when
-    another tool calls the script and reads the result.
+    RawOutput, StartedAt, FinishedAt, Error, TicketNote) instead of setting an exit code. Use
+    this when another tool calls the script and reads the result.
 .PARAMETER Quiet
-    Do not write the console report. Combine with -PassThru or -OutputPath.
+    Do not write the console report. Combine with -PassThru or -OutputPath. Also leaves the
+    clipboard alone, because another script is the caller.
 .PARAMETER LoadFunctionsOnly
     Define the functions and return without running a check (used by the tests).
 .EXAMPLE
@@ -60,8 +76,23 @@
 .EXAMPLE
     $r = .\Invoke-CitrixFSLogixTriage.ps1 -ComputerName RDSH01 -PassThru -Quiet
     Get the result object for another script to use.
+.EXAMPLE
+    .\Invoke-CitrixFSLogixTriage.ps1 -ComputerName RDSH01 -UserName jdoe -TicketNumber 482113
+    Same check; the text report, the CSV and the ticket note go into
+    %USERPROFILE%\Documents\TicketNotes\Ticket_482113, and the note is copied to the clipboard.
 .NOTES
-    Exit codes (without -PassThru): 0 = looks healthy, 1 = warnings, 2 = problems found.
+    Exit codes (without -PassThru): 0 = looks healthy, 1 = warnings, 2 = problems found,
+    3 = an unusable -TicketNumber.
+
+    TICKET NOTE. Every run ends with a four-part note (Checked, Ruled out, Could not check,
+    Next step) copied to the clipboard. It is also saved as Note_<time>_Citrix-FSLogix-Triage.txt
+    when -TicketNumber or -OutputPath is given. A check is only "Ruled out" when it really ran:
+    anything the tool could not read (ping, services, registry, event logs, disks), a profile
+    share it could not confirm from the server, and a Cloud Cache location it does not test
+    are listed under "Could not check". The FSLogix settings and Cloud Cache entries stay out
+    of the note. The note never changes the verdict or the exit code. It is built by
+    CaseKit.ps1 in this folder (a copy of TicketNote\CaseKit.ps1); if it is missing the check
+    still runs, without a note.
 
     Remote checks need, on the target: ping (ICMP), WinRM for CIM and Invoke-Command, the
     Remote Registry service, and Event Log access (RPC). Run as an account that is a local
@@ -87,6 +118,16 @@
       Get-Service has no -ComputerName in PowerShell 6+, so services are read with Win32_Service
         https://learn.microsoft.com/powershell/scripting/whats-new/differences-from-windows-powershell
         https://learn.microsoft.com/windows/win32/cimwin32prov/win32-service
+      Ticket note clipboard (in CaseKit.ps1): Set-Clipboard is 5.0, so it is used behind a
+      Get-Command check with a WinForms fallback; STA is the default since 3.0; never clip.exe,
+      because $OutputEncoding is ASCII in 5.1 and would mangle non-ASCII names
+        https://learn.microsoft.com/powershell/scripting/whats-new/what-s-new-in-windows-powershell-50
+        https://learn.microsoft.com/powershell/module/microsoft.powershell.management/set-clipboard?view=powershell-5.1
+        https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_powershell_exe?view=powershell-5.1
+        https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_preference_variables?view=powershell-5.1
+      Clipboard history / cloud clipboard opt-out formats (CanIncludeInClipboardHistory,
+      CanUploadToCloudClipboard; set by the kit's WinForms path, not by Set-Clipboard)
+        https://learn.microsoft.com/windows/win32/dataxchg/clipboard-formats
 
     NOT VERIFIED ON LEARN: the free-disk-space thresholds (see Get-DiskSpaceStatus) are this
     tool's own rule of thumb, not a Microsoft figure.
@@ -104,6 +145,14 @@ param(
     [int]$EventLookbackHours = 24,
 
     [string]$OutputPath,
+
+    # Checked in the script body (Test-TicketNumber in CaseKit.ps1), not with ValidatePattern,
+    # so a mistyped number gets a plain-English [FAIL] line instead of a parameter-binding error.
+    [string]$TicketNumber,
+
+    [switch]$NoClipboard,
+
+    [switch]$FullDetail,
 
     [switch]$PassThru,
 
@@ -130,14 +179,20 @@ function New-EvidenceItem {
         [Parameter(Mandatory)]
         [string]$Detail,
 
-        [string]$Action = ''
+        [string]$Action = '',
+
+        # The check could not run at all (no access, service unreachable), as opposed to running
+        # and finding something. The Status stays as given (Warn), so the verdict is unchanged;
+        # only the ticket note moves the item to "Could not check".
+        [switch]$NotChecked
     )
 
     [PSCustomObject]@{
-        Name   = $Name
-        Status = $Status
-        Detail = $Detail
-        Action = $Action
+        Name       = $Name
+        Status     = $Status
+        Detail     = $Detail
+        Action     = $Action
+        NotChecked = [bool]$NotChecked
     }
 }
 
@@ -250,6 +305,66 @@ function Get-FSLogixCloudCacheProviderField {
     return ''
 }
 
+# Text that looks like an Azure storage connection string, account key or SAS token. A
+# malformed CCDLocations entry (a missing comma, say) can make a field read run on into the
+# connection string, so anything matching this is never echoed into a finding or the note.
+$script:SecretLikePattern = '(?i)AccountKey|SharedAccessSignature|\bsig=|DefaultEndpointsProtocol|connectionString\s*=\s*\S'
+
+# Every finding about a Cloud Cache entry uses this fixed wording and never repeats a value
+# from the entry. Report is the console/report text; Note is the ticket-note text, which also
+# avoids the key names so the note never carries "connection string" at all (AC32).
+$script:CloudCacheSpellingProblems = @(
+    [PSCustomObject]@{ Report = 'it has no type= part'; Note = 'the type part is missing' }
+    [PSCustomObject]@{ Report = "the type= key is not written exactly 'type=' (lower case)"; Note = "the word 'type' is not in lower case" }
+    [PSCustomObject]@{ Report = "the type is not exactly 'smb' or 'azure' (lower case)"; Note = "the type is not exactly 'smb' or 'azure' (lower case)" }
+    [PSCustomObject]@{ Report = 'it has no connectionString= part'; Note = 'the storage location part is missing' }
+    [PSCustomObject]@{ Report = "the connectionString= key is not written exactly 'connectionString=' (capital S)"; Note = 'the storage location part is not spelled with the exact capitals FSLogix requires' }
+)
+
+$script:CloudCacheLocationDetails = @{
+    Smb          = 'Cloud Cache SMB location.'
+    SmbNoPath    = 'Cloud Cache SMB location has no share path to test.'
+    SmbNotUnc    = 'Cloud Cache SMB location is not a plain file share path, so it was not tested.'
+    Azure        = 'Cloud Cache location of type azure is not a file share, so it was not tested.'
+    Unknown      = 'Cloud Cache location has no type this tool recognises (smb or azure), so it was not tested.'
+    VhdSecret    = 'A VHDLocations entry looks like a storage key rather than a share path, so it was not tested.'
+}
+
+function Get-FSLogixCloudCacheProviderType {
+    <#
+    .SYNOPSIS
+        Returns the provider type of one CCDLocations entry as smb, azure or unknown - never the
+        raw text, which a malformed entry can run on into the connection string.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProviderString
+    )
+
+    $rawType = (Get-FSLogixCloudCacheProviderField -ProviderString $ProviderString -FieldName 'type').ToLowerInvariant()
+    if (@('smb', 'azure') -contains $rawType) {
+        return $rawType
+    }
+
+    return 'unknown'
+}
+
+function Test-FSLogixPlainSharePath {
+    <#
+    .SYNOPSIS
+        True when a configured location is a plain \\server\share path that is safe to show and
+        test. Anything with ; or = in it has run on into other parts of the setting.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()]
+        [string]$Path
+    )
+
+    return ($Path.StartsWith('\\') -and $Path -notmatch '[;=]' -and $Path -notmatch $script:SecretLikePattern)
+}
+
 function Test-FSLogixCloudCacheProviderSpelling {
     <#
     .SYNOPSIS
@@ -265,28 +380,30 @@ function Test-FSLogixCloudCacheProviderSpelling {
         [string]$ProviderString
     )
 
+    # Each problem is fixed wording from $script:CloudCacheSpellingProblems: it names the part
+    # that is wrong and never repeats a value from the entry, which can hold a storage key.
     $problems = @()
     $typeMatch = [regex]::Match($ProviderString, '(?i)(?:^|,)\s*(type)\s*=\s*([^,]*)')
     if (-not $typeMatch.Success) {
-        $problems += 'it has no type= part'
+        $problems += $script:CloudCacheSpellingProblems[0].Report
     }
     else {
         if ($typeMatch.Groups[1].Value -cne 'type') {
-            $problems += ("'{0}=' must be written 'type='" -f $typeMatch.Groups[1].Value)
+            $problems += $script:CloudCacheSpellingProblems[1].Report
         }
 
         $typeValue = $typeMatch.Groups[2].Value.Trim()
         if (@('smb', 'azure') -cnotcontains $typeValue) {
-            $problems += ("type '{0}' must be exactly 'smb' or 'azure' (lower case)" -f $typeValue)
+            $problems += $script:CloudCacheSpellingProblems[2].Report
         }
     }
 
     $connectionMatch = [regex]::Match($ProviderString, '(?i)(?:^|,)\s*(connectionstring)\s*=')
     if (-not $connectionMatch.Success) {
-        $problems += 'it has no connectionString= part'
+        $problems += $script:CloudCacheSpellingProblems[3].Report
     }
     elseif ($connectionMatch.Groups[1].Value -cne 'connectionString') {
-        $problems += ("'{0}=' must be written 'connectionString='" -f $connectionMatch.Groups[1].Value)
+        $problems += $script:CloudCacheSpellingProblems[4].Report
     }
 
     return @($problems)
@@ -299,22 +416,25 @@ function ConvertTo-RedactedFSLogixCloudCacheProviderEntry {
         [string]$ProviderString
     )
 
-    $providerType = (Get-FSLogixCloudCacheProviderField -ProviderString $ProviderString -FieldName 'type').ToLowerInvariant()
+    $providerType = Get-FSLogixCloudCacheProviderType -ProviderString $ProviderString
     $providerName = Get-FSLogixCloudCacheProviderField -ProviderString $ProviderString -FieldName 'name'
     $connectionString = Get-FSLogixCloudCacheProviderField -ProviderString $ProviderString -FieldName 'connectionString'
-    $parts = @()
-
-    if (-not [string]::IsNullOrWhiteSpace($providerType)) {
-        $parts += "type=$providerType"
-    }
+    $parts = @("type=$providerType")
 
     if (-not [string]::IsNullOrWhiteSpace($providerName)) {
-        $parts += "name=$($providerName.Trim())"
+        # A name that runs on into other parts (a missing comma) can carry the connection string.
+        $trimmedName = $providerName.Trim()
+        if ($trimmedName -match '[;=]' -or $trimmedName -match $script:SecretLikePattern) {
+            $parts += 'name=[REDACTED]'
+        }
+        else {
+            $parts += "name=$trimmedName"
+        }
     }
 
     if (-not [string]::IsNullOrWhiteSpace($connectionString)) {
         $trimmedConnectionString = $connectionString.Trim()
-        if ($providerType -eq 'smb' -and $trimmedConnectionString.StartsWith('\\')) {
+        if ($providerType -eq 'smb' -and (Test-FSLogixPlainSharePath -Path $trimmedConnectionString)) {
             $parts += "connectionString=$trimmedConnectionString"
         }
         else {
@@ -323,11 +443,7 @@ function ConvertTo-RedactedFSLogixCloudCacheProviderEntry {
         }
     }
 
-    if ($parts.Count -gt 0) {
-        return ($parts -join ',')
-    }
-
-    return '[REDACTED]'
+    return ($parts -join ',')
 }
 
 function ConvertTo-RedactedFSLogixRegistryValue {
@@ -354,7 +470,17 @@ function ConvertTo-RedactedFSLogixRegistryValue {
     }
 
     if ($Value -is [System.Array]) {
-        return @(ConvertTo-StringArray -Value $Value)
+        $items = @()
+        foreach ($item in @(ConvertTo-StringArray -Value $Value)) {
+            if ($item -match $script:SecretLikePattern) { $items += '[REDACTED]' } else { $items += $item }
+        }
+
+        return @($items)
+    }
+
+    if ([string]$Value -match $script:SecretLikePattern) {
+        # A storage connection string pasted into another setting (VHDLocations, say).
+        return '[REDACTED]'
     }
 
     if ($null -eq $Value) {
@@ -378,6 +504,21 @@ function Resolve-FSLogixProfileStorageLocations {
     $locations = @()
     if ($ValueName -eq 'VHDLocations') {
         foreach ($entry in @(Split-FSLogixRegistryLocationEntries -Value $Value)) {
+            if ($entry -match '=' -or $entry -match $script:SecretLikePattern) {
+                # Not a path at all: a storage key or connection string pasted into VHDLocations
+                # (split on ';' it becomes Name=value pieces). Never test it (the path would be
+                # echoed into the finding) and never show it.
+                $locations += [PSCustomObject]@{
+                    ValueName      = $ValueName
+                    SourceValue    = '[REDACTED]'
+                    ProviderType   = 'direct'
+                    TestPath       = ''
+                    ShouldTestPath = $false
+                    Detail         = $script:CloudCacheLocationDetails.VhdSecret
+                }
+                continue
+            }
+
             $locations += [PSCustomObject]@{
                 ValueName      = $ValueName
                 SourceValue    = $entry
@@ -391,26 +532,32 @@ function Resolve-FSLogixProfileStorageLocations {
         return @($locations)
     }
 
+    # Every Detail below is fixed wording from $script:CloudCacheLocationDetails, and the type is
+    # only ever smb, azure or unknown: nothing read from the entry is repeated, because a
+    # malformed entry can run on into its connection string.
     foreach ($entry in @(Split-FSLogixCloudCacheProviderEntries -Value $Value)) {
-        $providerType = (Get-FSLogixCloudCacheProviderField -ProviderString $entry -FieldName 'type').ToLowerInvariant()
-        $connectionString = Get-FSLogixCloudCacheProviderField -ProviderString $entry -FieldName 'connectionString'
+        $providerType = Get-FSLogixCloudCacheProviderType -ProviderString $entry
+        $connectionString = (Get-FSLogixCloudCacheProviderField -ProviderString $entry -FieldName 'connectionString').Trim()
         $redactedSourceValue = ConvertTo-RedactedFSLogixCloudCacheProviderEntry -ProviderString $entry
-        if ([string]::IsNullOrWhiteSpace($providerType)) {
-            $providerType = 'unknown'
-        }
 
         $shouldTestPath = $false
         $testPath = ''
-        $detail = "Cloud Cache location of type '$providerType' is not a file share, so it was not tested."
+        $detail = $script:CloudCacheLocationDetails.Unknown
 
-        if ($providerType -eq 'smb') {
-            if (-not [string]::IsNullOrWhiteSpace($connectionString)) {
-                $testPath = $connectionString.Trim()
+        if ($providerType -eq 'azure') {
+            $detail = $script:CloudCacheLocationDetails.Azure
+        }
+        elseif ($providerType -eq 'smb') {
+            if ([string]::IsNullOrWhiteSpace($connectionString)) {
+                $detail = $script:CloudCacheLocationDetails.SmbNoPath
+            }
+            elseif (Test-FSLogixPlainSharePath -Path $connectionString) {
+                $testPath = $connectionString
                 $shouldTestPath = $true
-                $detail = 'Cloud Cache SMB location.'
+                $detail = $script:CloudCacheLocationDetails.Smb
             }
             else {
-                $detail = 'Cloud Cache SMB location has no connectionString path to test.'
+                $detail = $script:CloudCacheLocationDetails.SmbNotUnc
             }
         }
 
@@ -773,7 +920,7 @@ function Invoke-CitrixFSLogixTriage {
     catch {
         $errors += "Reachability: $($_.Exception.Message)"
         $rawOutput.Reachability += [PSCustomObject]@{ Target = $ComputerName; Succeeded = $false; Error = $_.Exception.Message }
-        $evidence += New-EvidenceItem -Name 'Server answers' -Status 'Warn' `
+        $evidence += New-EvidenceItem -Name 'Server answers' -Status 'Warn' -NotChecked `
             -Detail "Ping could not run: $($_.Exception.Message)" `
             -Action 'Check the server name is spelled correctly.'
     }
@@ -816,7 +963,7 @@ function Invoke-CitrixFSLogixTriage {
     catch {
         $errors += "Services: $($_.Exception.Message)"
         $rawOutput.Services = @([PSCustomObject]@{ Name = ''; DisplayName = ''; Status = ''; StartType = ''; Error = $_.Exception.Message })
-        $evidence += New-EvidenceItem -Name 'FSLogix services' -Status 'Warn' `
+        $evidence += New-EvidenceItem -Name 'FSLogix services' -Status 'Warn' -NotChecked `
             -Detail "Could not read services: $($_.Exception.Message)" `
             -Action 'Run as an administrator of the server, and check WinRM is enabled on it.'
     }
@@ -863,8 +1010,11 @@ function Invoke-CitrixFSLogixTriage {
                     -Action 'Users get a local or temporary profile. Escalate: the FSLogix policy is not fully applied to this server.'
             }
             else {
+                # Only a short number is repeated; anything else in Enabled is described, not
+                # echoed, so a stray value cannot carry data into the report or the note.
+                $enabledShown = if ([string]$enabled -match '^-?\d{1,10}$') { 'Enabled = {0}' -f $enabled } else { 'Enabled is set, but not to 1' }
                 $evidence += New-EvidenceItem -Name 'FSLogix profiles switched on' -Status 'Fail' `
-                    -Detail "FSLogix profile containers are switched off (Enabled = $enabled)." `
+                    -Detail "FSLogix profile containers are switched off ($enabledShown)." `
                     -Action 'Users get a local or temporary profile. Escalate: check whether this server should be using FSLogix.'
             }
 
@@ -874,7 +1024,7 @@ function Invoke-CitrixFSLogixTriage {
         }
         elseif (-not [string]::IsNullOrWhiteSpace($profileKey.Error)) {
             $errors += "Registry: $($profileKey.Error)"
-            $evidence += New-EvidenceItem -Name 'FSLogix settings' -Status 'Warn' `
+            $evidence += New-EvidenceItem -Name 'FSLogix settings' -Status 'Warn' -NotChecked `
                 -Detail "Could not read the FSLogix settings: $($profileKey.Error)" `
                 -Action 'Run as an administrator of the server.'
         }
@@ -899,7 +1049,7 @@ function Invoke-CitrixFSLogixTriage {
             Values = ''
             Error  = $_.Exception.Message
         })
-        $evidence += New-EvidenceItem -Name 'FSLogix settings' -Status 'Warn' `
+        $evidence += New-EvidenceItem -Name 'FSLogix settings' -Status 'Warn' -NotChecked `
             -Detail "Could not read the server's registry: $($_.Exception.Message)" `
             -Action 'The Remote Registry service may be stopped on the server, or you are not an administrator there.'
     }
@@ -990,7 +1140,7 @@ function Invoke-CitrixFSLogixTriage {
                     -Detail "$logName does not exist on $ComputerName." -Action $missingAction
             }
             else {
-                $evidence += New-EvidenceItem -Name 'Event log access' -Status 'Warn' `
+                $evidence += New-EvidenceItem -Name 'Event log access' -Status 'Warn' -NotChecked `
                     -Detail "Could not read $logName on ${ComputerName}: $eventErrorMessage" `
                     -Action 'Run as an administrator of the server; remote event log access may be blocked by its firewall.'
             }
@@ -1036,13 +1186,13 @@ function Invoke-CitrixFSLogixTriage {
         }
 
         if ($disks.Count -eq 0) {
-            $evidence += New-EvidenceItem -Name 'Disk free space' -Status 'Warn' -Detail 'No local disks were returned.'
+            $evidence += New-EvidenceItem -Name 'Disk free space' -Status 'Warn' -NotChecked -Detail 'No local disks were returned.'
         }
     }
     catch {
         $errors += "Disks: $($_.Exception.Message)"
         $rawOutput.Disks += [PSCustomObject]@{ DeviceId = ''; SizeGB = ''; FreeGB = ''; FreePercent = ''; Error = $_.Exception.Message }
-        $evidence += New-EvidenceItem -Name 'Disk free space' -Status 'Warn' `
+        $evidence += New-EvidenceItem -Name 'Disk free space' -Status 'Warn' -NotChecked `
             -Detail "Could not read disk space: $($_.Exception.Message)" `
             -Action 'Run as an administrator of the server, and check WinRM is enabled on it.'
     }
@@ -1070,11 +1220,11 @@ function Invoke-CitrixFSLogixTriage {
                 $rawOutput.ProfilePaths += [PSCustomObject]@{
                     ConfiguredPath = [string]$profileLocation.SourceValue
                     TestedPath     = ''
-                    Context        = 'Cloud Cache provider'
+                    Context        = $(if ($profileLocation.ValueName -eq 'CCDLocations') { 'Cloud Cache provider' } else { 'VHDLocations entry' })
                     Reachable      = $false
                     Error          = [string]$profileLocation.Detail
                 }
-                $evidence += New-EvidenceItem -Name 'Profile storage reachable' -Status 'Warn' -Detail ([string]$profileLocation.Detail) `
+                $evidence += New-EvidenceItem -Name 'Profile storage reachable' -Status 'Warn' -NotChecked -Detail ([string]$profileLocation.Detail) `
                     -Action 'Check this storage location in the Azure portal or with an engineer.'
                 continue
             }
@@ -1126,7 +1276,7 @@ function Invoke-CitrixFSLogixTriage {
                 $fromHere = $false
                 try { $fromHere = [bool](Test-Path -LiteralPath $pathToTest -ErrorAction Stop) } catch { $fromHere = $false }
                 $hereText = if ($fromHere) { 'It CAN be reached from your PC' } else { 'It cannot be reached from your PC either' }
-                $evidence += New-EvidenceItem -Name 'Profile share reachable' -Status 'Warn' `
+                $evidence += New-EvidenceItem -Name 'Profile share reachable' -Status 'Warn' -NotChecked `
                     -Detail ("{0} could not be confirmed from {1}{2}. {3}." -f $pathToTest, $ComputerName, $why, $hereText) `
                     -Action 'A remote test can fail only because Windows will not pass your sign-in on to the file server. If it works from your PC, sign in to the server itself to confirm; if not, check the file server.'
             }
@@ -1253,8 +1403,127 @@ function Export-TriageReport {
     return @($textPath, $csvPath)
 }
 
+# =============================================================================
+# Ticket note (CaseKit.ps1)
+# =============================================================================
+
+function ConvertTo-CitrixFSLogixTriageTicketNote {
+    <#
+    .SYNOPSIS
+        Maps a triage result to a ticket note. The gate decisions for this tool live here.
+    .DESCRIPTION
+        Pass -> Ruled out (only when the check really ran), Fail -> PROBLEM, Warn -> WARNING.
+        A Warn that is NotChecked -> Could not check: ping, services, registry or event log
+        that could not be read, disks that could not be read or were not returned, a profile
+        share that could not be confirmed from the server (double hop), and a Cloud Cache
+        location that is not a file share. Their Status stays Warn, so the verdict is unchanged.
+
+        The FSLogix settings block (RawOutput.Registry) never goes into the note, and neither
+        does a Cloud Cache entry: a misspelled-entry finding keeps only what is wrong with it,
+        because the entry holds the connection string. Spelling and not-tested Cloud Cache lines
+        are rebuilt from the tool's fixed wording, and any line that still looks like a
+        connection string, account key or SAS token ($script:SecretLikePattern) is replaced.
+
+        Next steps are the result's RecommendedNextSteps. The headline is the report's own
+        (Get-TriageHeadline), and the stamp scope is the session host that was checked.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Result,
+        [string[]]$EvidencePaths = @()
+    )
+
+    $target = [string]$Result.RawOutput.AffectedDevice
+    $items = New-Object System.Collections.Generic.List[object]
+
+    foreach ($e in @($Result.Evidence)) {
+        $text = [string]$e.Detail
+        if ($e.Name -eq 'Cloud Cache location spelling') {
+            # Built from fixed wording only: the report's detail quotes the (redacted) entry, and
+            # the note says what is wrong without the entry or its key names.
+            $wrong = @($script:CloudCacheSpellingProblems | Where-Object { $text.Contains($_.Report) } | ForEach-Object { $_.Note })
+            $text = if ($wrong.Count -gt 0) {
+                'A Cloud Cache (CCDLocations) entry is misspelled: {0}. FSLogix treats these names as case sensitive.' -f ($wrong -join '; ')
+            }
+            else {
+                'A Cloud Cache (CCDLocations) entry is misspelled. FSLogix treats these names as case sensitive.'
+            }
+        }
+        elseif ($e.Name -eq 'Profile storage reachable') {
+            # A location that was not tested; only the tool's own fixed sentences pass through.
+            if (@($script:CloudCacheLocationDetails.Values) -notcontains $text) {
+                $text = 'A profile storage location was not tested.'
+            }
+        }
+        elseif ($e.Name -like 'Disk ?:*') {
+            # The detail is only the numbers; the drive is in the name.
+            $text = '{0} {1}' -f $e.Name, $text
+        }
+
+        # Last line of defence: whatever the wording above, a line that looks like a connection
+        # string, account key or SAS token never reaches the note (or the clipboard).
+        if ($text -match $script:SecretLikePattern) {
+            $text = '{0}: details left out of this note because they looked like a storage key.' -f $e.Name
+        }
+
+        $notChecked = ($e.PSObject.Properties.Name -contains 'NotChecked') -and [bool]$e.NotChecked
+        switch ([string]$e.Status) {
+            'Pass' { $items.Add((New-TicketNoteItem -Kind Clear -Text $text -CouldLook (-not $notChecked))) }
+            'Fail' { $items.Add((New-TicketNoteItem -Kind Problem -Text $text)) }
+            default {
+                $kind = if ($notChecked) { 'NotChecked' } else { 'Warning' }
+                $items.Add((New-TicketNoteItem -Kind $kind -Text $text))
+            }
+        }
+    }
+
+    $isLocal = (-not [string]::IsNullOrEmpty($target)) -and (Test-IsLocalComputerTarget -ComputerName $target)
+    $from = if ($isLocal) { 'on the server itself' } else { 'from {0} over the network' -f $env:COMPUTERNAME }
+    $who = if ($Result.RawOutput.AffectedUser) { ' for user {0}' -f $Result.RawOutput.AffectedUser } else { '' }
+    $scopeLine = 'FSLogix on {0}{1}, checked {2}: services, profile settings, event logs (last {3} hours), disk space and the profile share.' -f `
+        $target, $who, $from, $Result.RawOutput.EventLookbackHours
+
+    $scope = if ($isLocal) { $env:COMPUTERNAME } else { $target }
+    $stampArgs = @{ ScopeLabel = 'Computer'; Scope = $scope }
+    $started = [datetime]::MinValue
+    if ([datetime]::TryParseExact([string]$Result.StartedAt, 'yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$started)) {
+        $stampArgs['Now'] = $started
+    }
+    $stamp = New-TicketNoteStamp @stampArgs
+    $nextSteps = @(@($Result.RecommendedNextSteps) | Where-Object { [string]$_ -notmatch $script:SecretLikePattern })
+
+    return New-TicketNote -Tool 'Citrix-FSLogix-Triage' -Headline (Get-TriageHeadline -Result $Result) -ScopeLine $scopeLine `
+        -Items $items.ToArray() -NextSteps $nextSteps -Stamp $stamp -EvidencePaths $EvidencePaths
+}
+
+# The ticket-note kit ships beside this script (a copy of TicketNote\CaseKit.ps1). Without it
+# the check still runs; only the note is skipped.
+$kit = Join-Path $PSScriptRoot 'CaseKit.ps1'
+if (Test-Path -LiteralPath $kit) { . $kit } else { $script:CaseKitMissing = $true }
+
 if ($LoadFunctionsOnly) {
     return
+}
+
+if ($TicketNumber -and $script:CaseKitMissing) {
+    if (-not $Quiet) { Write-Host "[WARN] CaseKit.ps1 is missing from this folder, so -TicketNumber $TicketNumber was ignored: the reports go to -OutputPath (if given) and there is no ticket note this time." -ForegroundColor Yellow }
+    $TicketNumber = ''
+    $script:CaseKitWarned = $true
+}
+if ($TicketNumber -and -not (Test-TicketNumber -TicketNumber $TicketNumber)) {
+    $msg = "'$TicketNumber' is not a usable ticket number. Use letters, digits, - or _ (up to 32 characters, starting with a letter or digit), for example 482113."
+    if (-not $Quiet) { Write-Host "[FAIL] $msg" -ForegroundColor Red }
+    if ($PassThru) {
+        # -PassThru callers get a result instead of exit 3; nothing was checked.
+        $startFailure = New-CitrixFSLogixResult -Status 'Fail' -Summary $msg `
+            -Evidence @(New-EvidenceItem -Name 'Input' -Status 'Fail' -Detail $msg) `
+            -RecommendedNextSteps @('Run the check again with the ticket number as it appears in the ticket.') `
+            -RawOutput ([PSCustomObject]@{ AffectedDevice = $ComputerName; AffectedUser = $UserName; EventLookbackHours = $EventLookbackHours }) `
+            -StartedAt (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') -Errors @($msg)
+        $startFailure | Add-Member -NotePropertyName TicketNote -NotePropertyValue $null -Force
+        return $startFailure
+    }
+    exit 3
 }
 
 $result = Invoke-CitrixFSLogixTriage -ComputerName $ComputerName -UserName $UserName -EventLookbackHours $EventLookbackHours
@@ -1263,17 +1532,58 @@ if (-not $Quiet) {
     Write-TriageConsole -Result $result
 }
 
-if ($OutputPath) {
+# Where the files go: with -TicketNumber, <OutputPath or the default root>\Ticket_<n> (reports
+# and note together, so the note's evidence names sit beside it); with only -OutputPath, that
+# folder; with neither, no files (the note goes to the clipboard, or the console).
+$folder = $OutputPath
+if ($TicketNumber) {
+    $root = if ($OutputPath) { $OutputPath } else { Get-TicketNoteDefaultRoot }
     try {
-        $files = Export-TriageReport -Result $result -OutputPath $OutputPath
+        $folder = Resolve-TicketFolder -TicketNumber $TicketNumber -Root $root
+    }
+    catch {
+        if (-not $Quiet) { Write-Host ("[WARN] Could not create the ticket folder under {0}: {1}" -f $root, $_.Exception.Message) -ForegroundColor Yellow }
+    }
+}
+
+$evidencePaths = @()
+if ($folder) {
+    try {
+        $files = Export-TriageReport -Result $result -OutputPath $folder
+        $evidencePaths = @($files)
         if (-not $Quiet) {
             foreach ($file in $files) { Write-Host ('[INFO] Saved {0}' -f $file) -ForegroundColor Cyan }
         }
     }
     catch {
-        Write-Host ("[WARN] Could not write the report to {0}: {1}" -f $OutputPath, $_.Exception.Message) -ForegroundColor Yellow
+        Write-Host ("[WARN] Could not write the report to {0}: {1}" -f $folder, $_.Exception.Message) -ForegroundColor Yellow
     }
 }
+
+$note = $null
+if ($script:CaseKitMissing) {
+    if (-not $Quiet -and -not $script:CaseKitWarned) { Write-Host '[WARN] CaseKit.ps1 is missing from this folder - no ticket note this time.' -ForegroundColor Yellow }
+}
+else {
+    # The note is extra: a failure while building or saving it never changes the verdict or the
+    # exit code. The check's own result above stands.
+    try {
+        $note = ConvertTo-CitrixFSLogixTriageTicketNote -Result $result -EvidencePaths $evidencePaths
+        if ($Quiet) {
+            # Another script is the caller: no console and no clipboard. The note is still saved
+            # when a folder is in play, and it is always on the result object.
+            if ($folder) { $null = Save-TicketNote -Note $note -Folder $folder -PasteSafe:(-not $FullDetail) }
+        }
+        else {
+            $null = Publish-TicketNote -Note $note -Folder $folder -PasteSafe:(-not $FullDetail) -NoClipboard:$NoClipboard
+        }
+    }
+    catch {
+        if (-not $Quiet) { Write-Host ("[WARN] Could not make the ticket note: {0}. The check above is still valid." -f $_.Exception.Message) -ForegroundColor Yellow }
+        $note = $null
+    }
+}
+$result | Add-Member -NotePropertyName TicketNote -NotePropertyValue $note -Force
 
 if ($PassThru) {
     return $result

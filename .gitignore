@@ -16,6 +16,10 @@ AD-LockoutDiagnostics/**/Case_*/
 **/M365UserCheck_*.csv
 **/TempProfile_*.txt
 **/TempProfile_*.csv
+**/FSLogixTriage_*.txt
+**/FSLogixTriage_*.csv
+**/NetworkQuickCheck_*.txt
+**/NetworkQuickCheck_*.csv
 
 # --- Runtime artifacts from running the tools ---
 Entra-DeviceActivityTimeline/Reports/
