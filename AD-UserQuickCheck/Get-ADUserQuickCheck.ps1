@@ -928,6 +928,12 @@ function Export-QuickCheckReport {
     return [PSCustomObject]@{ Html = $html; Csv = $csv }
 }
 
+function ConvertTo-UserQuickCheckTicketNote {
+    # STUB (SQ-001 test-first): maps a result to a ticket note. Not implemented yet.
+    param([Parameter(Mandatory = $true)][object]$Result, [string[]]$EvidencePaths = @(), [System.Management.Automation.PSCredential]$Credential)
+    throw 'not implemented'
+}
+
 if ($LoadFunctionsOnly) { return }
 
 # =============================================================================

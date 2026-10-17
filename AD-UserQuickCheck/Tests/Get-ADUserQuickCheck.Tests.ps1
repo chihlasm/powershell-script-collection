@@ -403,3 +403,161 @@ Describe 'the script end to end (child process, fake ActiveDirectory module)' {
         $x.Text | Should -Match "\[WARN\] Couldn't check DC03"
     }
 }
+
+# =============================================================================
+# SQ-001 Part A: the ticket note (AC18-AC25)
+#
+# The script is expected to dot-source its own CaseKit.ps1 (copy of TicketNote\CaseKit.ps1)
+# and to expose the adapter ConvertTo-UserQuickCheckTicketNote -Result -EvidencePaths
+# [-Credential], which maps the result to kit items (the gate decisions live there).
+# The clipboard is never touched for real: Set-Clipboard is mocked, or -NoClipboard is used.
+# =============================================================================
+
+Describe 'ticket note' {
+    BeforeAll {
+        # The lines of one note section: after its header, up to the next header or blank line.
+        function Get-NoteSection([string[]]$Lines, [string]$Header) {
+            $headers = 'Checked:', 'Ruled out:', 'Could not check:', 'Next step:'
+            $at = [array]::IndexOf($Lines, $Header)
+            if ($at -lt 0) { return @() }
+            $out = @()
+            for ($i = $at + 1; $i -lt $Lines.Count; $i++) {
+                if ($headers -contains $Lines[$i] -or -not $Lines[$i].Trim()) { break }
+                $out += $Lines[$i]
+            }
+            , $out
+        }
+        function Get-NoteLines([string]$Identity, [string[]]$Evidence = @(), $Credential = $null) {
+            $r = Invoke-UserQuickCheck -Identity $Identity
+            $splat = @{ Result = $r; EvidencePaths = $Evidence }
+            if ($Credential) { $splat['Credential'] = $Credential }
+            $note = ConvertTo-UserQuickCheckTicketNote @splat
+            [PSCustomObject]@{ Result = $r; Note = $note; Lines = @(ConvertTo-TicketNoteText -Note $note) }
+        }
+        # Runs the real script in-process (exit only leaves the script) with the fake AD module first.
+        function Invoke-ScriptInProcess([hashtable]$Splat) {
+            $saved = $env:PSModulePath
+            try {
+                $env:PSModulePath = "$($script:FakeRoot);$saved"
+                $global:LASTEXITCODE = 0
+                @(& $script:ScriptPath @Splat *>&1)
+            } finally { $env:PSModulePath = $saved }
+        }
+        $script:ExeNote = (Get-Process -Id $PID).Path
+    }
+    BeforeEach { Set-Scenario }
+    AfterAll { Set-Scenario }
+
+    It 'AC18_UserCheckNoteFindings: expired password -> scope + PROBLEM under Checked, Ruled out, Next step' {
+        Set-Scenario @{ jdoe = @{ 'msDS-User-Account-Control-Computed' = 0x800000; 'msDS-UserPasswordExpiryTimeComputed' = (Get-FileTimeAt -2) } }
+        $n = Get-NoteLines 'jdoe'
+        $checked = Get-NoteSection $n.Lines 'Checked:'
+        $checked[0] | Should -Be '- AD account jdoe in contoso.com, on 3 of 3 domain controllers.'
+        @($checked | Where-Object { $_ -like '- PROBLEM: Their password expired*' }).Count | Should -Be 1
+        $ruled = Get-NoteSection $n.Lines 'Ruled out:'
+        $ruled | Should -Contain '- Account is turned on.'
+        $next = Get-NoteSection $n.Lines 'Next step:'
+        @($next | Where-Object { $_ -like '*Reset their password (Set-ADAccountPassword)*' }).Count | Should -Be 1
+    }
+
+    It 'AC19_UserCheckUnreachableDc: a down DC is Could not check, and wrong-password is not Ruled out' {
+        Set-Scenario -Down 'DC03'
+        $n = Get-NoteLines 'jdoe'
+        $could = Get-NoteSection $n.Lines 'Could not check:'
+        @($could | Where-Object { $_ -match 'DC03\.contoso\.com' -and $_ -match 'wrong-password' -and $_ -match 'last sign-in' }).Count | Should -BeGreaterThan 0
+        $ruled = Get-NoteSection $n.Lines 'Ruled out:'
+        @($ruled | Where-Object { $_ -match 'No recent wrong-password attempts' }).Count | Should -Be 0
+    }
+
+    It 'AC20_UserCheckPdcFallback: PDC unreadable -> Not locked out is not Ruled out; says status may be out of date' {
+        Set-Scenario -Down 'DC01'
+        $n = Get-NoteLines 'jdoe'
+        $n.Result.Facts.PdcNote | Should -Not -BeNullOrEmpty
+        $ruled = Get-NoteSection $n.Lines 'Ruled out:'
+        @($ruled | Where-Object { $_ -match 'Not locked out' }).Count | Should -Be 0
+        $could = Get-NoteSection $n.Lines 'Could not check:'
+        @($could | Where-Object { $_ -match 'lockout status was read from' -and $_ -match 'may be out of date' }).Count | Should -BeGreaterThan 0
+    }
+
+    It 'AC21_UserCheckNoReadNoRuledOut: <Case> still produces a note with nothing ruled out' -ForEach @(
+        @{ Case = 'Error'; Identity = 'jdoe'; Down = 'DC01,DC02,DC03'; Status = 'Error'; Headline = 'could not read Active Directory' }
+        @{ Case = 'NotFound'; Identity = 'nobody-here'; Down = ''; Status = 'NotFound'; Headline = "no user matched 'nobody-here'" }
+        @{ Case = 'Ambiguous'; Identity = 'Pat Smith'; Down = ''; Status = 'Ambiguous'; Headline = "'Pat Smith' matches 2 people" }
+    ) {
+        Set-Scenario -Down $Down
+        $n = Get-NoteLines $Identity
+        $n.Result.Status | Should -Be $Status
+        $n.Lines[0] | Should -BeLike "[[]Ticket note] AD-UserQuickCheck: *$Headline*"
+        (Get-NoteSection $n.Lines 'Ruled out:') | Should -Be @('- (none)')
+        $could = Get-NoteSection $n.Lines 'Could not check:'
+        @($could | Where-Object { $_ -match 'did not run' }).Count | Should -BeGreaterThan 0
+    }
+
+    It 'AC22_UserCheckPassThru: -PassThru -Quiet returns the result, does not exit, writes nothing to the host' {
+        $cmd = @"
+`$env:PSModulePath = '$($script:FakeRoot);' + `$env:PSModulePath
+`$all = @(& '$($script:ScriptPath)' -Identity jdoe -PassThru -Quiet *>&1)
+`$isResult = { `$_ -is [pscustomobject] -and `$_.PSObject.Properties['Status'] -and `$_.PSObject.Properties['TicketNote'] }
+`$res = @(`$all | Where-Object `$isResult)
+`$other = @(`$all | Where-Object { -not (& `$isResult) } | ForEach-Object { "`$_" })
+`$first = `$res | Select-Object -First 1
+'RESULT:' + (ConvertTo-Json -Compress -InputObject @{ Count = `$res.Count; Props = @(`$first.PSObject.Properties.Name); Other = `$other; Status = `$first.Status; Exit = `$first.ExitCode })
+'AFTER-MARK'
+exit 0
+"@
+        $out = & $script:ExeNote -NoProfile -NonInteractive -Command $cmd 2>&1
+        $text = (@($out | ForEach-Object { "$_" })) -join "`n"
+        $text | Should -Match 'AFTER-MARK' -Because 'the script must not call exit under -PassThru'
+        $line = @($text -split "`n" | Where-Object { $_ -like 'RESULT:*' })[0]
+        $line | Should -Not -BeNullOrEmpty
+        $info = ($line -replace '^RESULT:', '') | ConvertFrom-Json
+        $info.Count | Should -Be 1
+        $info.Status | Should -Be 'Ok'
+        foreach ($p in 'Status', 'ExitCode', 'Facts', 'Assessment', 'TicketNote') { @($info.Props) | Should -Contain $p }
+        @($info.Other).Count | Should -Be 0
+    }
+
+    It 'AC23_UserCheckTicketFolder: -TicketNumber puts the HTML, CSV and note in Ticket_<n> and names them as evidence' {
+        $root = Join-Path $TestDrive 'ac23'
+        $null = New-Item -ItemType Directory -Path $root
+        $null = Invoke-ScriptInProcess @{ Identity = 'jdoe'; TicketNumber = '482113'; OutputPath = $root; NoClipboard = $true }
+        $dir = Join-Path $root 'Ticket_482113'
+        $html = @(Get-ChildItem -LiteralPath $dir -Filter 'UserQuickCheck_jdoe_*.html' -ErrorAction SilentlyContinue)
+        $csv = @(Get-ChildItem -LiteralPath $dir -Filter 'UserQuickCheck_jdoe_*.csv' -ErrorAction SilentlyContinue)
+        $note = @(Get-ChildItem -LiteralPath $dir -Filter 'Note_*_AD-UserQuickCheck.txt' -ErrorAction SilentlyContinue)
+        $html.Count | Should -Be 1
+        $csv.Count | Should -Be 1
+        $note.Count | Should -Be 1
+        $text = [System.IO.File]::ReadAllText($note[0].FullName)
+        $text | Should -Match ([regex]::Escape($html[0].Name))
+        $text | Should -Match ([regex]::Escape($csv[0].Name))
+    }
+
+    It 'AC24_UserCheckStampScope: Domain from the DN, Changed anything: No, and (as <user>) with -Credential but no secrets' {
+        $n = Get-NoteLines 'jdoe'
+        $stamp = @($n.Lines | Where-Object { $_ -like 'Domain: *' })[0]
+        $stamp | Should -BeLike 'Domain: contoso.com | *'
+        $stamp | Should -BeLike '*Changed anything: No'
+        $stamp | Should -Not -Match '\(as '
+
+        $secret = 'P@ssw0rd-Secret-123'
+        $cred = New-Object System.Management.Automation.PSCredential('CONTOSO\svc-help', (ConvertTo-SecureString $secret -AsPlainText -Force))
+        $n2 = Get-NoteLines 'jdoe' -Credential $cred
+        $stamp2 = @($n2.Lines | Where-Object { $_ -like 'Domain: *' })[0]
+        $stamp2 | Should -Match ([regex]::Escape('(as CONTOSO\svc-help)'))
+        $all = $n2.Lines -join "`n"
+        $all | Should -Not -Match ([regex]::Escape($secret))
+        $all | Should -Not -Match 'PSCredential'
+        $all | Should -Not -Match 'System\.Security\.SecureString'
+    }
+
+    It 'AC25_NoClipboardSwitches: -NoClipboard and -Quiet skip the clipboard; the default copies exactly once' {
+        Mock Set-Clipboard { }
+        $null = Invoke-ScriptInProcess @{ Identity = 'jdoe'; NoClipboard = $true }
+        Should -Invoke Set-Clipboard -Times 0 -Exactly
+        $null = Invoke-ScriptInProcess @{ Identity = 'jdoe'; Quiet = $true }
+        Should -Invoke Set-Clipboard -Times 0 -Exactly
+        $null = Invoke-ScriptInProcess @{ Identity = 'jdoe' }
+        Should -Invoke Set-Clipboard -Times 1 -Exactly
+    }
+}
