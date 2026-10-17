@@ -80,6 +80,11 @@ Rules for the squad:
   little or no VDI. No single platform can be assumed.
 - 2026-10-14 · repo-history · recurring: Server 2012/2012 R2 still turns up; several tools
   were lowered to a PS 3.0/4.0 floor so they run there.
+- 2026-10-17 · owner (pitch session) · [entra] [m365] · recurring: "About half" of clients have
+  Entra ID P1 (Business Premium or higher).
+- 2026-10-17 · owner (pitch session) · [m365] · recurring: "I'm fairly certain we use [CIPP],
+  but we often login with the client's global admin account as it's easier to perform admin
+  related tasks."
 
 ## Manual chores
 

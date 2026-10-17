@@ -7,7 +7,18 @@ This card also carries I-10, the leaver check. The critic said to build it only 
 I-01 and this check, after both exist, so it is described under Cost and risk and not scored
 separately.
 
-## The pitch
+## Reshaped in the 2026-10-17 pitch session
+Michael is fairly certain the MSP runs CIPP. So this tool reports the mailbox facts techs look
+up by hand: delegates, forwarding, the rule list including hidden rules, size, archive, hold,
+shared or not, and a recent trace. It does not score takeover risk itself. When it sees a
+suspicious sign (external forwarding, rules that hide or delete mail, recently added rules or
+delegates), the first line still reads "Possible account takeover: do NOT reset the password or
+delete the rule yet. Escalate." The next step is then "Check CIPP's BEC report for this user".
+Techs often sign in as the client's global admin, so the Exchange role needed for
+`Get-InboxRule` is usually present. The tool stays strictly read-only. It is built after the
+I-01 tool, in the same folder. The leaver mode (I-10) stays parked.
+
+## The pitch (original)
 Enter one mailbox and get one read-only report: who has Full Access, Send As or Send on Behalf;
 forwarding and inbox rules (including hidden ones); size, archive and hold; shared or not; and a
 recent message trace. Every run looks for takeover signs first, such as external forwarding,

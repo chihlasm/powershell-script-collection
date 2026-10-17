@@ -2,7 +2,14 @@
 - Champion: manager-or-buyer, architect, security, market-analyst
 - Score: 24 (F 2, T 4, D 3, E 3, R 3)
 
-## The pitch
+## Reshaped in the 2026-10-17 pitch session
+Michael chose the small slice only: the lockout tools (AD-LockoutDiagnostics, and
+AD-UserQuickCheck where it fits) learn to recognize "not a password problem: encryption type
+blocked". The evidence is 4769 failure 0xE (KDC_ERR_ETYPE_NOTSUPP) and the KDCSVC 203/204/208/209
+errors, with a per-DC gate that says "can't tell" where a DC can't log them. Size S. The full
+domain-wide scan described below is parked until a real RC4 breakage ticket shows the need.
+
+## The pitch (original)
 One run across every DC finds the accounts, services and devices that the 2026 Kerberos RC4
 changes and NTLM auditing are blocking or warning about right now, and gives each a plain
 verdict: reset the password (no AES keys), set the encryption type on this service account, or
