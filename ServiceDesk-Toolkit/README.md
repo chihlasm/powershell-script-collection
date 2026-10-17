@@ -20,7 +20,7 @@ Every tool writes a report (HTML and/or CSV) you can attach to the ticket.
 | "Citrix is slow" — for one server or the whole farm                 | [Citrix-FSLogix-HealthCollector](#citrix-or-rds-is-slow)     | No                |
 | "Which Citrix servers are overloaded / low on disk?"                | [Get-CitrixVDAResources](#citrix-or-rds-is-slow)             | No                |
 | "The server's memory is maxed out — who is using it?"               | [Get-RAM-Usage](#server-memory-is-high--who-is-using-it)      | No                |
-| "My profile didn't load" / "temp profile" / "I got logged straight back out" | [Citrix-FSLogix-Triage](#profile-or-logon-problems-on-citrix-or-rds), then [RDS-FSLogix-EventExport](#profile-or-logon-problems-on-citrix-or-rds) | No                |
+| "My profile didn't load" / "temp profile" / "I got logged straight back out" | [Invoke-TempProfileInvestigation](#profile-or-logon-problems-on-citrix-or-rds) (in Citrix-FSLogix-Triage) | No                |
 | "I can't reach the server" / "the app won't connect" / "is port 445 open?" | [Network-QuickCheck](#cant-reach-a-server-or-app)            | No                |
 | "Hide this person from the address book (GAL)"                      | [M365-SyncedUserFixes](#hide-someone-from-the-address-book)  | **Yes — AD**      |
 | "Block this user from Microsoft 365 but keep their PC login"        | [M365-SyncedUserFixes](#block-someone-from-microsoft-365)    | **Yes — AD**      |
@@ -311,11 +311,47 @@ Use it when one of the Citrix tools above flags a server for memory, or when a u
 
 ## Profile or logon problems on Citrix or RDS
 
-**Start with:** `Citrix-FSLogix-Triage`
+**Start with:** `Invoke-TempProfileInvestigation` (in the `Citrix-FSLogix-Triage` folder)
+
+Answers "why did this user get a temporary profile?" for one user. Give it the user and the
+server they were on, or your Citrix Delivery Controller and it finds the server. It checks
+FSLogix on that server, reads that user's FSLogix log, and asks the profile file server which
+computer has the user's profile disk open. The first line is the answer, then the cause in one
+sentence and the next step:
+
+```
+Temporary profile check for jdoe on CTX07:  CAUSE FOUND
+======================================================================
+The Citrix session on CTX04 is disconnected and still holds jdoe's profile disk open on FS01, so FSLogix could not attach it on CTX07.
+Next step: Log off jdoe's disconnected session on CTX04 in Citrix Director or Studio, then have jdoe sign out of CTX07 and sign in again.
+```
+
+```powershell
+.\Invoke-TempProfileInvestigation.ps1 -UserName jdoe -ComputerName CTXVDA01
+
+# Let Citrix find the server, and see the state of jdoe's other sessions
+.\Invoke-TempProfileInvestigation.ps1 -UserName jdoe -DeliveryController CTX-DDC01
+
+# Save the report and the ticket note in the ticket's folder
+.\Invoke-TempProfileInvestigation.ps1 -UserName jdoe -ComputerName CTXVDA01 -TicketNumber 482113
+```
+
+**Things to know:**
+- It **only reports.** It never logs anyone off. If it tells you to log a session off, do that
+  in Citrix Director or Studio yourself.
+- **CAN'T TELL** means a check could not run (listed under "Could not check", with why). It is
+  not an all-clear. The usual one: the profile disk check needs you to be an administrator of
+  the file server.
+- When it says **Escalate**, attach the ticket note. Removing an old local profile deletes
+  data, so that is for an engineer.
+- A ticket note is on your clipboard when it finishes, like the other quick checks.
+
+**For the server only:** `Invoke-CitrixFSLogixTriage` (same folder)
 
 Checks the server the user signs in to and tells you in plain English whether FSLogix is
 healthy there: services running, profiles switched on, the profile share setting correct and
 reachable, recent FSLogix errors, and free disk space. Every finding comes with a "What to do".
+Use it when there is no single user to look at, for example after a server change.
 
 ```powershell
 .\Invoke-CitrixFSLogixTriage.ps1 -ComputerName CTXVDA01 -UserName jdoe
@@ -323,9 +359,6 @@ reachable, recent FSLogix errors, and free disk space. Every finding comes with 
 # Save a text report you can paste into the ticket
 .\Invoke-CitrixFSLogixTriage.ps1 -ComputerName CTXVDA01 -UserName jdoe -OutputPath C:\Temp
 ```
-
-If it says **LOOKS HEALTHY**, the problem is more likely the user's own profile disk. Escalate
-with the report.
 
 **Then, for the detail:** `RDS-FSLogix-EventExport`
 
