@@ -24,7 +24,9 @@
     Taking ownership of a folder and all its subfolders and files (Set-ItemOwnerToCurrentUser
     -Recurse) first saves the owner of every item to
     <LogFolder>\Backups\<yyyy-MM-dd_HHmmss>_TakeOwnership.csv (Path, ItemType, Owner,
-    OwnerSid), because icacls /save does not store owners. Afterwards it reads every owner
+    OwnerSid), because icacls /save does not store owners. Folders that cannot be opened also
+    have their permissions saved to ..._TakeOwnership_Permissions.csv (Path, ItemType, Sddl),
+    because takeown /D Y replaces them with full control for the user. Afterwards it reads every owner
     back. It logs one row for the whole folder (ItemType 'Folder tree', Result Done, Partly
     done or Failed).
 
@@ -62,16 +64,22 @@
       https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.commonobjectsecurity.removeaccessruleall
     - takeown /F /R /A /D Y (/R recursive over all files in the directory and subdirectories;
       /A gives ownership to the Administrators group; /D Y answers "take ownership" for
-      folders the account cannot list, and is documented for use with /R; the page lists no
-      exit codes, so anything but 0 is treated as a failure):
+      folders the account has no List Folder and Read permission on, and is documented for use
+      with /R; for such a folder "the directory permissions are replaced with permission
+      granting the user full control only", so their SDDL is saved first
+      (Save-UnlistedFolderPermission); the page lists no exit codes, so anything but 0 is
+      treated as a failure; it says nothing about junctions or symbolic links):
       https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
     - SeRestorePrivilege is what lets an account set any user or group as the owner:
       https://learn.microsoft.com/windows/win32/secauthz/privilege-constants
     - icacls (/save stores DACLs only, so owners need their own snapshot; /restore takes the
       parent directory; /setowner changes the owner of all matching files; /T includes
       subfolders and files; /C continues after file errors; /Q suppresses success messages;
-      a SID is given as *S-1-...):
+      /L works on a symbolic link itself "instead of its destination", so without /L a
+      symbolic link's destination is changed; a SID is given as *S-1-...):
       https://learn.microsoft.com/windows-server/administration/windows-commands/icacls
+      NOT VERIFIED: whether /T (or takeown /R) goes into junctions and symbolic links. A tree
+      that contains any is reported as incomplete, never as a plain success.
       NOT VERIFIED: the page documents neither icacls exit codes nor its closing line
       "Successfully processed N files; Failed processing M files". So the result of taking
       ownership of a tree comes from reading every owner back (Get-OwnerReadBack); exit
@@ -403,21 +411,38 @@ function Save-AclBackup {
     })
 
     $file = New-BackupFilePath -LogFolder $LogFolder -ActionSlug $ActionSlug
+    Export-SddlBackupFile -Rows $rows -File $file
+    $file
+}
 
-    $rows | ForEach-Object { [PSCustomObject][ordered]@{ Path = (ConvertTo-CsvSafeText $_.Path); ItemType = $_.ItemType; Sddl = $_.Sddl } } |
-        Export-Csv -LiteralPath $file -NoTypeInformation -Encoding UTF8 -NoClobber -ErrorAction Stop
+function Export-SddlBackupFile {
+    <#
+    .SYNOPSIS
+        Writes Path, ItemType, Sddl rows to a new CSV file (never over an existing one) and reads
+        it back to check it. Throws when the file cannot be written or does not hold the rows.
+    .DESCRIPTION
+        Shared by Save-AclBackup and Save-UnlistedFolderPermission, so every SDDL backup has the
+        same columns, the same Excel-formula escaping (ConvertTo-CsvSafeText) and the same check.
+        https://learn.microsoft.com/powershell/module/microsoft.powershell.utility/export-csv
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Rows,
+        [Parameter(Mandatory)][string]$File
+    )
+
+    $Rows | ForEach-Object { [PSCustomObject][ordered]@{ Path = (ConvertTo-CsvSafeText $_.Path); ItemType = $_.ItemType; Sddl = $_.Sddl } } |
+        Export-Csv -LiteralPath $File -NoTypeInformation -Encoding UTF8 -NoClobber -ErrorAction Stop
 
     # A backup that cannot be read back is no backup: check it before anything changes.
-    $saved = @(Import-Csv -LiteralPath $file -ErrorAction Stop)
-    if ($saved.Count -ne $rows.Count) {
-        throw "the backup file $file holds $($saved.Count) of $($rows.Count) items"
+    $saved = @(Import-Csv -LiteralPath $File -ErrorAction Stop)
+    if ($saved.Count -ne $Rows.Count) {
+        throw "the backup file $File holds $($saved.Count) of $($Rows.Count) items"
     }
-    for ($i = 0; $i -lt $rows.Count; $i++) {
-        if ((ConvertFrom-CsvSafeText $saved[$i].Path) -cne $rows[$i].Path -or $saved[$i].Sddl -cne $rows[$i].Sddl) {
-            throw "the backup file $file does not hold the permissions read from $($rows[$i].Path)"
+    for ($i = 0; $i -lt $Rows.Count; $i++) {
+        if ((ConvertFrom-CsvSafeText $saved[$i].Path) -cne $Rows[$i].Path -or $saved[$i].Sddl -cne $Rows[$i].Sddl) {
+            throw "the backup file $File does not hold the permissions read from $($Rows[$i].Path)"
         }
     }
-    $file
 }
 
 function Get-BackupFailureText {
@@ -454,24 +479,31 @@ function Get-OwnerTreeItem {
     <#
     .SYNOPSIS
         The folder and every folder and file under it, for the owner snapshot: Items (Path,
-        ItemType) and Unlisted (the folders that could not be opened).
+        ItemType), Unlisted (the folders that could not be opened) and Links (the junctions and
+        symbolic links found, the folder itself included).
     .DESCRIPTION
         -Force includes hidden and system items, which takeown /R also changes.
         A junction or symbolic link is listed as an item but not gone into: what it points to
         can be outside the folder, or loop back into it. Each folder is listed on its own
         (not Get-ChildItem -Recurse), so links are never followed, whatever the PowerShell
-        version.
+        version. Links are also returned on their own because Microsoft's documentation does
+        not say whether takeown /R or icacls /T go into them, and icacls changes what a
+        symbolic link points to unless /L is given.
         A folder that cannot be opened is listed, but what is inside it is not.
         https://learn.microsoft.com/powershell/module/microsoft.powershell.management/get-childitem
         https://learn.microsoft.com/dotnet/api/system.io.fileattributes
+        https://learn.microsoft.com/windows-server/administration/windows-commands/icacls
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Path)
 
     $items = New-Object System.Collections.Generic.List[object]
     $unlisted = New-Object System.Collections.Generic.List[string]
+    $links = New-Object System.Collections.Generic.List[string]
     $pending = New-Object System.Collections.Generic.Queue[string]
     $items.Add([PSCustomObject]@{ Path = $Path; ItemType = 'Folder' })
+    $top = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($top -and ($top.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { $links.Add($Path) }
     $pending.Enqueue($Path)
     while ($pending.Count -gt 0) {
         $folder = $pending.Dequeue()
@@ -485,10 +517,11 @@ function Get-OwnerTreeItem {
             $type = if ($child.PSIsContainer) { 'Folder' } else { 'File' }
             $items.Add([PSCustomObject]@{ Path = $child.FullName; ItemType = $type })
             $isLink = ($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+            if ($isLink) { $links.Add($child.FullName) }
             if ($child.PSIsContainer -and -not $isLink) { $pending.Enqueue($child.FullName) }
         }
     }
-    [PSCustomObject]@{ Items = $items.ToArray(); Unlisted = $unlisted.ToArray() }
+    [PSCustomObject]@{ Items = $items.ToArray(); Unlisted = $unlisted.ToArray(); Links = $links.ToArray() }
 }
 
 function Save-OwnerSnapshot {
@@ -545,6 +578,50 @@ function Save-OwnerSnapshot {
         Unreadable      = @($rows | Where-Object { $_.Owner -eq 'Could not read' }).Count
         Unlisted        = @($tree.Unlisted).Count
         UnlistedFolders = @($tree.Unlisted)
+        Links           = @($tree.Links).Count
+        LinkPaths       = @($tree.Links)
+    }
+}
+
+function Get-UnlistedPermissionFilePath {
+    # The companion of an owner snapshot that holds the permissions of the folders that could
+    # not be opened: ..._TakeOwnership.csv -> ..._TakeOwnership_Permissions.csv, so the two
+    # files of one run sort together and are easy to match.
+    param([Parameter(Mandatory)][string]$SnapshotFile)
+    $SnapshotFile -replace '\.csv$', '_Permissions.csv'
+}
+
+function Save-UnlistedFolderPermission {
+    <#
+    .SYNOPSIS
+        Before taking ownership of a tree, saves the SDDL of every folder that could not be
+        opened to the owner snapshot's companion file <snapshot>_Permissions.csv (Path, ItemType,
+        Sddl), reads it back to check it, and returns File, Saved, Unsaved and UnsavedFolders.
+        Throws when the file cannot be written or checked; callers must then change nothing.
+    .DESCRIPTION
+        takeown /D Y takes ownership of a folder the account has no List Folder and Read
+        permission on, and REPLACES that folder's permissions with full control for the user
+        only. The owner snapshot does not hold permissions, so without this file they would be
+        lost. A folder whose permissions cannot be read either is listed with Sddl
+        'Could not read' (D-027) and counted in Unsaved.
+        https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
+
+        Restore: the same steps as any SDDL backup ("Undo a change" in the README).
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Path,
+        [Parameter(Mandatory)][string]$SnapshotFile
+    )
+
+    $rows = @(foreach ($p in $Path) { [PSCustomObject][ordered]@{ Path = $p; ItemType = 'Folder'; Sddl = (Get-ItemSddl -Path $p) } })
+    $file = Get-UnlistedPermissionFilePath -SnapshotFile $SnapshotFile
+    Export-SddlBackupFile -Rows $rows -File $file
+    $unsaved = @($rows | Where-Object { $_.Sddl -eq 'Could not read' } | ForEach-Object { $_.Path })
+    [PSCustomObject]@{
+        File           = $file
+        Saved          = $rows.Count - $unsaved.Count
+        Unsaved        = $unsaved.Count
+        UnsavedFolders = $unsaved
     }
 }
 
@@ -583,10 +660,19 @@ function Test-AclToolErrorLine {
     # True for a native-tool output line that looks like an error in any Windows language:
     # icacls reports a failed item as "<path>: <reason>", so a line starting with the target
     # folder counts (with /Q it prints nothing for items that succeeded); English error words
-    # are a further hint.
+    # are a further hint, but only outside paths: "D:\Failed jobs" or a quoted "...\Errors\x"
+    # is a name, not an error.
     param([AllowEmptyString()][string]$Line, [AllowEmptyString()][string]$Path)
     if ($Path -and $Line.StartsWith($Path, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
-    $Line -match '(?i)\b(error|denied|failed|cannot|unable|invalid)\b'
+    $words = $Line -replace '"[^"]*"', ' ' -replace '(?:[A-Za-z]:\\|\\\\)[^"]*?(?=:\s|$)', ' '
+    $words -match '(?i)\b(error|denied|failed|cannot|unable|invalid)\b'
+}
+
+function Test-AclToolSuccessLine {
+    # True for a takeown line reporting an item that succeeded ("SUCCESS: The file (or folder):
+    # ... now owned by ..."). English only: in other languages no line is skipped as a success.
+    param([AllowEmptyString()][string]$Line)
+    $Line -match '^SUCCESS\b'
 }
 
 function Get-AclToolSummary {
@@ -595,11 +681,13 @@ function Get-AclToolSummary {
         The part of a native tool's output worth showing and logging: the lines that look like
         errors (Test-AclToolErrorLine), at most -MaxLines in all, then always the last line
         (icacls ends with its count of processed and failed files). When no line looks like an
-        error, only the last line.
+        error, the last line that does not report a success (Test-AclToolSuccessLine), or the
+        last line when every line does.
     .DESCRIPTION
         Not tied to English: what was changed is decided by reading the owners back
         (Get-OwnerReadBack), so this text only supports the result. takeown prints one line
-        per item that succeeded; those are left out unless one is the last line.
+        per item that succeeded; those are left out, so a tool that failed (Get-AclToolProblem
+        adds its exit code) is not summed up by a line saying an item succeeded.
     #>
     param([AllowNull()][AllowEmptyString()][string]$Output, [string]$Path = '', [int]$MaxLines = 5)
 
@@ -607,6 +695,11 @@ function Get-AclToolSummary {
     if ($lines.Count -eq 0) { return '' }
     $last = $lines[-1]
     $errors = @($lines | Select-Object -First ($lines.Count - 1) | Where-Object { Test-AclToolErrorLine -Line $_ -Path $Path })
+    if ($errors.Count -eq 0 -and -not (Test-AclToolErrorLine -Line $last -Path $Path)) {
+        $other = @($lines | Where-Object { -not (Test-AclToolSuccessLine -Line $_) })
+        if ($other.Count -gt 0) { return $other[-1] }
+        return $last
+    }
     $shown = @($errors | Select-Object -First ([Math]::Max(0, $MaxLines - 1)))
     $parts = @($shown)
     if ($errors.Count -gt $shown.Count) { $parts += "(and $($errors.Count - $shown.Count) more lines)" }
@@ -918,10 +1011,14 @@ function Get-TreeEntryCount {
 
 function Test-TreeEntryIncomplete {
     # True for a whole-tree row whose result could not be checked everywhere: folders that could
-    # not be opened (what is inside them is in no backup) or owners that could not be read
-    # back. Such a row is never reported as a plain success.
+    # not be opened (what is inside them is in no backup), owners that could not be read back,
+    # or junctions and symbolic links (Microsoft's documentation does not say whether takeown /R
+    # and icacls /T go into them). Such a row is never reported as a plain success.
     param([Parameter(Mandatory)][AllowNull()][object]$Entry)
-    (Test-TreeChangeEntry $Entry) -and ((Get-TreeEntryCount $Entry 'Unlisted') -gt 0 -or (Get-TreeEntryCount $Entry 'Unchecked') -gt 0)
+    (Test-TreeChangeEntry $Entry) -and (
+        (Get-TreeEntryCount $Entry 'Unlisted') -gt 0 -or
+        (Get-TreeEntryCount $Entry 'Unchecked') -gt 0 -or
+        (Get-TreeEntryCount $Entry 'Links') -gt 0)
 }
 
 function Format-AclToolCommand {
@@ -939,9 +1036,13 @@ function Invoke-TreeOwnershipChange {
     .DESCRIPTION
         1. The path is made a full path once (Resolve-AclTargetPath) and used for everything.
         2. ShouldProcess once for the folder (-WhatIf: nothing is read, written or changed).
-        3. Save-OwnerSnapshot: if it cannot be written and checked, nothing is changed.
+        3. Save-OwnerSnapshot, and when some folders could not be opened,
+           Save-UnlistedFolderPermission (their SDDL, see 4): if either cannot be written and
+           checked, nothing is changed.
         4. takeown /F <dir> /R /A /D Y gives every item to Administrators, so an administrator
-           can open items they are locked out of.
+           can open items they are locked out of. For a folder the account cannot list, /D Y
+           also REPLACES the folder's permissions with full control for the user only (takeown
+           page on Learn), which is why step 3 saves those permissions.
         5. icacls <dir> /setowner <DOMAIN\user> /T /C /Q makes the current account the owner.
            The full name from WindowsIdentity, not $env:USERNAME, which has no domain and is
            wrong under SYSTEM and service accounts.
@@ -950,7 +1051,8 @@ function Invoke-TreeOwnershipChange {
         sets the final owner.
 
         Result comes from reading the owners back: Done when every item that can be read is
-        now owned by the current account, Partly done when some are, Failed when none are. A
+        now owned by the current account, Partly done when some are (or when no owner at all
+        could be read back, so nothing is known), Failed when none are. A
         tool that reports errors (exit code not 0) also keeps the result from being better than
         the tools say (Partly done when the other tool succeeded, Failed when neither did),
         because its errors may concern items the snapshot could not see. NewValue says what the
@@ -958,9 +1060,11 @@ function Invoke-TreeOwnershipChange {
 
         The row also carries, in its TreeCounts member set (Add-TreeEntryCount), for the messages
         and not for the log file: ItemCount, Unreadable (no readable owner before), Unlisted and
-        UnlistedFolders (folders that could not be opened), Unchecked (no readable owner
-        afterwards), NotOwned (still not owned by the current account) and Changed (owner
-        differs from the snapshot).
+        UnlistedFolders (folders that could not be opened), PermissionsFile, PermissionsUnsaved
+        and PermissionsUnsavedFolders (their saved permissions, and the ones that could not be
+        read), Links and LinkPaths (junctions and symbolic links, listed but not gone into),
+        Unchecked (no readable owner afterwards), NotOwned (still not owned by the current
+        account) and Changed (owner differs from the snapshot).
     #>
     [CmdletBinding()]
     param(
@@ -995,6 +1099,13 @@ function Invoke-TreeOwnershipChange {
 
     try {
         $snapshot = Save-OwnerSnapshot -Path $Path -LogFolder $LogFolder
+        # takeown /D Y replaces the permissions of a folder it cannot list with full control for
+        # the user only, so save the permissions of the folders that could not be opened first.
+        # https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
+        $unlistedBackup = $null
+        if ($snapshot.Unlisted -gt 0) {
+            $unlistedBackup = Save-UnlistedFolderPermission -Path @($snapshot.UnlistedFolders) -SnapshotFile $snapshot.File
+        }
     } catch {
         return New-PermissionChangeEntry -Action $action -Target $Path -ItemType 'Folder tree' -Detail $detail -Result 'Failed' `
             -ErrorText (Get-BackupFailureText -LogFolder $LogFolder -Reason $_.Exception.Message)
@@ -1015,6 +1126,8 @@ function Invoke-TreeOwnershipChange {
         "$detail."
         $(if ($snapshot.Unreadable -gt 0) { "$($snapshot.Unreadable) item(s) had no readable owner before the change." })
         $(if ($snapshot.Unlisted -gt 0) { "$($snapshot.Unlisted) folder(s) could not be opened, so the owners inside them are not in the backup: $(@($snapshot.UnlistedFolders) -join '; ')." })
+        $(if ($unlistedBackup) { "takeown /D Y replaces the permissions of those folders with full control for the technician only; $($unlistedBackup.Saved) of $($snapshot.Unlisted) were saved to $($unlistedBackup.File) first.$(if ($unlistedBackup.Unsaved -gt 0) { " Could not read (not saved): $(@($unlistedBackup.UnsavedFolders) -join '; ')." })" })
+        $(if ($snapshot.Links -gt 0) { "$($snapshot.Links) junction(s) or symbolic link(s) were listed but not gone into: $(@($snapshot.LinkPaths) -join '; ')." })
         "Ran: $(Format-AclToolCommand -Tool takeown -Arguments $takeownArgs); $(Format-AclToolCommand -Tool icacls -Arguments $icaclsArgs)"
     ) | Where-Object { $_ }
     $common = @{ Action = $action; Target = $Path; ItemType = 'Folder tree'; Detail = ($notes -join ' '); OldValue = "Saved in $($snapshot.File)"; BackupFile = $snapshot.File }
@@ -1031,7 +1144,11 @@ function Invoke-TreeOwnershipChange {
                 elseif ($check.NotMine -eq 0) { 'Not checked' }
                 elseif ($check.Changed -eq 0) { 'Owner unchanged' }
                 else { "Owner: $me on 0 of $total items" }
-    $readBackResult = if ($check.NotMine -eq 0) { 'Done' } elseif ($check.Mine -eq 0) { 'Failed' } else { 'Partly done' }
+    # No owner read back at all is not a success: nothing is known about the result.
+    $readBackResult = if ($check.Mine -eq 0 -and $check.NotMine -eq 0) { 'Partly done' }
+                      elseif ($check.NotMine -eq 0) { 'Done' }
+                      elseif ($check.Mine -eq 0) { 'Failed' }
+                      else { 'Partly done' }
 
     # The tools' exit codes and output support the read-back; their output is not parsed for
     # counts (icacls' closing line is translated, and Learn documents neither it nor the exit
@@ -1058,6 +1175,11 @@ function Invoke-TreeOwnershipChange {
         Unreadable      = $snapshot.Unreadable
         Unlisted        = $snapshot.Unlisted
         UnlistedFolders = @($snapshot.UnlistedFolders)
+        PermissionsFile = $(if ($unlistedBackup) { $unlistedBackup.File } else { '' })
+        PermissionsUnsaved        = $(if ($unlistedBackup) { $unlistedBackup.Unsaved } else { 0 })
+        PermissionsUnsavedFolders = $(if ($unlistedBackup) { @($unlistedBackup.UnsavedFolders) } else { @() })
+        Links           = $snapshot.Links
+        LinkPaths       = @($snapshot.LinkPaths)
         Unchecked       = $check.Unchecked
         NotOwned        = $check.NotMine
         Changed         = $check.Changed
@@ -1203,14 +1325,16 @@ function Get-UnrestorableItemCount {
     .SYNOPSIS
         How many changed items cannot be put back from their backup because their permissions
         or owner could not be read first: a Done row with OldValue 'Could not read', plus a
-        whole-tree row's Unreadable count (Invoke-TreeOwnershipChange).
+        whole-tree row's Unreadable count (Invoke-TreeOwnershipChange) when the row is Done,
+        Partly done, or Failed with something changed or not known (Get-FailedChangeState).
     #>
     param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Entries)
 
     $count = 0
     foreach ($e in @($Entries | Where-Object { $null -ne $_ })) {
         if (Test-TreeChangeEntry $e) {
-            if (@('Done', 'Partly done') -contains $e.Result) { $count += Get-TreeEntryCount $e 'Unreadable' }
+            $changed = (@('Done', 'Partly done') -contains $e.Result) -or ($e.Result -eq 'Failed' -and (Get-FailedChangeState $e) -ne 'Unchanged')
+            if ($changed) { $count += Get-TreeEntryCount $e 'Unreadable' }
         } elseif ($e.Result -eq 'Done' -and $e.OldValue -eq 'Could not read') {
             $count++
         }
@@ -1237,7 +1361,13 @@ function Get-TreeChangeResultMessage {
         $restore = "The owners before the change are in $($e.BackupFile); see ""Undo a change"" in the README to put them back."
         switch ($e.Result) {
             'Done'                { $parts.Add("Took $what.") }
-            'Partly done'         { $parts.Add("Partly done: took $what, but not on every item ($($e.NewValue)). $(Format-Sentence $e.Error) $restore") }
+            'Partly done'         {
+                if ($e.NewValue -eq 'Not checked') {
+                    $parts.Add("Partly done: ran takeown and icacls on $($e.Target), but no owner could be read back afterwards, so it is not known whether ownership was taken. $(Format-Sentence $e.Error) $restore".Replace('  ', ' '))
+                } else {
+                    $parts.Add("Partly done: took $what, but not on every item ($($e.NewValue)). $(Format-Sentence $e.Error) $restore")
+                }
+            }
             'Skipped (WhatIf)'    { $parts.Add("WhatIf: nothing was changed (would take $what).") }
             'Skipped (not found)' { $parts.Add("$($e.Target) does not exist.") }
             default {
@@ -1259,6 +1389,31 @@ function Get-TreeChangeResultMessage {
             $names = @($e.TreeCounts.UnlistedFolders | Select-Object -First 3)
             $more = if ($unlisted -gt $names.Count) { " and $($unlisted - $names.Count) more" } else { '' }
             $parts.Add("$unlisted folder(s) could not be opened ($($names -join '; ')$more), so the owners of what is inside them were not saved and cannot be restored from this backup.")
+            # takeown /D Y replaced the permissions of those folders with full control for the
+            # technician only. https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
+            $permissionsFile = "$($e.TreeCounts.PermissionsFile)"
+            $unsaved = Get-TreeEntryCount $e 'PermissionsUnsaved'
+            $replaced = "takeown replaces the permissions of a folder it cannot open with full control for you only"
+            if ($permissionsFile -and $unsaved -eq 0) {
+                $parts.Add("$replaced; the permissions those folders had were backed up to $permissionsFile first.")
+            } elseif ($permissionsFile) {
+                $lost = @($e.TreeCounts.PermissionsUnsavedFolders | Select-Object -First 3)
+                $lostMore = if ($unsaved -gt $lost.Count) { " and $($unsaved - $lost.Count) more" } else { '' }
+                $lostText = "$unsaved could not be read, so their permissions were not backed up and are lost ($($lost -join '; ')$lostMore)"
+                if ($unsaved -ge $unlisted) {
+                    $parts.Add("$replaced; $lostText.")
+                } else {
+                    $parts.Add("$replaced; the permissions of $($unlisted - $unsaved) of those folders were backed up to $permissionsFile first, but $lostText.")
+                }
+            } else {
+                $parts.Add("$replaced; their permissions were not backed up.")
+            }
+        }
+        $links = Get-TreeEntryCount $e 'Links'
+        if ($links -gt 0) {
+            $linkNames = @($e.TreeCounts.LinkPaths | Select-Object -First 3)
+            $linkMore = if ($links -gt $linkNames.Count) { " and $($links - $linkNames.Count) more" } else { '' }
+            $parts.Add("$links junction(s) or symbolic link(s) ($($linkNames -join '; ')$linkMore) were listed but not gone into. Microsoft's documentation does not say whether takeown and icacls follow them, and icacls changes what a symbolic link points to, so check them and what they point to.")
         }
         $unchecked = Get-TreeEntryCount $e 'Unchecked'
         if ($unchecked -gt 0 -and $e.Result -ne 'Skipped (WhatIf)') {

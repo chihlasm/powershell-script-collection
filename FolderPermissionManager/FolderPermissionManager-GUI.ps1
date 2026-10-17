@@ -1576,6 +1576,18 @@ function api(url, opts) {
     });
 }
 
+// True while any permission change (add, remove, copy permissions, take ownership; folders or
+// files) is running. One flag for all of them: a second click must not start another change
+// on the same items before the first one has finished and been logged. (The name is older
+// than the sharing.)
+var ownershipBusy = false;
+// Says so and returns true when a change is still running; the caller then does nothing.
+function changeIsBusy() {
+    if (!ownershipBusy) return false;
+    setStatus('Still working on the previous change. Wait for it to finish, then try again.', 'warning');
+    return true;
+}
+
 // Permission changes: the server's message already says what was done, where it was backed up
 // and logged, or why nothing was changed.
 function showChangeError(e) {
@@ -1937,19 +1949,21 @@ function submitAddAce() {
     var rights   = document.getElementById('addAceRights').value;
     var type     = document.getElementById('addAceType').value;
     if (!identity) { setStatus('Identity is required', 'error'); return; }
+    if (changeIsBusy()) return;
     closeModal('addAceModal');
+    ownershipBusy = true;
 
     if (addAceTarget === 'files') {
         var paths = Array.from(checkedFiles);
         setStatus('Backing up and adding the permission to ' + paths.length + ' file(s)...', 'info');
         api('/api/file-acl/add', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ paths: paths, identity: identity, rights: rights, type: type }) })
-            .then(function(r) { showChangeResult(r); })
-            .catch(showChangeError);
+            .then(function(r) { ownershipBusy = false; showChangeResult(r); })
+            .catch(function(e) { ownershipBusy = false; showChangeError(e); });
     } else {
         setStatus('Backing up and adding the permission...', 'info');
         api('/api/add-ace', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: currentFolder, identity: identity, rights: rights, type: type }) })
-            .then(function(r) { showChangeResult(r); loadFolderAcl(currentFolder); })
-            .catch(showChangeError);
+            .then(function(r) { ownershipBusy = false; showChangeResult(r); loadFolderAcl(currentFolder); })
+            .catch(function(e) { ownershipBusy = false; showChangeError(e); });
     }
 }
 
@@ -1985,33 +1999,36 @@ function submitRemoveAce() {
     var identity = document.getElementById('removeAceIdentity').value;
     var rights   = document.getElementById('removeAceRights').value;
     var type     = document.getElementById('removeAceType').value;
+    if (changeIsBusy()) return;
     closeModal('removeAceModal');
+    ownershipBusy = true;
 
     if (removeAceTarget === 'files') {
         var paths = Array.from(checkedFiles);
         setStatus('Backing up and removing the permission from ' + paths.length + ' file(s)...', 'info');
         api('/api/file-acl/remove', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ paths: paths, identity: identity, rights: rights, type: type }) })
-            .then(function(r) { showChangeResult(r); })
-            .catch(showChangeError);
+            .then(function(r) { ownershipBusy = false; showChangeResult(r); })
+            .catch(function(e) { ownershipBusy = false; showChangeError(e); });
     } else {
         setStatus('Backing up and removing the permission...', 'info');
         api('/api/remove-ace', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: currentFolder, identity: identity, rights: rights, type: type }) })
-            .then(function(r) { showChangeResult(r); loadFolderAcl(currentFolder); })
-            .catch(showChangeError);
+            .then(function(r) { ownershipBusy = false; showChangeResult(r); loadFolderAcl(currentFolder); })
+            .catch(function(e) { ownershipBusy = false; showChangeError(e); });
     }
 }
 
-// True while a take-ownership request is running: a second click must not start another run
-// over the same tree.
-var ownershipBusy = false;
+// Uses the shared busy flag (ownershipBusy, see changeIsBusy) like every other change.
 function takeOwnership(recursive) {
     if (!currentFolder) return;
     if (ownershipBusy) {
         setStatus('Still working on the previous change. Wait for it to finish, then try again.', 'warning');
         return;
     }
+    // takeown /D Y replaces the permissions of a folder it cannot open with full control for
+    // the user only (takeown page on Microsoft Learn); the server backs those up first.
     var msg = recursive
-        ? 'This will change ownership on ALL files and subfolders under:\n\n' + currentFolder + '\n\nYou become the owner. The current owners will be saved to a backup first. Continue?'
+        ? 'This will change ownership on ALL files and subfolders under:\n\n' + currentFolder + '\n\nYou become the owner. The current owners will be saved to a backup first.\n\n' +
+          'Any folder in it that cannot be opened also has its permissions replaced with full control for you only. Those permissions are backed up first where they can be read; the result says how many folders that was and whether any could not be backed up.\n\nContinue?'
         : 'Take ownership of:\n\n' + currentFolder + '?';
     if (!confirm(msg)) return;
     ownershipBusy = true;
@@ -2031,17 +2048,21 @@ function submitReplicate() {
     var raw = document.getElementById('replicateTargets').value;
     var targets = raw.split('\n').map(function(s) { return s.trim(); }).filter(Boolean);
     if (!targets.length) { setStatus('Enter at least one target path', 'error'); return; }
+    if (changeIsBusy()) return;
     closeModal('replicateModal');
+    ownershipBusy = true;
     var recursive = document.getElementById('replicateRecursive').checked;
     setStatus(recursive ? 'Replicating permissions...' : 'Backing up and copying permissions...', 'info');
     api('/api/replicate', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ sourcePath: currentFolder, targetPaths: targets, recursive: recursive }) })
         .then(function(r) {
+            ownershipBusy = false;
             // This folder only: backed up and logged, and the server's message says so.
             if (!recursive) { showChangeResult(r); return; }
             var failed = (r.results || []).filter(function(x) { return x.status === 'error'; });
             if (failed.length) { setStatus(failed.length + ' target(s) failed. First: ' + failed[0].message, 'error'); }
             else { setStatus('Permissions replicated to ' + targets.length + ' target(s). Not backed up or logged.', 'success'); }
         }).catch(function(e) {
+            ownershipBusy = false;
             if (recursive) { setStatus('Failed: ' + e.message, 'error'); }
             else { showChangeError(e); }
         });
@@ -2056,11 +2077,13 @@ function exportReport() {
 function takeFileOwnership() {
     var paths = Array.from(checkedFiles);
     if (!paths.length) return;
+    if (changeIsBusy()) return;
     if (!confirm('Take ownership of ' + paths.length + ' file(s)?')) return;
+    ownershipBusy = true;
     setStatus('Backing up and taking ownership of ' + paths.length + ' file(s)...', 'info');
     api('/api/file-acl/take-ownership', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ paths: paths }) })
-        .then(function(r) { showChangeResult(r); })
-        .catch(showChangeError);
+        .then(function(r) { ownershipBusy = false; showChangeResult(r); })
+        .catch(function(e) { ownershipBusy = false; showChangeError(e); });
 }
 
 // --- Copy files modal ---

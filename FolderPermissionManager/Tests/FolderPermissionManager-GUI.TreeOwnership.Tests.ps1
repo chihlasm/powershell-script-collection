@@ -155,4 +155,60 @@ Describe 'GUI recursive take ownership' {
         $fn.Value | Should -Match 'ownershipBusy = true;'
         @([regex]::Matches($fn.Value, 'ownershipBusy = false;')).Count | Should -Be 2 -Because 'cleared on success and on error'
     }
+
+    # --- Fix round 2 (SQ-014 review) ---------------------------------------------------------
+
+    It 'AC16_GuiRecursiveConfirmText_SaysFoldersThatCannotBeOpenedGetFullControlAndAreBackedUp' {
+        # takeown /D Y replaces such a folder's permissions with full control for the user only.
+        $raw = Get-Content -LiteralPath $script:GuiPath -Raw
+        $m = [regex]::Match($raw, '(?s)This will change ownership on ALL files and subfolders under:.*?Continue\?')
+        $m.Success | Should -BeTrue
+        $m.Value | Should -Match 'Any folder in it that cannot be opened also has its permissions replaced with full control for you only'
+        $m.Value | Should -Match 'Those permissions are backed up first where they can be read'
+        $m.Value | Should -Match 'whether any could not be backed up'
+    }
+
+    It 'AC18_GuiRecursiveTakeOwnership_FolderThatCannotBeListed_MessageSaysPermissionsWereReplacedAndBackedUp' {
+        $locked = Join-Path $script:Dir 'sub'
+        Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $LiteralPath -eq $locked }
+        $script:Body = [PSCustomObject]@{ path = $script:Dir; recursive = $true }
+        $response = [PSCustomObject]@{ StatusCode = 200 }
+
+        Invoke-TakeOwnership $null $response
+
+        $script:Sent.status | Should -Be 'partial'
+        $script:Sent.message | Should -BeLike '*takeown replaces the permissions of a folder it cannot open with full control for you only; the permissions those folders had were backed up to *_TakeOwnership_Permissions.csv first.*'
+        @(Get-ChildItem -LiteralPath (Join-Path $script:ChangeLogFolder 'Backups') -Filter '*_TakeOwnership_Permissions.csv').Count | Should -Be 1
+    }
+
+    It 'AC16_GuiRecursiveTakeOwnership_JunctionMakesTheResultAWarningAndIsCounted' {
+        $elsewhere = Join-Path $TestDrive ('gui-junction-target-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $elsewhere -Force | Out-Null
+        New-Item -ItemType Junction -Path (Join-Path $script:Dir 'link') -Target $elsewhere | Out-Null
+        try {
+            $script:Body = [PSCustomObject]@{ path = $script:Dir; recursive = $true }
+            $response = [PSCustomObject]@{ StatusCode = 200 }
+
+            Invoke-TakeOwnership $null $response
+
+            $script:Sent.status | Should -Be 'partial'
+            $script:Sent.message | Should -BeLike '*1 junction(s) or symbolic link(s) (*link) were listed but not gone into*'
+        } finally {
+            [System.IO.Directory]::Delete((Join-Path $script:Dir 'link'))
+        }
+    }
+
+    It 'AC16_GuiPage_EveryChangeActionSharesTheBusyFlag' {
+        $raw = Get-Content -LiteralPath $script:GuiPath -Raw
+        foreach ($name in 'submitAddAce', 'submitRemoveAce', 'submitReplicate', 'takeFileOwnership') {
+            $fn = [regex]::Match($raw, "(?s)function $name\(\) \{.*?\n\}")
+            $fn.Success | Should -BeTrue -Because "$name exists"
+            $fn.Value | Should -Match 'if \(changeIsBusy\(\)\) return;' -Because "$name refuses to start while a change runs"
+            $fn.Value | Should -Match 'ownershipBusy = true;' -Because "$name marks a change as running"
+            @([regex]::Matches($fn.Value, 'ownershipBusy = false;')).Count | Should -BeGreaterOrEqual 2 -Because "$name clears the flag on success and on error"
+        }
+        $busy = [regex]::Match($raw, '(?s)function changeIsBusy\(\) \{.*?\n\}')
+        $busy.Success | Should -BeTrue
+        $busy.Value | Should -Match "setStatus\('Still working on the previous change"
+    }
 }

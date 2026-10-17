@@ -358,6 +358,113 @@ Describe 'Recursive take ownership' {
         $logPath = Write-PermissionChangeLog -Entries $rows -LogFolder $script:Log
         (Get-Content -LiteralPath $logPath -TotalCount 1) | Should -Be ('"' + ($script:ExpectedColumns -join '","') + '"')
     }
+
+    # --- Fix round 2 (SQ-014 review) ---------------------------------------------------------
+
+    It 'AC18_FolderThatCannotBeListed_ItsPermissionsAreSavedBeforeTakeownReplacesThem' {
+        # takeown /D Y replaces the permissions of a folder the account cannot list with full
+        # control for the user only (takeown page on Learn), so they are saved first.
+        $dir = New-TestTree 'ac18-perm'
+        $locked = Join-Path $dir 'sub'
+        $sddl = (& $script:RealGetAcl -LiteralPath $locked).Sddl
+        Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $LiteralPath -eq $locked }
+
+        $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+        $permissionsFile = $rows[0].TreeCounts.PermissionsFile
+        $permissionsFile | Should -Be ($rows[0].BackupFile -replace '\.csv$', '_Permissions.csv')
+        foreach ($c in $script:ToolCalls) {
+            $c.BackupFiles | Should -Contain $permissionsFile -Because 'the permissions must be saved before any native call'
+        }
+        $saved = @(Import-Csv -LiteralPath $permissionsFile)
+        $saved.Count | Should -Be 1
+        $saved[0].PSObject.Properties.Name | Should -Be @('Path', 'ItemType', 'Sddl')
+        $saved[0].Path | Should -Be $locked
+        $saved[0].Sddl | Should -Be $sddl
+        $rows[0].TreeCounts.PermissionsUnsaved | Should -Be 0
+        $rows[0].Detail | Should -BeLike "*replaces the permissions of those folders with full control*1 of 1 were saved to $permissionsFile*"
+
+        $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
+        $message | Should -BeLike "*takeown replaces the permissions of a folder it cannot open with full control for you only; the permissions those folders had were backed up to $permissionsFile first.*"
+    }
+
+    It 'AC18_FolderThatCannotBeListedOrRead_IsCountedAndNamedAsNotBackedUp' {
+        $dir = New-TestTree 'ac18-perm-lost'
+        $locked = Join-Path $dir 'sub'
+        $script:UnreadableLike = $locked
+        Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $LiteralPath -eq $locked }
+
+        $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+        @($script:ToolCalls).Count | Should -Be 2 -Because 'D-027: an unreadable folder does not stop the action'
+        $saved = @(Import-Csv -LiteralPath $rows[0].TreeCounts.PermissionsFile)
+        $saved[0].Sddl | Should -Be 'Could not read'
+        $rows[0].TreeCounts.PermissionsUnsaved | Should -Be 1
+        @($rows[0].TreeCounts.PermissionsUnsavedFolders) | Should -Be @($locked)
+        $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
+        $message | Should -BeLike "*full control for you only; 1 could not be read, so their permissions were not backed up and are lost ($locked).*"
+    }
+
+    It 'AC18_PermissionsOfUnlistedFoldersCannotBeSaved_NothingIsChanged' {
+        $dir = New-TestTree 'ac18-perm-fail'
+        $locked = Join-Path $dir 'sub'
+        Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $LiteralPath -eq $locked }
+        Mock Export-Csv { throw 'disk full (test)' } -ParameterFilter { $LiteralPath -like '*_Permissions.csv' }
+
+        $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        $rows[0].Result | Should -Be 'Failed'
+        $rows[0].Error | Should -Match '^Could not save a backup of the current permissions'
+        $rows[0].Error | Should -Match 'Nothing was changed\.$'
+    }
+
+    It 'AC17_NoOwnerCouldBeReadBack_IsPartlyDoneNeverDone' {
+        $dir = New-TestTree 'ac17-unchecked'
+        Mock Get-ItemOwner {
+            if ($script:ToolCalls.Count -gt 0) { return [PSCustomObject]@{ Owner = 'Could not read'; OwnerSid = '' } }
+            & $script:RealGetItemOwner -Path $Path
+        }
+
+        $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+        $rows[0].Result | Should -Be 'Partly done'
+        $rows[0].NewValue | Should -Be 'Not checked'
+        $rows[0].TreeCounts.Unchecked | Should -Be 4
+        Test-TreeEntryIncomplete $rows[0] | Should -BeTrue
+        $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
+        $message | Should -BeLike 'Partly done: ran takeown and icacls on *, but no owner could be read back afterwards*'
+        $message | Should -Not -Match '^Took ownership'
+    }
+
+    It 'AC16_JunctionInTheTree_IsCountedAndMakesTheResultIncomplete' {
+        $dir = New-TestTree 'ac16-junction-count'
+        $elsewhere = Join-Path $TestDrive 'ac16-junction-count-target'
+        New-Item -ItemType Directory -Path $elsewhere -Force | Out-Null
+        $link = Join-Path $dir 'link'
+        New-Item -ItemType Junction -Path $link -Target $elsewhere | Out-Null
+
+        $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+        $rows[0].TreeCounts.Links | Should -Be 1
+        @($rows[0].TreeCounts.LinkPaths) | Should -Be @($link)
+        Test-TreeEntryIncomplete $rows[0] | Should -BeTrue
+        $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
+        $message | Should -BeLike "*1 junction(s) or symbolic link(s) ($link) were listed but not gone into. Microsoft's documentation does not say whether takeown and icacls follow them*"
+    }
+
+    It 'AC18_FailedTreeRowThatChangedSomething_CountsItsUnreadableItems' {
+        $partly = New-PermissionChangeEntry -Action $script:TreeAction -Target 'D:\x' -ItemType 'Folder tree' `
+            -NewValue 'Owner: Administrators (icacls failed)' -Result 'Failed'
+        Add-TreeEntryCount -Entry $partly -Counts ([ordered]@{ Unreadable = 2; Changed = 3 })
+        $unchanged = New-PermissionChangeEntry -Action $script:TreeAction -Target 'D:\y' -ItemType 'Folder tree' `
+            -NewValue 'Owner unchanged' -Result 'Failed'
+        Add-TreeEntryCount -Entry $unchanged -Counts ([ordered]@{ Unreadable = 5; Changed = 0 })
+
+        Get-FailedChangeState $partly | Should -Be 'Partly'
+        Get-UnrestorableItemCount -Entries @($partly) | Should -Be 2
+        Get-UnrestorableItemCount -Entries @($unchanged) | Should -Be 0 -Because 'nothing was changed, so nothing needs restoring'
+    }
 }
 
 Describe 'Native tool guard and tool output' {
@@ -378,6 +485,20 @@ Describe 'Native tool guard and tool output' {
     It 'Get-AclToolSummary falls back to the last line when nothing looks like an error' {
         $output = "ERFOLGREICH: a`r`nERFOLGREICH: b`r`nERFOLGREICH: c"
         Get-AclToolSummary -Output $output -Path 'D:\Daten' | Should -Be 'ERFOLGREICH: c'
+    }
+
+    It 'Get-AclToolSummary never sums up a tool with a SUCCESS line when another line is there' {
+        $output = "INFO: No files with the specified name were found.`r`nSUCCESS: The file (or folder): ""D:\HR\a.txt"" now owned by the administrators group.`r`nSUCCESS: The file (or folder): ""D:\HR\b.txt"" now owned by the administrators group."
+        Get-AclToolSummary -Output $output -Path 'D:\HR' | Should -Be 'INFO: No files with the specified name were found.'
+    }
+
+    It 'Test-AclToolErrorLine does not read error words inside a path as errors' {
+        Test-AclToolErrorLine -Line 'SUCCESS: The file (or folder): "D:\Failed Jobs\a.txt" now owned by user "CONTOSO\tech".' -Path 'E:\Other' | Should -BeFalse
+        Test-AclToolErrorLine -Line 'Processing D:\Errors\Invalid\x.txt' -Path 'E:\Other' | Should -BeFalse
+        Test-AclToolErrorLine -Line 'D:\Failed Jobs\x.txt: Access is denied.' -Path 'E:\Other' | Should -BeTrue
+        Test-AclToolErrorLine -Line 'ERROR: Access is denied.' -Path 'E:\Other' | Should -BeTrue
+        $summary = Get-AclToolSummary -Output "SUCCESS: The file (or folder): ""D:\Failed\a.txt"" now owned by X.`r`nINFO: done" -Path 'E:\Other'
+        $summary | Should -Be 'INFO: done'
     }
 
     It 'Resolve-AclTargetPath keeps a drive root and trims other trailing backslashes' {

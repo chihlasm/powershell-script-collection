@@ -25,8 +25,14 @@
     Every change is written to <LogFolder>\Changes_<yyyy-MM-dd>.csv, the same log the GUI
     writes. See "Undo a change" in README.md to put permissions or owners back.
 
-    Exit code: 1 when a change Failed or was only Partly done, or the folder or log folder
-    could not be used; 0 otherwise (done, -WhatIf, or declined).
+    Exit code: 1 when a change Failed or was only Partly done, when taking ownership could not
+    be checked everywhere (folders that could not be opened, owners that could not be read
+    back, junctions or symbolic links), or the folder or log folder could not be used; 0
+    otherwise (done, -WhatIf, or declined).
+
+    If taking ownership is interrupted, its owner snapshot (..._TakeOwnership.csv) is in the
+    Backups folder with no matching row in the change log: the row is written when the run
+    ends.
 
     CHANGES ANYTHING? Yes: owners and permissions. Use -WhatIf first.
 
@@ -109,7 +115,8 @@ function Write-CliChangeResult {
     <#
     .SYNOPSIS
         Prints the plain-English result of one change with [PASS], [WARN], [FAIL] or [INFO], and
-        returns $true when it needs the technician's attention (a row is Failed or Partly done).
+        returns $true when it needs the technician's attention (a row is Failed or Partly done,
+        or a whole folder could not be checked everywhere: Test-TreeEntryIncomplete).
     .DESCRIPTION
         [PASS] only when every row is Done, was logged, can be restored from its backup, and
         (for a whole folder) every folder could be opened and every owner read back.
@@ -134,7 +141,26 @@ function Write-CliChangeResult {
     } else {
         Write-Host "[FAIL] $message" -ForegroundColor Red
     }
-    @($results | Where-Object { $_ -eq 'Failed' -or $_ -eq 'Partly done' }).Count -gt 0
+    @($results | Where-Object { $_ -eq 'Failed' -or $_ -eq 'Partly done' }).Count -gt 0 -or $incomplete.Count -gt 0
+}
+
+function Get-CliSubfolder {
+    <#
+    .SYNOPSIS
+        The subfolders to copy permissions to, listed with Get-OwnerTreeItem so junctions and
+        symbolic links are never gone into: Folders (paths), plus Unlisted (folders that could
+        not be opened) and Links (junctions and symbolic links, which can point outside the
+        folder), which are both skipped.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    $tree = Get-OwnerTreeItem -Path $Path
+    $skip = @(@($tree.Unlisted) + @($tree.Links))
+    [PSCustomObject]@{
+        Folders  = @($tree.Items | Where-Object { $_.ItemType -eq 'Folder' -and $_.Path -ne $Path -and $skip -notcontains $_.Path } | ForEach-Object { $_.Path })
+        Unlisted = @($tree.Unlisted | Where-Object { $_ -ne $Path })
+        Links    = @($tree.Links | Where-Object { $_ -ne $Path })
+    }
 }
 
 function Confirm-CliStep {
@@ -153,8 +179,9 @@ function Invoke-FolderPermissionCli {
         (backup, then change, then change log) and prints its result. Never throws for a
         declined prompt.
     .OUTPUTS
-        The exit code for the script: 1 when the folder could not be used or a change Failed or
-        was only Partly done; 0 otherwise (done, -WhatIf, or declined).
+        The exit code for the script: 1 when the folder could not be used, a change Failed or
+        was only Partly done, or taking ownership could not be checked everywhere; 0 otherwise
+        (done, -WhatIf, or declined).
     #>
     [CmdletBinding(SupportsShouldProcess)]
     [OutputType([int])]
@@ -199,11 +226,29 @@ function Invoke-FolderPermissionCli {
     Write-Host "[INFO] Counting the folders and files in $Path..." -ForegroundColor Cyan
     $tree = Get-OwnerTreeItem -Path $Path
     $scope = "$(@($tree.Items).Count) item(s): $Path and every subfolder and file under it"
-    if (@($tree.Unlisted).Count -gt 0) {
-        $scope += ", plus whatever is inside $(@($tree.Unlisted).Count) folder(s) that could not be opened (their owners cannot be saved first)"
+    $unlisted = @($tree.Unlisted)
+    if ($unlisted.Count -gt 0) {
+        $scope += ", plus whatever is inside $($unlisted.Count) folder(s) that could not be opened (their owners cannot be saved first)"
     }
     $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    Write-Host "[WARN] Taking ownership makes $me the owner of $scope. The current owners are saved to a backup first." -ForegroundColor Yellow
+    $warning = "[WARN] Taking ownership makes $me the owner of $scope. The current owners are saved to a backup first."
+    if ($unlisted.Count -gt 0) {
+        # takeown /D Y replaces the permissions of a folder the account cannot list with full
+        # control for the user only; checked here (read only) which of them can be backed up.
+        # https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
+        $unreadable = @($unlisted | Where-Object { (Get-ItemSddl -Path $_) -eq 'Could not read' })
+        $warning += " The permissions of the $($unlisted.Count) folder(s) that could not be opened are replaced with full control for you ($me) only."
+        if ($unreadable.Count -eq 0) {
+            $warning += ' Their current permissions are backed up first.'
+        } else {
+            $warning += " $($unlisted.Count - $unreadable.Count) of them are backed up first; $($unreadable.Count) cannot be read, so their current permissions cannot be backed up and are lost: $($unreadable -join '; ')."
+        }
+    }
+    $links = @($tree.Links)
+    if ($links.Count -gt 0) {
+        $warning += " It contains $($links.Count) junction(s) or symbolic link(s), which are listed but not gone into. Microsoft's documentation does not say whether takeown and icacls follow them, and icacls changes what a symbolic link points to, so check them afterwards: $($links -join '; ')."
+    }
+    Write-Host $warning -ForegroundColor Yellow
     $takeOwnership = $whatIf -or $Force -or (Confirm-CliStep)
     $ownershipTaken = $false
     if ($takeOwnership) {
@@ -213,6 +258,9 @@ function Invoke-FolderPermissionCli {
             $ownershipTaken = $true
         } else {
             Write-Host "[INFO] Saving the current owners and taking ownership. This can take a while on a large folder..." -ForegroundColor Cyan
+            # The change-log row is written when the run ends; the Result values are fixed
+            # (D-030), so there is no "started" row. An interrupted run is known by its backup.
+            Write-Host "[INFO] If this is interrupted, the owners from before are in $(Join-Path $logFolderUsed 'Backups') (<date_time>_TakeOwnership.csv) with no matching row in the change log. See ""Undo a change"" in README.md to put them back." -ForegroundColor Cyan
             $result = Invoke-LoggedPermissionChange -LogFolder $logFolderUsed -Change {
                 Set-ItemOwnerToCurrentUser -Path $Path -Recurse -LogFolder $logFolderUsed -WhatIf:$false
             }
@@ -239,15 +287,23 @@ function Invoke-FolderPermissionCli {
     Write-Host 'Access rules:'
     $topAcl.Access | Format-Table IdentityReference, FileSystemRights, AccessControlType, IsInherited, InheritanceFlags -AutoSize | Out-Host
 
-    $subFolders = @(Get-ChildItem -LiteralPath $Path -Recurse -Directory -Force -ErrorAction SilentlyContinue)
+    # Listed again: taking ownership may have opened folders that could not be opened before.
+    $listing = Get-CliSubfolder -Path $Path
+    $subFolders = @($listing.Folders)
     Write-Host "Subfolders and their owners ($($subFolders.Count)):"
     foreach ($folder in $subFolders) {
         try {
-            $folderAcl = Get-Acl -LiteralPath $folder.FullName -ErrorAction Stop
-            Write-Host "  $($folder.FullName) - Owner: $($folderAcl.Owner)"
+            $folderAcl = Get-Acl -LiteralPath $folder -ErrorAction Stop
+            Write-Host "  $folder - Owner: $($folderAcl.Owner)"
         } catch {
-            Write-Host "[WARN] Cannot read $($folder.FullName): $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host "[WARN] Cannot read $($folder): $($_.Exception.Message)" -ForegroundColor Yellow
         }
+    }
+    if (@($listing.Unlisted).Count -gt 0) {
+        Write-Host "[WARN] $(@($listing.Unlisted).Count) folder(s) could not be opened, so they and what is inside them are skipped: $(@($listing.Unlisted) -join '; ')" -ForegroundColor Yellow
+    }
+    if (@($listing.Links).Count -gt 0) {
+        Write-Host "[INFO] $(@($listing.Links).Count) junction(s) or symbolic link(s) are skipped, because they can point outside $($Path): $(@($listing.Links) -join '; ')" -ForegroundColor Cyan
     }
     if ($subFolders.Count -eq 0) {
         Write-Host '[INFO] There are no subfolders to copy the permissions to.' -ForegroundColor Cyan
@@ -262,7 +318,7 @@ function Invoke-FolderPermissionCli {
         Write-Host '[INFO] Permissions were not copied.' -ForegroundColor Cyan
         return $exitCode
     }
-    $targets = @($subFolders | ForEach-Object { $_.FullName })
+    $targets = $subFolders
     if ($whatIf) {
         $rows = @(Copy-FolderPermission -SourcePath $Path -TargetPath $targets -LogFolder $logFolderUsed -WhatIf)
         $null = Write-CliChangeResult -Entries $rows -LogFolder $logFolderUsed

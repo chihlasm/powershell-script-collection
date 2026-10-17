@@ -58,12 +58,19 @@ The console shows the log folder at startup.
 | `Logs\Changes_<yyyy-MM-dd>.csv` | One row per folder or file changed: `Time`, `Technician`, `Computer`, `Action`, `Target`, `ItemType`, `Detail`, `OldValue`, `NewValue`, `Result`, `Error`, `BackupFile`. `OldValue` and `NewValue` are the permissions before and after, as SDDL text. |
 | `Logs\Backups\<yyyy-MM-dd_HHmmss>_<Action>.csv` | The permissions as they were just before one action: `Path`, `ItemType`, `Sddl`. |
 | `Logs\Backups\<yyyy-MM-dd_HHmmss>_TakeOwnership.csv` (whole folder) | The owner snapshot written before taking ownership of a folder and everything under it: `Path`, `ItemType`, `Owner`, `OwnerSid`, one row for the folder and every subfolder and file under it (hidden ones too). |
+| `Logs\Backups\<yyyy-MM-dd_HHmmss>_TakeOwnership_Permissions.csv` (whole folder, only when some folders could not be opened) | The permissions of the folders the tool could not open, saved before taking ownership because `takeown` replaces them (see below): `Path`, `ItemType`, `Sddl`, same format as the other permission backups. |
 
 `Result` is one of `Done`, `Partly done`, `Failed`, `Skipped (not found)` or `Skipped (WhatIf)`. A `Failed`
 row whose `NewValue` differs from its `OldValue` was **partly changed** (for example, takeown
 gave the folder to Administrators but the owner could not then be set to you); the status bar
 says so and points at the backup. Each row is written as soon as that item is done, so a batch
 that is interrupted still leaves a log of what it changed.
+
+Taking ownership of a whole folder writes its one row when it ends. **A `..._TakeOwnership.csv`
+in `Backups` with no row in the change log whose `BackupFile` names it means that run was
+interrupted** (window closed, server restarted) after the owners were saved: some owners may
+have changed. The snapshot still holds the owners from before, so the restore steps below work
+for it. (The command-line script says this before it starts.)
 
 Taking ownership of a whole folder logs **one row for the folder** (`ItemType` = `Folder tree`):
 `OldValue` is `Saved in <owner snapshot>`. It runs `takeown /F <folder> /R /A /D Y` (gives every
@@ -73,7 +80,8 @@ two commands exactly as run. A relative path or a trailing backslash is turned i
 path first, and that path is used for the snapshot, both tools and the log.
 
 Afterwards the tool **reads the owner of every item in the snapshot again**, and that decides
-the result: `Done` when you own every item, `Partly done` when you own some, `Failed` when you
+the result: `Done` when you own every item, `Partly done` when you own some (or when no owner
+could be read back at all, so nothing is known: `NewValue` is `Not checked`), `Failed` when you
 own none. A tool that reports errors (exit code not 0) also keeps the result from looking
 better than the tools say. `NewValue` says what the owners are now: `Owner: <you>`,
 `Owner: <you> on 3 of 5 items`, `Owner: Administrators (icacls failed)` (takeown worked, icacls
@@ -82,10 +90,25 @@ own messages, for example `Successfully processed 3 files; Failed processing 2 f
 
 Items under a folder the tool could not open are not in the snapshot, so their owners cannot
 be put back from it. The result is then never shown as a plain success: the status bar (or the
-console, with `[WARN]`) says how many folders that was and names them. Junctions and symbolic
-links inside the folder are listed in the snapshot but not gone into, because they can point
-outside the folder. `takeown /R` and `icacls /T` may still treat them differently (follow them
-or change the link itself), so check those items after the change.
+console, with `[WARN]`) says how many folders that was and names them.
+
+**Taking ownership replaces the permissions of a folder you cannot open.** For a folder the
+account has no "List folder" and "Read" permission on, `takeown /D Y` takes ownership and
+replaces the folder's permissions with full control for you only
+([takeown](https://learn.microsoft.com/windows-server/administration/windows-commands/takeown)).
+So before running it, the tool saves the permissions of every folder it could not open to
+`..._TakeOwnership_Permissions.csv` next to the owner snapshot; if that file cannot be written
+and read back, nothing is changed. A folder whose permissions cannot be read either is listed
+there as `Could not read`: its permissions are lost. The console `[WARN]` line before the
+change and the result afterwards say how many folders that was and name them; the GUI's
+confirm dialog warns that it can happen.
+
+Junctions and symbolic links inside the folder are listed in the snapshot but not gone into,
+because they can point outside the folder. Microsoft's documentation does not say whether
+`takeown /R` and `icacls /T` go into them, and `icacls` changes what a symbolic link points to
+unless `/L` is given ([icacls](https://learn.microsoft.com/windows-server/administration/windows-commands/icacls)),
+so a folder containing any is never reported as a plain success: the result says how many
+there are and names them. Check them, and what they point to, after the change.
 
 `Could not read` means the tool could not read the item's permissions (or, in an owner
 snapshot, its owner) before the change. Add permission, Remove permission and Copy permissions
@@ -166,18 +189,24 @@ foreach ($row in Import-Csv -LiteralPath $snapshot) {
 
         # A SID is given to icacls with a leading * ; /C carries on after an error.
         $out = & icacls.exe $path /setowner "*$($row.OwnerSid)" /C 2>&1
-        if ($LASTEXITCODE -ne 0) { Write-Warning "icacls reported a problem for ${path}: $out" }
-
-        # Check: read the owner again and compare it with the snapshot.
-        $now = (Get-Acl -LiteralPath $path -ErrorAction Stop).GetOwner([System.Security.Principal.SecurityIdentifier]).Value
-        if ($now -ne $row.OwnerSid) {
-            Write-Warning "$path is owned by $now, not $($row.Owner) ($($row.OwnerSid))."
-        } else {
-            Write-Host "[PASS] $path owner restored" -ForegroundColor Green
-        }
+        $set = if ($LASTEXITCODE -eq 0) { 'owner set' } else { "icacls reported a problem (exit code $LASTEXITCODE): $out" }
     } catch {
         Write-Warning "Could not restore the owner of $($row.Path): $($_.Exception.Message)"
         continue
+    }
+
+    # Check, on its own: read the owner again and compare it with the snapshot. A check that
+    # fails does not mean the restore failed, so both results are shown.
+    try {
+        $now = (Get-Acl -LiteralPath $path -ErrorAction Stop).GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+    } catch {
+        Write-Warning "${path}: $set; could not verify: $($_.Exception.Message)"
+        continue
+    }
+    if ($now -ne $row.OwnerSid) {
+        Write-Warning "${path}: $set; but it is owned by $now, not $($row.Owner) ($($row.OwnerSid))."
+    } else {
+        Write-Host "[PASS] ${path}: $set and verified" -ForegroundColor Green
     }
 }
 ```
@@ -185,8 +214,17 @@ foreach ($row in Import-Csv -LiteralPath $snapshot) {
 The restore uses the saved SID, not the name, so it also works for an owner whose account
 name has changed. One item that fails is reported and the rest carry on. Setting another
 account as the owner needs the "Restore files and directories" right (`SeRestorePrivilege`),
-which administrators have in an elevated window. Rows with `Could not read` have no saved owner and are skipped with a warning. Taking
-ownership does not change permissions, so there is nothing else to put back.
+which administrators have in an elevated window. Rows with `Could not read` have no saved owner
+and are skipped with a warning.
+
+**Then put back the permissions of the folders that could not be opened.** Taking ownership
+leaves the permissions of every folder it could open alone, but for a folder it could not open
+`takeown` replaced them with full control for you (see above). If there is a
+`..._TakeOwnership_Permissions.csv` with the same date and time as the snapshot, restore it
+with the permission restore steps at the top of this section (set `$backup` to that file). Do
+this **after** the owners: the saved permissions also hold each folder's owner (the `O:` part),
+so they put back owner and permissions together. Rows with `Could not read` have nothing saved;
+set those folders' permissions by hand.
 
 Alternative, if `icacls` is not available: replace the `icacls` line with
 `$acl = Get-Acl -LiteralPath $path; $acl.SetOwner((New-Object System.Security.Principal.SecurityIdentifier -ArgumentList $row.OwnerSid)); Set-Acl -LiteralPath $path -AclObject $acl`.
@@ -241,8 +279,15 @@ Declining ownership, or ownership failing, still shows the permissions and offer
 does not depend on ownership. Run it in an elevated window: it stops with `[FAIL]` otherwise
 (except with `-WhatIf`). See "Undo a change" above to put owners or permissions back.
 
-The script exits with `1` when a step `Failed` or was only `Partly done` (or the folder or the
-log folder could not be used), and `0` otherwise, including `-WhatIf` and declined steps.
+The script exits with `1` when a step `Failed` or was only `Partly done`, when taking ownership
+could not be checked everywhere (folders it could not open, owners it could not read back, or
+junctions and symbolic links in the folder), or when the folder or the log folder could not be
+used; and `0` otherwise, including `-WhatIf` and declined steps.
+
+The copy step lists the subfolders the same way as the owner snapshot: it does not go into
+junctions or symbolic links and skips them (they can point outside the folder), and it skips
+folders it cannot open; both are named in the console. If taking ownership is interrupted, see
+the note on interrupted runs above.
 
 ## Requirements
 
