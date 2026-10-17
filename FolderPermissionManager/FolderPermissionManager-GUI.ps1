@@ -179,14 +179,16 @@ function Complete-PermissionChange {
     }
 }
 
-# Per-item results in the shape the page already reads: path, status, message.
+# Per-item results in the shape the page already reads: path, status, message. 'unchanged' is
+# an item that already had what was asked (Copy permissions with nothing to copy): not a
+# failure and not a shortfall, so the page does not count it against the result.
 function ConvertTo-ChangeResultRow {
     param([object[]]$Entries)
     @($Entries | Where-Object { $null -ne $_ } | ForEach-Object {
         $status = switch ($_.Result) {
             'Done'                      { 'success' }
             'Skipped (not found)'       { 'skipped' }
-            'Skipped (nothing to copy)' { 'skipped' }
+            'Skipped (nothing to copy)' { 'unchanged' }
             default                     { 'error' }
         }
         # Nothing to copy says why in Detail ("Already has these permissions; nothing changed.").
@@ -1445,8 +1447,11 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
 <div class="modal-overlay" id="replicateModal">
   <div class="modal">
     <h3>Copy Permissions To...</h3>
-    <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">Adds the current folder's own permissions to each folder you list (one per line). Nothing is removed. Subfolders that inherit permissions get them too; subfolders that block inheritance are not changed.</p>
-    <div class="form-row"><label>Folders to copy to</label><textarea id="replicateTargets" rows="5" style="width:100%;background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:6px 8px;font-size:12px;resize:vertical;" placeholder="C:\Shares\FolderA&#10;C:\Shares\FolderB"></textarea></div>
+    <p style="font-size:12px;margin-bottom:6px;">Copy from: <strong id="replicateSource" style="word-break:break-all;"></strong></p>
+    <p style="font-size:12px;margin-bottom:6px;">Adds this folder's own permissions to each folder you list. Nothing is removed.</p>
+    <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">Subfolders that inherit permissions get them too. Subfolders that block inheritance (folders with inheritance turned off) are not changed.</p>
+    <p id="replicateDenyNote" style="font-size:12px;color:var(--warning);margin-bottom:12px;display:none;"></p>
+    <div class="form-row"><label for="replicateTargets">Folders to copy to (one per line)</label><textarea id="replicateTargets" rows="5" style="width:100%;background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:6px 8px;font-size:12px;resize:vertical;" placeholder="C:\Shares\FolderA&#10;C:\Shares\FolderB"></textarea></div>
     <div class="modal-actions">
       <button class="btn btn-secondary" onclick="closeModal('replicateModal')">Cancel</button>
       <button class="btn btn-primary" onclick="submitReplicate()">Copy Permissions</button>
@@ -1500,6 +1505,7 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
 
 // --- State ---
 var currentFolder  = null;   // currently selected folder path
+var currentFolderEntries = []; // permission entries of currentFolder, as last loaded
 var currentFiles   = [];     // array of file objects for current folder
 var checkedFiles   = new Set(); // paths of checked files
 var addAceTarget   = 'folder'; // 'folder' or 'files'
@@ -1557,10 +1563,15 @@ function changeStatusType(r) {
     var res = r.results || [];
     var failed = res.filter(function(x) { return x.status === 'error'; }).length;
     var done = res.filter(function(x) { return x.status === 'success'; }).length;
+    var notFound = res.filter(function(x) { return x.status === 'skipped'; }).length;
+    // 'unchanged': the item already had what was asked. Not a shortfall.
+    var unchanged = res.filter(function(x) { return x.status === 'unchanged'; }).length;
     // 'partial': a whole-tree change partly done, or not checked everywhere.
     if (r.status === 'partial') return 'warning';
     if (res.length && failed && !done) return 'error';
-    if (failed || done < res.length || !r.logPath || r.unrestorable) return 'warning';
+    // Every item already up to date: nothing was changed, and nothing needed to be.
+    if (res.length && unchanged === res.length) return 'info';
+    if (failed || notFound || !r.logPath || r.unrestorable) return 'warning';
     return 'success';
 }
 // Shows a change result; a warning is also spelled out in words, not only in colour.
@@ -1570,8 +1581,10 @@ function showChangeResult(r) {
     // A partly done whole-tree change already starts "Partly done:"; never say it twice.
     if (type === 'warning' && msg.indexOf('Partly done:') !== 0) {
         var res = r.results || [];
-        // Partly done only when something was done: a copy with nothing to copy changed nothing.
-        var partial = res.some(function(x) { return x.status === 'success'; }) && res.some(function(x) { return x.status !== 'success'; });
+        // Partly done only when something was done and another item failed or was not found;
+        // an item that was already up to date is not a shortfall.
+        var partial = res.some(function(x) { return x.status === 'success'; }) &&
+            res.some(function(x) { return x.status === 'error' || x.status === 'skipped'; });
         msg = (partial ? 'Partly done: ' : 'Check this: ') + msg;
     }
     setStatus(msg, type);
@@ -1753,6 +1766,7 @@ function loadFolderAcl(path) {
         document.getElementById('folderOwner').textContent = data.owner || '—';
         var tbody = document.getElementById('folderAclBody');
         tbody.innerHTML = '';
+        currentFolderEntries = data.entries || [];
         (data.entries || []).forEach(function(e) {
             var tr = document.createElement('tr');
             tr.innerHTML =
@@ -1996,13 +2010,26 @@ function takeOwnership(recursive) {
 
 function showReplicateModal() {
     document.getElementById('replicateTargets').value = '';
+    document.getElementById('replicateSource').textContent = currentFolder || '';
+    // Copy only copies the folder's own permissions, so only those Deny entries are copied.
+    var denies = currentFolderEntries.filter(function(e) { return !e.isInherited && e.type === 'Deny'; });
+    var note = document.getElementById('replicateDenyNote');
+    if (denies.length) {
+        note.textContent = 'This folder has ' + denies.length + ' Deny permission(s) of its own (' +
+            denies.map(function(e) { return e.identity; }).join(', ') +
+            '). They are copied too, and a Deny blocks access even where another permission allows it.';
+        note.style.display = 'block';
+    } else {
+        note.textContent = '';
+        note.style.display = 'none';
+    }
     openModal('replicateModal');
 }
 
 function submitReplicate() {
     var raw = document.getElementById('replicateTargets').value;
     var targets = raw.split('\n').map(function(s) { return s.trim(); }).filter(Boolean);
-    if (!targets.length) { setStatus('Enter at least one folder to copy to', 'error'); return; }
+    if (!targets.length) { setStatus('Enter at least one folder to copy to, one per line.', 'error'); return; }
     if (changeIsBusy()) return;
     closeModal('replicateModal');
     ownershipBusy = true;

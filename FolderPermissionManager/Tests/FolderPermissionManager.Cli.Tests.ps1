@@ -315,4 +315,51 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
 
         $script:InterruptNoteBeforeTools | Should -BeTrue
     }
+
+    # --- Fix round 1 (SQ-015 review) ---------------------------------------------------------
+
+    Context 'copy step over subfolders that inherit the top folder''s rule' {
+        BeforeEach {
+            # The top folder has Allow Modify for Users (S-1-5-32-545) as its own rule; sub1 and
+            # sub2 carry it as inherited (ID flag), as Windows puts it there. In memory only.
+            $script:RealGetAcl = Get-Command Get-Acl -CommandType Cmdlet
+            $script:Sddl = @{
+                $script:Dir                       = 'O:BAG:SYD:AI(A;OICI;0x1301bf;;;S-1-5-32-545)'
+                (Join-Path $script:Dir 'sub1')    = 'O:BAG:SYD:AI(A;OICIID;0x1301bf;;;S-1-5-32-545)'
+                (Join-Path $script:Dir 'sub2')    = 'O:BAG:SYD:AI(A;OICIID;0x1301bf;;;S-1-5-32-545)'
+            }
+            Mock Get-Acl {
+                $p = "$LiteralPath"   # -LiteralPath is a string array
+                $acl = & $script:RealGetAcl -LiteralPath $p
+                if ($script:Sddl.ContainsKey($p)) { $acl.SetSecurityDescriptorSddlForm($script:Sddl[$p]) }
+                $acl
+            }
+            $script:Answers.Enqueue('n')   # take ownership: no
+            $script:Answers.Enqueue('y')   # copy: yes
+        }
+
+        It 'Review1_Cli_SubfoldersThatInheritTheRule_AreNotWrittenAndTheResultIsInfo' {
+            # Regression: each subfolder got the rule again as its own, so removing it from the
+            # top folder later left it on every subfolder.
+            $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
+
+            $code | Should -Be 0
+            Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
+            $result = @($script:Lines | Where-Object { $_ -like '*2 folder(s) already had these permissions*' })
+            $result.Count | Should -Be 1
+            $result[0] | Should -BeLike '`[INFO`] *'
+        }
+
+        It 'Review1_Cli_OneSubfolderDoneAndOneUpToDate_IsAPass' {
+            $script:Sddl[(Join-Path $script:Dir 'sub2')] = 'O:BAG:SYD:AI'
+
+            $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
+
+            $code | Should -Be 0
+            Should -Invoke Set-Acl -Times 1 -Exactly -Scope It -ParameterFilter { $LiteralPath -eq (Join-Path $script:Dir 'sub2') }
+            $result = @($script:Lines | Where-Object { $_ -like '*Permissions copied from *' })
+            $result.Count | Should -Be 1
+            $result[0] | Should -BeLike '`[PASS`] *1 folder(s) already had these permissions*'
+        }
+    }
 }

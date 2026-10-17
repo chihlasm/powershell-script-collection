@@ -312,6 +312,211 @@ Describe 'Copy-FolderPermission (SQ-015, add-only)' {
         $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $log 'Changes.csv') -LogFolder $log
         $message | Should -BeLike '*Subfolders and files that inherit permissions get them too. Any that block inheritance were not changed.*'
     }
+
+    # --- Fix round 1 (SQ-015 review) ---------------------------------------------------------
+
+    It 'Review1_TargetUnderTheSourceThatInheritsTheRule_NotWrittenAndNothingToCopy' {
+        # Regression: the rule arrived as an explicit duplicate, so removing it from the source
+        # later left it on every subfolder.
+        $src = New-TestFolder 'r1-src'
+        $dst = New-TestFolder 'r1-src\child'
+        $log = Join-Path $TestDrive 'r1-logs'
+        $script:Seed[$src] = 'O:BAG:SYD:AI(A;OICI;0x1301bf;;;S-1-5-32-545)'
+        $script:Seed[$dst] = 'O:BAG:SYD:AI(A;OICIID;0x1301bf;;;S-1-5-32-545)'
+        @((Get-Acl -LiteralPath $dst).Access | Where-Object { $_.IsInherited }).Count | Should -Be 1
+
+        $rows = @(Copy-FolderPermission -SourcePath $src -TargetPath $dst -LogFolder $log)
+
+        Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
+        $rows.Count | Should -Be 1
+        $rows[0].Result | Should -Be 'Skipped (nothing to copy)'
+        $rows[0].Detail | Should -Be 'Already has these permissions; nothing changed.'
+    }
+
+    It 'Review1_TargetUnderTheSourceWithDifferentCase_StillCountsTheInheritedRule' {
+        $src = New-TestFolder 'r1c-src'
+        $dst = New-TestFolder 'r1c-src\child'
+        $log = Join-Path $TestDrive 'r1c-logs'
+        $script:Seed[$src] = 'O:BAG:SYD:AI(A;OICI;0x1301bf;;;S-1-5-32-545)'
+        $script:Seed[$src.ToUpperInvariant()] = $script:Seed[$src]
+        $script:Seed[$dst] = 'O:BAG:SYD:AI(A;OICIID;0x1301bf;;;S-1-5-32-545)'
+
+        $rows = @(Copy-FolderPermission -SourcePath $src.ToUpperInvariant() -TargetPath $dst -LogFolder $log)
+
+        Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
+        $rows[0].Result | Should -Be 'Skipped (nothing to copy)'
+    }
+
+    It 'Review1_UnrelatedTargetWithTheRuleOnlyInherited_StillGetsItAsItsOwn' {
+        # Outside the source an inherited rule comes from somewhere else: only own rules count
+        # (AC7/AC8). 'r1u-src2' starts with 'r1u-src' but is not under it.
+        $src = New-TestFolder 'r1u-src'
+        $dst = New-TestFolder 'r1u-src2'
+        $log = Join-Path $TestDrive 'r1u-logs'
+        $script:Seed[$src] = 'O:BAG:SYD:AI(A;OICI;0x1301bf;;;S-1-5-32-545)'
+        $script:Seed[$dst] = 'O:BAG:SYD:AI(A;OICIID;0x1301bf;;;S-1-5-32-545)'
+
+        $rows = @(Copy-FolderPermission -SourcePath $src -TargetPath $dst -LogFolder $log)
+
+        $rows[0].Result | Should -Be 'Done'
+        Should -Invoke Set-Acl -Times 1 -Exactly -Scope It -ParameterFilter { $LiteralPath -eq $dst }
+        @($script:Applied[$dst].Access | Where-Object { (Get-RuleSid $_) -eq 'S-1-5-32-545' -and -not $_.IsInherited }).Count | Should -Be 1
+    }
+
+    It 'Review1_TestPathWithin_IsCaseInsensitiveAndStopsAtABackslash' {
+        Test-PathWithin -Path 'D:\Shares\HR' -Root 'D:\Shares\HR' | Should -BeTrue
+        Test-PathWithin -Path 'D:\Shares\HR\Pay' -Root 'd:\shares\hr\' | Should -BeTrue
+        Test-PathWithin -Path 'D:\Shares\HR2' -Root 'D:\Shares\HR' | Should -BeFalse
+        Test-PathWithin -Path 'D:\Shares' -Root 'D:\Shares\HR' | Should -BeFalse
+        Test-PathWithin -Path 'D:\Shares\HR [old]\x' -Root 'D:\Shares\HR [old]' | Should -BeTrue
+        Test-PathWithin -Path 'D:\Any' -Root 'D:\' | Should -BeTrue
+        Test-PathWithin -Path '' -Root 'D:\' | Should -BeFalse
+    }
+
+    It 'Review1_PlanErrorOtherThanReadingTheTarget_RowFailedWithTheErrorAndNothingChanged' {
+        $src = New-TestFolder 'r4-src'
+        $dst = New-TestFolder 'r4-dst'
+        $log = Join-Path $TestDrive 'r4-logs'
+        $script:Seed[$src] = Get-TwoRuleSddl
+        Mock Get-PermissionCopyPlan { throw 'The rule could not be added (test)' }
+
+        $rows = @(Copy-FolderPermission -SourcePath $src -TargetPath $dst -LogFolder $log)
+
+        Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
+        $rows.Count | Should -Be 1
+        $rows[0].Result | Should -Be 'Failed'
+        $rows[0].Error | Should -Be 'The rule could not be added (test). Nothing was changed.'
+    }
+
+    It 'Review1_TargetThatCannotBeRead_IsStillRefusedAsUnreadable' {
+        $src = New-TestFolder 'r4r-src'
+        $dst = New-TestFolder 'r4r-dst'
+        $log = Join-Path $TestDrive 'r4r-logs'
+        $script:Seed[$src] = Get-TwoRuleSddl
+        $script:Dst = $dst
+        Mock Get-Acl { throw 'Attempted to perform an unauthorized operation. (test)' } -ParameterFilter { $LiteralPath -eq $script:Dst }
+
+        $rows = @(Copy-FolderPermission -SourcePath $src -TargetPath $dst -LogFolder $log)
+
+        Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
+        $rows[0].Result | Should -Be 'Failed'
+        $rows[0].Error | Should -BeLike 'Could not read the current permissions, so nothing was changed.*'
+    }
+
+    It 'Review1_RuleThatMergesIntoAnExistingOne_IsNotListedAsAdded' {
+        # Allow Read for Users merges into the target's Allow Modify for Users (same security
+        # descriptor); Allow Modify for Backup Operators is really added.
+        $src = New-TestFolder 'r5-src'
+        $dst = New-TestFolder 'r5-dst'
+        $log = Join-Path $TestDrive 'r5-logs'
+        $script:Seed[$src] = (New-FakeAcl -Rule @((New-Rule 'S-1-5-32-545' 'Read'), (New-Rule 'S-1-5-32-551' 'Modify'))).Sddl
+        $script:Seed[$dst] = (New-FakeAcl -Rule @(New-Rule 'S-1-5-32-545' 'Modify')).Sddl
+        $backupOperators = @((Get-Acl -LiteralPath $src).Access | Where-Object { (Get-RuleSid $_) -eq 'S-1-5-32-551' })[0].IdentityReference.Value
+
+        $rows = @(Copy-FolderPermission -SourcePath $src -TargetPath $dst -LogFolder $log)
+
+        $rows[0].Result | Should -Be 'Done'
+        $rows[0].Detail | Should -Be "Copied from $($src): Allow Modify for $backupOperators"
+        Should -Invoke Set-Acl -Times 1 -Exactly -Scope It
+    }
+
+    It 'Review1_TargetUpToDateByTheTimeOfTheChange_SkippedNotDone' {
+        # Checked first without the rules; by the time of the change it has them (changed by
+        # someone else in between).
+        $src = New-TestFolder 'r6-src'
+        $dst = New-TestFolder 'r6-dst'
+        $log = Join-Path $TestDrive 'r6-logs'
+        $script:Seed[$src] = Get-TwoRuleSddl
+        $script:Seed[$dst] = (New-FakeAcl).Sddl
+        $script:Dst = $dst
+        $script:Later = Get-TwoRuleSddl
+        $script:DstReads = 0
+        Mock Get-Acl {
+            $script:DstReads++
+            $p = "$LiteralPath"   # -LiteralPath is a string array
+            $acl = & $script:RealGetAcl -LiteralPath $p
+            $acl.SetSecurityDescriptorSddlForm($(if ($script:DstReads -eq 1) { $script:Seed[$p] } else { $script:Later }))
+            $acl
+        } -ParameterFilter { $LiteralPath -eq $script:Dst }
+
+        $rows = @(Copy-FolderPermission -SourcePath $src -TargetPath $dst -LogFolder $log)
+
+        Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
+        $rows[0].Result | Should -Be 'Skipped (nothing to copy)'
+        $rows[0].Detail | Should -Be 'Already has these permissions; nothing changed.'
+    }
+
+    It 'Review1_TargetPartlyUpToDateByTheTimeOfTheChange_DetailListsOnlyWhatWasWritten' {
+        $src = New-TestFolder 'r6p-src'
+        $dst = New-TestFolder 'r6p-dst'
+        $log = Join-Path $TestDrive 'r6p-logs'
+        $script:Seed[$src] = Get-TwoRuleSddl
+        $script:Seed[$dst] = (New-FakeAcl).Sddl
+        $script:Dst = $dst
+        $script:Later = (New-FakeAcl -Rule @(New-Rule 'S-1-5-32-545' 'Modify')).Sddl
+        $script:DstReads = 0
+        Mock Get-Acl {
+            $script:DstReads++
+            $p = "$LiteralPath"   # -LiteralPath is a string array
+            if ($script:Applied.ContainsKey($p)) { return $script:Applied[$p] }
+            $acl = & $script:RealGetAcl -LiteralPath $p
+            $acl.SetSecurityDescriptorSddlForm($(if ($script:DstReads -eq 1) { $script:Seed[$p] } else { $script:Later }))
+            $acl
+        } -ParameterFilter { $LiteralPath -eq $script:Dst }
+        $backupOperators = @((Get-Acl -LiteralPath $src).Access | Where-Object { (Get-RuleSid $_) -eq 'S-1-5-32-551' })[0].IdentityReference.Value
+
+        $rows = @(Copy-FolderPermission -SourcePath $src -TargetPath $dst -LogFolder $log)
+
+        Should -Invoke Set-Acl -Times 1 -Exactly -Scope It
+        $rows[0].Result | Should -Be 'Done'
+        $rows[0].Detail | Should -Be "Copied from $($src): Allow Read & execute for $backupOperators"
+    }
+
+    It 'Review1_DoneCopyMessage_SaysBlockedSubfoldersAreExpected' {
+        $src = New-TestFolder 'r7-src'
+        $dst = New-TestFolder 'r7-dst'
+        $log = Join-Path $TestDrive 'r7-logs'
+        $script:Seed[$src] = Get-TwoRuleSddl
+        $script:Seed[$dst] = (New-FakeAcl).Sddl
+
+        $rows = @(Copy-FolderPermission -SourcePath $src -TargetPath $dst -LogFolder $log)
+        $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $log 'Changes.csv') -LogFolder $log
+
+        $message | Should -BeLike '*Any that block inheritance were not changed. That is expected: Windows passes permissions down only to the items that inherit them, as Explorer does.*'
+    }
+
+    It 'Review1_SourceWithNoOwnRules_MissingTargetIsStillNotFound' {
+        $src = New-TestFolder 'r8-src'
+        $dst = New-TestFolder 'r8-dst'
+        $missing = Join-Path $TestDrive 'r8-missing'
+        $log = Join-Path $TestDrive 'r8-logs'
+        $script:Seed[$src] = 'O:BAG:SYD:AI(A;OICIID;0x1200a9;;;S-1-5-32-545)'
+
+        $rows = @(Copy-FolderPermission -SourcePath $src -TargetPath @($dst, $missing) -LogFolder $log)
+
+        Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
+        ($rows.Result -join ',') | Should -Be 'Skipped (nothing to copy),Skipped (not found)'
+        $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $log 'Changes.csv') -LogFolder $log
+        $message | Should -BeLike "*Nothing to copy: $([WildcardPattern]::Escape($src)) has no permissions of its own.*"
+        $message | Should -BeLike '*1 not found and skipped.*'
+
+        $rows = @(Copy-FolderPermission -SourcePath $src -TargetPath $missing -LogFolder $log)
+        $rows[0].Result | Should -Be 'Skipped (not found)'
+        $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $log 'Changes.csv') -LogFolder $log
+        $message | Should -BeLike "*Nothing to copy: *$([WildcardPattern]::Escape($missing)) does not exist.*"
+    }
+
+    It 'Review1_NothingToCopyMessage_GivesTheNextStep' {
+        $src = New-TestFolder 'r9-src'
+        $dst = New-TestFolder 'r9-dst'
+        $log = Join-Path $TestDrive 'r9-logs'
+        $script:Seed[$src] = 'O:BAG:SYD:AI(A;OICIID;0x1200a9;;;S-1-5-32-545)'
+
+        $rows = @(Copy-FolderPermission -SourcePath $src -TargetPath $dst -LogFolder $log)
+        $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $log 'Changes.csv') -LogFolder $log
+
+        $message | Should -BeLike '*has no permissions of its own.*Open a folder that has its own permissions, or use Add Permission.*'
+    }
 }
 
 Describe 'GUI replicate endpoint ignores an old client''s recursive flag (SQ-015, AC14)' {
@@ -367,5 +572,113 @@ Describe 'GUI replicate endpoint ignores an old client''s recursive flag (SQ-015
         @($script:Sent.results).Count | Should -Be 1
         $script:Sent.results[0].status | Should -Be 'success'
         $script:Sent.message | Should -BeLike "*$([WildcardPattern]::Escape($src))*"
+    }
+
+    # --- Fix round 1 (SQ-015 review): up-to-date targets are not a shortfall -----------------
+
+    It 'Review1_AllTargetsUpToDate_RowsAreUnchanged' {
+        $src = New-TestFolder 'g-all-src'
+        $a = New-TestFolder 'g-all-a'
+        $b = New-TestFolder 'g-all-b'
+        $script:Seed[$src] = Get-TwoRuleSddl
+        $script:Seed[$a] = Get-TwoRuleSddl
+        $script:Seed[$b] = Get-TwoRuleSddl
+        $script:Body = [PSCustomObject]@{ sourcePath = $src; targetPaths = @($a, $b) }
+        Invoke-ReplicatePermissions $null ([PSCustomObject]@{ StatusCode = 200 })
+
+        Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
+        $script:Sent.status | Should -Be 'complete'
+        ($script:Sent.results.status -join ',') | Should -Be 'unchanged,unchanged'
+        $script:Sent.results[0].message | Should -Be 'Already has these permissions; nothing changed.'
+        $script:Sent.message | Should -BeLike '*2 folder(s) already had these permissions and were not changed.*'
+        $script:Sent.message | Should -Not -BeLike '*failed*'
+    }
+
+    It 'Review1_DoneAndUpToDate_RowsAreSuccessAndUnchanged' {
+        $src = New-TestFolder 'g-mix-src'
+        $a = New-TestFolder 'g-mix-a'
+        $b = New-TestFolder 'g-mix-b'
+        $script:Seed[$src] = Get-TwoRuleSddl
+        $script:Seed[$a] = (New-FakeAcl).Sddl
+        $script:Seed[$b] = Get-TwoRuleSddl
+        $script:Body = [PSCustomObject]@{ sourcePath = $src; targetPaths = @($a, $b) }
+        Invoke-ReplicatePermissions $null ([PSCustomObject]@{ StatusCode = 200 })
+
+        ($script:Sent.results.status -join ',') | Should -Be 'success,unchanged'
+        $script:Sent.logPath | Should -Not -BeNullOrEmpty
+        $script:Sent.message | Should -BeLike "Permissions copied from $([WildcardPattern]::Escape($src)) to 1 of 2 folders.*1 folder(s) already had these permissions*"
+    }
+
+    It 'Review1_DoneAndFailed_RowsAreSuccessAndError' {
+        $src = New-TestFolder 'g-fail-src'
+        $a = New-TestFolder 'g-fail-a'
+        $file = New-TestFile 'g-fail-file.txt'
+        $script:Seed[$src] = Get-TwoRuleSddl
+        $script:Seed[$a] = (New-FakeAcl).Sddl
+        $script:Body = [PSCustomObject]@{ sourcePath = $src; targetPaths = @($a, $file) }
+        Invoke-ReplicatePermissions $null ([PSCustomObject]@{ StatusCode = 200 })
+
+        ($script:Sent.results.status -join ',') | Should -Be 'success,error'
+        $script:Sent.message | Should -BeLike '*1 failed.*'
+    }
+
+    It 'Review1_AllFailed_RowsAreAllErrors' {
+        $src = New-TestFolder 'g-allf-src'
+        $f1 = New-TestFile 'g-allf-1.txt'
+        $f2 = New-TestFile 'g-allf-2.txt'
+        $script:Seed[$src] = Get-TwoRuleSddl
+        $script:Body = [PSCustomObject]@{ sourcePath = $src; targetPaths = @($f1, $f2) }
+        Invoke-ReplicatePermissions $null ([PSCustomObject]@{ StatusCode = 200 })
+
+        Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
+        ($script:Sent.results.status -join ',') | Should -Be 'error,error'
+        $script:Sent.message | Should -BeLike 'Nothing was changed. 2 failed.*'
+    }
+}
+
+Describe 'GUI page: copy result and dialog wording (SQ-015 fix round 1)' {
+    BeforeAll {
+        $script:GuiRaw = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\FolderPermissionManager-GUI.ps1') -Raw
+        $script:StatusType = [regex]::Match($script:GuiRaw, '(?s)function changeStatusType\(r\) \{.*?\n\}').Value
+        $script:ShowResult = [regex]::Match($script:GuiRaw, '(?s)function showChangeResult\(r\) \{.*?\n\}').Value
+    }
+
+    It 'Review1_StatusType_AllUnchangedIsInfoWithoutNeedingALog' {
+        $script:StatusType | Should -Not -BeNullOrEmpty
+        # The info line comes before the warning line, which is the one that checks logPath.
+        $info = $script:StatusType.IndexOf("if (res.length && unchanged === res.length) return 'info';")
+        $warn = $script:StatusType.IndexOf('!r.logPath')
+        $info | Should -BeGreaterThan -1
+        $info | Should -BeLessThan $warn
+        $script:StatusType | Should -Match "x\.status === 'unchanged'"
+    }
+
+    It 'Review1_StatusType_UnchangedIsNotAShortfallButNotFoundAndFailedAre' {
+        # done < res.length counted an up-to-date row as a shortfall.
+        $script:StatusType | Should -Not -Match 'done < res\.length'
+        $script:StatusType | Should -Match "if \(failed \|\| notFound \|\| !r\.logPath \|\| r\.unrestorable\) return 'warning';"
+        $script:StatusType | Should -Match "if \(res\.length && failed && !done\) return 'error';"
+    }
+
+    It 'Review1_ShowResult_PartlyDoneOnlyWhenARowFailedOrWasNotFound' {
+        $script:ShowResult | Should -Not -BeNullOrEmpty
+        $script:ShowResult | Should -Match "x\.status === 'error' \|\| x\.status === 'skipped'"
+        $script:ShowResult | Should -Not -Match "x\.status !== 'success'"
+    }
+
+    It 'Review1_CopyDialog_NamesTheSourceLabelsTheListAndWarnsAboutDeny' {
+        $modal = [regex]::Match($script:GuiRaw, '(?s)<div class="modal-overlay" id="replicateModal">.*?<div class="modal-actions">').Value
+        $modal | Should -Not -BeNullOrEmpty
+        $modal | Should -Match 'Copy from: <strong id="replicateSource"'
+        $modal | Should -Match '<label for="replicateTargets">Folders to copy to \(one per line\)</label>'
+        $modal | Should -Match 'folders with inheritance turned off'
+        $modal | Should -Match 'id="replicateDenyNote"'
+
+        $show = [regex]::Match($script:GuiRaw, '(?s)function showReplicateModal\(\) \{.*?\n\}').Value
+        $show | Should -Match "getElementById\('replicateSource'\)\.textContent = currentFolder"
+        $show | Should -Match "!e\.isInherited && e\.type === 'Deny'"
+
+        $submit = [regex]::Match($script:GuiRaw, '(?s)function submitReplicate\(\) \{.*?\n\}').Value
+        $submit | Should -Match "setStatus\('Enter at least one folder to copy to, one per line\.', 'error'\)"
     }
 }

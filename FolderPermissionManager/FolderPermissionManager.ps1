@@ -15,8 +15,9 @@
        file cannot be written, nothing is changed.
     2. Shows the top folder's owner and permissions, and the owner of each subfolder.
     3. Copies the permissions set directly on the top folder (not the ones it inherits) to
-       every subfolder: entries a subfolder does not already have as its own are added,
-       nothing is removed. If the top folder has no permissions of its own, nothing is copied.
+       every subfolder: entries a subfolder does not already have, as its own or inherited
+       from the top folder, are added; nothing is removed. A subfolder that already inherits
+       them is not changed. If the top folder has no permissions of its own, nothing is copied.
        The permissions of every subfolder that changes are saved to
        <LogFolder>\Backups\<yyyy-MM-dd_HHmmss>_CopyPermissions.csv first.
 
@@ -120,8 +121,10 @@ function Write-CliChangeResult {
         returns $true when it needs the technician's attention (a row is Failed or Partly done,
         or a whole folder could not be checked everywhere: Test-TreeEntryIncomplete).
     .DESCRIPTION
-        [PASS] only when every row is Done, was logged, can be restored from its backup, and
-        (for a whole folder) every folder could be opened and every owner read back.
+        [PASS] only when every row is Done (or already up to date: 'Skipped (nothing to
+        copy)'), was logged, can be restored from its backup, and (for a whole folder) every
+        folder could be opened and every owner read back. [INFO] when nothing was done because
+        every row is -WhatIf or already up to date.
     #>
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Entries,
@@ -132,9 +135,11 @@ function Write-CliChangeResult {
     $all = @($Entries | Where-Object { $null -ne $_ })
     $message = Get-ChangeResultMessage -Entries $all -LogPath $LogPath -LogFolder $LogFolder
     $results = @($all | ForEach-Object { $_.Result })
-    $notDone = @($results | Where-Object { $_ -ne 'Done' })
+    # A folder that already had the permissions needed nothing: not a shortfall.
+    $upToDate = 'Skipped (nothing to copy)'
+    $notDone = @($results | Where-Object { $_ -ne 'Done' -and $_ -ne $upToDate })
     $incomplete = @($all | Where-Object { Test-TreeEntryIncomplete $_ })
-    if ($all.Count -gt 0 -and @($results | Where-Object { $_ -ne 'Skipped (WhatIf)' }).Count -eq 0) {
+    if ($all.Count -gt 0 -and @($results | Where-Object { $_ -ne 'Skipped (WhatIf)' -and $_ -ne $upToDate }).Count -eq 0) {
         Write-Host "[INFO] $message" -ForegroundColor Cyan
     } elseif ($all.Count -gt 0 -and $notDone.Count -eq 0 -and $incomplete.Count -eq 0 -and $LogPath -and (Get-UnrestorableItemCount -Entries $all) -eq 0) {
         Write-Host "[PASS] $message" -ForegroundColor Green

@@ -55,12 +55,18 @@ to each folder you list. Nothing already on a target folder is removed.
 - Only the current folder's **own** permissions are copied. Permissions it only inherits from
   its parent are not, so later changes higher up the share still reach the target. If the
   folder has no permissions of its own, nothing changes and the status bar says
-  `Nothing to copy: <folder> has no permissions of its own. All of its permissions come from <parent>.`
+  `Nothing to copy: <folder> has no permissions of its own. All of its permissions come from <parent>. Open a folder that has its own permissions, or use Add Permission.`
 - Each permission arrives exactly as it is: the same person or group, the same level of access
   (Read & execute stays Read & execute; special combinations stay as they are), Allow or Deny,
   and the same "applies to" setting.
 - A target that already has every one of those permissions is not changed
-  (`Skipped (nothing to copy)`, "Already has these permissions; nothing changed.").
+  (`Skipped (nothing to copy)`, "Already has these permissions; nothing changed."). The status
+  bar shows this as information, not as a problem. For a target inside the current folder, a
+  permission it already inherits from the current folder counts as already there: it is not
+  added again as the target's own, so removing it from the current folder later still removes
+  it everywhere below.
+- If the current folder has a Deny permission of its own, the dialog says so before you copy:
+  a Deny is copied too and blocks access even where another permission allows it.
 - Each target folder is changed once. **Subfolders and files under it that inherit permissions
   get the new ones automatically**, as they would in Explorer.
 - A target that is a file is refused: "<path> is a file. Copy permissions copies to folders only."
@@ -277,8 +283,9 @@ decides the result by reading the owners back and only shows the tools' output.
 
 For servers without a browser. It takes ownership of a folder and everything under it, shows
 the permissions and the owner of each subfolder, and then copies the permissions set directly on
-the top folder (not the ones it inherits) to every subfolder (entries a subfolder lacks as its
-own are added; nothing is removed; nothing is copied when the top folder has none of its own). **It asks before
+the top folder (not the ones it inherits) to every subfolder (entries a subfolder has neither
+as its own nor inherited from the top folder are added, so a subfolder that inherits them is not
+changed; nothing is removed; nothing is copied when the top folder has none of its own). **It asks before
 taking ownership and again before copying**, and every change is backed up and logged exactly
 as in the GUI (owner snapshot before taking ownership, SDDL backup before copying, same
 `Changes_<yyyy-MM-dd>.csv`). Changes anything? **Yes**: owners and permissions.
