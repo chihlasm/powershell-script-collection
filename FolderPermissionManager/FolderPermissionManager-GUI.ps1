@@ -44,6 +44,9 @@
     ownership of this folder only, copy permissions without "apply recursively"), the current
     permissions are saved to <LogFolder>\Backups. If that fails, nothing is changed. Each
     change is then logged to <LogFolder>\Changes_<yyyy-MM-dd>.csv. See README "Undo a change".
+    Taking ownership of all subfolders and files first saves the owner of every item to
+    <LogFolder>\Backups\<yyyy-MM-dd_HHmmss>_TakeOwnership.csv and logs one row for the folder.
+    Copying permissions with "apply recursively" is still not backed up or logged.
     The logic lives in FolderPermissions.Core.ps1, which must stay next to this script.
 
     REFERENCES
@@ -164,7 +167,7 @@ function Complete-PermissionChange {
             message      = Get-ChangeResultMessage -Entries $entries -LogPath $result.LogPath -LogFolder $script:ChangeLogFolder
             logPath      = $result.LogPath
             backupPath   = $(if ($backup.Count -gt 0) { $backup[0].BackupFile } else { $null })
-            unrestorable = @($entries | Where-Object { $_.Result -eq 'Done' -and $_.OldValue -eq 'Could not read' }).Count
+            unrestorable = Get-UnrestorableItemCount -Entries $entries
         }
     }
 }
@@ -182,8 +185,10 @@ function ConvertTo-ChangeResultRow {
     })
 }
 
-# Sends the result of a change to ONE folder: 200 with status 'success', or the existing error
-# shape (400 when the folder does not exist, 500 otherwise) with the same added fields.
+# Sends the result of a change to ONE folder: 200 with status 'success', 200 with status
+# 'partial' when a whole-tree change was only partly done (the page shows it as a warning), or
+# the existing error shape (400 when the folder does not exist, 500 otherwise) with the same
+# added fields.
 function Send-SingleChangeResult {
     param([System.Net.HttpListenerResponse]$Response, [scriptblock]$Change)
     $completed = Complete-PermissionChange -Change $Change
@@ -191,6 +196,8 @@ function Send-SingleChangeResult {
     $data = $completed.Data
     if ($entries.Count -gt 0 -and @($entries | Where-Object { $_.Result -ne 'Done' }).Count -eq 0) {
         $data['status'] = 'success'
+    } elseif ($entries.Count -gt 0 -and @($entries | Where-Object { $_.Result -ne 'Done' -and $_.Result -ne 'Partly done' }).Count -eq 0) {
+        $data['status'] = 'partial'
     } else {
         $Response.StatusCode = if (@($entries | Where-Object { $_.Result -eq 'Skipped (not found)' }).Count -gt 0) { 400 } else { 500 }
         $data['error'] = $data.message
@@ -418,21 +425,9 @@ function Invoke-TakeOwnership {
         return
     }
 
-    # All subfolders and files: unchanged here; backup and logging come with SQ-014.
-    try {
-        # takeown first to force ownership on folders and files (uses SE_TAKE_OWNERSHIP privilege)
-        $takeownOutput = takeown /F $folderPath /R /A /D Y 2>&1
-        # Then set the current user as owner via icacls on all files and folders
-        $icaclsOutput = icacls $folderPath /setowner $env:USERNAME /T /C /Q 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            throw "icacls failed: $icaclsOutput"
-        }
-        Send-Json $Response @{ status = 'success'; message = "Ownership taken recursively on all folders and files in $folderPath" }
-    }
-    catch {
-        $Response.StatusCode = 500
-        Send-Json $Response @{ error = "Take ownership failed: $($_.Exception.Message)" }
-    }
+    # All subfolders and files: the core saves every item's owner first, then runs takeown /R
+    # and icacls /setowner /T, and logs one row for the whole folder.
+    Send-SingleChangeResult $Response { Set-ItemOwnerToCurrentUser -Path $folderPath -Recurse -LogFolder $script:ChangeLogFolder }
 }
 
 function Invoke-ReplicatePermissions {
@@ -1593,6 +1588,7 @@ function changeStatusType(r) {
     var res = r.results || [];
     var failed = res.filter(function(x) { return x.status === 'error'; }).length;
     var done = res.filter(function(x) { return x.status === 'success'; }).length;
+    if (r.status === 'partial') return 'warning';
     if (res.length && failed && !done) return 'error';
     if (failed || done < res.length || !r.logPath || r.unrestorable) return 'warning';
     return 'success';
@@ -1601,7 +1597,8 @@ function changeStatusType(r) {
 function showChangeResult(r) {
     var type = changeStatusType(r);
     var msg = r.message;
-    if (type === 'warning') {
+    // A partly done whole-tree change already starts "Partly done:".
+    if (type === 'warning' && r.status !== 'partial') {
         var res = r.results || [];
         var partial = res.some(function(x) { return x.status !== 'success'; });
         msg = (partial ? 'Partly done: ' : 'Check this: ') + msg;
@@ -2004,21 +2001,13 @@ function submitRemoveAce() {
 function takeOwnership(recursive) {
     if (!currentFolder) return;
     var msg = recursive
-        ? 'This will change ownership on ALL files and subfolders under:\n\n' + currentFolder + '\n\nThis cannot be undone. Continue?'
+        ? 'This will change ownership on ALL files and subfolders under:\n\n' + currentFolder + '\n\nThe current owners will be saved to a backup first. Continue?'
         : 'Take ownership of:\n\n' + currentFolder + '?';
     if (!confirm(msg)) return;
-    setStatus(recursive ? 'Taking ownership...' : 'Backing up and taking ownership...', 'info');
+    setStatus(recursive ? 'Saving the current owners and taking ownership of everything in this folder. This can take a while...' : 'Backing up and taking ownership...', 'info');
     api('/api/take-ownership', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: currentFolder, recursive: recursive }) })
-        .then(function(r) {
-            // The whole-tree action is not backed up or logged yet (SQ-014), and says so.
-            if (recursive) { setStatus((r.message || 'Ownership taken') + '. Not backed up or logged.', 'success'); }
-            else { showChangeResult(r); }
-            loadFolderAcl(currentFolder);
-        })
-        .catch(function(e) {
-            if (recursive) { setStatus('Failed: ' + e.message, 'error'); }
-            else { showChangeError(e); }
-        });
+        .then(function(r) { showChangeResult(r); loadFolderAcl(currentFolder); })
+        .catch(showChangeError);
 }
 
 function showReplicateModal() {

@@ -44,9 +44,10 @@ why. This covers:
 - Add permission and Remove permission (folder, or selected files)
 - Take ownership of this folder only, or of selected files
 - Copy permissions to other folders, when "apply recursively" is not ticked
+- Take ownership of a folder **and all its subfolders and files**: the current owner of every
+  item is saved first (see the owner snapshot below)
 
-The two "all subfolders and files" options (take ownership recursively, copy permissions
-recursively) are **not backed up or logged yet**.
+Copying permissions with "apply recursively" ticked is **not backed up or logged yet**.
 
 After each change the status bar says what was done and where it was logged, for example
 `Added Allow Modify for CONTOSO\HR-Staff on \\FS01\Data\HR. Backed up to ...\Backups\2026-10-17_142233_AddPermission.csv and logged to ...\Changes_2026-10-17.csv.`
@@ -56,17 +57,28 @@ The console shows the log folder at startup.
 |------|---------------|
 | `Logs\Changes_<yyyy-MM-dd>.csv` | One row per folder or file changed: `Time`, `Technician`, `Computer`, `Action`, `Target`, `ItemType`, `Detail`, `OldValue`, `NewValue`, `Result`, `Error`, `BackupFile`. `OldValue` and `NewValue` are the permissions before and after, as SDDL text. |
 | `Logs\Backups\<yyyy-MM-dd_HHmmss>_<Action>.csv` | The permissions as they were just before one action: `Path`, `ItemType`, `Sddl`. |
+| `Logs\Backups\<yyyy-MM-dd_HHmmss>_TakeOwnership.csv` (whole folder) | The owner snapshot written before taking ownership of a folder and everything under it: `Path`, `ItemType`, `Owner`, `OwnerSid`, one row for the folder and every subfolder and file under it (hidden ones too). |
 
-`Result` is one of `Done`, `Failed`, `Skipped (not found)` or `Skipped (WhatIf)`. A `Failed`
+`Result` is one of `Done`, `Partly done`, `Failed`, `Skipped (not found)` or `Skipped (WhatIf)`. A `Failed`
 row whose `NewValue` differs from its `OldValue` was **partly changed** (for example, takeown
 gave the folder to Administrators but the owner could not then be set to you); the status bar
 says so and points at the backup. Each row is written as soon as that item is done, so a batch
 that is interrupted still leaves a log of what it changed.
 
-`Could not read` means the tool could not read the item's permissions before the change. Add
-permission, Remove permission and Copy permissions then refuse that item and change nothing.
-Take ownership still goes ahead (it exists for folders you are locked out of), so that item
-cannot be restored from the backup, and the status bar says so.
+Taking ownership of a whole folder logs **one row for the folder** (`ItemType` = `Folder tree`):
+`OldValue` is `Saved in <owner snapshot>`, `NewValue` is `Owner: <you>`. It runs
+`takeown /F <folder> /R /A /D Y` (gives every item to Administrators, so locked-out items can be
+opened) and then `icacls <folder> /setowner <DOMAIN\you> /T /C /Q` (makes you the owner). If
+either tool reports errors but something was changed, the row is `Partly done` and `Error` holds
+the tool's own summary, for example `Successfully processed 3 files; Failed processing 2 files`;
+if nothing succeeded it is `Failed`. Items under a folder the tool could not open are not in the
+snapshot, and the status bar says how many folders that was.
+
+`Could not read` means the tool could not read the item's permissions (or, in an owner
+snapshot, its owner) before the change. Add permission, Remove permission and Copy permissions
+then refuse that item and change nothing. Take ownership still goes ahead, for one item or a
+whole folder (it exists for folders you are locked out of), so that item cannot be restored
+from the backup, and the status bar says how many there were.
 
 Remove permission removes **every** Allow (or Deny) entry the account has on the item, whatever
 rights you picked, as it always has; the status bar says "Removed all Allow permissions for ...
@@ -127,26 +139,87 @@ and the check above warns. A warning can also mean Windows changed the inherited
 permissions (for example, the parent folder changed since the backup); compare the two SDDL
 strings to see what differs.
 
+#### Put owners back after taking ownership of a whole folder
+
+The owner snapshot (`..._TakeOwnership.csv`, named in the log's `BackupFile` column) holds
+every item's owner. Run, as administrator:
+
+```powershell
+$snapshot = 'C:\Tools\FolderPermissionManager\Logs\Backups\2026-10-17_142233_TakeOwnership.csv'
+foreach ($row in Import-Csv -LiteralPath $snapshot) {
+    $path = if ($row.Path -match "^'[=+\-@\t\r]") { $row.Path.Substring(1) } else { $row.Path }
+    if (-not $row.OwnerSid) { Write-Warning "No saved owner for $path ($($row.Owner))"; continue }
+    $sid = New-Object System.Security.Principal.SecurityIdentifier -ArgumentList $row.OwnerSid
+    $acl = Get-Acl -LiteralPath $path
+    $acl.SetOwner($sid)
+    Set-Acl -LiteralPath $path -AclObject $acl
+
+    # Check: read the owner again and compare it with the snapshot.
+    $now = (Get-Acl -LiteralPath $path).GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+    if ($now -ne $row.OwnerSid) {
+        Write-Warning "$path is owned by $now, not $($row.Owner) ($($row.OwnerSid))."
+    } else {
+        Write-Host "[PASS] $path owner restored" -ForegroundColor Green
+    }
+}
+```
+
+The restore uses the saved SID, not the name, so it also works for an owner whose account
+name has changed. Instead of `Set-Acl` you can run, per row,
+`icacls "<path>" /setowner "*<OwnerSid>" /C` (a SID is written with a leading `*`) and then check
+with `(Get-Acl -LiteralPath "<path>").Owner`. Either way this needs an elevated window
+(`SeRestorePrivilege`, see above). Rows with `Could not read` have no saved owner and are
+skipped with a warning. Taking ownership does not change permissions, so there is nothing else
+to put back.
+
 References:
 [Get-Acl](https://learn.microsoft.com/powershell/module/microsoft.powershell.security/get-acl),
 [Set-Acl](https://learn.microsoft.com/powershell/module/microsoft.powershell.security/set-acl),
 [SetSecurityDescriptorSddlForm](https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.objectsecurity.setsecuritydescriptorsddlform),
 [SeRestorePrivilege sets any owner](https://learn.microsoft.com/windows/win32/secauthz/privilege-constants),
-[RemoveAccessRuleAll](https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.filesystemsecurity.removeaccessruleall).
+[RemoveAccessRuleAll](https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.filesystemsecurity.removeaccessruleall),
+[GetOwner](https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.objectsecurity.getowner),
+[takeown](https://learn.microsoft.com/windows-server/administration/windows-commands/takeown),
+[icacls](https://learn.microsoft.com/windows-server/administration/windows-commands/icacls).
+Microsoft Learn documents neither `icacls` exit codes nor its closing
+`Successfully processed ...` line; the tool reads both defensively.
 
 ### FolderPermissionManager.ps1 (CLI)
 
-Command-line script that takes ownership of subfolders, reviews permissions, and optionally replicates parent ACLs to all children.
+For servers without a browser. It takes ownership of a folder and everything under it, shows
+the permissions and the owner of each subfolder, and then copies the top folder's permissions to
+every subfolder (entries a subfolder lacks are added; nothing is removed). **It asks before
+taking ownership and again before copying**, and every change is backed up and logged exactly
+as in the GUI (owner snapshot before taking ownership, SDDL backup before copying, same
+`Changes_<yyyy-MM-dd>.csv`). Changes anything? **Yes**: owners and permissions.
 
 ```powershell
-.\FolderPermissionManager.ps1 -Path "C:\SharedFolder"
+# Dry run: shows what would change; nothing is changed, backed up or logged
+.\FolderPermissionManager.ps1 -Path 'D:\Shares\HR' -WhatIf
+
+# Asks before each step
+.\FolderPermissionManager.ps1 -Path 'D:\Shares\HR'
+
+# No questions; backups and log in the ticket folder
+.\FolderPermissionManager.ps1 -Path 'D:\Shares\HR' -Force -LogFolder 'C:\Tickets\12345'
 ```
 
-If no path is provided, the script will prompt for it.
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `-Path` | asks | The top folder |
+| `-LogFolder` | `Logs` next to the script | Where backups and the change log go (same rules as the GUI) |
+| `-Force` | — | Do not ask before taking ownership or copying permissions |
+| `-WhatIf` | — | Show what would be changed and change nothing |
+
+Answer `y` to go ahead; anything else (including Enter) skips that step. Declining ownership
+still shows the permissions and offers the copy. Run it in an elevated window: it stops with
+`[FAIL]` otherwise (except with `-WhatIf`). See "Undo a change" above to put owners or
+permissions back.
 
 ## Requirements
 
-- PowerShell 5.1+ for the GUI
+- PowerShell 5.1+ for the GUI; PowerShell 3.0+ for the command-line script (Windows Server 2012
+  and later)
 - Run as Administrator (required for ownership and permission operations)
-- Keep `FolderPermissions.Core.ps1` in the same folder as the GUI: it holds the backup,
+- Keep `FolderPermissions.Core.ps1` in the same folder as both scripts: it holds the backup,
   logging and change logic

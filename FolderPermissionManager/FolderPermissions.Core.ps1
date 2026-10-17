@@ -5,10 +5,12 @@
 
 <#
 .SYNOPSIS
-    Shared logic for FolderPermissionManager: permission backups, the change log, and the
-    single-item permission changes (add, remove, take ownership, copy).
+    Shared logic for FolderPermissionManager: permission backups, the change log, the
+    single-item permission changes (add, remove, take ownership, copy), and taking ownership
+    of a whole folder tree.
 .DESCRIPTION
-    Dot-sourced by FolderPermissionManager-GUI.ps1. Nothing here draws UI.
+    Dot-sourced by FolderPermissionManager-GUI.ps1 and FolderPermissionManager.ps1. Nothing
+    here draws UI.
 
     EVERY CHANGE IS BACKED UP AND LOGGED
     Before a change, the current permissions of every item about to change are saved as SDDL
@@ -18,6 +20,12 @@
     for folders you are locked out of. As each item completes, one row is appended to
     <LogFolder>\Changes_<yyyy-MM-dd>.csv with the SDDL before and after
     (Invoke-LoggedPermissionChange), so an interrupted batch still leaves a log.
+
+    Taking ownership of a folder and all its subfolders and files (Set-ItemOwnerToCurrentUser
+    -Recurse) first saves the owner of every item to
+    <LogFolder>\Backups\<yyyy-MM-dd_HHmmss>_TakeOwnership.csv (Path, ItemType, Owner,
+    OwnerSid), because icacls /save does not store owners. It logs one row for the whole
+    folder (ItemType 'Folder tree', Result Done, Partly done or Failed).
 
     The change-log columns are shared with other tools that change things (LocalAdminManager):
     Time, Technician, Computer, Action, Target, ItemType, Detail, OldValue, NewValue, Result,
@@ -51,13 +59,28 @@
     - RemoveAccessRuleAll removes every rule for the rule's account, whatever its rights:
       https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.filesystemsecurity.removeaccessruleall
       https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.commonobjectsecurity.removeaccessruleall
-    - takeown /F /A (/A gives ownership to the Administrators group; /D is documented for use
-      with /R; the page lists no exit codes, so anything but 0 is treated as a failure):
+    - takeown /F /R /A /D Y (/R recursive over all files in the directory and subdirectories;
+      /A gives ownership to the Administrators group; /D Y answers "take ownership" for
+      folders the account cannot list, and is documented for use with /R; the page lists no
+      exit codes, so anything but 0 is treated as a failure):
       https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
     - SeRestorePrivilege is what lets an account set any user or group as the owner:
       https://learn.microsoft.com/windows/win32/secauthz/privilege-constants
-    - icacls (/save stores DACLs only; /restore takes the parent directory):
+    - icacls (/save stores DACLs only, so owners need their own snapshot; /restore takes the
+      parent directory; /setowner changes the owner of all matching files; /T includes
+      subfolders and files; /C continues after file errors; /Q suppresses success messages;
+      a SID is given as *S-1-...):
       https://learn.microsoft.com/windows-server/administration/windows-commands/icacls
+      NOT VERIFIED: the page documents neither icacls exit codes nor its closing line
+      "Successfully processed N files; Failed processing M files". Invoke-TreeOwnershipChange
+      reads both defensively (see the comment there).
+    - ObjectSecurity.GetOwner (SecurityIdentifier always; NTAccount throws
+      IdentityNotMappedException for a deleted account) and WindowsIdentity.Name
+      (DOMAIN\USERNAME):
+      https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.objectsecurity.getowner
+      https://learn.microsoft.com/dotnet/api/system.security.principal.windowsidentity.name
+    - Get-ChildItem -Force (hidden and system items too, no security override):
+      https://learn.microsoft.com/powershell/module/microsoft.powershell.management/get-childitem
     - DriveInfo.DriveType (Fixed, Network, Removable, ...) and
       Environment.SpecialFolder.LocalApplicationData, used to pick a local log folder:
       https://learn.microsoft.com/dotnet/api/system.io.driveinfo.drivetype
@@ -273,6 +296,33 @@ function Get-ItemSddl {
     try { (Get-Acl -LiteralPath $Path -ErrorAction Stop).Sddl } catch { 'Could not read' }
 }
 
+function New-BackupFilePath {
+    <#
+    .SYNOPSIS
+        A new, unused <LogFolder>\Backups\<yyyy-MM-dd_HHmmss>_<ActionSlug>.csv path (the
+        Backups folder is created if missing). Throws when the folder cannot be created.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$LogFolder,
+        [Parameter(Mandatory)][string]$ActionSlug
+    )
+
+    $folder = Join-Path $LogFolder 'Backups'
+    if (-not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force -ErrorAction Stop | Out-Null }
+
+    # Two actions in the same second must not overwrite each other's backup; the callers'
+    # Export-Csv -NoClobber makes sure of it even if another copy of the tool creates the same
+    # name in between.
+    $stamp = Get-Date -Format 'yyyy-MM-dd_HHmmss'
+    $file = Join-Path $folder ('{0}_{1}.csv' -f $stamp, $ActionSlug)
+    $n = 2
+    while (Test-Path -LiteralPath $file) {
+        $file = Join-Path $folder ('{0}_{1}_{2}.csv' -f $stamp, $ActionSlug, $n)
+        $n++
+    }
+    $file
+}
+
 function Save-AclBackup {
     <#
     .SYNOPSIS
@@ -302,18 +352,7 @@ function Save-AclBackup {
         [PSCustomObject][ordered]@{ Path = $p; ItemType = (Get-AclItemType -Path $p); Sddl = (Get-ItemSddl -Path $p) }
     })
 
-    $folder = Join-Path $LogFolder 'Backups'
-    if (-not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force -ErrorAction Stop | Out-Null }
-
-    # Two actions in the same second must not overwrite each other's backup; -NoClobber makes
-    # sure of it even if another copy of the tool creates the same name in between.
-    $stamp = Get-Date -Format 'yyyy-MM-dd_HHmmss'
-    $file = Join-Path $folder ('{0}_{1}.csv' -f $stamp, $ActionSlug)
-    $n = 2
-    while (Test-Path -LiteralPath $file) {
-        $file = Join-Path $folder ('{0}_{1}_{2}.csv' -f $stamp, $ActionSlug, $n)
-        $n++
-    }
+    $file = New-BackupFilePath -LogFolder $LogFolder -ActionSlug $ActionSlug
 
     $rows | ForEach-Object { [PSCustomObject][ordered]@{ Path = (ConvertTo-CsvSafeText $_.Path); ItemType = $_.ItemType; Sddl = $_.Sddl } } |
         Export-Csv -LiteralPath $file -NoTypeInformation -Encoding UTF8 -NoClobber -ErrorAction Stop
@@ -334,6 +373,110 @@ function Save-AclBackup {
 function Get-BackupFailureText {
     param([Parameter(Mandatory)][string]$LogFolder, [Parameter(Mandatory)][string]$Reason)
     "Could not save a backup of the current permissions to $(Join-Path $LogFolder 'Backups'): $($Reason.Trim().TrimEnd('.')). Nothing was changed."
+}
+
+function Get-ItemOwner {
+    <#
+    .SYNOPSIS
+        The item's owner as Owner (account name) and OwnerSid, or Owner 'Could not read' and an
+        empty OwnerSid.
+    .DESCRIPTION
+        GetOwner([SecurityIdentifier]) always works once the security descriptor is read;
+        GetOwner([NTAccount]) throws IdentityNotMappedException for an owner whose account was
+        deleted, and then the SID is used as the name.
+        https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.objectsecurity.getowner
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    try {
+        $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+        $sid = "$($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value)"
+    } catch {
+        $sid = ''
+    }
+    if (-not $sid) { return [PSCustomObject]@{ Owner = 'Could not read'; OwnerSid = '' } }
+    try { $name = "$($acl.GetOwner([System.Security.Principal.NTAccount]).Value)" } catch { $name = '' }
+    if (-not $name) { $name = $sid }
+    [PSCustomObject]@{ Owner = $name; OwnerSid = $sid }
+}
+
+function Save-OwnerSnapshot {
+    <#
+    .SYNOPSIS
+        Saves the owner of a folder and of every folder and file under it to
+        <LogFolder>\Backups\<yyyy-MM-dd_HHmmss>_TakeOwnership.csv (Path, ItemType, Owner,
+        OwnerSid), reads the file back to check it, and returns File, Count, Unreadable and
+        Unlisted. Throws when the file cannot be written or does not hold what was read;
+        callers must then change nothing.
+    .DESCRIPTION
+        Needed because icacls /save stores DACLs only, not owners.
+        https://learn.microsoft.com/windows-server/administration/windows-commands/icacls
+
+        An item whose owner cannot be read is listed with Owner 'Could not read' and does not
+        stop the snapshot (owner decision D-027); Unreadable counts them. A folder that cannot
+        be opened is in the snapshot, but what is inside it is not; Unlisted counts those
+        folders. -Force includes hidden and system files, which takeown /R also changes.
+        https://learn.microsoft.com/powershell/module/microsoft.powershell.management/get-childitem
+
+        Restore: see "Undo a change" in the README (Set-Acl with the saved OwnerSid, or
+        icacls <path> /setowner *<OwnerSid>).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$LogFolder
+    )
+
+    $listErrors = $null
+    $children = @(Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable listErrors)
+    $rows = @(
+        $owner = Get-ItemOwner -Path $Path
+        [PSCustomObject][ordered]@{ Path = $Path; ItemType = 'Folder'; Owner = $owner.Owner; OwnerSid = $owner.OwnerSid }
+        foreach ($child in $children) {
+            $owner = Get-ItemOwner -Path $child.FullName
+            $type = if ($child.PSIsContainer) { 'Folder' } else { 'File' }
+            [PSCustomObject][ordered]@{ Path = $child.FullName; ItemType = $type; Owner = $owner.Owner; OwnerSid = $owner.OwnerSid }
+        }
+    )
+
+    $file = New-BackupFilePath -LogFolder $LogFolder -ActionSlug 'TakeOwnership'
+    $rows | ForEach-Object {
+        [PSCustomObject][ordered]@{ Path = (ConvertTo-CsvSafeText $_.Path); ItemType = $_.ItemType; Owner = (ConvertTo-CsvSafeText $_.Owner); OwnerSid = $_.OwnerSid }
+    } | Export-Csv -LiteralPath $file -NoTypeInformation -Encoding UTF8 -NoClobber -ErrorAction Stop
+
+    # A backup that cannot be read back is no backup: check it before anything changes.
+    $saved = @(Import-Csv -LiteralPath $file -ErrorAction Stop)
+    if ($saved.Count -ne $rows.Count) {
+        throw "the backup file $file holds $($saved.Count) of $($rows.Count) items"
+    }
+    for ($i = 0; $i -lt $rows.Count; $i++) {
+        if ((ConvertFrom-CsvSafeText $saved[$i].Path) -cne $rows[$i].Path -or $saved[$i].OwnerSid -cne $rows[$i].OwnerSid) {
+            throw "the backup file $file does not hold the owner read from $($rows[$i].Path)"
+        }
+    }
+    [PSCustomObject]@{
+        File       = $file
+        Count      = $rows.Count
+        Unreadable = @($rows | Where-Object { $_.Owner -eq 'Could not read' }).Count
+        Unlisted   = @($listErrors | Where-Object { $null -ne $_ }).Count
+    }
+}
+
+function Get-AclToolSummary {
+    <#
+    .SYNOPSIS
+        The part of a native tool's output worth showing and logging: blank lines and per-item
+        "SUCCESS:" lines (takeown prints one per item) dropped, and at most -MaxLines lines,
+        always keeping the last one (icacls ends with its "Successfully processed ..." count).
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$Output, [int]$MaxLines = 5)
+
+    $lines = @("$Output" -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -notmatch '^SUCCESS:' })
+    if ($lines.Count -gt $MaxLines) {
+        $hidden = $lines.Count - $MaxLines
+        $lines = @($lines[0..($MaxLines - 2)]) + "(and $hidden more lines)" + $lines[-1]
+    }
+    $lines -join ' '
 }
 
 #endregion
@@ -505,24 +648,34 @@ function Remove-FolderPermission {
 function Set-ItemOwnerToCurrentUser {
     <#
     .SYNOPSIS
-        Takes ownership of each folder or file (this item only) for the account running the
-        tool. Backed up first; one row per item.
+        Takes ownership of each folder or file for the account running the tool: this item
+        only, or with -Recurse the folder and everything under it. Backed up first.
     .DESCRIPTION
-        takeown /A first gives ownership to Administrators, which lets an administrator open an
-        item they are locked out of; the owner is then set to the current account with Set-Acl.
-        If that second step fails after takeown succeeded, the item is left owned by
-        Administrators and the row says so. An item whose permissions could not be read
-        beforehand is still changed and is listed as 'Could not read' in the backup (D-027).
+        This item only (one row per item): takeown /A first gives ownership to Administrators,
+        which lets an administrator open an item they are locked out of; the owner is then set
+        to the current account with Set-Acl. If that second step fails after takeown succeeded,
+        the item is left owned by Administrators and the row says so. An item whose permissions
+        could not be read beforehand is still changed and is listed as 'Could not read' in the
+        backup (D-027).
+
+        -Recurse (one row per folder, see Invoke-TreeOwnershipChange): the owner of every item
+        is saved to an owner snapshot first, then takeown /R and icacls /setowner /T change the
+        whole tree.
         https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
+    .PARAMETER Recurse
+        Take ownership of each folder and of all its subfolders and files.
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param(
         [Parameter(Mandatory)][AllowEmptyString()][AllowEmptyCollection()][string[]]$Path,
         [Parameter(Mandatory)][string]$LogFolder,
-        [switch]$Recurse   # SQ-014 STUB
+        [switch]$Recurse
     )
 
-    if ($Recurse) { throw 'Set-ItemOwnerToCurrentUser -Recurse is not implemented' }
+    if ($Recurse) {
+        foreach ($p in $Path) { Invoke-TreeOwnershipChange -Cmdlet $PSCmdlet -Path $p -LogFolder $LogFolder }
+        return
+    }
     $me = [System.Security.Principal.WindowsIdentity]::GetCurrent()
     Invoke-SingleItemAclChange -Cmdlet $PSCmdlet -Path $Path -Action 'Take ownership' -ActionSlug 'TakeOwnership' `
         -Detail "Owner set to $($me.Name)" -LogFolder $LogFolder -ProceedWhenUnreadable -Change {
@@ -590,6 +743,121 @@ function Copy-FolderPermission {
         }
         Set-Acl -LiteralPath $p -AclObject $acl -ErrorAction Stop
     }
+}
+
+#endregion
+
+#region Whole-tree changes
+
+function Test-TreeChangeEntry {
+    # True for the row of a whole-tree action ("... (all subfolders and files)"): one row for
+    # the whole folder, with the full before-state in the backup file instead of OldValue.
+    param([Parameter(Mandatory)][AllowNull()][object]$Entry)
+    $null -ne $Entry -and "$($Entry.Action)" -like '* (all subfolders and files)'
+}
+
+function Invoke-TreeOwnershipChange {
+    <#
+    .SYNOPSIS
+        Takes ownership of a folder and everything under it for the account running the tool,
+        after saving every item's owner. Returns one row for the whole folder and never throws.
+    .DESCRIPTION
+        1. ShouldProcess once for the folder (-WhatIf: nothing is read, written or changed).
+        2. Save-OwnerSnapshot: if it cannot be written and checked, nothing is changed.
+        3. takeown /F <dir> /R /A /D Y gives every item to Administrators, so an administrator
+           can open items they are locked out of.
+        4. icacls <dir> /setowner <DOMAIN\user> /T /C /Q makes the current account the owner.
+           The full name from WindowsIdentity, not $env:USERNAME, which has no domain and is
+           wrong under SYSTEM and service accounts.
+        Both tools run even if takeown reports errors (as the GUI always did): icacls is what
+        sets the final owner. Result is Done when both succeed, Partly done when one of them
+        reported errors but something was changed, and Failed when nothing succeeded. Error
+        holds the tools' own summary.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][System.Management.Automation.PSCmdlet]$Cmdlet,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Path,
+        [Parameter(Mandatory)][string]$LogFolder
+    )
+
+    $action = 'Take ownership (all subfolders and files)'
+    # WindowsIdentity.Name is the logon name in DOMAIN\USERNAME form.
+    # https://learn.microsoft.com/dotnet/api/system.security.principal.windowsidentity.name
+    $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $detail = "Owner set to $me on the folder and all subfolders and files"
+
+    $itemType = Get-AclItemType -Path $Path
+    if (-not $itemType) {
+        $why = if ([string]::IsNullOrWhiteSpace($Path)) { 'No path was given.' } else { 'The folder does not exist.' }
+        return New-PermissionChangeEntry -Action $action -Target "$Path" -ItemType 'Unknown' -Detail $detail `
+            -Result 'Skipped (not found)' -ErrorText $why
+    }
+    if ($itemType -eq 'File') {
+        return New-PermissionChangeEntry -Action $action -Target $Path -ItemType 'File' -Detail $detail -Result 'Failed' `
+            -ErrorText "$Path is a file, not a folder: take ownership of this item only instead. Nothing was changed."
+    }
+    if (-not $Cmdlet.ShouldProcess($Path, "$action ($detail)")) {
+        return New-PermissionChangeEntry -Action $action -Target $Path -ItemType 'Folder tree' -Detail $detail -Result 'Skipped (WhatIf)'
+    }
+
+    try {
+        $snapshot = Save-OwnerSnapshot -Path $Path -LogFolder $LogFolder
+    } catch {
+        return New-PermissionChangeEntry -Action $action -Target $Path -ItemType 'Folder tree' -Detail $detail -Result 'Failed' `
+            -ErrorText (Get-BackupFailureText -LogFolder $LogFolder -Reason $_.Exception.Message)
+    }
+    # Read back by Get-UnrestorableItemCount: keep the wording in step with it.
+    if ($snapshot.Unreadable -gt 0) { $detail += ". $($snapshot.Unreadable) item(s) had no readable owner before the change" }
+    if ($snapshot.Unlisted -gt 0) { $detail += ". $($snapshot.Unlisted) folder(s) could not be opened, so what is in them is not in the backup" }
+    $common = @{ Action = $action; Target = $Path; ItemType = 'Folder tree'; Detail = $detail; OldValue = "Saved in $($snapshot.File)"; BackupFile = $snapshot.File }
+
+    # takeown: /R recursive, /A owner = Administrators, /D Y answers "yes" for folders the
+    # account cannot list (documented for use with /R). Learn lists no exit codes for takeown,
+    # so anything but 0 is treated as "not every item" (NOT VERIFIED beyond that).
+    # https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
+    $takeown = Invoke-AclTool -Tool takeown -Arguments @('/F', $Path, '/R', '/A', '/D', 'Y')
+    # icacls: /setowner changes the owner of all matching files, /T includes subfolders and
+    # files, /C continues after file errors (still shown), /Q hides success messages.
+    # https://learn.microsoft.com/windows-server/administration/windows-commands/icacls
+    $icacls = Invoke-AclTool -Tool icacls -Arguments @($Path, '/setowner', $me, '/T', '/C', '/Q')
+
+    # NOT VERIFIED: Learn documents neither icacls exit codes nor its closing line
+    # "Successfully processed N files; Failed processing M files" (English Windows; other
+    # languages translate it). Both are read defensively: a non-zero exit code or a non-zero
+    # "Failed processing" count is a problem, and a non-zero "Successfully processed" count
+    # means something was changed. When the line is not found, only the exit codes count.
+    $icaclsText = "$($icacls.Output)"
+    $icaclsSet = if ($icaclsText -match 'Successfully processed (\d+) files') { [int]$Matches[1] } else { 0 }
+    $icaclsFailed = if ($icaclsText -match 'Failed processing (\d+) files') { [int]$Matches[1] } else { 0 }
+
+    $problems = New-Object System.Collections.Generic.List[string]
+    if ($takeown.ExitCode -ne 0) {
+        $problems.Add((Get-AclToolProblem -What 'takeown could not give every item to Administrators' -Result $takeown))
+    }
+    if ($icacls.ExitCode -ne 0 -or $icaclsFailed -gt 0) {
+        $problems.Add((Get-AclToolProblem -What "icacls could not make $me the owner of every item" -Result $icacls))
+    }
+    if ($problems.Count -eq 0) {
+        return New-PermissionChangeEntry @common -NewValue "Owner: $me" -Result 'Done'
+    }
+
+    $somethingChanged = $takeown.ExitCode -eq 0 -or ($icacls.ExitCode -eq 0) -or $icaclsSet -gt 0
+    if ($somethingChanged) {
+        New-PermissionChangeEntry @common -NewValue "Owner: $me on some items" -Result 'Partly done' -ErrorText ($problems -join ' ')
+    } else {
+        # Not read back: a tree is too big to check item by item, so the state is unknown.
+        New-PermissionChangeEntry @common -NewValue 'Not checked' -Result 'Failed' -ErrorText ($problems -join ' ')
+    }
+}
+
+function Get-AclToolProblem {
+    # One sentence for a native tool that reported errors: what failed, the exit code, and the
+    # tool's own summary (Get-AclToolSummary).
+    param([Parameter(Mandatory)][string]$What, [Parameter(Mandatory)][object]$Result)
+    $summary = Get-AclToolSummary -Output "$($Result.Output)"
+    if ($summary) { Format-Sentence "$What (exit code $($Result.ExitCode)): $summary" }
+    else { "$What (exit code $($Result.ExitCode))." }
 }
 
 #endregion
@@ -675,7 +943,8 @@ function Get-FailedChangeState {
     #>
     param([Parameter(Mandatory)][object]$Entry)
     if (-not $Entry.NewValue) { return 'Unchanged' }
-    if ($Entry.NewValue -eq 'Could not read') { return 'Unknown' }
+    # A whole-tree row is not read back item by item ('Not checked').
+    if ($Entry.NewValue -eq 'Could not read' -or (Test-TreeChangeEntry $Entry)) { return 'Unknown' }
     if ($Entry.NewValue -ceq $Entry.OldValue) { return 'Unchanged' }
     'Partly'
 }
@@ -702,6 +971,82 @@ function Get-PlainErrorText {
     $t
 }
 
+function Get-UnrestorableItemCount {
+    <#
+    .SYNOPSIS
+        How many changed items cannot be put back from their backup because their permissions
+        or owner could not be read first: a Done row with OldValue 'Could not read', plus the
+        count a whole-tree row records in its Detail (Invoke-TreeOwnershipChange).
+    #>
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Entries)
+
+    $count = 0
+    foreach ($e in @($Entries | Where-Object { $null -ne $_ })) {
+        if (Test-TreeChangeEntry $e) {
+            if (@('Done', 'Partly done') -contains $e.Result -and "$($e.Detail)" -match '(\d+) item\(s\) had no readable owner') { $count += [int]$Matches[1] }
+        } elseif ($e.Result -eq 'Done' -and $e.OldValue -eq 'Could not read') {
+            $count++
+        }
+    }
+    $count
+}
+
+function Get-TreeChangeResultMessage {
+    <#
+    .SYNOPSIS
+        The status line for whole-tree rows (Get-ChangeResultMessage hands them over): one
+        sentence per folder, the items that cannot be restored, then where the backup and the
+        log are.
+    #>
+    param(
+        [Parameter(Mandatory)][object[]]$Entries,
+        [AllowNull()][string]$LogPath,
+        [Parameter(Mandatory)][string]$LogFolder
+    )
+
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($e in $Entries) {
+        $what = "ownership of $($e.Target) and all subfolders and files"
+        $restore = "The owners before the change are in $($e.BackupFile); see ""Undo a change"" in the README to put them back."
+        switch ($e.Result) {
+            'Done'                { $parts.Add("Took $what.") }
+            'Partly done'         { $parts.Add("Partly done: took $what, but not on every item. $(Format-Sentence $e.Error) $restore") }
+            'Skipped (WhatIf)'    { $parts.Add("WhatIf: nothing was changed (would take $what).") }
+            'Skipped (not found)' { $parts.Add("$($e.Target) does not exist.") }
+            default {
+                if ((Get-FailedChangeState $e) -eq 'Unchanged') {
+                    # The error already ends "Nothing was changed."
+                    $parts.Add("Could not take $($what): $(Format-Sentence $e.Error)")
+                } else {
+                    $parts.Add("Could not take $($what): $(Format-Sentence $e.Error) Some items may still have changed. $restore")
+                }
+            }
+        }
+        if ("$($e.Detail)" -match '(\d+) folder\(s\) could not be opened') {
+            $parts.Add("$($Matches[1]) folder(s) could not be opened, so what is in them is not in the backup.")
+        }
+    }
+    $unreadable = Get-UnrestorableItemCount -Entries $Entries
+    if ($unreadable -gt 0) {
+        $parts.Add("$unreadable item(s) had no readable permissions before the change and cannot be restored from this backup.")
+    }
+
+    $changed = @($Entries | Where-Object { $_.Result -eq 'Done' -or $_.Result -eq 'Partly done' -or ($_.Result -eq 'Failed' -and (Get-FailedChangeState $_) -ne 'Unchanged') })
+    $allDone = @($Entries | Where-Object { $_.Result -ne 'Done' }).Count -eq 0
+    $whatIfOnly = @($Entries | Where-Object { $_.Result -ne 'Skipped (WhatIf)' }).Count -eq 0
+    $backup = @($Entries | Where-Object { $_.BackupFile } | ForEach-Object { $_.BackupFile } | Select-Object -First 1)
+    if ($changed.Count -gt 0 -and -not $LogPath) {
+        $parts.Add("The change was made, but the change log could not be written to $LogFolder.$(if ($backup.Count -gt 0) { " The backup is at $($backup[0])." })")
+    } elseif ($allDone -and $LogPath) {
+        $parts.Add("Backed up to $($backup[0]) and logged to $LogPath.")
+    } elseif ($LogPath) {
+        $parts.Add("Logged to $LogPath.")
+    } elseif (-not $whatIfOnly) {
+        $parts.Add("The change log could not be written to $LogFolder.")
+    }
+    $parts -join ' '
+}
+
 function Get-ChangeResultMessage {
     <#
     .SYNOPSIS
@@ -718,6 +1063,9 @@ function Get-ChangeResultMessage {
 
     $all = @($Entries | Where-Object { $null -ne $_ })
     if ($all.Count -eq 0) { return 'Nothing was changed.' }
+    if (@($all | Where-Object { -not (Test-TreeChangeEntry $_) }).Count -eq 0) {
+        return Get-TreeChangeResultMessage -Entries $all -LogPath $LogPath -LogFolder $LogFolder
+    }
     $done     = @($all | Where-Object { $_.Result -eq 'Done' })
     $failed   = @($all | Where-Object { $_.Result -eq 'Failed' })
     $notFound = @($all | Where-Object { $_.Result -eq 'Skipped (not found)' })
