@@ -465,6 +465,16 @@ function Export-NetworkReport {
     return @("$stem.txt", "$stem.csv")
 }
 
+# STUB (SQ-010, tests first): the adapter that maps a result to a ticket note. Not implemented yet.
+function ConvertTo-NetworkQuickCheckTicketNote {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Result,
+        [string[]]$EvidencePaths = @()
+    )
+    throw 'ConvertTo-NetworkQuickCheckTicketNote is not implemented yet.'
+}
+
 if ($LoadFunctionsOnly) {
     return
 }

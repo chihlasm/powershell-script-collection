@@ -1253,6 +1253,16 @@ function Export-TriageReport {
     return @($textPath, $csvPath)
 }
 
+# STUB (SQ-010, tests first): the adapter that maps a result to a ticket note. Not implemented yet.
+function ConvertTo-CitrixFSLogixTriageTicketNote {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Result,
+        [string[]]$EvidencePaths = @()
+    )
+    throw 'ConvertTo-CitrixFSLogixTriageTicketNote is not implemented yet.'
+}
+
 if ($LoadFunctionsOnly) {
     return
 }
