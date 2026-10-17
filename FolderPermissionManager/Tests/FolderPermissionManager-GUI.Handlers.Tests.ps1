@@ -43,7 +43,7 @@ BeforeAll {
 Describe 'GUI single-item change endpoints' {
     BeforeEach {
         $script:driveMappings = @{}
-        $script:LogFolder = Join-Path $TestDrive ('logs-' + [guid]::NewGuid().ToString('N'))
+        $script:ChangeLogFolder = Join-Path $TestDrive ('logs-' + [guid]::NewGuid().ToString('N'))
         $script:Dir = Join-Path $TestDrive 'HR [old]'
         New-Item -ItemType Directory -Path $script:Dir -Force | Out-Null
         $script:File = Join-Path $script:Dir 'a.txt'
@@ -97,7 +97,8 @@ Describe 'GUI single-item change endpoints' {
         $r = Invoke-Handler 'Invoke-RemoveFileAce' @{ paths = @($script:File); identity = 'BUILTIN\Users'; rights = 'Read'; type = 'Deny' }
 
         $r.Data.results[0].status | Should -Be 'success'
-        $r.Data.message | Should -BeLike 'Removed Deny Read for BUILTIN\Users from *'
+        # RemoveAccessRuleAll removes every Deny rule for the account, so the message says so.
+        $r.Data.message | Should -BeLike 'Removed all Deny permissions for BUILTIN\Users (asked: Read) from *'
     }
 
     It 'take-ownership of this folder only runs takeown through the wrapper and logs it' {
@@ -126,5 +127,122 @@ Describe 'GUI single-item change endpoints' {
         ($r.Data.results.status -join ',') | Should -Be 'success,skipped'
         $r.Data.message | Should -BeLike "Permissions copied from $source to 1 of 2 folders.*"
         Should -Invoke Set-Acl -Times 1 -Exactly -ParameterFilter { $LiteralPath -eq $script:Dir }
+    }
+
+    It 'blank entries in paths are dropped, and a selection of only blanks is a 400 with no change' {
+        $r = Invoke-Handler 'Invoke-AddFileAce' @{ paths = @('', '  ', $script:File); identity = 'BUILTIN\Users'; rights = 'Read' }
+        $r.StatusCode | Should -Be 200
+        @($r.Data.results).Count | Should -Be 1
+        $r.Data.results[0].status | Should -Be 'success'
+
+        foreach ($name in 'Invoke-AddFileAce', 'Invoke-RemoveFileAce', 'Invoke-TakeFileOwnership') {
+            $r = Invoke-Handler $name @{ paths = @('', ' '); identity = 'BUILTIN\Users'; rights = 'Read' }
+            $r.StatusCode | Should -Be 400 -Because "$name with only blank paths"
+            $r.Data.error | Should -BeLike 'Missing required field*'
+        }
+        $r = Invoke-Handler 'Invoke-AddFileAce' @{ paths = @(); identity = 'BUILTIN\Users'; rights = 'Read' }
+        $r.StatusCode | Should -Be 400
+        Should -Invoke Set-Acl -Times 1 -Exactly
+    }
+
+    It 'replicate drops blank target lines, and only blanks is a 400 with no change' {
+        $source = Join-Path $TestDrive 'source-blank'
+        New-Item -ItemType Directory -Path $source -Force | Out-Null
+        $r = Invoke-Handler 'Invoke-ReplicatePermissions' @{ sourcePath = $source; targetPaths = @('', $script:Dir); recursive = $false }
+        @($r.Data.results).Count | Should -Be 1
+
+        $r = Invoke-Handler 'Invoke-ReplicatePermissions' @{ sourcePath = $source; targetPaths = @(' '); recursive = $false }
+        $r.StatusCode | Should -Be 400
+        $r.Data.error | Should -Be 'Missing required field: targetPaths'
+        Should -Invoke Set-Acl -Times 1 -Exactly
+    }
+}
+
+Describe 'Change result JSON shapes' {
+    BeforeAll {
+        function New-Row {
+            param([string]$Target, [string]$Result, [string]$ErrorText = '', [string]$OldValue = 'O:BAD:(A;;FA;;;BA)',
+                [string]$NewValue = '', [string]$BackupFile = '')
+            New-PermissionChangeEntry -Action 'Add permission' -Target $Target -ItemType 'Folder' -Detail 'Allow Modify for BUILTIN\Users' `
+                -OldValue $OldValue -NewValue $NewValue -Result $Result -ErrorText $ErrorText -BackupFile $BackupFile
+        }
+        function Invoke-Send {
+            param([string]$Name, [scriptblock]$Change)
+            $script:Sent = $null
+            $response = [PSCustomObject]@{ StatusCode = 200 }
+            & $Name $response $Change
+            [PSCustomObject]@{ StatusCode = $response.StatusCode; Data = $script:Sent }
+        }
+    }
+    BeforeEach {
+        $script:ChangeLogFolder = Join-Path $TestDrive ('shapes-' + [guid]::NewGuid().ToString('N'))
+        $script:Backup = Join-Path $TestDrive 'backup.csv'
+    }
+
+    It 'success: status, message, logPath, backupPath, unrestorable 0' {
+        $r = Invoke-Send 'Send-SingleChangeResult' { New-Row 'C:\a' 'Done' -NewValue 'O:BAD:' -BackupFile $script:Backup }
+        $r.StatusCode | Should -Be 200
+        $r.Data.status | Should -Be 'success'
+        $r.Data.message | Should -BeLike 'Added Allow Modify for BUILTIN\Users on C:\a.*'
+        $r.Data.logPath | Should -Exist
+        $r.Data.backupPath | Should -Be $script:Backup
+        $r.Data.unrestorable | Should -Be 0
+        $r.Data.Keys | Should -Not -Contain 'error'
+    }
+
+    It 'partial batch: complete, one result per item, message counts the failure' {
+        $r = Invoke-Send 'Send-BatchChangeResult' {
+            New-Row 'C:\a' 'Done' -NewValue 'O:BAD:' -BackupFile $script:Backup
+            New-Row 'C:\b' 'Failed' -ErrorText 'Access to the path is denied' -NewValue 'O:BAD:(A;;FA;;;BA)' -BackupFile $script:Backup
+        }
+        $r.Data.status | Should -Be 'complete'
+        ($r.Data.results.status -join ',') | Should -Be 'success,error'
+        $r.Data.results[1].message | Should -Be 'Access to the path is denied'
+        $r.Data.message | Should -BeLike '*1 of 2 folders.*1 failed. First error (C:\b): You do not have permission to change this item.*'
+        $r.Data.logPath | Should -Exist
+    }
+
+    It 'all failed: a single folder is a 500 with error = message; a batch is complete with every result an error' {
+        $r = Invoke-Send 'Send-SingleChangeResult' { New-Row 'C:\a' 'Failed' -ErrorText 'Access is denied.' -NewValue 'O:BAD:(A;;FA;;;BA)' }
+        $r.StatusCode | Should -Be 500
+        $r.Data.error | Should -Be $r.Data.message
+        $r.Data.error | Should -BeLike 'Add permission failed on C:\a: You do not have permission*Nothing was changed.*'
+
+        $r = Invoke-Send 'Send-BatchChangeResult' {
+            New-Row 'C:\a' 'Failed' -ErrorText 'x' -NewValue 'O:BAD:(A;;FA;;;BA)'
+            New-Row 'C:\b' 'Failed' -ErrorText 'y' -NewValue 'O:BAD:(A;;FA;;;BA)'
+        }
+        ($r.Data.results.status -join ',') | Should -Be 'error,error'
+        $r.Data.message | Should -BeLike 'Nothing was changed. 2 failed.*'
+    }
+
+    It 'log failed: logPath is null and the message says the change log could not be written' {
+        Mock Write-PermissionChangeLog { $null }
+        $r = Invoke-Send 'Send-SingleChangeResult' { New-Row 'C:\a' 'Done' -NewValue 'O:BAD:' -BackupFile $script:Backup }
+        $r.Data.status | Should -Be 'success'
+        $r.Data.logPath | Should -BeNullOrEmpty
+        $r.Data.message | Should -BeLike "*the change log could not be written to $($script:ChangeLogFolder)*$($script:Backup)*"
+    }
+
+    It 'backup failed: 500 and the error is the backup text' {
+        $text = Get-BackupFailureText -LogFolder $script:ChangeLogFolder -Reason 'disk full'
+        $r = Invoke-Send 'Send-SingleChangeResult' { New-Row 'C:\a' 'Failed' -ErrorText $text }
+        $r.StatusCode | Should -Be 500
+        $r.Data.error | Should -Be $text
+        $r.Data.backupPath | Should -BeNullOrEmpty
+    }
+
+    It 'unrestorable: counts changed items whose permissions could not be read first' {
+        $r = Invoke-Send 'Send-BatchChangeResult' { New-Row 'C:\a' 'Done' -OldValue 'Could not read' -NewValue 'O:BAD:' -BackupFile $script:Backup }
+        $r.Data.unrestorable | Should -Be 1
+        $r.Data.message | Should -BeLike '*cannot be restored from this backup*'
+    }
+
+    It 'zero items: complete, no results, nothing was changed, nothing logged' {
+        $r = Invoke-Send 'Send-BatchChangeResult' { }
+        $r.Data.status | Should -Be 'complete'
+        @($r.Data.results).Count | Should -Be 0
+        $r.Data.message | Should -Be 'Nothing was changed.'
+        $r.Data.logPath | Should -BeNullOrEmpty
     }
 }

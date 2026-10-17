@@ -23,8 +23,9 @@
 .PARAMETER LogFolder
     Folder for permission backups and the change log. Defaults to the Logs folder next to this
     script (not the current directory, which is C:\Windows\System32 when started "as
-    administrator"). If that folder is read-only, %LOCALAPPDATA%\FolderPermissionManager\Logs
-    is used instead.
+    administrator"). If the script is on a network share or any drive that is not a local fixed
+    disk, or that folder is read-only, %LOCALAPPDATA%\FolderPermissionManager\Logs is used
+    instead. A folder passed here is used as given (with a warning if it is on the network).
 
 .EXAMPLE
     .\FolderPermissionManager-GUI.ps1
@@ -72,7 +73,16 @@ if (-not (Test-Path -LiteralPath $corePath)) {
     exit 1
 }
 . $corePath -LoadFunctionsOnly
-$script:LogFolder = Resolve-ChangeLogFolder -LogFolder $LogFolder -DefaultFolder (Join-Path $PSScriptRoot 'Logs')
+# Not $script:LogFolder: at script scope that IS the -LogFolder parameter, and the startup
+# notice needs to know whether -LogFolder was passed.
+$defaultLogFolder = Join-Path $PSScriptRoot 'Logs'
+try {
+    $script:ChangeLogFolder = Resolve-ChangeLogFolder -LogFolder $LogFolder -DefaultFolder $defaultLogFolder
+}
+catch {
+    Write-Host "[FAIL] $($_.Exception.Message)" -ForegroundColor Red
+    exit 1
+}
 
 # Cache mapped network drives from the user session via WMI
 # Elevated processes can't see drive mappings, so we grab them here
@@ -136,17 +146,26 @@ function Read-RequestBody {
     return $json | ConvertFrom-Json
 }
 
-# Logs the core's result rows and builds the fields every change endpoint adds to its JSON:
-# the plain-English status-bar message and the log and backup paths.
+# Runs one core change function, logging each item as soon as it completes, and builds the
+# fields every change endpoint adds to its JSON: the plain-English status-bar message, the log
+# and backup paths, and how many changed items cannot be restored from the backup (their
+# permissions could not be read first). Returns the rows (Entries) and those fields (Data).
+# $Change is the handler's { Add-FolderPermission ... } block; it runs in a child scope of this
+# call chain and reads the handler's variables ($folderPath, $filePaths, ...), so the functions
+# between the handler and the core must not define variables with those names.
 function Complete-PermissionChange {
-    param([object[]]$Entries)
-    $entries = @($Entries | Where-Object { $null -ne $_ })
-    $logPath = Write-PermissionChangeLog -Entries $entries -LogFolder $script:LogFolder
+    param([scriptblock]$Change)
+    $result = Invoke-LoggedPermissionChange -Change $Change -LogFolder $script:ChangeLogFolder
+    $entries = @($result.Entries)
     $backup = @($entries | Where-Object { $_.BackupFile } | Select-Object -First 1)
-    @{
-        message    = Get-ChangeResultMessage -Entries $entries -LogPath $logPath -LogFolder $script:LogFolder
-        logPath    = $logPath
-        backupPath = $(if ($backup.Count -gt 0) { $backup[0].BackupFile } else { $null })
+    [PSCustomObject]@{
+        Entries = $entries
+        Data    = @{
+            message      = Get-ChangeResultMessage -Entries $entries -LogPath $result.LogPath -LogFolder $script:ChangeLogFolder
+            logPath      = $result.LogPath
+            backupPath   = $(if ($backup.Count -gt 0) { $backup[0].BackupFile } else { $null })
+            unrestorable = @($entries | Where-Object { $_.Result -eq 'Done' -and $_.OldValue -eq 'Could not read' }).Count
+        }
     }
 }
 
@@ -166,10 +185,11 @@ function ConvertTo-ChangeResultRow {
 # Sends the result of a change to ONE folder: 200 with status 'success', or the existing error
 # shape (400 when the folder does not exist, 500 otherwise) with the same added fields.
 function Send-SingleChangeResult {
-    param([System.Net.HttpListenerResponse]$Response, [object[]]$Entries)
-    $entries = @($Entries | Where-Object { $null -ne $_ })
-    $data = Complete-PermissionChange -Entries $entries
-    if (@($entries | Where-Object { $_.Result -ne 'Done' }).Count -eq 0) {
+    param([System.Net.HttpListenerResponse]$Response, [scriptblock]$Change)
+    $completed = Complete-PermissionChange -Change $Change
+    $entries = @($completed.Entries)
+    $data = $completed.Data
+    if ($entries.Count -gt 0 -and @($entries | Where-Object { $_.Result -ne 'Done' }).Count -eq 0) {
         $data['status'] = 'success'
     } else {
         $Response.StatusCode = if (@($entries | Where-Object { $_.Result -eq 'Skipped (not found)' }).Count -gt 0) { 400 } else { 500 }
@@ -180,10 +200,11 @@ function Send-SingleChangeResult {
 
 # Sends the result of a change to several items in the existing batch shape.
 function Send-BatchChangeResult {
-    param([System.Net.HttpListenerResponse]$Response, [object[]]$Entries)
-    $data = Complete-PermissionChange -Entries $Entries
+    param([System.Net.HttpListenerResponse]$Response, [scriptblock]$Change)
+    $completed = Complete-PermissionChange -Change $Change
+    $data = $completed.Data
     $data['status'] = 'complete'
-    $data['results'] = @(ConvertTo-ChangeResultRow -Entries $Entries)
+    $data['results'] = @(ConvertTo-ChangeResultRow -Entries $completed.Entries)
     Send-Json $Response $data
 }
 
@@ -393,7 +414,7 @@ function Invoke-TakeOwnership {
 
     if (-not $recursive) {
         # This folder only: backed up and logged by the core, which never throws.
-        Send-SingleChangeResult $Response @(Set-ItemOwnerToCurrentUser -Path $folderPath -LogFolder $script:LogFolder)
+        Send-SingleChangeResult $Response { Set-ItemOwnerToCurrentUser -Path $folderPath -LogFolder $script:ChangeLogFolder }
         return
     }
 
@@ -422,7 +443,8 @@ function Invoke-ReplicatePermissions {
 
     $body = Read-RequestBody $Request
     $sourcePath = Resolve-MappedDrive $body.sourcePath
-    $targetPaths = @($body.targetPaths | ForEach-Object { Resolve-MappedDrive $_ })
+    # Blank lines in the target list are dropped rather than reported as missing folders.
+    $targetPaths = @($body.targetPaths | Where-Object { $null -ne $_ -and "$_".Trim() } | ForEach-Object { Resolve-MappedDrive "$_".Trim() })
     $recursive = $body.recursive -eq $true
 
     if (-not $sourcePath -or -not (Test-Path -LiteralPath $sourcePath -PathType Container)) {
@@ -430,10 +452,15 @@ function Invoke-ReplicatePermissions {
         Send-Json $Response @{ error = "Invalid source path" }
         return
     }
+    if ($targetPaths.Count -eq 0) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Missing required field: targetPaths" }
+        return
+    }
 
     if (-not $recursive) {
         # This folder only: backed up and logged by the core; missing targets are skipped.
-        Send-BatchChangeResult $Response @(Copy-FolderPermission -SourcePath $sourcePath -TargetPath $targetPaths -LogFolder $script:LogFolder)
+        Send-BatchChangeResult $Response { Copy-FolderPermission -SourcePath $sourcePath -TargetPath $targetPaths -LogFolder $script:ChangeLogFolder }
         return
     }
 
@@ -508,7 +535,7 @@ function Invoke-AddAce {
         return
     }
 
-    Send-SingleChangeResult $Response @(Add-FolderPermission -Path $folderPath -Identity $identity -Rights $rights -Type $type -LogFolder $script:LogFolder)
+    Send-SingleChangeResult $Response { Add-FolderPermission -Path $folderPath -Identity $identity -Rights $rights -Type $type -LogFolder $script:ChangeLogFolder }
 }
 
 function Invoke-RemoveAce {
@@ -529,7 +556,7 @@ function Invoke-RemoveAce {
         return
     }
 
-    Send-SingleChangeResult $Response @(Remove-FolderPermission -Path $folderPath -Identity $identity -Rights $rights -Type $type -LogFolder $script:LogFolder)
+    Send-SingleChangeResult $Response { Remove-FolderPermission -Path $folderPath -Identity $identity -Rights $rights -Type $type -LogFolder $script:ChangeLogFolder }
 }
 
 function Invoke-ExportReport {
@@ -631,7 +658,8 @@ function Invoke-AddFileAce {
     )
 
     $body     = Read-RequestBody $Request
-    $paths    = @($body.paths)
+    # Blank entries are dropped, so a selection with no real paths gets the 400 below.
+    $paths    = @($body.paths | Where-Object { $null -ne $_ -and "$_".Trim() })
     $identity = $body.identity
     $rights   = $body.rights
     $type     = if ($body.type -eq 'Deny') { 'Deny' } else { 'Allow' }
@@ -643,8 +671,8 @@ function Invoke-AddFileAce {
     }
 
     # One backup for the whole selection; a file that fails does not stop the others.
-    $filePaths = @($paths | ForEach-Object { Resolve-MappedDrive $_ })
-    Send-BatchChangeResult $Response @(Add-FolderPermission -Path $filePaths -Identity $identity -Rights $rights -Type $type -LogFolder $script:LogFolder)
+    $filePaths = @($paths | ForEach-Object { Resolve-MappedDrive "$_" })
+    Send-BatchChangeResult $Response { Add-FolderPermission -Path $filePaths -Identity $identity -Rights $rights -Type $type -LogFolder $script:ChangeLogFolder }
 }
 
 function Invoke-RemoveFileAce {
@@ -654,7 +682,8 @@ function Invoke-RemoveFileAce {
     )
 
     $body     = Read-RequestBody $Request
-    $paths    = @($body.paths)
+    # Blank entries are dropped, so a selection with no real paths gets the 400 below.
+    $paths    = @($body.paths | Where-Object { $null -ne $_ -and "$_".Trim() })
     $identity = $body.identity
     $rights   = $body.rights
     $type     = if ($body.type -eq 'Deny') { 'Deny' } else { 'Allow' }
@@ -666,8 +695,8 @@ function Invoke-RemoveFileAce {
     }
 
     # One backup for the whole selection; a file that fails does not stop the others.
-    $filePaths = @($paths | ForEach-Object { Resolve-MappedDrive $_ })
-    Send-BatchChangeResult $Response @(Remove-FolderPermission -Path $filePaths -Identity $identity -Rights $rights -Type $type -LogFolder $script:LogFolder)
+    $filePaths = @($paths | ForEach-Object { Resolve-MappedDrive "$_" })
+    Send-BatchChangeResult $Response { Remove-FolderPermission -Path $filePaths -Identity $identity -Rights $rights -Type $type -LogFolder $script:ChangeLogFolder }
 }
 
 function Invoke-TakeFileOwnership {
@@ -677,7 +706,8 @@ function Invoke-TakeFileOwnership {
     )
 
     $body  = Read-RequestBody $Request
-    $paths = @($body.paths)
+    # Blank entries are dropped, so a selection with no real paths gets the 400 below.
+    $paths = @($body.paths | Where-Object { $null -ne $_ -and "$_".Trim() })
 
     if (-not $paths -or $paths.Count -eq 0) {
         $Response.StatusCode = 400
@@ -686,8 +716,8 @@ function Invoke-TakeFileOwnership {
     }
 
     # takeown, then the owner set to the current account; backed up and logged by the core.
-    $filePaths = @($paths | ForEach-Object { Resolve-MappedDrive $_ })
-    Send-BatchChangeResult $Response @(Set-ItemOwnerToCurrentUser -Path $filePaths -LogFolder $script:LogFolder)
+    $filePaths = @($paths | ForEach-Object { Resolve-MappedDrive "$_" })
+    Send-BatchChangeResult $Response { Set-ItemOwnerToCurrentUser -Path $filePaths -LogFolder $script:ChangeLogFolder }
 }
 
 function Invoke-RobocopyFiles {
@@ -1392,7 +1422,7 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
 
     </div><!-- /pane-robocopy -->
 
-    <div class="status-bar" id="statusBar">Ready</div>
+    <div class="status-bar" id="statusBar" role="status" aria-live="polite">Ready</div>
 
   </div><!-- /panel-right -->
 </div><!-- /main -->
@@ -1527,13 +1557,22 @@ var fileAclCache   = {};     // path -> acl object, for inline expand + diff che
 // --- Utilities ---
 function setStatus(msg, type) {
     var el = document.getElementById('statusBar');
+    // Errors interrupt a screen reader (alert); everything else is announced when it is idle.
+    el.setAttribute('role', type === 'error' ? 'alert' : 'status');
+    el.setAttribute('aria-live', type === 'error' ? 'assertive' : 'polite');
     el.textContent = msg;
     el.className = 'status-bar ' + (type || '');
 }
 
 function api(url, opts) {
-    return fetch(url, opts).then(function(r) {
-        return r.json().then(function(d) {
+    return fetch(url, opts).catch(function(e) {
+        // The request never got an answer: the server is not running or not reachable.
+        e.network = true; throw e;
+    }).then(function(r) {
+        return r.json().catch(function() {
+            var bad = new Error('The server sent a reply that could not be read (HTTP ' + r.status + ').');
+            bad.badReply = true; throw bad;
+        }).then(function(d) {
             if (!r.ok) { var err = new Error(d.error || r.statusText); err.fromServer = true; throw err; }
             return d;
         });
@@ -1543,15 +1582,31 @@ function api(url, opts) {
 // Permission changes: the server's message already says what was done, where it was backed up
 // and logged, or why nothing was changed.
 function showChangeError(e) {
-    setStatus(e.fromServer ? e.message : 'Could not reach the Folder Permission Manager server: ' + e.message, 'error');
+    if (e.fromServer) { setStatus(e.message, 'error'); return; }
+    if (e.network) {
+        setStatus('Could not reach the Folder Permission Manager server. Is the PowerShell window still running? If it was closed, start the tool again. (' + e.message + ')', 'error');
+        return;
+    }
+    setStatus('The change may or may not have been made. Check the folder\'s permissions. (' + e.message + ')', 'error');
 }
 function changeStatusType(r) {
     var res = r.results || [];
     var failed = res.filter(function(x) { return x.status === 'error'; }).length;
     var done = res.filter(function(x) { return x.status === 'success'; }).length;
     if (res.length && failed && !done) return 'error';
-    if (failed || done < res.length || !r.logPath) return 'warning';
+    if (failed || done < res.length || !r.logPath || r.unrestorable) return 'warning';
     return 'success';
+}
+// Shows a change result; a warning is also spelled out in words, not only in colour.
+function showChangeResult(r) {
+    var type = changeStatusType(r);
+    var msg = r.message;
+    if (type === 'warning') {
+        var res = r.results || [];
+        var partial = res.some(function(x) { return x.status !== 'success'; });
+        msg = (partial ? 'Partly done: ' : 'Check this: ') + msg;
+    }
+    setStatus(msg, type);
 }
 
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
@@ -1888,12 +1943,12 @@ function submitAddAce() {
         var paths = Array.from(checkedFiles);
         setStatus('Backing up and adding the permission to ' + paths.length + ' file(s)...', 'info');
         api('/api/file-acl/add', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ paths: paths, identity: identity, rights: rights, type: type }) })
-            .then(function(r) { setStatus(r.message, changeStatusType(r)); })
+            .then(function(r) { showChangeResult(r); })
             .catch(showChangeError);
     } else {
         setStatus('Backing up and adding the permission...', 'info');
         api('/api/add-ace', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: currentFolder, identity: identity, rights: rights, type: type }) })
-            .then(function(r) { setStatus(r.message, changeStatusType(r)); loadFolderAcl(currentFolder); })
+            .then(function(r) { showChangeResult(r); loadFolderAcl(currentFolder); })
             .catch(showChangeError);
     }
 }
@@ -1936,12 +1991,12 @@ function submitRemoveAce() {
         var paths = Array.from(checkedFiles);
         setStatus('Backing up and removing the permission from ' + paths.length + ' file(s)...', 'info');
         api('/api/file-acl/remove', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ paths: paths, identity: identity, rights: rights, type: type }) })
-            .then(function(r) { setStatus(r.message, changeStatusType(r)); })
+            .then(function(r) { showChangeResult(r); })
             .catch(showChangeError);
     } else {
         setStatus('Backing up and removing the permission...', 'info');
         api('/api/remove-ace', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: currentFolder, identity: identity, rights: rights, type: type }) })
-            .then(function(r) { setStatus(r.message, changeStatusType(r)); loadFolderAcl(currentFolder); })
+            .then(function(r) { showChangeResult(r); loadFolderAcl(currentFolder); })
             .catch(showChangeError);
     }
 }
@@ -1955,11 +2010,15 @@ function takeOwnership(recursive) {
     setStatus(recursive ? 'Taking ownership...' : 'Backing up and taking ownership...', 'info');
     api('/api/take-ownership', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: currentFolder, recursive: recursive }) })
         .then(function(r) {
-            // The whole-tree action is not backed up or logged yet (no logPath), so it keeps its plain success style.
-            setStatus(r.message || 'Ownership taken', recursive ? 'success' : changeStatusType(r));
+            // The whole-tree action is not backed up or logged yet (SQ-014), and says so.
+            if (recursive) { setStatus((r.message || 'Ownership taken') + '. Not backed up or logged.', 'success'); }
+            else { showChangeResult(r); }
             loadFolderAcl(currentFolder);
         })
-        .catch(showChangeError);
+        .catch(function(e) {
+            if (recursive) { setStatus('Failed: ' + e.message, 'error'); }
+            else { showChangeError(e); }
+        });
 }
 
 function showReplicateModal() {
@@ -1978,11 +2037,14 @@ function submitReplicate() {
     api('/api/replicate', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ sourcePath: currentFolder, targetPaths: targets, recursive: recursive }) })
         .then(function(r) {
             // This folder only: backed up and logged, and the server's message says so.
-            if (!recursive) { setStatus(r.message, changeStatusType(r)); return; }
+            if (!recursive) { showChangeResult(r); return; }
             var failed = (r.results || []).filter(function(x) { return x.status === 'error'; });
             if (failed.length) { setStatus(failed.length + ' target(s) failed. First: ' + failed[0].message, 'error'); }
-            else { setStatus('Permissions replicated to ' + targets.length + ' target(s)', 'success'); }
-        }).catch(function(e) { setStatus('Failed: ' + e.message, 'error'); });
+            else { setStatus('Permissions replicated to ' + targets.length + ' target(s). Not backed up or logged.', 'success'); }
+        }).catch(function(e) {
+            if (recursive) { setStatus('Failed: ' + e.message, 'error'); }
+            else { showChangeError(e); }
+        });
 }
 
 function exportReport() {
@@ -1997,7 +2059,7 @@ function takeFileOwnership() {
     if (!confirm('Take ownership of ' + paths.length + ' file(s)?')) return;
     setStatus('Backing up and taking ownership of ' + paths.length + ' file(s)...', 'info');
     api('/api/file-acl/take-ownership', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ paths: paths }) })
-        .then(function(r) { setStatus(r.message, changeStatusType(r)); })
+        .then(function(r) { showChangeResult(r); })
         .catch(showChangeError);
 }
 
@@ -2190,10 +2252,10 @@ $listener.Prefixes.Add($baseUrl)
 try {
     $listener.Start()
     Write-Host "[INFO] Folder Permission Manager running at $baseUrl" -ForegroundColor Cyan
-    if (-not $LogFolder -and $script:LogFolder -ne (Join-Path $PSScriptRoot 'Logs')) {
-        Write-Host "[WARN] The Logs folder next to this script cannot be written to (read-only share?). Using $($script:LogFolder) instead." -ForegroundColor Yellow
+    foreach ($notice in @(Get-ChangeLogFolderNotice -LogFolder $LogFolder -ResolvedFolder $script:ChangeLogFolder -DefaultFolder $defaultLogFolder)) {
+        Write-Host "[WARN] $notice" -ForegroundColor Yellow
     }
-    Write-Host "[INFO] Changes are backed up and logged to $($script:LogFolder)" -ForegroundColor Cyan
+    Write-Host "[INFO] Changes are backed up and logged to $($script:ChangeLogFolder)" -ForegroundColor Cyan
     Write-Host "[INFO] Press Ctrl+C to stop." -ForegroundColor Cyan
 }
 catch {

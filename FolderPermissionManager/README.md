@@ -57,16 +57,38 @@ The console shows the log folder at startup.
 | `Logs\Changes_<yyyy-MM-dd>.csv` | One row per folder or file changed: `Time`, `Technician`, `Computer`, `Action`, `Target`, `ItemType`, `Detail`, `OldValue`, `NewValue`, `Result`, `Error`, `BackupFile`. `OldValue` and `NewValue` are the permissions before and after, as SDDL text. |
 | `Logs\Backups\<yyyy-MM-dd_HHmmss>_<Action>.csv` | The permissions as they were just before one action: `Path`, `ItemType`, `Sddl`. |
 
-`Result` is one of `Done`, `Failed`, `Skipped (not found)` or `Skipped (WhatIf)`. A row whose
-`Sddl` or `OldValue` is `Could not read` had permissions the tool could not read before the
-change (common when taking ownership of a folder you are locked out of); that item cannot be
-restored from the backup.
+`Result` is one of `Done`, `Failed`, `Skipped (not found)` or `Skipped (WhatIf)`. A `Failed`
+row whose `NewValue` differs from its `OldValue` was **partly changed** (for example, takeown
+gave the folder to Administrators but the owner could not then be set to you); the status bar
+says so and points at the backup. Each row is written as soon as that item is done, so a batch
+that is interrupted still leaves a log of what it changed.
+
+`Could not read` means the tool could not read the item's permissions before the change. Add
+permission, Remove permission and Copy permissions then refuse that item and change nothing.
+Take ownership still goes ahead (it exists for folders you are locked out of), so that item
+cannot be restored from the backup, and the status bar says so.
+
+Remove permission removes **every** Allow (or Deny) entry the account has on the item, whatever
+rights you picked, as it always has; the status bar says "Removed all Allow permissions for ...
+(asked: Modify)". Inherited entries are not touched.
+
+Text that Excel would run as a formula (starting with `=`, `+`, `-`, `@`, a tab or a carriage
+return, such as a mistyped target `=1+1`) is written to both CSV files with a leading `'`. The
+restore steps below remove it again.
 
 The log folder is `Logs` next to the script, not the current directory (which is
-`C:\Windows\System32` when PowerShell runs as administrator). If that folder is read-only, for
-example when the tool runs from a share, `%LOCALAPPDATA%\FolderPermissionManager\Logs` is used
-and the console says so. Logs and backups hold client paths, account names and SIDs: they stay
-on the machine that ran the tool and are never deleted automatically.
+`C:\Windows\System32` when PowerShell runs as administrator). If the script is on a network
+share, a mapped drive or any drive that is not a local fixed disk, or that folder is
+read-only, `%LOCALAPPDATA%\FolderPermissionManager\Logs` on this computer is used instead and
+the console says so with `[WARN]`. A `-LogFolder` you pass is always used as given; if it is on
+the network the console warns, because every change is refused while it cannot be written. If
+no local folder can be found at all, the tool stops with `[FAIL]` and asks for `-LogFolder`.
+
+Logs and backups hold client paths, account names and SIDs: they stay on the machine that ran
+the tool and are never deleted automatically. **They get the permissions of the folder they
+are in**: the tool does not lock them down. Keep the tool in a folder only administrators can
+read (or pass a `-LogFolder` that is), and do not copy it to a shared folder on a server that
+other users can open.
 
 ### Undo a change
 
@@ -76,23 +98,41 @@ CSV named in the change log's `BackupFile` column and run, as administrator:
 ```powershell
 $backup = 'C:\Tools\FolderPermissionManager\Logs\Backups\2026-10-17_142233_AddPermission.csv'
 foreach ($row in Import-Csv -LiteralPath $backup) {
-    if ($row.Sddl -eq 'Could not read') { Write-Warning "No backup for $($row.Path)"; continue }
-    $acl = Get-Acl -LiteralPath $row.Path
+    # A path that looked like an Excel formula was saved with a leading ' (see above).
+    $path = if ($row.Path -match "^'[=+\-@\t\r]") { $row.Path.Substring(1) } else { $row.Path }
+    if ($row.Sddl -eq 'Could not read') { Write-Warning "No backup for $path"; continue }
+    $acl = Get-Acl -LiteralPath $path
     $acl.SetSecurityDescriptorSddlForm($row.Sddl)   # owner, group and permissions as they were
-    Set-Acl -LiteralPath $row.Path -AclObject $acl
+    Set-Acl -LiteralPath $path -AclObject $acl
+
+    # Check: read the item again and compare it with the backup.
+    $now = Get-Acl -LiteralPath $path
+    $saved = Get-Acl -LiteralPath $path
+    $saved.SetSecurityDescriptorSddlForm($row.Sddl)
+    if ($now.Sddl -ne $row.Sddl -or $now.Owner -ne $saved.Owner) {
+        Write-Warning "$path does not match the backup. Owner now: $($now.Owner); in the backup: $($saved.Owner)."
+    } else {
+        Write-Host "[PASS] $path restored" -ForegroundColor Green
+    }
 }
 ```
 
 Remove the rows for items you do not want to restore first. Use `-LiteralPath`, not `-Path`:
-folder names with `[` or `]` are otherwise read as wildcards. Setting the owner back to
-another account needs the "Restore files and directories" right (`SeRestorePrivilege`), so run
-this in an elevated session.
+folder names with `[` or `]` are otherwise read as wildcards. Run this in an elevated
+PowerShell window: changing permissions with `Set-Acl` needs the right to change them, and
+setting the owner back to another account needs the "Restore files and directories" right
+(`SeRestorePrivilege`), which administrators have only when the window is elevated. Without it,
+`Set-Acl` fails with "The security identifier is not allowed to be the owner of this object"
+and the check above warns. A warning can also mean Windows changed the inherited part of the
+permissions (for example, the parent folder changed since the backup); compare the two SDDL
+strings to see what differs.
 
 References:
 [Get-Acl](https://learn.microsoft.com/powershell/module/microsoft.powershell.security/get-acl),
 [Set-Acl](https://learn.microsoft.com/powershell/module/microsoft.powershell.security/set-acl),
 [SetSecurityDescriptorSddlForm](https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.objectsecurity.setsecuritydescriptorsddlform),
-[SeRestorePrivilege sets any owner](https://learn.microsoft.com/windows/win32/secauthz/privilege-constants).
+[SeRestorePrivilege sets any owner](https://learn.microsoft.com/windows/win32/secauthz/privilege-constants),
+[RemoveAccessRuleAll](https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.filesystemsecurity.removeaccessruleall).
 
 ### FolderPermissionManager.ps1 (CLI)
 
