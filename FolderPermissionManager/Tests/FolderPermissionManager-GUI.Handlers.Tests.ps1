@@ -12,6 +12,15 @@
 BeforeAll {
     $folder = Join-Path $PSScriptRoot '..'
     . (Join-Path $folder 'FolderPermissions.Core.ps1') -LoadFunctionsOnly
+    # Guard: the real Invoke-AclTool runs takeown.exe and icacls.exe. Replaced here (same
+    # parameters) so a test that forgets to mock it fails instead of changing real owners.
+    function Invoke-AclTool {
+        param(
+            [Parameter(Mandatory)][ValidateSet('icacls', 'takeown')][string]$Tool,
+            [Parameter(Mandatory)][string[]]$Arguments
+        )
+        throw "Invoke-AclTool ($Tool) was called without a mock in a test."
+    }
 
     $guiPath = (Resolve-Path (Join-Path $folder 'FolderPermissionManager-GUI.ps1')).Path
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($guiPath, [ref]$null, [ref]$null)

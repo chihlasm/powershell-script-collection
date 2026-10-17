@@ -66,13 +66,26 @@ says so and points at the backup. Each row is written as soon as that item is do
 that is interrupted still leaves a log of what it changed.
 
 Taking ownership of a whole folder logs **one row for the folder** (`ItemType` = `Folder tree`):
-`OldValue` is `Saved in <owner snapshot>`, `NewValue` is `Owner: <you>`. It runs
-`takeown /F <folder> /R /A /D Y` (gives every item to Administrators, so locked-out items can be
-opened) and then `icacls <folder> /setowner <DOMAIN\you> /T /C /Q` (makes you the owner). If
-either tool reports errors but something was changed, the row is `Partly done` and `Error` holds
-the tool's own summary, for example `Successfully processed 3 files; Failed processing 2 files`;
-if nothing succeeded it is `Failed`. Items under a folder the tool could not open are not in the
-snapshot, and the status bar says how many folders that was.
+`OldValue` is `Saved in <owner snapshot>`. It runs `takeown /F <folder> /R /A /D Y` (gives every
+item to Administrators, so locked-out items can be opened) and then
+`icacls <folder> /setowner <DOMAIN\you> /T /C /Q` (makes you the owner); `Detail` ends with the
+two commands exactly as run. A relative path or a trailing backslash is turned into one full
+path first, and that path is used for the snapshot, both tools and the log.
+
+Afterwards the tool **reads the owner of every item in the snapshot again**, and that decides
+the result: `Done` when you own every item, `Partly done` when you own some, `Failed` when you
+own none. A tool that reports errors (exit code not 0) also keeps the result from looking
+better than the tools say. `NewValue` says what the owners are now: `Owner: <you>`,
+`Owner: <you> on 3 of 5 items`, `Owner: Administrators (icacls failed)` (takeown worked, icacls
+did not) or `Owner unchanged`. `Error` says how many items you do not own and adds the tools'
+own messages, for example `Successfully processed 3 files; Failed processing 2 files`.
+
+Items under a folder the tool could not open are not in the snapshot, so their owners cannot
+be put back from it. The result is then never shown as a plain success: the status bar (or the
+console, with `[WARN]`) says how many folders that was and names them. Junctions and symbolic
+links inside the folder are listed in the snapshot but not gone into, because they can point
+outside the folder. `takeown /R` and `icacls /T` may still treat them differently (follow them
+or change the link itself), so check those items after the change.
 
 `Could not read` means the tool could not read the item's permissions (or, in an owner
 snapshot, its owner) before the change. Add permission, Remove permission and Copy permissions
@@ -142,35 +155,44 @@ strings to see what differs.
 #### Put owners back after taking ownership of a whole folder
 
 The owner snapshot (`..._TakeOwnership.csv`, named in the log's `BackupFile` column) holds
-every item's owner. Run, as administrator:
+every item's owner. Run, in an elevated PowerShell window:
 
 ```powershell
 $snapshot = 'C:\Tools\FolderPermissionManager\Logs\Backups\2026-10-17_142233_TakeOwnership.csv'
 foreach ($row in Import-Csv -LiteralPath $snapshot) {
-    $path = if ($row.Path -match "^'[=+\-@\t\r]") { $row.Path.Substring(1) } else { $row.Path }
-    if (-not $row.OwnerSid) { Write-Warning "No saved owner for $path ($($row.Owner))"; continue }
-    $sid = New-Object System.Security.Principal.SecurityIdentifier -ArgumentList $row.OwnerSid
-    $acl = Get-Acl -LiteralPath $path
-    $acl.SetOwner($sid)
-    Set-Acl -LiteralPath $path -AclObject $acl
+    try {
+        $path = if ($row.Path -match "^'[=+\-@\t\r]") { $row.Path.Substring(1) } else { $row.Path }
+        if (-not $row.OwnerSid) { Write-Warning "No saved owner for $path ($($row.Owner))"; continue }
 
-    # Check: read the owner again and compare it with the snapshot.
-    $now = (Get-Acl -LiteralPath $path).GetOwner([System.Security.Principal.SecurityIdentifier]).Value
-    if ($now -ne $row.OwnerSid) {
-        Write-Warning "$path is owned by $now, not $($row.Owner) ($($row.OwnerSid))."
-    } else {
-        Write-Host "[PASS] $path owner restored" -ForegroundColor Green
+        # A SID is given to icacls with a leading * ; /C carries on after an error.
+        $out = & icacls.exe $path /setowner "*$($row.OwnerSid)" /C 2>&1
+        if ($LASTEXITCODE -ne 0) { Write-Warning "icacls reported a problem for ${path}: $out" }
+
+        # Check: read the owner again and compare it with the snapshot.
+        $now = (Get-Acl -LiteralPath $path -ErrorAction Stop).GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+        if ($now -ne $row.OwnerSid) {
+            Write-Warning "$path is owned by $now, not $($row.Owner) ($($row.OwnerSid))."
+        } else {
+            Write-Host "[PASS] $path owner restored" -ForegroundColor Green
+        }
+    } catch {
+        Write-Warning "Could not restore the owner of $($row.Path): $($_.Exception.Message)"
+        continue
     }
 }
 ```
 
 The restore uses the saved SID, not the name, so it also works for an owner whose account
-name has changed. Instead of `Set-Acl` you can run, per row,
-`icacls "<path>" /setowner "*<OwnerSid>" /C` (a SID is written with a leading `*`) and then check
-with `(Get-Acl -LiteralPath "<path>").Owner`. Either way this needs an elevated window
-(`SeRestorePrivilege`, see above). Rows with `Could not read` have no saved owner and are
-skipped with a warning. Taking ownership does not change permissions, so there is nothing else
-to put back.
+name has changed. One item that fails is reported and the rest carry on. Setting another
+account as the owner needs the "Restore files and directories" right (`SeRestorePrivilege`),
+which administrators have in an elevated window. Rows with `Could not read` have no saved owner and are skipped with a warning. Taking
+ownership does not change permissions, so there is nothing else to put back.
+
+Alternative, if `icacls` is not available: replace the `icacls` line with
+`$acl = Get-Acl -LiteralPath $path; $acl.SetOwner((New-Object System.Security.Principal.SecurityIdentifier -ArgumentList $row.OwnerSid)); Set-Acl -LiteralPath $path -AclObject $acl`.
+It is **not verified** that `Set-Acl` turns on `SeRestorePrivilege` for you, so it may fail with
+"The security identifier is not allowed to be the owner of this object"; the check line then
+warns.
 
 References:
 [Get-Acl](https://learn.microsoft.com/powershell/module/microsoft.powershell.security/get-acl),
@@ -182,7 +204,8 @@ References:
 [takeown](https://learn.microsoft.com/windows-server/administration/windows-commands/takeown),
 [icacls](https://learn.microsoft.com/windows-server/administration/windows-commands/icacls).
 Microsoft Learn documents neither `icacls` exit codes nor its closing
-`Successfully processed ...` line; the tool reads both defensively.
+`Successfully processed ...` line (which is translated on non-English Windows), so the tool
+decides the result by reading the owners back and only shows the tools' output.
 
 ### FolderPermissionManager.ps1 (CLI)
 
@@ -211,10 +234,15 @@ as in the GUI (owner snapshot before taking ownership, SDDL backup before copyin
 | `-Force` | — | Do not ask before taking ownership or copying permissions |
 | `-WhatIf` | — | Show what would be changed and change nothing |
 
-Answer `y` to go ahead; anything else (including Enter) skips that step. Declining ownership
-still shows the permissions and offers the copy. Run it in an elevated window: it stops with
-`[FAIL]` otherwise (except with `-WhatIf`). See "Undo a change" above to put owners or
-permissions back.
+Before each step it prints what will change with `[WARN]` (for ownership, how many items:
+the folder is counted first, read only, and `-WhatIf` shows the count too), then asks
+`Continue? (y/N)`. Answer `y` to go ahead; anything else (including Enter) skips that step.
+Declining ownership, or ownership failing, still shows the permissions and offers the copy: it
+does not depend on ownership. Run it in an elevated window: it stops with `[FAIL]` otherwise
+(except with `-WhatIf`). See "Undo a change" above to put owners or permissions back.
+
+The script exits with `1` when a step `Failed` or was only `Partly done` (or the folder or the
+log folder could not be used), and `0` otherwise, including `-WhatIf` and declined steps.
 
 ## Requirements
 

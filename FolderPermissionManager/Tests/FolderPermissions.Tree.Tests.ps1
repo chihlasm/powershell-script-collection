@@ -27,7 +27,19 @@
 
 BeforeAll {
     . (Join-Path $PSScriptRoot '..\FolderPermissions.Core.ps1') -LoadFunctionsOnly
+    # Guard: the real Invoke-AclTool runs takeown.exe and icacls.exe by full path, which the
+    # bare 'Mock takeown' / 'Mock icacls' below cannot catch. Replaced here (same parameters)
+    # so a test that forgets to mock it fails instead of changing real owners.
+    function Invoke-AclTool {
+        param(
+            [Parameter(Mandatory)][ValidateSet('icacls', 'takeown')][string]$Tool,
+            [Parameter(Mandatory)][string[]]$Arguments
+        )
+        throw "Invoke-AclTool ($Tool) was called without a mock in a test."
+    }
     $script:RealGetAcl = Get-Command Get-Acl -CommandType Cmdlet
+    $script:RealGetItemOwner = ${function:Get-ItemOwner}
+    $script:MySid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $script:ExpectedColumns = @('Time', 'Technician', 'Computer', 'Action', 'Target', 'ItemType',
         'Detail', 'OldValue', 'NewValue', 'Result', 'Error', 'BackupFile')
     $script:TreeAction = 'Take ownership (all subfolders and files)'
@@ -215,5 +227,162 @@ Describe 'Recursive take ownership' {
         $rows[0].Action | Should -Be $script:TreeAction
         $rows[0].ItemType | Should -Be 'Folder tree'
         $rows[0].Result | Should -Be 'Skipped (WhatIf)'
+    }
+
+    # --- Fix round 1 (SQ-014 review) ---------------------------------------------------------
+
+    It 'AC18_FolderThatCannotBeListed_IsNeverReportedAsCompleteAndTheMessageNamesIt' {
+        $dir = New-TestTree 'ac18-unlisted'
+        $locked = Join-Path $dir 'sub'
+        Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $LiteralPath -eq $locked }
+
+        $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+        $rows[0].Result | Should -Be 'Done'
+        $rows[0].TreeCounts.Unlisted | Should -Be 1
+        @($rows[0].TreeCounts.UnlistedFolders) | Should -Be @($locked)
+        Test-TreeEntryIncomplete $rows[0] | Should -BeTrue
+        $saved = @(Import-Csv -LiteralPath $rows[0].BackupFile)
+        @($saved | ForEach-Object { $_.Path }) | Should -Not -Contain (Join-Path $locked 'a.txt')
+        $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
+        $message | Should -BeLike "*1 folder(s) could not be opened ($locked)*"
+        $message | Should -Match 'cannot be restored from this backup'
+    }
+
+    It 'AC17_ToolsReportSuccessButOwnersReadBackUnchanged_ResultIsPartlyDone' {
+        # Exit code 0 and no summary line: only reading the owners back shows what happened.
+        $dir = New-TestTree 'ac17-readback'
+        $script:ToolResult['icacls'] = [PSCustomObject]@{ ExitCode = 0; Output = '' }
+        Mock Get-ItemOwner {
+            if ($script:ToolCalls.Count -gt 0 -and $Path -like '*.txt') { return [PSCustomObject]@{ Owner = 'CONTOSO\old.owner'; OwnerSid = 'S-1-5-21-1-2-3-1105' } }
+            & $script:RealGetItemOwner -Path $Path
+        }
+        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+
+        $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+        $rows[0].Result | Should -Be 'Partly done'
+        $rows[0].NewValue | Should -Be "Owner: $me on 2 of 4 items"
+        $rows[0].Error | Should -BeLike "2 of 4 items are not owned by $me after the change*"
+        $rows[0].TreeCounts.NotOwned | Should -Be 2
+    }
+
+    It 'AC17_OwnersReadBackNotChangedAtAll_ResultIsFailedAndNothingClaimed' {
+        $dir = New-TestTree 'ac17-none-readback'
+        $script:ToolResult['icacls'] = [PSCustomObject]@{ ExitCode = 0; Output = '' }
+        Mock Get-ItemOwner { [PSCustomObject]@{ Owner = 'CONTOSO\old.owner'; OwnerSid = 'S-1-5-21-1-2-3-1105' } }
+
+        $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+        $rows[0].Result | Should -Be 'Failed'
+        $rows[0].NewValue | Should -Be 'Owner unchanged'
+        Get-FailedChangeState $rows[0] | Should -Be 'Unchanged'
+        $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
+        $message | Should -Match 'No owner was changed'
+    }
+
+    It 'AC17_TakeownSucceededButIcaclsSetNothing_NewValueNamesAdministrators' {
+        $dir = New-TestTree 'ac17-admins'
+        $script:ToolResult['icacls'] = [PSCustomObject]@{ ExitCode = 5; Output = "$dir`: Access is denied.`r`nSuccessfully processed 0 files; Failed processing 4 files" }
+        Mock Get-ItemOwner {
+            if ($script:ToolCalls.Count -gt 0) { return [PSCustomObject]@{ Owner = 'BUILTIN\Administrators'; OwnerSid = 'S-1-5-32-544' } }
+            & $script:RealGetItemOwner -Path $Path
+        }
+
+        $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+        $rows[0].NewValue | Should -Be 'Owner: Administrators (icacls failed)'
+        $rows[0].Result | Should -Be 'Failed'
+        $rows[0].Error | Should -BeLike "*$dir`: Access is denied.*"
+        $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
+        $message | Should -BeLike '*Some owners were changed (Owner: Administrators (icacls failed))*'
+        $message | Should -BeLike "*$($rows[0].BackupFile)*"
+    }
+
+    It 'AC16_RelativePathWithTrailingBackslashAndSpace_IsResolvedOnceAndUsedEverywhere' {
+        $dir = New-TestTree 'ac16 rel tree'
+        Push-Location -LiteralPath $TestDrive
+        try {
+            $rows = @(Set-ItemOwnerToCurrentUser -Path '.\ac16 rel tree\' -Recurse -LogFolder $script:Log)
+        } finally { Pop-Location }
+
+        $rows[0].Target | Should -Be $dir
+        $rows[0].Result | Should -Be 'Done'
+        ($script:ToolCalls | Where-Object { $_.Tool -eq 'takeown' }).Arguments[1] | Should -Be $dir
+        ($script:ToolCalls | Where-Object { $_.Tool -eq 'icacls' }).Arguments[0] | Should -Be $dir
+        (Import-Csv -LiteralPath $rows[0].BackupFile)[0].Path | Should -Be $dir
+        $rows[0].Detail | Should -BeLike "*Ran: takeown /F ""$dir"" /R /A /D Y; icacls ""$dir"" /setowner *"
+    }
+
+    It 'AC16_JunctionInTheTree_IsListedButNotGoneInto' {
+        $dir = New-TestTree 'ac16-junction'
+        $elsewhere = Join-Path $TestDrive 'ac16-junction-target'
+        New-Item -ItemType Directory -Path $elsewhere -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $elsewhere 'outside.txt') -Value 'x'
+        $link = Join-Path $dir 'link'
+        New-Item -ItemType Junction -Path $link -Target $elsewhere | Out-Null
+
+        $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+        $paths = @(Import-Csv -LiteralPath $rows[0].BackupFile | ForEach-Object { $_.Path })
+        $paths | Should -Contain $link
+        $paths | Should -Not -Contain (Join-Path $link 'outside.txt')
+        $paths.Count | Should -Be 5
+    }
+
+    It 'AC16_OwnerSnapshotEscapesFormulaTextAndStillReadsBack' {
+        $dir = New-TestTree 'ac16-formula'
+        $formulaFolder = Join-Path $dir '=x'
+        New-Item -ItemType Directory -Path $formulaFolder | Out-Null
+        $script:FormulaOwner = '=HYPERLINK("http://example.invalid","x")'
+        Mock Get-ItemOwner { [PSCustomObject]@{ Owner = $script:FormulaOwner; OwnerSid = $script:MySid } }
+
+        $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+        $rows[0].Result | Should -Be 'Done' -Because 'the read-back check of the snapshot passes with escaped text'
+        $saved = @(Import-Csv -LiteralPath $rows[0].BackupFile)
+        foreach ($s in $saved) { $s.Owner | Should -Be "'$($script:FormulaOwner)" }
+        @($saved | ForEach-Object { $_.Path }) | Should -Contain $formulaFolder
+    }
+
+    It 'AC16_TreeRowKeepsTheLogColumnsAndTheCountsAreReadFromTheRowNotFromDetail' {
+        $dir = New-TestTree 'ac16-counts'
+        $script:UnreadableLike = '*b.txt'
+
+        $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+        $rows[0].PSObject.Properties.Name | Should -Be $script:ExpectedColumns
+        $rows[0].TreeCounts.Unreadable | Should -Be 1
+        $rows[0].Detail = 'reworded'
+        Get-UnrestorableItemCount -Entries $rows | Should -Be 1
+        $logPath = Write-PermissionChangeLog -Entries $rows -LogFolder $script:Log
+        (Get-Content -LiteralPath $logPath -TotalCount 1) | Should -Be ('"' + ($script:ExpectedColumns -join '","') + '"')
+    }
+}
+
+Describe 'Native tool guard and tool output' {
+    It 'an unmocked Invoke-AclTool throws instead of running takeown or icacls' {
+        { Invoke-AclTool -Tool takeown -Arguments '/?' } | Should -Throw '*without a mock*'
+    }
+
+    It 'Get-AclToolSummary prefers error-looking lines and the last line, in any language' {
+        $dir = 'D:\Daten\HR'
+        $output = (@(1..40 | ForEach-Object { "ERFOLGREICH: Die Datei (oder der Ordner) ""$dir\f$_.txt"" gehoert jetzt der Gruppe Administratoren." }) +
+            "$dir\gesperrt.txt: Zugriff verweigert" + '1 Dateien erfolgreich verarbeitet; Fehler bei 1 Dateien') -join "`r`n"
+
+        $summary = Get-AclToolSummary -Output $output -Path $dir
+
+        $summary | Should -Be "$dir\gesperrt.txt: Zugriff verweigert 1 Dateien erfolgreich verarbeitet; Fehler bei 1 Dateien"
+    }
+
+    It 'Get-AclToolSummary falls back to the last line when nothing looks like an error' {
+        $output = "ERFOLGREICH: a`r`nERFOLGREICH: b`r`nERFOLGREICH: c"
+        Get-AclToolSummary -Output $output -Path 'D:\Daten' | Should -Be 'ERFOLGREICH: c'
+    }
+
+    It 'Resolve-AclTargetPath keeps a drive root and trims other trailing backslashes' {
+        Resolve-AclTargetPath -Path 'C:\' | Should -Be 'C:\'
+        Resolve-AclTargetPath -Path 'C:\Shares\HR Team\' | Should -Be 'C:\Shares\HR Team'
+        Resolve-AclTargetPath -Path 'C:\Shares\HR [old]' | Should -Be 'C:\Shares\HR [old]'
     }
 }

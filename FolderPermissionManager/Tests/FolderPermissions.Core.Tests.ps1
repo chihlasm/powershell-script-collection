@@ -15,6 +15,15 @@
 
 BeforeAll {
     . (Join-Path $PSScriptRoot '..\FolderPermissions.Core.ps1') -LoadFunctionsOnly
+    # Guard: the real Invoke-AclTool runs takeown.exe and icacls.exe. Replaced here (same
+    # parameters) so a test that forgets to mock it fails instead of changing real owners.
+    function Invoke-AclTool {
+        param(
+            [Parameter(Mandatory)][ValidateSet('icacls', 'takeown')][string]$Tool,
+            [Parameter(Mandatory)][string[]]$Arguments
+        )
+        throw "Invoke-AclTool ($Tool) was called without a mock in a test."
+    }
 
     # The real cmdlet object: Pester mocks also intercept the module-qualified name.
     $script:RealGetAcl = Get-Command Get-Acl -CommandType Cmdlet

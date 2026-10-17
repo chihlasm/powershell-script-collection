@@ -18,13 +18,21 @@
        already have are added, nothing is removed. The permissions of every subfolder are
        saved to <LogFolder>\Backups\<yyyy-MM-dd_HHmmss>_CopyPermissions.csv first.
 
+    Before each change it prints the scope with [WARN] (for ownership, the number of items,
+    counted read-only first) and asks "Continue? (y/N)". The copy step does not depend on
+    ownership, so it is still offered when ownership was declined or failed.
+
     Every change is written to <LogFolder>\Changes_<yyyy-MM-dd>.csv, the same log the GUI
     writes. See "Undo a change" in README.md to put permissions or owners back.
+
+    Exit code: 1 when a change Failed or was only Partly done, or the folder or log folder
+    could not be used; 0 otherwise (done, -WhatIf, or declined).
 
     CHANGES ANYTHING? Yes: owners and permissions. Use -WhatIf first.
 
 .PARAMETER Path
-    The top folder. If not given, the script asks for it.
+    The top folder. If not given, the script asks for it. A relative path ('.\HR') is made a
+    full path once, and that path is used for everything.
 
 .PARAMETER LogFolder
     Folder for the backups and the change log. Defaults to the Logs folder next to this script
@@ -100,7 +108,11 @@ if (-not (Test-Path -LiteralPath $corePath)) {
 function Write-CliChangeResult {
     <#
     .SYNOPSIS
-        Prints the plain-English result of one change with [PASS], [WARN], [FAIL] or [INFO].
+        Prints the plain-English result of one change with [PASS], [WARN], [FAIL] or [INFO], and
+        returns $true when it needs the technician's attention (a row is Failed or Partly done).
+    .DESCRIPTION
+        [PASS] only when every row is Done, was logged, can be restored from its backup, and
+        (for a whole folder) every folder could be opened and every owner read back.
     #>
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Entries,
@@ -112,21 +124,24 @@ function Write-CliChangeResult {
     $message = Get-ChangeResultMessage -Entries $all -LogPath $LogPath -LogFolder $LogFolder
     $results = @($all | ForEach-Object { $_.Result })
     $notDone = @($results | Where-Object { $_ -ne 'Done' })
+    $incomplete = @($all | Where-Object { Test-TreeEntryIncomplete $_ })
     if ($all.Count -gt 0 -and @($results | Where-Object { $_ -ne 'Skipped (WhatIf)' }).Count -eq 0) {
         Write-Host "[INFO] $message" -ForegroundColor Cyan
-    } elseif ($all.Count -gt 0 -and $notDone.Count -eq 0 -and $LogPath -and (Get-UnrestorableItemCount -Entries $all) -eq 0) {
+    } elseif ($all.Count -gt 0 -and $notDone.Count -eq 0 -and $incomplete.Count -eq 0 -and $LogPath -and (Get-UnrestorableItemCount -Entries $all) -eq 0) {
         Write-Host "[PASS] $message" -ForegroundColor Green
     } elseif (@($results | Where-Object { $_ -eq 'Done' -or $_ -eq 'Partly done' }).Count -gt 0) {
         Write-Host "[WARN] $message" -ForegroundColor Yellow
     } else {
         Write-Host "[FAIL] $message" -ForegroundColor Red
     }
+    @($results | Where-Object { $_ -eq 'Failed' -or $_ -eq 'Partly done' }).Count -gt 0
 }
 
 function Confirm-CliStep {
-    # True when the technician types y or Y. Anything else, including Enter, is no.
-    param([Parameter(Mandatory)][string]$Question)
-    $answer = Read-Host "$Question (y/n)"
+    # True when the technician types y or Y. Anything else, including Enter, is no (the
+    # capital N says so).
+    param([string]$Question = 'Continue?')
+    $answer = Read-Host "$Question (y/N)"
     $answer -eq 'y' -or $answer -eq 'Y'
 }
 
@@ -134,10 +149,15 @@ function Invoke-FolderPermissionCli {
     <#
     .SYNOPSIS
         The script's work: take ownership, show permissions, copy them to the subfolders. Each
-        change asks first (unless -Force), goes through the core (backup, then change, then
-        change log) and prints its result. Never throws for a declined prompt.
+        change shows its scope with [WARN], asks first (unless -Force), goes through the core
+        (backup, then change, then change log) and prints its result. Never throws for a
+        declined prompt.
+    .OUTPUTS
+        The exit code for the script: 1 when the folder could not be used or a change Failed or
+        was only Partly done; 0 otherwise (done, -WhatIf, or declined).
     #>
     [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([int])]
     param(
         [string]$Path,
         [string]$LogFolder,
@@ -145,13 +165,16 @@ function Invoke-FolderPermissionCli {
     )
 
     $whatIf = [bool]$WhatIfPreference
+    $exitCode = 0
 
     if (-not $Path) {
         $Path = Read-Host 'Enter the path to the top-level folder'
     }
+    # One full path for everything below: the snapshot, takeown, icacls and the log.
+    $Path = Resolve-AclTargetPath -Path "$Path".Trim()
     if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Container)) {
         Write-Host "[FAIL] The folder '$Path' does not exist or is not a folder. Nothing was changed." -ForegroundColor Red
-        return
+        return 1
     }
 
     $defaultLogFolder = Join-Path $PSScriptRoot 'Logs'
@@ -163,7 +186,7 @@ function Invoke-FolderPermissionCli {
             $logFolderUsed = Resolve-ChangeLogFolder -LogFolder $LogFolder -DefaultFolder $defaultLogFolder
         } catch {
             Write-Host "[FAIL] $($_.Exception.Message)" -ForegroundColor Red
-            return
+            return 1
         }
         foreach ($notice in @(Get-ChangeLogFolderNotice -LogFolder $LogFolder -ResolvedFolder $logFolderUsed -DefaultFolder $defaultLogFolder)) {
             Write-Host "[WARN] $notice" -ForegroundColor Yellow
@@ -171,22 +194,36 @@ function Invoke-FolderPermissionCli {
         Write-Host "[INFO] Changes are backed up and logged to $logFolderUsed" -ForegroundColor Cyan
     }
 
-    # 1. Take ownership of everything under the folder.
-    Write-Host "[WARN] Taking ownership changes the owner of $Path and of every subfolder and file under it." -ForegroundColor Yellow
-    $takeOwnership = $whatIf -or $Force -or (Confirm-CliStep "Take ownership of $Path and ALL its subfolders and files? The current owners will be saved to a backup first.")
+    # 1. Take ownership of everything under the folder. The tree is counted first (read only)
+    # so the scope is shown before asking; the core lists it again for the snapshot.
+    Write-Host "[INFO] Counting the folders and files in $Path..." -ForegroundColor Cyan
+    $tree = Get-OwnerTreeItem -Path $Path
+    $scope = "$(@($tree.Items).Count) item(s): $Path and every subfolder and file under it"
+    if (@($tree.Unlisted).Count -gt 0) {
+        $scope += ", plus whatever is inside $(@($tree.Unlisted).Count) folder(s) that could not be opened (their owners cannot be saved first)"
+    }
+    $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    Write-Host "[WARN] Taking ownership makes $me the owner of $scope. The current owners are saved to a backup first." -ForegroundColor Yellow
+    $takeOwnership = $whatIf -or $Force -or (Confirm-CliStep)
+    $ownershipTaken = $false
     if ($takeOwnership) {
         if ($whatIf) {
             $rows = @(Set-ItemOwnerToCurrentUser -Path $Path -Recurse -LogFolder $logFolderUsed -WhatIf)
-            Write-CliChangeResult -Entries $rows -LogFolder $logFolderUsed
+            $null = Write-CliChangeResult -Entries $rows -LogFolder $logFolderUsed
+            $ownershipTaken = $true
         } else {
             Write-Host "[INFO] Saving the current owners and taking ownership. This can take a while on a large folder..." -ForegroundColor Cyan
             $result = Invoke-LoggedPermissionChange -LogFolder $logFolderUsed -Change {
                 Set-ItemOwnerToCurrentUser -Path $Path -Recurse -LogFolder $logFolderUsed -WhatIf:$false
             }
-            Write-CliChangeResult -Entries $result.Entries -LogPath $result.LogPath -LogFolder $logFolderUsed
+            if (Write-CliChangeResult -Entries $result.Entries -LogPath $result.LogPath -LogFolder $logFolderUsed) { $exitCode = 1 }
+            $ownershipTaken = @($result.Entries | Where-Object { $_.Result -eq 'Done' -or $_.Result -eq 'Partly done' }).Count -gt 0
         }
     } else {
         Write-Host '[INFO] Ownership was not changed.' -ForegroundColor Cyan
+    }
+    if (-not $ownershipTaken) {
+        Write-Host '[INFO] Copying permissions (next) does not depend on taking ownership: it is offered on its own, and any subfolder you cannot change is reported as failed.' -ForegroundColor Cyan
     }
 
     # 2. Show the permissions.
@@ -194,7 +231,7 @@ function Invoke-FolderPermissionCli {
         $topAcl = Get-Acl -LiteralPath $Path -ErrorAction Stop
     } catch {
         Write-Host "[FAIL] Could not read the permissions of $($Path): $($_.Exception.Message) Permissions were not copied." -ForegroundColor Red
-        return
+        return 1
     }
     Write-Host ''
     Write-Host "Permissions on the top-level folder ($Path):"
@@ -214,27 +251,28 @@ function Invoke-FolderPermissionCli {
     }
     if ($subFolders.Count -eq 0) {
         Write-Host '[INFO] There are no subfolders to copy the permissions to.' -ForegroundColor Cyan
-        return
+        return $exitCode
     }
 
     # 3. Copy the top folder's permissions to every subfolder.
     Write-Host ''
-    Write-Host "[WARN] Copying adds the permissions of $Path to $($subFolders.Count) subfolder(s). Nothing is removed." -ForegroundColor Yellow
-    $copy = $whatIf -or $Force -or (Confirm-CliStep "Copy the permissions from the top-level folder to all $($subFolders.Count) subfolder(s)? Their current permissions will be saved to a backup first.")
+    Write-Host "[WARN] Copying adds the permissions of $Path to $($subFolders.Count) subfolder(s). Their current permissions are saved to a backup first. Nothing is removed." -ForegroundColor Yellow
+    $copy = $whatIf -or $Force -or (Confirm-CliStep)
     if (-not $copy) {
         Write-Host '[INFO] Permissions were not copied.' -ForegroundColor Cyan
-        return
+        return $exitCode
     }
     $targets = @($subFolders | ForEach-Object { $_.FullName })
     if ($whatIf) {
         $rows = @(Copy-FolderPermission -SourcePath $Path -TargetPath $targets -LogFolder $logFolderUsed -WhatIf)
-        Write-CliChangeResult -Entries $rows -LogFolder $logFolderUsed
+        $null = Write-CliChangeResult -Entries $rows -LogFolder $logFolderUsed
     } else {
         $result = Invoke-LoggedPermissionChange -LogFolder $logFolderUsed -Change {
             Copy-FolderPermission -SourcePath $Path -TargetPath $targets -LogFolder $logFolderUsed -WhatIf:$false
         }
-        Write-CliChangeResult -Entries $result.Entries -LogPath $result.LogPath -LogFolder $logFolderUsed
+        if (Write-CliChangeResult -Entries $result.Entries -LogPath $result.LogPath -LogFolder $logFolderUsed) { $exitCode = 1 }
     }
+    $exitCode
 }
 
 if ($loadOnly) { return }
@@ -245,4 +283,4 @@ if (-not $isAdmin -and -not $WhatIfPreference) {
     exit 1
 }
 
-Invoke-FolderPermissionCli -Path $Path -LogFolder $LogFolder -Force:$Force
+exit (Invoke-FolderPermissionCli -Path $Path -LogFolder $LogFolder -Force:$Force)

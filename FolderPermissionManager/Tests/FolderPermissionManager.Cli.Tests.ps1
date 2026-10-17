@@ -23,6 +23,16 @@
 
 BeforeAll {
     . (Join-Path $PSScriptRoot '..\FolderPermissionManager.ps1') -LoadFunctionsOnly
+    # Guard: the real Invoke-AclTool runs takeown.exe and icacls.exe by full path, which the
+    # bare 'Mock takeown' / 'Mock icacls' cannot catch. Replaced here (same parameters) so a
+    # test that forgets to mock it fails instead of changing real owners.
+    function Invoke-AclTool {
+        param(
+            [Parameter(Mandatory)][ValidateSet('icacls', 'takeown')][string]$Tool,
+            [Parameter(Mandatory)][string[]]$Arguments
+        )
+        throw "Invoke-AclTool ($Tool) was called without a mock in a test."
+    }
 }
 
 Describe 'FolderPermissionManager.ps1 (command line)' {
@@ -34,6 +44,7 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         $script:Log = Join-Path $TestDrive ('cli-logs-' + [guid]::NewGuid().ToString('N'))
         $script:Answers = [System.Collections.Generic.Queue[string]]::new()
         $script:Prompts = [System.Collections.Generic.List[string]]::new()
+        $script:Lines = [System.Collections.Generic.List[string]]::new()
 
         Mock Set-Acl { }
         Mock takeown { }
@@ -43,6 +54,7 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
             $script:Prompts.Add("$Prompt")
             if ($script:Answers.Count -gt 0) { $script:Answers.Dequeue() } else { 'n' }
         }
+        Mock Write-Host { $script:Lines.Add("$Object") }
     }
 
     It 'AC19_Cli_WhatIf_CallsNoNativeToolAndNoSetAcl' {
@@ -71,7 +83,9 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
 
         Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
 
-        Should -Invoke Read-Host -Times 1 -Scope It
+        # Two questions: ownership (declined), then the copy step (default answer: no).
+        Should -Invoke Read-Host -Times 2 -Exactly -Scope It
+        Test-Path -LiteralPath (Join-Path $script:Log 'Backups') | Should -BeFalse -Because 'nothing was backed up, so nothing was about to change'
         Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It -Because 'ownership must not be taken before the user agrees'
         Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
         Should -Invoke takeown -Times 0 -Exactly -Scope It
@@ -115,5 +129,79 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         $names | Should -Contain 'Force'
         $names | Should -Contain 'LogFolder'
         $names | Should -Contain 'WhatIf'
+    }
+
+    # --- Fix round 1 (SQ-014 review) ---------------------------------------------------------
+
+    It 'AC20_Cli_OwnershipDeclinedThenCopyAccepted_CopiesThroughTheCoreWithABackupAndLeavesOwnersAlone' {
+        $script:Answers.Enqueue('n')   # take ownership: no
+        $script:Answers.Enqueue('y')   # copy permissions to subfolders: yes
+
+        $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
+
+        $code | Should -Be 0
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It -Because 'ownership was declined'
+        Should -Invoke Set-Acl -Times 2 -Exactly -Scope It -Because 'one write per subfolder (sub1, sub2), through Copy-FolderPermission'
+        @(Get-ChildItem -LiteralPath (Join-Path $script:Log 'Backups') -Filter '*_CopyPermissions.csv').Count | Should -Be 1
+        @(Get-ChildItem -LiteralPath (Join-Path $script:Log 'Backups') -Filter '*_TakeOwnership.csv').Count | Should -Be 0
+        @($script:Lines | Where-Object { $_ -like '`[INFO`] Copying permissions (next) does not depend on taking ownership*' }).Count | Should -Be 1
+        $log = @(Import-Csv -LiteralPath @(Get-ChildItem -LiteralPath $script:Log -Filter 'Changes_*.csv')[0].FullName)
+        @($log | ForEach-Object { $_.Action } | Sort-Object -Unique) | Should -Be @('Copy permissions')
+    }
+
+    It 'AC20_Cli_ShowsTheItemCountBeforeAskingAndAsksYesNoWithNoAsTheDefault' {
+        Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
+
+        $script:Prompts[0] | Should -Be 'Continue? (y/N)'
+        $scope = @($script:Lines | Where-Object { $_ -like '`[WARN`] Taking ownership makes *' })
+        $scope.Count | Should -Be 1
+        $scope[0] | Should -BeLike "*the owner of 3 item(s): $($script:Dir) and every subfolder and file under it*"
+    }
+
+    It 'AC19_Cli_WhatIf_ShowsTheItemCount' {
+        Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log -WhatIf
+
+        @($script:Lines | Where-Object { $_ -like '`[WARN`] Taking ownership makes * 3 item(s): *' }).Count | Should -Be 1
+        Should -Invoke Read-Host -Times 0 -Exactly -Scope It
+    }
+
+    It 'AC18_Cli_FolderThatCannotBeListed_IsAWarningNotAPass' {
+        $locked = Join-Path $script:Dir 'sub1'
+        Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $LiteralPath -eq $locked -and -not $Recurse }
+
+        $null = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log -Force
+
+        $result = @($script:Lines | Where-Object { $_ -match '^\[(PASS|WARN|FAIL)\] Took ownership' })
+        $result.Count | Should -Be 1
+        $result[0] | Should -Match '^\[WARN\] '
+        $result[0] | Should -BeLike "*could not be opened ($locked)*cannot be restored from this backup*"
+    }
+
+    It 'AC17_Cli_ExitCodeIsOneWhenOwnershipIsPartlyDoneOrFailed' -ForEach @(
+        @{ Name = 'partly done'; Takeown = 0; Icacls = 1 }
+        @{ Name = 'failed'; Takeown = 1; Icacls = 1 }
+    ) {
+        $script:Exit = @{ takeown = $Takeown; icacls = $Icacls }
+        Mock Invoke-AclTool { [PSCustomObject]@{ ExitCode = $script:Exit[$Tool]; Output = 'ERROR: Access is denied.' } }
+
+        $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log -Force
+
+        $code | Should -Be 1
+    }
+
+    It 'AC17_Cli_ExitCodeIsZeroWhenDoneDeclinedOrWhatIf' {
+        Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log -Force | Should -Be 0
+        Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log | Should -Be 0
+        Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log -WhatIf | Should -Be 0
+    }
+
+    It 'AC19_Cli_RelativePathWithTrailingBackslash_IsResolvedOnce' {
+        Push-Location -LiteralPath (Split-Path -Parent $script:Dir)
+        try {
+            $null = Invoke-FolderPermissionCli -Path ('.\' + (Split-Path -Leaf $script:Dir) + '\') -LogFolder $script:Log -Force
+        } finally { Pop-Location }
+
+        Should -Invoke Invoke-AclTool -Times 1 -Exactly -Scope It -ParameterFilter { $Tool -eq 'takeown' -and $Arguments[1] -eq $script:Dir }
+        Should -Invoke Invoke-AclTool -Times 1 -Exactly -Scope It -ParameterFilter { $Tool -eq 'icacls' -and $Arguments[0] -eq $script:Dir }
     }
 }

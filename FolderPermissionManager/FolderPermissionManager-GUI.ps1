@@ -186,15 +186,17 @@ function ConvertTo-ChangeResultRow {
 }
 
 # Sends the result of a change to ONE folder: 200 with status 'success', 200 with status
-# 'partial' when a whole-tree change was only partly done (the page shows it as a warning), or
-# the existing error shape (400 when the folder does not exist, 500 otherwise) with the same
+# 'partial' when a whole-tree change was only partly done or could not be checked everywhere
+# (folders it could not open, owners it could not read back; the page shows it as a warning),
+# or the existing error shape (400 when the folder does not exist, 500 otherwise) with the same
 # added fields.
 function Send-SingleChangeResult {
     param([System.Net.HttpListenerResponse]$Response, [scriptblock]$Change)
     $completed = Complete-PermissionChange -Change $Change
     $entries = @($completed.Entries)
     $data = $completed.Data
-    if ($entries.Count -gt 0 -and @($entries | Where-Object { $_.Result -ne 'Done' }).Count -eq 0) {
+    $incomplete = @($entries | Where-Object { Test-TreeEntryIncomplete $_ })
+    if ($entries.Count -gt 0 -and $incomplete.Count -eq 0 -and @($entries | Where-Object { $_.Result -ne 'Done' }).Count -eq 0) {
         $data['status'] = 'success'
     } elseif ($entries.Count -gt 0 -and @($entries | Where-Object { $_.Result -ne 'Done' -and $_.Result -ne 'Partly done' }).Count -eq 0) {
         $data['status'] = 'partial'
@@ -1588,6 +1590,7 @@ function changeStatusType(r) {
     var res = r.results || [];
     var failed = res.filter(function(x) { return x.status === 'error'; }).length;
     var done = res.filter(function(x) { return x.status === 'success'; }).length;
+    // 'partial': a whole-tree change partly done, or not checked everywhere.
     if (r.status === 'partial') return 'warning';
     if (res.length && failed && !done) return 'error';
     if (failed || done < res.length || !r.logPath || r.unrestorable) return 'warning';
@@ -1596,9 +1599,9 @@ function changeStatusType(r) {
 // Shows a change result; a warning is also spelled out in words, not only in colour.
 function showChangeResult(r) {
     var type = changeStatusType(r);
-    var msg = r.message;
-    // A partly done whole-tree change already starts "Partly done:".
-    if (type === 'warning' && r.status !== 'partial') {
+    var msg = r.message || '';
+    // A partly done whole-tree change already starts "Partly done:"; never say it twice.
+    if (type === 'warning' && msg.indexOf('Partly done:') !== 0) {
         var res = r.results || [];
         var partial = res.some(function(x) { return x.status !== 'success'; });
         msg = (partial ? 'Partly done: ' : 'Check this: ') + msg;
@@ -1998,16 +2001,24 @@ function submitRemoveAce() {
     }
 }
 
+// True while a take-ownership request is running: a second click must not start another run
+// over the same tree.
+var ownershipBusy = false;
 function takeOwnership(recursive) {
     if (!currentFolder) return;
+    if (ownershipBusy) {
+        setStatus('Still working on the previous change. Wait for it to finish, then try again.', 'warning');
+        return;
+    }
     var msg = recursive
-        ? 'This will change ownership on ALL files and subfolders under:\n\n' + currentFolder + '\n\nThe current owners will be saved to a backup first. Continue?'
+        ? 'This will change ownership on ALL files and subfolders under:\n\n' + currentFolder + '\n\nYou become the owner. The current owners will be saved to a backup first. Continue?'
         : 'Take ownership of:\n\n' + currentFolder + '?';
     if (!confirm(msg)) return;
+    ownershipBusy = true;
     setStatus(recursive ? 'Saving the current owners and taking ownership of everything in this folder. This can take a while...' : 'Backing up and taking ownership...', 'info');
     api('/api/take-ownership', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: currentFolder, recursive: recursive }) })
-        .then(function(r) { showChangeResult(r); loadFolderAcl(currentFolder); })
-        .catch(showChangeError);
+        .then(function(r) { ownershipBusy = false; showChangeResult(r); loadFolderAcl(currentFolder); })
+        .catch(function(e) { ownershipBusy = false; showChangeError(e); });
 }
 
 function showReplicateModal() {
