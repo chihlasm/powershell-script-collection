@@ -54,9 +54,12 @@
     Optional ticket number (letters, digits, - or _, up to 32 characters). The HTML, the CSV and
     the ticket note are saved in <root>\Ticket_<number>, where root is -OutputPath if given,
     else %USERPROFILE%\Documents\TicketNotes. TicketNote\Join-TicketNotes.ps1 later joins
-    every tool's note in that folder into one.
+    every tool's note in that folder into one. A number that does not fit is refused with a
+    [FAIL] line and exit code 3, before anything is checked.
 .PARAMETER NoClipboard
-    Do not copy the ticket note to the clipboard.
+    Do not copy the ticket note to the clipboard. Without it the note goes to the clipboard,
+    where it can enter clipboard history (Win+V) or the cloud clipboard on Windows PowerShell
+    5.0 and later, and travels over RDP clipboard redirection.
 .PARAMETER FullDetail
     Keep IP addresses and share paths in the ticket note. By default the note is paste-safe:
     they are replaced by [IP removed] / [share path removed]. The question at the top is
@@ -84,7 +87,8 @@
     %USERPROFILE%\Documents\TicketNotes\Ticket_482113, and the note is copied to the clipboard.
 .NOTES
     Exit codes (without -PassThru): 0 = can sign in, 1 = cannot / probably not, 2 = user not
-    found or ambiguous, 3 = ActiveDirectory module or connectivity failure.
+    found or ambiguous, 3 = could not run (ActiveDirectory module missing, connectivity
+    failure, or an unusable -TicketNumber).
 
     TICKET NOTE. Every run ends with a four-part note (Checked, Ruled out, Could not check,
     Next step) copied to the clipboard. It is also saved as Note_<time>_AD-UserQuickCheck.txt
@@ -146,6 +150,9 @@
         https://learn.microsoft.com/powershell/module/microsoft.powershell.management/set-clipboard?view=powershell-5.1
         https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_powershell_exe?view=powershell-5.1
         https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_preference_variables?view=powershell-5.1
+      Clipboard history / cloud clipboard opt-out formats (CanIncludeInClipboardHistory,
+      CanUploadToCloudClipboard; set by the kit's WinForms path, not by Set-Clipboard)
+        https://learn.microsoft.com/windows/win32/dataxchg/clipboard-formats
 
     NOT VERIFIED ON LEARN: that msDS-LogonTimeSyncInterval defaults to 14 days. The
     lastLogonTimestamp page documents "14 days minus random percentage of 5 days" only for
@@ -166,7 +173,8 @@ param(
 
     [string]$OutputPath,
 
-    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_-]{0,31}\z')]
+    # Checked in the script body (Test-TicketNumber in CaseKit.ps1), not with ValidatePattern,
+    # so a mistyped number gets a plain-English [FAIL] line instead of a parameter-binding error.
     [string]$TicketNumber,
 
     [switch]$NoClipboard,
@@ -207,6 +215,12 @@ $script:PasswordExpiryWarnDays = 14
 # default MaxTokenSize value does not create a large enough buffer". Used as a WARN-only
 # early signal on the total (nested) group count, never as a blocker.
 $script:TokenBloatWarnGroups = 120
+
+# A display-name search returns at most this many people (Get-ADUser -ResultSetSize); when it
+# is reached there may be more, so the ticket note says "25 or more".
+$script:NameSearchLimit = 25
+# The ticket note lists this many of an ambiguous search's candidates, then "...and N more".
+$script:NoteCandidateLimit = 5
 
 # =============================================================================
 # Small helpers
@@ -549,7 +563,7 @@ function Resolve-QuickCheckUser {
         $matchedBy = 'sign-in name'
         if ($found.Count -eq 0) {
             $e2 = ConvertTo-LdapFilterValue $id
-            $found = @(Get-ADUser @ad -LDAPFilter "(&(objectCategory=person)(objectClass=user)(|(anr=$e2)(displayName=$e2)))" -Properties $props -ResultSetSize 25 -ErrorAction Stop)
+            $found = @(Get-ADUser @ad -LDAPFilter "(&(objectCategory=person)(objectClass=user)(|(anr=$e2)(displayName=$e2)))" -Properties $props -ResultSetSize $script:NameSearchLimit -ErrorAction Stop)
             $matchedBy = 'name search'
         }
     }
@@ -1054,9 +1068,16 @@ function ConvertTo-UserQuickCheckTicketNote {
             }
             'Ambiguous' {
                 $cands = @($Result.Candidates)
-                $headline = "Sign-in check did not run - '$id' matches $($cands.Count) people"
-                foreach ($c in $cands) {
-                    $items.Add((New-TicketNoteItem -Kind Info -Text ('Matches {0} ({1}, {2}).' -f $c.DisplayName, $c.SamAccountName, $c.UserPrincipalName)))
+                # The name search stops at $script:NameSearchLimit, so a full page means "or more".
+                $howMany = if ($cands.Count -ge $script:NameSearchLimit) { "$($script:NameSearchLimit) or more" } else { [string]$cands.Count }
+                $headline = "Sign-in check did not run - '$id' matches $howMany people"
+                # Enough to recognise the right person; not a directory dump in the ticket.
+                foreach ($c in @($cands | Select-Object -First $script:NoteCandidateLimit)) {
+                    $items.Add((New-TicketNoteItem -Kind Info -Text ('Matches {0} ({1}).' -f $c.DisplayName, $c.SamAccountName)))
+                }
+                if ($cands.Count -gt $script:NoteCandidateLimit) {
+                    $more = if ($cands.Count -ge $script:NameSearchLimit) { "at least $($cands.Count - $script:NoteCandidateLimit)" } else { [string]($cands.Count - $script:NoteCandidateLimit) }
+                    $items.Add((New-TicketNoteItem -Kind Info -Text "...and $more more (refine the search)."))
                 }
                 if ($cands.Count -gt 0) { $domain = Get-DomainDnsFromDn -DistinguishedName ([string]$cands[0].DistinguishedName) }
                 $next.Add('Run it again with the exact sign-in name of the right person.')
@@ -1092,17 +1113,35 @@ if ($LoadFunctionsOnly) { return }
 # Main
 # =============================================================================
 
+# A result for the cases where the check cannot start (-PassThru callers get it instead of exit 3).
+function New-QuickCheckStartFailure([string]$Message) {
+    [PSCustomObject]@{
+        Status = 'Error'; ExitCode = 3; Identity = $Identity; Message = $Message
+        Candidates = @(); MatchedBy = ''; Facts = $null; Assessment = $null; Now = (Get-Date); TicketNote = $null
+    }
+}
+
+if ($TicketNumber -and $script:CaseKitMissing) {
+    if (-not $Quiet) { Write-Status "CaseKit.ps1 is missing from this folder, so -TicketNumber $TicketNumber was ignored: the reports go to -OutputPath (if given) and there is no ticket note this time." 'WARN' }
+    $TicketNumber = ''
+    $script:CaseKitWarned = $true
+}
+if ($TicketNumber -and -not (Test-TicketNumber -TicketNumber $TicketNumber)) {
+    $msg = "'$TicketNumber' is not a usable ticket number. Use letters, digits, - or _ (up to 32 characters, starting with a letter or digit), for example 482113."
+    if (-not $Quiet) { Write-Status $msg 'FAIL' }
+    if ($PassThru) { return (New-QuickCheckStartFailure $msg) }
+    exit 3
+}
+
 try {
     Import-Module ActiveDirectory -ErrorAction Stop
 } catch {
-    Write-Status "The ActiveDirectory PowerShell module is not available: $($_.Exception.Message)" 'FAIL'
-    Write-Status 'Install the RSAT Active Directory tools, or run this on a domain controller / admin server.' 'INFO'
-    if ($PassThru) {
-        return [PSCustomObject]@{
-            Status = 'Error'; ExitCode = 3; Identity = $Identity; Message = "The ActiveDirectory PowerShell module is not available: $($_.Exception.Message)"
-            Candidates = @(); MatchedBy = ''; Facts = $null; Assessment = $null; Now = (Get-Date); TicketNote = $null
-        }
+    $msg = "The ActiveDirectory PowerShell module is not available: $($_.Exception.Message)"
+    if (-not $Quiet) {
+        Write-Status $msg 'FAIL'
+        Write-Status 'Install the RSAT Active Directory tools, or run this on a domain controller / admin server.' 'INFO'
     }
+    if ($PassThru) { return (New-QuickCheckStartFailure $msg) }
     exit 3
 }
 
@@ -1113,12 +1152,12 @@ if (-not $Quiet) { Write-QuickCheckConsole -Result $result }
 # and note together, so the note's evidence names sit beside it); with only -OutputPath, that
 # folder; with neither, no files (the note goes to the clipboard, or the console).
 $folder = $OutputPath
-if ($TicketNumber -and -not $script:CaseKitMissing) {
+if ($TicketNumber) {
     $root = if ($OutputPath) { $OutputPath } else { Get-TicketNoteDefaultRoot }
     try {
         $folder = Resolve-TicketFolder -TicketNumber $TicketNumber -Root $root
     } catch {
-        Write-Status "Could not create the ticket folder under ${root}: $($_.Exception.Message)" 'WARN'
+        if (-not $Quiet) { Write-Status "Could not create the ticket folder under ${root}: $($_.Exception.Message)" 'WARN' }
     }
 }
 
@@ -1132,25 +1171,29 @@ if ($folder -and $result.Status -eq 'Ok') {
             Write-Status "CSV saved   : $($files.Csv)" 'PASS'
         }
     } catch {
-        Write-Status "Could not write the report to ${folder}: $($_.Exception.Message)" 'WARN'
+        if (-not $Quiet) { Write-Status "Could not write the report to ${folder}: $($_.Exception.Message)" 'WARN' }
     }
 }
 
 $note = $null
 if ($script:CaseKitMissing) {
-    if (-not $Quiet) { Write-Status 'CaseKit.ps1 is missing from this folder - no ticket note this time.' 'WARN' }
+    if (-not $Quiet -and -not $script:CaseKitWarned) { Write-Status 'CaseKit.ps1 is missing from this folder - no ticket note this time.' 'WARN' }
 } else {
-    $note = ConvertTo-UserQuickCheckTicketNote -Result $result -EvidencePaths $evidence -Credential $Credential
-    if ($Quiet) {
-        # Another script is the caller: no console and no clipboard. The note is still saved
-        # when a folder is in play, and it is always on the result object.
-        if ($folder) {
-            try { $null = Save-TicketNote -Note $note -Folder $folder -PasteSafe:(-not $FullDetail) }
-            catch { Write-Status "Could not save the ticket note in ${folder}: $($_.Exception.Message)" 'WARN' }
+    # The note is extra: a failure while building or saving it never changes the answer or the
+    # exit code. The check's own result above stands.
+    try {
+        $note = ConvertTo-UserQuickCheckTicketNote -Result $result -EvidencePaths $evidence -Credential $Credential
+        if ($Quiet) {
+            # Another script is the caller: no console and no clipboard. The note is still saved
+            # when a folder is in play, and it is always on the result object.
+            if ($folder) { $null = Save-TicketNote -Note $note -Folder $folder -PasteSafe:(-not $FullDetail) }
+        } else {
+            Write-Host ''
+            $null = Publish-TicketNote -Note $note -Folder $folder -PasteSafe:(-not $FullDetail) -NoClipboard:$NoClipboard
         }
-    } else {
-        Write-Host ''
-        $null = Publish-TicketNote -Note $note -Folder $folder -PasteSafe:(-not $FullDetail) -NoClipboard:$NoClipboard
+    } catch {
+        if (-not $Quiet) { Write-Status "Could not make the ticket note: $($_.Exception.Message). The check above is still valid." 'WARN' }
+        $note = $null
     }
 }
 $result | Add-Member -NotePropertyName TicketNote -NotePropertyValue $note -Force

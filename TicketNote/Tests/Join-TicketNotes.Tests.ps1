@@ -73,6 +73,49 @@ Describe 'Join-TicketNotes' {
         $lines | Should -Contain 'Tech tried by hand: (not given)'
     }
 
+    It 'redacts a note saved with -FullDetail, keeps its headline, and -FullDetail keeps everything' {
+        $root = Join-Path $TestDrive 'fulldetail'
+        $dir = Join-Path $root 'Ticket_482113'
+        $null = New-Item -ItemType Directory -Path $dir -Force
+        $body = "[Ticket note] Network-QuickCheck: Can this PC reach 10.9.9.9?`r`n`r`nChecked:`r`n- PROBLEM: 10.1.2.3:445 did not answer.`r`n- Profile share \\fs01\FSLogix Profiles\jdoe is slow.`r`n"
+        [System.IO.File]::WriteAllText((Join-Path $dir 'Note_2026-10-17_101500_Network-QuickCheck.txt'), $body, $utf8)
+
+        & $script:Joiner -TicketNumber '482113' -OutputPath $root -UserReported 'a' -TechTried 'b' -NoClipboard 6>$null
+        $safe = @(Get-ChildItem -LiteralPath $dir -Filter 'TicketNotes_Combined_*.txt')
+        $safe.Count | Should -Be 1
+        $text = [System.IO.File]::ReadAllText($safe[0].FullName, $utf8)
+        $text | Should -Match ([regex]::Escape('[Ticket note] Network-QuickCheck: Can this PC reach 10.9.9.9?'))
+        $text | Should -Not -Match '10\.1\.2\.3'
+        $text | Should -Not -Match 'fs01'
+        $text | Should -Match ([regex]::Escape('- PROBLEM: [IP removed] did not answer.'))
+        $text | Should -Match ([regex]::Escape('- Profile share [share path removed] is slow.'))
+        Remove-Item -LiteralPath $safe[0].FullName
+
+        & $script:Joiner -TicketNumber '482113' -OutputPath $root -UserReported 'a' -TechTried 'b' -NoClipboard -FullDetail 6>$null
+        $full = @(Get-ChildItem -LiteralPath $dir -Filter 'TicketNotes_Combined_*.txt')
+        $full.Count | Should -Be 1
+        $fullText = [System.IO.File]::ReadAllText($full[0].FullName, $utf8)
+        $fullText | Should -Match '10\.1\.2\.3:445'
+        $fullText | Should -Match ([regex]::Escape('\\fs01\FSLogix Profiles\jdoe'))
+    }
+
+    It 'a mistyped ticket number gets a plain-English [FAIL] line and exit 2' {
+        $records = @(& $script:Joiner -TicketNumber '..\x' -OutputPath $TestDrive -UserReported 'a' -TechTried 'b' -NoClipboard 6>&1)
+        $LASTEXITCODE | Should -Be 2
+        $out = (@($records | ForEach-Object { $_.ToString() })) -join "`n"
+        $out | Should -Match ([regex]::Escape("[FAIL] '..\x' is not a usable ticket number"))
+    }
+
+    It 'a ticket folder that cannot be read gets a [FAIL] line and exit 2' {
+        Mock Get-ChildItem { throw 'Access to the path is denied.' } -ParameterFilter { $Filter -eq 'Note_*.txt' }
+        $root = Join-Path $TestDrive 'denied'
+        $null = New-Item -ItemType Directory -Path (Join-Path $root 'Ticket_482113') -Force
+        $records = @(& $script:Joiner -TicketNumber '482113' -OutputPath $root -UserReported 'a' -TechTried 'b' -NoClipboard 6>&1)
+        $LASTEXITCODE | Should -Be 2
+        $out = (@($records | ForEach-Object { $_.ToString() })) -join "`n"
+        $out | Should -Match '\[FAIL\] Could not read the ticket folder .*Access to the path is denied'
+    }
+
     It 'AC17_JoinerNothingToJoin: no folder -> [WARN] line, no file, exit 1' {
         $root = Join-Path $TestDrive 'ac17'
         $null = New-Item -ItemType Directory -Path $root

@@ -26,8 +26,8 @@ Other options:
 | `-Server DC01` | Run the lookup against a specific domain controller or domain. |
 | `-Credential (Get-Credential)` | Use a different account for the lookups. |
 | `-DomainController DC01,DC02` | Check only these DCs instead of all of them. |
-| `-TicketNumber 482113` | Save the HTML, the CSV and the ticket note in the ticket's folder. See [Ticket note](#ticket-note). |
-| `-NoClipboard` | Do not copy the ticket note to the clipboard. |
+| `-TicketNumber 482113` | Save the HTML, the CSV and the ticket note in the ticket's folder. See [Ticket note](#ticket-note). A number that does not fit (letters, digits, `-` or `_`, up to 32 characters) is refused with a `[FAIL]` line before anything is checked. |
+| `-NoClipboard` | Do not copy the ticket note to the clipboard (see the clipboard note under [Ticket note](#ticket-note)). |
 | `-FullDetail` | Keep IP addresses and share paths in the ticket note (removed by default). |
 | `-PassThru` / `-Quiet` | For scripts: return the result object instead of an exit code, and write nothing to the console. `-Quiet` also leaves the clipboard alone. |
 
@@ -97,13 +97,15 @@ Evidence: UserQuickCheck_jdoe_2026-10-17_093012.html, UserQuickCheck_jdoe_2026-1
 - IP addresses and share paths are replaced by `[IP removed]` / `[share path removed]`, so the note is safe to paste. Add `-FullDetail` to keep them. Evidence shows file names only.
 - `-Credential` shows as `(as CONTOSO\name)` in the stamp. The password never goes into the note.
 - Ran several tools on the same ticket? `..\TicketNote\Join-TicketNotes.ps1 -TicketNumber 482113` joins their notes into one.
-- The note is built by `CaseKit.ps1` in this folder. Keep it next to the script. Without it the check still runs, with no note.
+- **The clipboard is not private.** On Windows PowerShell 5.0 and later the note is copied with `Set-Clipboard`, so it can land in clipboard history (Win+V) and the cloud clipboard (synced to the user's other devices, if turned on). On 3.0 and 4.0 the note is marked to stay out of both. In a Remote Desktop session the clipboard is shared with the PC you connected from (RDP clipboard redirection). The note names the user, so add `-NoClipboard` when that matters; the note file is still saved when a folder is in play.
+- If the name matches more than five people, the note lists the first five (name and sign-in name) and says how many more, so refine the search.
+- The note is built by `CaseKit.ps1` in this folder. Keep it next to the script. Without it the check still runs, with no note, and `-TicketNumber` is ignored (the warning says so).
 
 ## Things worth knowing
 
 - **Last sign-in** is the newest time across every DC, with the DC named. The shared copy (`lastLogonTimestamp`) is only updated every so often (up to about 14 days by default), so it can be days behind. Do not use it to prove someone has not signed in today.
 - **Locked now** is asked of the PDC emulator, which learns about lockouts first. If it cannot be reached, you get a warning and the answer may be out of date.
-- **Exit codes** (for scripts): `0` can sign in, `1` cannot or probably not, `2` user not found or the name matches several people (the candidates are listed, nothing is guessed), `3` AD module or connection failure.
+- **Exit codes** (for scripts): `0` can sign in, `1` cannot or probably not, `2` user not found or the name matches several people (the candidates are listed, nothing is guessed), `3` could not run (AD module missing, connection failure, or a ticket number that does not fit).
 
 ## What it does not check
 

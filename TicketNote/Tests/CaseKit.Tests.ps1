@@ -167,6 +167,26 @@ Describe 'paste-safe redaction' {
         (Protect-TicketNoteText -Line 'ip [::ffff:10.0.0.5]:445') | Should -Not -Match '10\.0\.0\.5'
         (Protect-TicketNoteText -Line 'at \\fs01\profiles$\jdoe now') | Should -Be 'at [share path removed] now'
     }
+
+    It 'redacts an unquoted share path whose folder names contain spaces, all of it' {
+        (Protect-TicketNoteText -Line '\\fs01\FSLogix Profiles\jdoe') | Should -Be '[share path removed]'
+        (Protect-TicketNoteText -Line 'Profile at \\fs01\FSLogix Profiles\jdoe is slow.') | Should -Be 'Profile at [share path removed] is slow.'
+        (Protect-TicketNoteText -Line 'VHD \\fs01\FSLogix Profiles\jdoe\Profile_jdoe.vhdx, 2 GB') | Should -Be 'VHD [share path removed], 2 GB'
+        (Protect-TicketNoteText -Line 'see "\\fs01\FSLogix Profiles" here') | Should -Be 'see "[share path removed]" here'
+    }
+
+    It 'redacts //host/share and file://host/share forms, and leaves web addresses alone' {
+        (Protect-TicketNoteText -Line 'see //fs01/profiles/jdoe now') | Should -Be 'see [share path removed] now'
+        (Protect-TicketNoteText -Line 'see file://fs01/profiles/jdoe now') | Should -Be 'see [share path removed] now'
+        (Protect-TicketNoteText -Line 'see file:\\fs01\profiles\jdoe now') | Should -Be 'see [share path removed] now'
+        (Protect-TicketNoteText -Line 'portal https://contoso.com/help') | Should -Be 'portal https://contoso.com/help'
+    }
+
+    It 'keeps two share paths in one sentence apart, and is idempotent' {
+        $once = Protect-TicketNoteText -Line '\\fs01\a is on \\fs02\b'
+        $once | Should -Be '[share path removed] is on [share path removed]'
+        (Protect-TicketNoteText -Line $once) | Should -Be $once
+    }
 }
 
 Describe 'saving the note' {
@@ -216,6 +236,25 @@ Describe 'clipboard' {
         { $script:result = Copy-TicketNoteToClipboard -Text 'x' } | Should -Not -Throw
         $script:result | Should -BeFalse
         $script:result | Should -Not -BeNullOrEmpty -Because 'it must return $false, not nothing'
+    }
+
+    It 'the WinForms clipboard data opts out of clipboard history and the cloud clipboard' {
+        # Builds the DataObject only; nothing is put on the clipboard.
+        # https://learn.microsoft.com/windows/win32/dataxchg/clipboard-formats
+        $data = New-TicketNoteClipboardData -Text 'the whole note'
+        $data.GetData([System.Windows.Forms.DataFormats]::UnicodeText) | Should -Be 'the whole note'
+        foreach ($format in 'CanIncludeInClipboardHistory', 'CanUploadToCloudClipboard') {
+            $value = $data.GetData($format)
+            $value | Should -BeOfType [System.IO.MemoryStream]
+            @($value.ToArray()) | Should -Be @(0, 0, 0, 0) -Because "$format must be a DWORD of zero"
+        }
+    }
+
+    It 'Invoke-WinFormsClipboard puts that data object on the clipboard' {
+        $code = (Get-Command Invoke-WinFormsClipboard).Definition
+        $code | Should -Match 'New-TicketNoteClipboardData'
+        $code | Should -Match 'SetDataObject\(\$data, \$true\)'
+        $code | Should -Not -Match 'SetText'
     }
 
     It 'AC11_NeverClipExe: neither the kit nor the joiner calls clip.exe' {

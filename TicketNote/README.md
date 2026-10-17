@@ -45,11 +45,11 @@ The notes are in the order they were made. Earlier combined files are never incl
 | `-OutputPath D:\Cases` | Where the `Ticket_<number>` folder is. Use the same `-OutputPath` you gave the tools. Default: `%USERPROFILE%\Documents\TicketNotes`. |
 | `-UserReported '...'` / `-TechTried '...'` | Answer the two questions up front (no prompts). |
 | `-NoClipboard` | Only write the file. |
-| `-FullDetail` | Keep IP addresses and share paths in your two answers. By default they are removed, the same as in the tools' notes. |
+| `-FullDetail` | Keep IP addresses and share paths. By default they are removed from your two answers and from every joined note (even one a tool saved with `-FullDetail`). Each note's `[Ticket note]` first line is never changed. |
 
 If no notes are found it says `[WARN] No ticket notes found for ticket 482113 in <folder>.`, writes nothing, and exits with code 1. Check the ticket number, and that you used the same `-OutputPath` as the tools.
 
-Exit codes: `0` combined note written, `1` no notes found, `2` could not run (`CaseKit.ps1` missing, or the file could not be written).
+Exit codes: `0` combined note written, `1` no notes found, `2` could not run (`CaseKit.ps1` missing, a ticket number that does not fit the rules, the ticket folder or a note could not be read, or the file could not be written).
 
 Works on Windows PowerShell 3.0 and later.
 
@@ -66,6 +66,16 @@ Documents\TicketNotes\
 
 These folders hold client user names and findings. They stay on your machine; nothing is uploaded. Delete the folder when the ticket is closed if your client agreement requires it.
 
+## The clipboard
+
+The note (and the combined note) is copied to the clipboard, which is not private:
+
+- On Windows PowerShell 5.0 and later it is copied with `Set-Clipboard`, so it can land in **clipboard history** (Win+V) and, if the user turned it on, the **cloud clipboard** that syncs to their other devices.
+- On 3.0 and 4.0 (or when `Set-Clipboard` fails) the Windows Forms clipboard is used, and the note is marked to stay out of clipboard history and the cloud clipboard (the `CanIncludeInClipboardHistory` and `CanUploadToCloudClipboard` formats, [Microsoft Learn](https://learn.microsoft.com/windows/win32/dataxchg/clipboard-formats)).
+- Either way, in a Remote Desktop session the clipboard is shared with the PC you connected from (**RDP clipboard redirection**).
+
+The note is paste-safe by default (no IP addresses or share paths), but it still names the user. Add `-NoClipboard` to keep it off the clipboard entirely; the file in the ticket folder is still written.
+
 ## The kit: CaseKit.ps1
 
 `CaseKit.ps1` builds the four-part note (Checked, Ruled out, Could not check, Next step), the stamp (where, by whom, when, and whether anything was changed), saves it as UTF-8 with BOM, and copies it to the clipboard.
@@ -73,7 +83,7 @@ These folders hold client user names and findings. They stay on your machine; no
 - **This folder holds the master copy.** Each tool that writes a note keeps an identical copy in its own folder, so every folder still runs on its own. After changing `CaseKit.ps1` here, copy it to `AD-UserQuickCheck`, `Network-QuickCheck` and `Citrix-FSLogix-Triage`. `Tests\CaseKitParity.Tests.ps1` fails if a copy drifts.
 - **"Ruled out" needs proof.** A check is only ruled out when the tool says it really looked (`New-TicketNoteItem -Kind Clear -CouldLook $true`). Without that it goes under "Could not check".
 - **Paste-safe.** IP addresses and share paths become `[IP removed]` / `[share path removed]` unless the tool is run with `-FullDetail`. Evidence shows file names only.
-- **Clipboard.** `Set-Clipboard` where it exists (Windows PowerShell 5.0 and later), the Windows Forms clipboard on 3.0 and 4.0. Never `clip.exe`, which mangles names like Müller on Windows PowerShell 5.1. If there is no clipboard (a server with no desktop), the note is saved or printed instead.
+- **Clipboard.** `Set-Clipboard` where it exists (Windows PowerShell 5.0 and later), the Windows Forms clipboard on 3.0 and 4.0, marked to stay out of clipboard history (see [The clipboard](#the-clipboard)). Never `clip.exe`, which mangles names like Müller on Windows PowerShell 5.1. If there is no clipboard (a server with no desktop), the note is saved or printed instead.
 
 ## Tests
 

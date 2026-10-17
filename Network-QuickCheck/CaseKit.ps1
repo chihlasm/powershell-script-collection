@@ -32,9 +32,14 @@
         https://learn.microsoft.com/powershell/module/microsoft.powershell.management/set-clipboard?view=powershell-5.1
       powershell.exe defaults to a single-threaded apartment (STA) since 3.0; -Mta changes that
         https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_powershell_exe?view=powershell-5.1
-      Clipboard.SetText throws ThreadStateException outside STA (MTA hosts), so the call is
-      wrapped and a failure is reported, not fatal
-        https://learn.microsoft.com/dotnet/api/system.windows.forms.clipboard.settext
+      The WinForms clipboard throws ThreadStateException outside STA (MTA hosts), so the call
+      is wrapped and a failure is reported, not fatal
+        https://learn.microsoft.com/dotnet/api/system.windows.forms.clipboard.setdataobject
+      Clipboard history and the cloud clipboard: a DWORD of zero in the registered formats
+      CanIncludeInClipboardHistory / CanUploadToCloudClipboard keeps the item out of Win+V
+      history and off the user's other devices. The WinForms path sets both; Set-Clipboard
+      cannot, so on 5.0 and later the note can enter history (-NoClipboard avoids it)
+        https://learn.microsoft.com/windows/win32/dataxchg/clipboard-formats
       Why not clip.exe: piping to a native program encodes with $OutputEncoding, which is
       ASCIIEncoding in Windows PowerShell 5.1, so a name such as Mueller-with-umlaut is mangled
         https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_preference_variables?view=powershell-5.1
@@ -249,10 +254,15 @@ function Protect-TicketNoteText {
     if ([string]::IsNullOrEmpty($Line)) { return [string]$Line }
     $text = $Line
 
-    # UNC paths. A quoted path may contain spaces; an unquoted one ends at whitespace.
-    # Trailing sentence punctuation is kept outside the redaction.
-    $text = [regex]::Replace($text, '(?<q>["''])\\\\[^"''\r\n]+\k<q>', { param($m) $m.Groups['q'].Value + '[share path removed]' + $m.Groups['q'].Value })
-    $text = [regex]::Replace($text, '\\\\[^\\/\s"''<>|]+(?:\\[^\s"''<>|]*)?', {
+    # Share paths: \\host\share, //host/share and file://host/share (or file:\\host\share).
+    # The // form needs a non-word, non-colon character before it, so http:// is left alone.
+    # A quoted path may contain spaces. In an unquoted path a folder name may contain spaces
+    # when another folder follows it (\\fs01\FSLogix Profiles\jdoe); the last part ends at
+    # whitespace, so the sentence after the path is kept. When in doubt this removes more,
+    # never less. Trailing sentence punctuation is kept outside the redaction.
+    $sharePrefix = '(?:(?i:file:)(?://|\\\\)|\\\\|(?<![\w:/\\])//)'
+    $text = [regex]::Replace($text, '(?<q>["''])' + $sharePrefix + '[^"''\r\n]+\k<q>', { param($m) $m.Groups['q'].Value + '[share path removed]' + $m.Groups['q'].Value })
+    $text = [regex]::Replace($text, $sharePrefix + '[^\\/\s"''<>|]+(?:[\\/][^\\/\r\n"''<>|,;()]+(?=[\\/](?![\\/])))*(?:[\\/][^\s"''<>|]*)?', {
             param($m)
             $v = $m.Value
             $tail = ''
@@ -350,12 +360,43 @@ function Save-TicketNote {
     return $path
 }
 
-function Invoke-WinFormsClipboard {
-    # The clipboard on Windows PowerShell 3.0 / 4.0, which have no Set-Clipboard. Kept apart so
-    # tests can mock it. Throws ThreadStateException in an MTA host (powershell.exe -Mta).
-    param([Parameter(Mandatory = $true)][string]$Text)
+function New-TicketNoteClipboardData {
+    <#
+    .SYNOPSIS
+        The WinForms DataObject Invoke-WinFormsClipboard puts on the clipboard: the note as
+        Unicode text, plus the two formats that keep it out of clipboard history (Win+V) and
+        off the cloud clipboard (the user's other devices).
+    .DESCRIPTION
+        Learn, "Cloud Clipboard and Clipboard History Formats": a serialized DWORD of zero in the
+        registered format CanIncludeInClipboardHistory keeps every format of the item out of
+        clipboard history; a DWORD of zero in CanUploadToCloudClipboard keeps it from being
+        synchronized to the user's other devices. A MemoryStream is placed on the clipboard as
+        its raw bytes, so four zero bytes are that DWORD. WinForms registers the format names
+        (RegisterClipboardFormat) itself.
+          https://learn.microsoft.com/windows/win32/dataxchg/clipboard-formats
+          https://learn.microsoft.com/dotnet/api/system.windows.forms.dataobject.setdata
+        Building the object does not touch the clipboard, so tests can inspect it.
+    #>
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
     Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
-    [System.Windows.Forms.Clipboard]::SetText($Text)
+    $data = New-Object System.Windows.Forms.DataObject
+    $data.SetData([System.Windows.Forms.DataFormats]::UnicodeText, $Text)
+    $dwordZero = [byte[]](0, 0, 0, 0)
+    $data.SetData('CanIncludeInClipboardHistory', (New-Object System.IO.MemoryStream -ArgumentList (, $dwordZero)))
+    $data.SetData('CanUploadToCloudClipboard', (New-Object System.IO.MemoryStream -ArgumentList (, $dwordZero)))
+    return $data
+}
+
+function Invoke-WinFormsClipboard {
+    # The clipboard on Windows PowerShell 3.0 / 4.0, which have no Set-Clipboard, and the
+    # fallback when Set-Clipboard fails. Kept apart so tests can mock it. Unlike Set-Clipboard
+    # it marks the note as not for clipboard history or the cloud clipboard (see
+    # New-TicketNoteClipboardData). SetDataObject(..., $true) keeps the data after this
+    # process exits. Throws ThreadStateException in an MTA host (powershell.exe -Mta).
+    #   https://learn.microsoft.com/dotnet/api/system.windows.forms.clipboard.setdataobject
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
+    $data = New-TicketNoteClipboardData -Text $Text
+    [System.Windows.Forms.Clipboard]::SetDataObject($data, $true)
 }
 
 function Copy-TicketNoteToClipboard {
@@ -366,6 +407,11 @@ function Copy-TicketNoteToClipboard {
         Set-Clipboard where it exists (5.0 and later), else the WinForms clipboard. If
         Set-Clipboard fails, the WinForms clipboard is tried too. Never clip.exe: piping to a
         native program re-encodes the text with $OutputEncoding (ASCII in 5.1).
+
+        Set-Clipboard has no way to opt out of clipboard history (Win+V) or the cloud
+        clipboard, so the note can land there; the WinForms path opts out (see
+        New-TicketNoteClipboardData). Either way the clipboard travels over RDP clipboard
+        redirection. A tool's -NoClipboard switch keeps the note off the clipboard entirely.
     #>
     param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
     try {

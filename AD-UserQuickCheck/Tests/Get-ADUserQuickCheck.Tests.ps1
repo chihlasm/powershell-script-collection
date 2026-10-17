@@ -352,12 +352,14 @@ Describe 'report files' {
     }
 }
 
+# Every child-process run passes -NoClipboard (or -Quiet), so the suite never touches the real
+# clipboard; the 'child-process runs' guard below fails if one is added without it.
 Describe 'the script end to end (child process, fake ActiveDirectory module)' {
     BeforeAll {
         $script:Exe = (Get-Process -Id $PID).Path
         function Invoke-Script {
-            param([string]$ScriptArgs, [string]$ModulePath)
-            $cmd = "`$env:PSModulePath = '$ModulePath;' + `$env:PSModulePath; & '$($script:ScriptPath)' $ScriptArgs; exit `$LASTEXITCODE"
+            param([string]$ScriptArgs, [string]$ModulePath, [string]$Path = $script:ScriptPath)
+            $cmd = "`$env:PSModulePath = '$ModulePath;' + `$env:PSModulePath; & '$Path' $ScriptArgs; exit `$LASTEXITCODE"
             $out = & $script:Exe -NoProfile -NonInteractive -Command $cmd 2>&1
             [PSCustomObject]@{ ExitCode = $LASTEXITCODE; Text = (@($out | ForEach-Object { "$_" }) -join "`n") }
         }
@@ -366,41 +368,88 @@ Describe 'the script end to end (child process, fake ActiveDirectory module)' {
     AfterAll { Set-Scenario }
 
     It 'exit 0 and the answer comes first' {
-        $x = Invoke-Script -ScriptArgs '-Identity jdoe' -ModulePath $script:FakeRoot
+        $x = Invoke-Script -ScriptArgs '-Identity jdoe -NoClipboard' -ModulePath $script:FakeRoot
         $x.ExitCode | Should -Be 0
         @($x.Text -split "`n" | Where-Object { $_.Trim() })[0] | Should -Match '^Can Jane Doe sign in right now\?\s+YES'
     }
     It 'exit 1 when the account is locked' {
-        $x = Invoke-Script -ScriptArgs '-Identity locked' -ModulePath $script:FakeRoot
+        $x = Invoke-Script -ScriptArgs '-Identity locked -NoClipboard' -ModulePath $script:FakeRoot
         $x.ExitCode | Should -Be 1
         $x.Text | Should -Match 'NO'
         $x.Text | Should -Match 'What to do:'
     }
     It 'exit 2 for an ambiguous name' {
-        (Invoke-Script -ScriptArgs "-Identity 'Pat Smith'" -ModulePath $script:FakeRoot).ExitCode | Should -Be 2
+        (Invoke-Script -ScriptArgs "-Identity 'Pat Smith' -NoClipboard" -ModulePath $script:FakeRoot).ExitCode | Should -Be 2
     }
     It 'exit 3 when the ActiveDirectory module is missing' {
+        # Only meaningful on machines without RSAT, where the module cannot be found anywhere.
+        # Checked before running anything, so the script never runs against a real directory.
+        if (Get-Module -ListAvailable -Name ActiveDirectory | Where-Object { $_.Path -notlike "$($script:FakeRoot)*" }) {
+            Set-ItResult -Skipped -Because 'real ActiveDirectory module installed on this machine'
+            return
+        }
         $empty = Join-Path $TestDrive 'nomodules'
         $null = New-Item -ItemType Directory -Path $empty -Force
-        $x = Invoke-Script -ScriptArgs '-Identity jdoe' -ModulePath $empty
-        # Only meaningful on machines without RSAT, where the module cannot be found anywhere.
-        if (-not (Get-Module -ListAvailable -Name ActiveDirectory | Where-Object { $_.Path -notlike "$($script:FakeRoot)*" })) {
-            $x.ExitCode | Should -Be 3
-        } else {
-            Set-ItResult -Skipped -Because 'real ActiveDirectory module installed on this machine'
-        }
+        $x = Invoke-Script -ScriptArgs '-Identity jdoe -NoClipboard' -ModulePath $empty
+        $x.ExitCode | Should -Be 3
     }
     It 'writes the HTML and CSV when -OutputPath is given, and only then' {
         $dir = Join-Path $TestDrive 'e2e-out'
-        $null = Invoke-Script -ScriptArgs "-Identity jdoe -OutputPath '$dir'" -ModulePath $script:FakeRoot
+        $null = Invoke-Script -ScriptArgs "-Identity jdoe -OutputPath '$dir' -NoClipboard" -ModulePath $script:FakeRoot
         @(Get-ChildItem -LiteralPath $dir -Filter 'UserQuickCheck_jdoe_*.html').Count | Should -Be 1
         @(Get-ChildItem -LiteralPath $dir -Filter 'UserQuickCheck_jdoe_*.csv').Count | Should -Be 1
     }
     It 'warns about an unreachable DC on the console' {
         Set-Scenario -Down 'DC03'
-        $x = Invoke-Script -ScriptArgs '-Identity jdoe' -ModulePath $script:FakeRoot
+        $x = Invoke-Script -ScriptArgs '-Identity jdoe -NoClipboard' -ModulePath $script:FakeRoot
         $x.ExitCode | Should -Be 0
         $x.Text | Should -Match "\[WARN\] Couldn't check DC03"
+    }
+    It 'still runs without CaseKit.ps1 beside it, and says there is no ticket note' {
+        # Regression: a folder copied without the kit must not break the check itself.
+        $dir = Join-Path $TestDrive 'nokit'
+        $null = New-Item -ItemType Directory -Path $dir -Force
+        $copy = Join-Path $dir 'Get-ADUserQuickCheck.ps1'
+        Copy-Item -LiteralPath $script:ScriptPath -Destination $copy
+        Test-Path -LiteralPath (Join-Path $dir 'CaseKit.ps1') | Should -BeFalse
+        $x = Invoke-Script -Path $copy -ScriptArgs '-Identity jdoe -NoClipboard' -ModulePath $script:FakeRoot
+        $x.ExitCode | Should -Be 0
+        @($x.Text -split "`n" | Where-Object { $_.Trim() })[0] | Should -Match '^Can Jane Doe sign in right now\?\s+YES'
+        $x.Text | Should -Match ([regex]::Escape('[WARN] CaseKit.ps1 is missing from this folder - no ticket note this time.'))
+    }
+    It 'without CaseKit.ps1, -TicketNumber is ignored and the warning says so' {
+        $dir = Join-Path $TestDrive 'nokit-ticket'
+        $null = New-Item -ItemType Directory -Path $dir -Force
+        $copy = Join-Path $dir 'Get-ADUserQuickCheck.ps1'
+        Copy-Item -LiteralPath $script:ScriptPath -Destination $copy
+        $out = Join-Path $TestDrive 'nokit-ticket-out'
+        $x = Invoke-Script -Path $copy -ScriptArgs "-Identity jdoe -TicketNumber 482113 -OutputPath '$out' -NoClipboard" -ModulePath $script:FakeRoot
+        $x.ExitCode | Should -Be 0
+        $x.Text | Should -Match '\[WARN\] CaseKit\.ps1 is missing from this folder, so -TicketNumber 482113 was ignored'
+        Test-Path -LiteralPath (Join-Path $out 'Ticket_482113') | Should -BeFalse
+    }
+    It 'a mistyped -TicketNumber gets a plain-English [FAIL] line and exit 3, before any check' {
+        $x = Invoke-Script -ScriptArgs "-Identity jdoe -TicketNumber '..\x' -OutputPath '$TestDrive' -NoClipboard" -ModulePath $script:FakeRoot
+        $x.ExitCode | Should -Be 3
+        $x.Text | Should -Match ([regex]::Escape("[FAIL] '..\x' is not a usable ticket number"))
+        $x.Text | Should -Not -Match 'sign in right now'
+    }
+    It 'child-process runs: every one passes -NoClipboard or -Quiet' {
+        # Static guard for this suite: a child process has no Pester mocks, so without one of
+        # these switches it would write to the real clipboard.
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($PSCommandPath, [ref]$null, [ref]$null)
+        $calls = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Invoke-Script' }, $true))
+        $calls.Count | Should -BeGreaterThan 5
+        foreach ($c in $calls) {
+            $names = @($c.CommandElements | ForEach-Object { "$_" })
+            $i = [array]::IndexOf($names, '-ScriptArgs')
+            $i | Should -BeGreaterThan 0 -Because "every Invoke-Script call passes -ScriptArgs: $c"
+            "$($c.CommandElements[$i + 1])" | Should -Match '-NoClipboard|-Quiet' -Because "a child-process run must not reach the clipboard: $c"
+        }
+        # Child processes started from a here-string (AC22) call the script directly.
+        $direct = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.ExpandableStringExpressionAst] -and $n.Value -like "*& '`$(`$script:ScriptPath)'*" }, $true))
+        $direct.Count | Should -BeGreaterThan 0
+        foreach ($d in $direct) { $d.Value | Should -Match '-NoClipboard|-Quiet' -Because "a child-process run must not reach the clipboard: $($d.Extent.Text)" }
     }
 }
 
@@ -491,6 +540,25 @@ Describe 'ticket note' {
         (Get-NoteSection $n.Lines 'Ruled out:') | Should -Be @('- (none)')
         $could = Get-NoteSection $n.Lines 'Could not check:'
         @($could | Where-Object { $_ -match 'did not run' }).Count | Should -BeGreaterThan 0
+    }
+
+    It 'the ambiguous-name note lists at most 5 people (name and sign-in name only), then how many more' {
+        $people = @(1..7 | ForEach-Object { [PSCustomObject]@{ DisplayName = "Pat Smith $_"; SamAccountName = "psmith$_"; UserPrincipalName = "psmith$_@contoso.com"; DistinguishedName = "CN=Pat Smith $_,OU=Staff,DC=contoso,DC=com" } })
+        $r = [PSCustomObject]@{ Status = 'Ambiguous'; ExitCode = 2; Identity = 'Pat'; Message = ''; Candidates = $people; MatchedBy = 'name search'; Facts = $null; Assessment = $null; Now = (Get-Date) }
+        $lines = @(ConvertTo-TicketNoteText -Note (ConvertTo-UserQuickCheckTicketNote -Result $r))
+        $lines[0] | Should -BeLike "*'Pat' matches 7 people"
+        @($lines | Where-Object { $_ -like '- INFO: Matches *' }).Count | Should -Be 5
+        $lines | Should -Contain '- INFO: Matches Pat Smith 1 (psmith1).'
+        $lines | Should -Contain '- INFO: ...and 2 more (refine the search).'
+        ($lines -join "`n") | Should -Not -Match '@contoso\.com'
+    }
+
+    It 'a name search that hits the 25-result cap says "25 or more"' {
+        $people = @(1..25 | ForEach-Object { [PSCustomObject]@{ DisplayName = "Pat $_"; SamAccountName = "pat$_"; UserPrincipalName = "pat$_@contoso.com"; DistinguishedName = "CN=Pat $_,DC=contoso,DC=com" } })
+        $r = [PSCustomObject]@{ Status = 'Ambiguous'; ExitCode = 2; Identity = 'Pat'; Message = ''; Candidates = $people; MatchedBy = 'name search'; Facts = $null; Assessment = $null; Now = (Get-Date) }
+        $lines = @(ConvertTo-TicketNoteText -Note (ConvertTo-UserQuickCheckTicketNote -Result $r))
+        $lines[0] | Should -BeLike "*'Pat' matches 25 or more people"
+        $lines | Should -Contain '- INFO: ...and at least 20 more (refine the search).'
     }
 
     It 'AC22_UserCheckPassThru: -PassThru -Quiet returns the result, does not exit, writes nothing to the host' {
