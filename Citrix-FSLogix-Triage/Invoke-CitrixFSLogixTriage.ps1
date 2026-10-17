@@ -42,13 +42,29 @@
 .PARAMETER OutputPath
     Optional folder. When given, a text report ready to paste into a ticket and a CSV of the
     findings are written there, named FSLogixTriage_<computer>_<yyyy-MM-dd_HHmmss>. When
-    omitted the tool is console-only.
+    omitted the tool is console-only. With -TicketNumber, this is the folder that holds
+    Ticket_<number>.
+.PARAMETER TicketNumber
+    Optional ticket number (letters, digits, - or _, up to 32 characters). The text report, the
+    CSV and the ticket note are saved in <root>\Ticket_<number>, where root is -OutputPath if
+    given, else %USERPROFILE%\Documents\TicketNotes. TicketNote\Join-TicketNotes.ps1 later
+    joins every tool's note in that folder into one. A number that does not fit is refused
+    with a [FAIL] line and exit code 3, before anything is checked.
+.PARAMETER NoClipboard
+    Do not copy the ticket note to the clipboard. Without it the note goes to the clipboard,
+    where it can enter clipboard history (Win+V) or the cloud clipboard on Windows PowerShell
+    5.0 and later, and travels over RDP clipboard redirection.
+.PARAMETER FullDetail
+    Keep IP addresses and share paths in the ticket note. By default the note is paste-safe:
+    they are replaced by [IP removed] / [share path removed]. The question at the top is
+    never changed.
 .PARAMETER PassThru
     Return the result object (CheckId, Status, Summary, Evidence, RecommendedNextSteps,
-    RawOutput, StartedAt, FinishedAt, Error) instead of setting an exit code. Use this when
-    another tool calls the script and reads the result.
+    RawOutput, StartedAt, FinishedAt, Error, TicketNote) instead of setting an exit code. Use
+    this when another tool calls the script and reads the result.
 .PARAMETER Quiet
-    Do not write the console report. Combine with -PassThru or -OutputPath.
+    Do not write the console report. Combine with -PassThru or -OutputPath. Also leaves the
+    clipboard alone, because another script is the caller.
 .PARAMETER LoadFunctionsOnly
     Define the functions and return without running a check (used by the tests).
 .EXAMPLE
@@ -60,8 +76,23 @@
 .EXAMPLE
     $r = .\Invoke-CitrixFSLogixTriage.ps1 -ComputerName RDSH01 -PassThru -Quiet
     Get the result object for another script to use.
+.EXAMPLE
+    .\Invoke-CitrixFSLogixTriage.ps1 -ComputerName RDSH01 -UserName jdoe -TicketNumber 482113
+    Same check; the text report, the CSV and the ticket note go into
+    %USERPROFILE%\Documents\TicketNotes\Ticket_482113, and the note is copied to the clipboard.
 .NOTES
-    Exit codes (without -PassThru): 0 = looks healthy, 1 = warnings, 2 = problems found.
+    Exit codes (without -PassThru): 0 = looks healthy, 1 = warnings, 2 = problems found,
+    3 = an unusable -TicketNumber.
+
+    TICKET NOTE. Every run ends with a four-part note (Checked, Ruled out, Could not check,
+    Next step) copied to the clipboard. It is also saved as Note_<time>_Citrix-FSLogix-Triage.txt
+    when -TicketNumber or -OutputPath is given. A check is only "Ruled out" when it really ran:
+    anything the tool could not read (ping, services, registry, event logs, disks), a profile
+    share it could not confirm from the server, and a Cloud Cache location it does not test
+    are listed under "Could not check". The FSLogix settings and Cloud Cache entries stay out
+    of the note. The note never changes the verdict or the exit code. It is built by
+    CaseKit.ps1 in this folder (a copy of TicketNote\CaseKit.ps1); if it is missing the check
+    still runs, without a note.
 
     Remote checks need, on the target: ping (ICMP), WinRM for CIM and Invoke-Command, the
     Remote Registry service, and Event Log access (RPC). Run as an account that is a local
@@ -87,6 +118,16 @@
       Get-Service has no -ComputerName in PowerShell 6+, so services are read with Win32_Service
         https://learn.microsoft.com/powershell/scripting/whats-new/differences-from-windows-powershell
         https://learn.microsoft.com/windows/win32/cimwin32prov/win32-service
+      Ticket note clipboard (in CaseKit.ps1): Set-Clipboard is 5.0, so it is used behind a
+      Get-Command check with a WinForms fallback; STA is the default since 3.0; never clip.exe,
+      because $OutputEncoding is ASCII in 5.1 and would mangle non-ASCII names
+        https://learn.microsoft.com/powershell/scripting/whats-new/what-s-new-in-windows-powershell-50
+        https://learn.microsoft.com/powershell/module/microsoft.powershell.management/set-clipboard?view=powershell-5.1
+        https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_powershell_exe?view=powershell-5.1
+        https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_preference_variables?view=powershell-5.1
+      Clipboard history / cloud clipboard opt-out formats (CanIncludeInClipboardHistory,
+      CanUploadToCloudClipboard; set by the kit's WinForms path, not by Set-Clipboard)
+        https://learn.microsoft.com/windows/win32/dataxchg/clipboard-formats
 
     NOT VERIFIED ON LEARN: the free-disk-space thresholds (see Get-DiskSpaceStatus) are this
     tool's own rule of thumb, not a Microsoft figure.
@@ -104,6 +145,14 @@ param(
     [int]$EventLookbackHours = 24,
 
     [string]$OutputPath,
+
+    # Checked in the script body (Test-TicketNumber in CaseKit.ps1), not with ValidatePattern,
+    # so a mistyped number gets a plain-English [FAIL] line instead of a parameter-binding error.
+    [string]$TicketNumber,
+
+    [switch]$NoClipboard,
+
+    [switch]$FullDetail,
 
     [switch]$PassThru,
 
@@ -130,14 +179,20 @@ function New-EvidenceItem {
         [Parameter(Mandatory)]
         [string]$Detail,
 
-        [string]$Action = ''
+        [string]$Action = '',
+
+        # The check could not run at all (no access, service unreachable), as opposed to running
+        # and finding something. The Status stays as given (Warn), so the verdict is unchanged;
+        # only the ticket note moves the item to "Could not check".
+        [switch]$NotChecked
     )
 
     [PSCustomObject]@{
-        Name   = $Name
-        Status = $Status
-        Detail = $Detail
-        Action = $Action
+        Name       = $Name
+        Status     = $Status
+        Detail     = $Detail
+        Action     = $Action
+        NotChecked = [bool]$NotChecked
     }
 }
 
@@ -773,7 +828,7 @@ function Invoke-CitrixFSLogixTriage {
     catch {
         $errors += "Reachability: $($_.Exception.Message)"
         $rawOutput.Reachability += [PSCustomObject]@{ Target = $ComputerName; Succeeded = $false; Error = $_.Exception.Message }
-        $evidence += New-EvidenceItem -Name 'Server answers' -Status 'Warn' `
+        $evidence += New-EvidenceItem -Name 'Server answers' -Status 'Warn' -NotChecked `
             -Detail "Ping could not run: $($_.Exception.Message)" `
             -Action 'Check the server name is spelled correctly.'
     }
@@ -816,7 +871,7 @@ function Invoke-CitrixFSLogixTriage {
     catch {
         $errors += "Services: $($_.Exception.Message)"
         $rawOutput.Services = @([PSCustomObject]@{ Name = ''; DisplayName = ''; Status = ''; StartType = ''; Error = $_.Exception.Message })
-        $evidence += New-EvidenceItem -Name 'FSLogix services' -Status 'Warn' `
+        $evidence += New-EvidenceItem -Name 'FSLogix services' -Status 'Warn' -NotChecked `
             -Detail "Could not read services: $($_.Exception.Message)" `
             -Action 'Run as an administrator of the server, and check WinRM is enabled on it.'
     }
@@ -874,7 +929,7 @@ function Invoke-CitrixFSLogixTriage {
         }
         elseif (-not [string]::IsNullOrWhiteSpace($profileKey.Error)) {
             $errors += "Registry: $($profileKey.Error)"
-            $evidence += New-EvidenceItem -Name 'FSLogix settings' -Status 'Warn' `
+            $evidence += New-EvidenceItem -Name 'FSLogix settings' -Status 'Warn' -NotChecked `
                 -Detail "Could not read the FSLogix settings: $($profileKey.Error)" `
                 -Action 'Run as an administrator of the server.'
         }
@@ -899,7 +954,7 @@ function Invoke-CitrixFSLogixTriage {
             Values = ''
             Error  = $_.Exception.Message
         })
-        $evidence += New-EvidenceItem -Name 'FSLogix settings' -Status 'Warn' `
+        $evidence += New-EvidenceItem -Name 'FSLogix settings' -Status 'Warn' -NotChecked `
             -Detail "Could not read the server's registry: $($_.Exception.Message)" `
             -Action 'The Remote Registry service may be stopped on the server, or you are not an administrator there.'
     }
@@ -990,7 +1045,7 @@ function Invoke-CitrixFSLogixTriage {
                     -Detail "$logName does not exist on $ComputerName." -Action $missingAction
             }
             else {
-                $evidence += New-EvidenceItem -Name 'Event log access' -Status 'Warn' `
+                $evidence += New-EvidenceItem -Name 'Event log access' -Status 'Warn' -NotChecked `
                     -Detail "Could not read $logName on ${ComputerName}: $eventErrorMessage" `
                     -Action 'Run as an administrator of the server; remote event log access may be blocked by its firewall.'
             }
@@ -1036,13 +1091,13 @@ function Invoke-CitrixFSLogixTriage {
         }
 
         if ($disks.Count -eq 0) {
-            $evidence += New-EvidenceItem -Name 'Disk free space' -Status 'Warn' -Detail 'No local disks were returned.'
+            $evidence += New-EvidenceItem -Name 'Disk free space' -Status 'Warn' -NotChecked -Detail 'No local disks were returned.'
         }
     }
     catch {
         $errors += "Disks: $($_.Exception.Message)"
         $rawOutput.Disks += [PSCustomObject]@{ DeviceId = ''; SizeGB = ''; FreeGB = ''; FreePercent = ''; Error = $_.Exception.Message }
-        $evidence += New-EvidenceItem -Name 'Disk free space' -Status 'Warn' `
+        $evidence += New-EvidenceItem -Name 'Disk free space' -Status 'Warn' -NotChecked `
             -Detail "Could not read disk space: $($_.Exception.Message)" `
             -Action 'Run as an administrator of the server, and check WinRM is enabled on it.'
     }
@@ -1074,7 +1129,7 @@ function Invoke-CitrixFSLogixTriage {
                     Reachable      = $false
                     Error          = [string]$profileLocation.Detail
                 }
-                $evidence += New-EvidenceItem -Name 'Profile storage reachable' -Status 'Warn' -Detail ([string]$profileLocation.Detail) `
+                $evidence += New-EvidenceItem -Name 'Profile storage reachable' -Status 'Warn' -NotChecked -Detail ([string]$profileLocation.Detail) `
                     -Action 'Check this storage location in the Azure portal or with an engineer.'
                 continue
             }
@@ -1126,7 +1181,7 @@ function Invoke-CitrixFSLogixTriage {
                 $fromHere = $false
                 try { $fromHere = [bool](Test-Path -LiteralPath $pathToTest -ErrorAction Stop) } catch { $fromHere = $false }
                 $hereText = if ($fromHere) { 'It CAN be reached from your PC' } else { 'It cannot be reached from your PC either' }
-                $evidence += New-EvidenceItem -Name 'Profile share reachable' -Status 'Warn' `
+                $evidence += New-EvidenceItem -Name 'Profile share reachable' -Status 'Warn' -NotChecked `
                     -Detail ("{0} could not be confirmed from {1}{2}. {3}." -f $pathToTest, $ComputerName, $why, $hereText) `
                     -Action 'A remote test can fail only because Windows will not pass your sign-in on to the file server. If it works from your PC, sign in to the server itself to confirm; if not, check the file server.'
             }
@@ -1253,18 +1308,105 @@ function Export-TriageReport {
     return @($textPath, $csvPath)
 }
 
-# STUB (SQ-010, tests first): the adapter that maps a result to a ticket note. Not implemented yet.
+# =============================================================================
+# Ticket note (CaseKit.ps1)
+# =============================================================================
+
 function ConvertTo-CitrixFSLogixTriageTicketNote {
+    <#
+    .SYNOPSIS
+        Maps a triage result to a ticket note. The gate decisions for this tool live here.
+    .DESCRIPTION
+        Pass -> Ruled out (only when the check really ran), Fail -> PROBLEM, Warn -> WARNING.
+        A Warn that is NotChecked -> Could not check: ping, services, registry or event log
+        that could not be read, disks that could not be read or were not returned, a profile
+        share that could not be confirmed from the server (double hop), and a Cloud Cache
+        location that is not a file share. Their Status stays Warn, so the verdict is unchanged.
+
+        The FSLogix settings block (RawOutput.Registry) never goes into the note, and neither
+        does a Cloud Cache entry: a misspelled-entry finding keeps only what is wrong with it,
+        because the entry holds the connection string.
+
+        Next steps are the result's RecommendedNextSteps. The headline is the report's own
+        (Get-TriageHeadline), and the stamp scope is the session host that was checked.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][object]$Result,
         [string[]]$EvidencePaths = @()
     )
-    throw 'ConvertTo-CitrixFSLogixTriageTicketNote is not implemented yet.'
+
+    $target = [string]$Result.RawOutput.AffectedDevice
+    $items = New-Object System.Collections.Generic.List[object]
+
+    foreach ($e in @($Result.Evidence)) {
+        $text = [string]$e.Detail
+        if ($e.Name -eq 'Cloud Cache location spelling') {
+            # "CCDLocations entry '<entry>' is misspelled: <problems>. ..." - drop the entry.
+            $text = $text -replace "^CCDLocations entry '.*' is misspelled: ", 'A Cloud Cache (CCDLocations) entry is misspelled: '
+        }
+        elseif ($e.Name -like 'Disk ?:*') {
+            # The detail is only the numbers; the drive is in the name.
+            $text = '{0} {1}' -f $e.Name, $text
+        }
+
+        $notChecked = ($e.PSObject.Properties.Name -contains 'NotChecked') -and [bool]$e.NotChecked
+        switch ([string]$e.Status) {
+            'Pass' { $items.Add((New-TicketNoteItem -Kind Clear -Text $text -CouldLook (-not $notChecked))) }
+            'Fail' { $items.Add((New-TicketNoteItem -Kind Problem -Text $text)) }
+            default {
+                $kind = if ($notChecked) { 'NotChecked' } else { 'Warning' }
+                $items.Add((New-TicketNoteItem -Kind $kind -Text $text))
+            }
+        }
+    }
+
+    $isLocal = (-not [string]::IsNullOrEmpty($target)) -and (Test-IsLocalComputerTarget -ComputerName $target)
+    $from = if ($isLocal) { 'on the server itself' } else { 'from {0} over the network' -f $env:COMPUTERNAME }
+    $who = if ($Result.RawOutput.AffectedUser) { ' for user {0}' -f $Result.RawOutput.AffectedUser } else { '' }
+    $scopeLine = 'FSLogix on {0}{1}, checked {2}: services, profile settings, event logs (last {3} hours), disk space and the profile share.' -f `
+        $target, $who, $from, $Result.RawOutput.EventLookbackHours
+
+    $scope = if ($isLocal) { $env:COMPUTERNAME } else { $target }
+    $stampArgs = @{ ScopeLabel = 'Computer'; Scope = $scope }
+    $started = [datetime]::MinValue
+    if ([datetime]::TryParseExact([string]$Result.StartedAt, 'yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$started)) {
+        $stampArgs['Now'] = $started
+    }
+    $stamp = New-TicketNoteStamp @stampArgs
+
+    return New-TicketNote -Tool 'Citrix-FSLogix-Triage' -Headline (Get-TriageHeadline -Result $Result) -ScopeLine $scopeLine `
+        -Items $items.ToArray() -NextSteps @($Result.RecommendedNextSteps) -Stamp $stamp -EvidencePaths $EvidencePaths
 }
+
+# The ticket-note kit ships beside this script (a copy of TicketNote\CaseKit.ps1). Without it
+# the check still runs; only the note is skipped.
+$kit = Join-Path $PSScriptRoot 'CaseKit.ps1'
+if (Test-Path -LiteralPath $kit) { . $kit } else { $script:CaseKitMissing = $true }
 
 if ($LoadFunctionsOnly) {
     return
+}
+
+if ($TicketNumber -and $script:CaseKitMissing) {
+    if (-not $Quiet) { Write-Host "[WARN] CaseKit.ps1 is missing from this folder, so -TicketNumber $TicketNumber was ignored: the reports go to -OutputPath (if given) and there is no ticket note this time." -ForegroundColor Yellow }
+    $TicketNumber = ''
+    $script:CaseKitWarned = $true
+}
+if ($TicketNumber -and -not (Test-TicketNumber -TicketNumber $TicketNumber)) {
+    $msg = "'$TicketNumber' is not a usable ticket number. Use letters, digits, - or _ (up to 32 characters, starting with a letter or digit), for example 482113."
+    if (-not $Quiet) { Write-Host "[FAIL] $msg" -ForegroundColor Red }
+    if ($PassThru) {
+        # -PassThru callers get a result instead of exit 3; nothing was checked.
+        $startFailure = New-CitrixFSLogixResult -Status 'Fail' -Summary $msg `
+            -Evidence @(New-EvidenceItem -Name 'Input' -Status 'Fail' -Detail $msg) `
+            -RecommendedNextSteps @('Run the check again with the ticket number as it appears in the ticket.') `
+            -RawOutput ([PSCustomObject]@{ AffectedDevice = $ComputerName; AffectedUser = $UserName; EventLookbackHours = $EventLookbackHours }) `
+            -StartedAt (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') -Errors @($msg)
+        $startFailure | Add-Member -NotePropertyName TicketNote -NotePropertyValue $null -Force
+        return $startFailure
+    }
+    exit 3
 }
 
 $result = Invoke-CitrixFSLogixTriage -ComputerName $ComputerName -UserName $UserName -EventLookbackHours $EventLookbackHours
@@ -1273,17 +1415,58 @@ if (-not $Quiet) {
     Write-TriageConsole -Result $result
 }
 
-if ($OutputPath) {
+# Where the files go: with -TicketNumber, <OutputPath or the default root>\Ticket_<n> (reports
+# and note together, so the note's evidence names sit beside it); with only -OutputPath, that
+# folder; with neither, no files (the note goes to the clipboard, or the console).
+$folder = $OutputPath
+if ($TicketNumber) {
+    $root = if ($OutputPath) { $OutputPath } else { Get-TicketNoteDefaultRoot }
     try {
-        $files = Export-TriageReport -Result $result -OutputPath $OutputPath
+        $folder = Resolve-TicketFolder -TicketNumber $TicketNumber -Root $root
+    }
+    catch {
+        if (-not $Quiet) { Write-Host ("[WARN] Could not create the ticket folder under {0}: {1}" -f $root, $_.Exception.Message) -ForegroundColor Yellow }
+    }
+}
+
+$evidencePaths = @()
+if ($folder) {
+    try {
+        $files = Export-TriageReport -Result $result -OutputPath $folder
+        $evidencePaths = @($files)
         if (-not $Quiet) {
             foreach ($file in $files) { Write-Host ('[INFO] Saved {0}' -f $file) -ForegroundColor Cyan }
         }
     }
     catch {
-        Write-Host ("[WARN] Could not write the report to {0}: {1}" -f $OutputPath, $_.Exception.Message) -ForegroundColor Yellow
+        Write-Host ("[WARN] Could not write the report to {0}: {1}" -f $folder, $_.Exception.Message) -ForegroundColor Yellow
     }
 }
+
+$note = $null
+if ($script:CaseKitMissing) {
+    if (-not $Quiet -and -not $script:CaseKitWarned) { Write-Host '[WARN] CaseKit.ps1 is missing from this folder - no ticket note this time.' -ForegroundColor Yellow }
+}
+else {
+    # The note is extra: a failure while building or saving it never changes the verdict or the
+    # exit code. The check's own result above stands.
+    try {
+        $note = ConvertTo-CitrixFSLogixTriageTicketNote -Result $result -EvidencePaths $evidencePaths
+        if ($Quiet) {
+            # Another script is the caller: no console and no clipboard. The note is still saved
+            # when a folder is in play, and it is always on the result object.
+            if ($folder) { $null = Save-TicketNote -Note $note -Folder $folder -PasteSafe:(-not $FullDetail) }
+        }
+        else {
+            $null = Publish-TicketNote -Note $note -Folder $folder -PasteSafe:(-not $FullDetail) -NoClipboard:$NoClipboard
+        }
+    }
+    catch {
+        if (-not $Quiet) { Write-Host ("[WARN] Could not make the ticket note: {0}. The check above is still valid." -f $_.Exception.Message) -ForegroundColor Yellow }
+        $note = $null
+    }
+}
+$result | Add-Member -NotePropertyName TicketNote -NotePropertyValue $note -Force
 
 if ($PassThru) {
     return $result

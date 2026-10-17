@@ -406,7 +406,8 @@ Describe 'ticket note (adapter)' {
         @($checked | Where-Object { $_ -like '- WARNING: *Microsoft-FSLogix-Apps/Operational does not exist*' }).Count | Should -Be 1
         @($checked | Where-Object { $_ -like '- WARNING: *' }).Count | Should -Be 4 -Because 'four logs are missing'
         @(Get-NoteSection $n.Lines 'Could not check:' | Where-Object { $_ -match 'does not exist' }).Count | Should -Be 0
-        Get-NoteSection $n.Lines 'Ruled out:' | Should -Contain '- FSLogix Apps Services is running.'
+        $ruled = Get-NoteSection $n.Lines 'Ruled out:'
+        $ruled | Should -Contain '- FSLogix Apps Services is running.'
     }
 
     It 'TriageMapping_ProblemAndStopped: a stopped service is a PROBLEM under Checked, not Ruled out' {
@@ -428,7 +429,8 @@ Describe 'ticket note (adapter)' {
         $stamp = @($n.Lines | Where-Object { $_ -like 'Computer: *' })[0]
         $stamp | Should -BeLike 'Computer: RDSH01 | *'
         $stamp | Should -BeLike '*Changed anything: No'
-        Get-NoteSection $n.Lines 'Next step:' | Should -Contain ('- ' + $r.RecommendedNextSteps[0])
+        $next = Get-NoteSection $n.Lines 'Next step:'
+        $next | Should -Contain ('- ' + $r.RecommendedNextSteps[0])
         $n.Lines | Should -Contain 'Evidence: FSLogixTriage_RDSH01_2026-10-17_090000.txt, FSLogixTriage_RDSH01_2026-10-17_090000.csv'
     }
 

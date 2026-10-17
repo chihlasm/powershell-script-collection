@@ -234,7 +234,8 @@ Describe 'ticket note (adapter)' {
         Mock Get-Command -ParameterFilter { $Name -eq 'Get-NetRoute' } { $null }
         $r = Invoke-NetworkQuickCheck -TargetAddress filesrv01 -Port 445
         $n = Get-NoteLines $r
-        Get-NoteSection $n.Lines 'Could not check:' | Should -Contain '- Default gateway: not checked (this Windows version has no Get-NetRoute)'
+        $could = Get-NoteSection $n.Lines 'Could not check:'
+        $could | Should -Contain '- Default gateway: not checked (this Windows version has no Get-NetRoute)'
         @(Get-NoteSection $n.Lines 'Ruled out:' | Where-Object { $_ -match '(?i)gateway' }).Count | Should -Be 0
         $r.Status | Should -Be $withRoute.Status
         $r.Answer | Should -Be $withRoute.Answer
