@@ -33,6 +33,66 @@ Press Ctrl+C in the PowerShell window to stop the server.
 |-----------|---------|-------------|
 | `-Port` | `8271` | TCP port for the local web server (1024-65535) |
 | `-NoBrowserOpen` | — | Don't automatically open the browser on launch |
+| `-LogFolder` | `Logs` next to the script | Where permission backups and the change log go (see below) |
+
+### Changes are backed up and logged
+
+Before the GUI changes the permissions of a folder or of selected files, it saves the
+current permissions. **If it cannot save them, it changes nothing** and the status bar says
+why. This covers:
+
+- Add permission and Remove permission (folder, or selected files)
+- Take ownership of this folder only, or of selected files
+- Copy permissions to other folders, when "apply recursively" is not ticked
+
+The two "all subfolders and files" options (take ownership recursively, copy permissions
+recursively) are **not backed up or logged yet**.
+
+After each change the status bar says what was done and where it was logged, for example
+`Added Allow Modify for CONTOSO\HR-Staff on \\FS01\Data\HR. Backed up to ...\Backups\2026-10-17_142233_AddPermission.csv and logged to ...\Changes_2026-10-17.csv.`
+The console shows the log folder at startup.
+
+| File | What is in it |
+|------|---------------|
+| `Logs\Changes_<yyyy-MM-dd>.csv` | One row per folder or file changed: `Time`, `Technician`, `Computer`, `Action`, `Target`, `ItemType`, `Detail`, `OldValue`, `NewValue`, `Result`, `Error`, `BackupFile`. `OldValue` and `NewValue` are the permissions before and after, as SDDL text. |
+| `Logs\Backups\<yyyy-MM-dd_HHmmss>_<Action>.csv` | The permissions as they were just before one action: `Path`, `ItemType`, `Sddl`. |
+
+`Result` is one of `Done`, `Failed`, `Skipped (not found)` or `Skipped (WhatIf)`. A row whose
+`Sddl` or `OldValue` is `Could not read` had permissions the tool could not read before the
+change (common when taking ownership of a folder you are locked out of); that item cannot be
+restored from the backup.
+
+The log folder is `Logs` next to the script, not the current directory (which is
+`C:\Windows\System32` when PowerShell runs as administrator). If that folder is read-only, for
+example when the tool runs from a share, `%LOCALAPPDATA%\FolderPermissionManager\Logs` is used
+and the console says so. Logs and backups hold client paths, account names and SIDs: they stay
+on the machine that ran the tool and are never deleted automatically.
+
+### Undo a change
+
+There is no Undo button. To put back the permissions of one folder or file, open the backup
+CSV named in the change log's `BackupFile` column and run, as administrator:
+
+```powershell
+$backup = 'C:\Tools\FolderPermissionManager\Logs\Backups\2026-10-17_142233_AddPermission.csv'
+foreach ($row in Import-Csv -LiteralPath $backup) {
+    if ($row.Sddl -eq 'Could not read') { Write-Warning "No backup for $($row.Path)"; continue }
+    $acl = Get-Acl -LiteralPath $row.Path
+    $acl.SetSecurityDescriptorSddlForm($row.Sddl)   # owner, group and permissions as they were
+    Set-Acl -LiteralPath $row.Path -AclObject $acl
+}
+```
+
+Remove the rows for items you do not want to restore first. Use `-LiteralPath`, not `-Path`:
+folder names with `[` or `]` are otherwise read as wildcards. Setting the owner back to
+another account needs the "Restore files and directories" right (`SeRestorePrivilege`), so run
+this in an elevated session.
+
+References:
+[Get-Acl](https://learn.microsoft.com/powershell/module/microsoft.powershell.security/get-acl),
+[Set-Acl](https://learn.microsoft.com/powershell/module/microsoft.powershell.security/set-acl),
+[SetSecurityDescriptorSddlForm](https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.objectsecurity.setsecuritydescriptorsddlform),
+[SeRestorePrivilege sets any owner](https://learn.microsoft.com/windows/win32/secauthz/privilege-constants).
 
 ### FolderPermissionManager.ps1 (CLI)
 
@@ -46,5 +106,7 @@ If no path is provided, the script will prompt for it.
 
 ## Requirements
 
-- PowerShell 5.1+
+- PowerShell 5.1+ for the GUI
 - Run as Administrator (required for ownership and permission operations)
+- Keep `FolderPermissions.Core.ps1` in the same folder as the GUI: it holds the backup,
+  logging and change logic
