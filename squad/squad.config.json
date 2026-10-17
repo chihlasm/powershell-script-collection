@@ -1,0 +1,119 @@
+{
+  "schemaVersion": 2,
+  "setupComplete": true,
+  "project": {
+    "name": "PowerShell Script Collection",
+    "summary": "Standalone PowerShell tools that make troubleshooting faster and data collection quicker and more accurate for an MSP's service desk and sysadmins across Windows Server, Active Directory, Citrix/RDS/FSLogix and Microsoft 365."
+  },
+  "owner": {
+    "name": "Michael",
+    "technicalLevel": "developer",
+    "notes": "Wants the squad free to work on any script in the repo; no command guard was chosen."
+  },
+  "baseBranch": "main",
+  "branchPrefix": "squad/",
+  "buildCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests\\Test-ScriptParse.ps1",
+  "testCommand": "pwsh -NoProfile -ExecutionPolicy Bypass -File Tests\\Invoke-AllTests.ps1",
+  "maxItemsPerRun": 8,
+  "maxFixRoundsPerItem": 2,
+  "uiPaths": [
+    "**/*GUI*.ps1",
+    "**/Start-*.ps1",
+    "**/*Report*.ps1",
+    "**/*.html"
+  ],
+  "riskProfiles": [
+    {
+      "name": "destructive-operations",
+      "file": "squad/risks/destructive-operations.md",
+      "paths": [
+        "DeleteOldFolders/**",
+        "Storage Space Clean-up/**",
+        "FSLogix-ProfileDiskRepair/**",
+        "FSLogix-miExcel-Cleanup/**",
+        "RobocopyMigration/**",
+        "CopyFileToServer/**",
+        "FolderPermissionManager/**",
+        "LocalAdminManager/**",
+        "M365-SyncedUserFixes/**"
+      ],
+      "keywords": [
+        "Remove-Item",
+        "/MIR",
+        "/PURGE",
+        "Set-Acl",
+        "Set-ADUser",
+        "Set-ADObject",
+        "Add-ADGroupMember",
+        "Remove-ADGroupMember",
+        "Remove-LocalGroupMember",
+        "Add-LocalGroupMember",
+        "Dismount-DiskImage",
+        "Repair-Volume"
+      ]
+    },
+    {
+      "name": "system-configuration",
+      "file": "squad/risks/system-configuration.md",
+      "paths": [
+        "Install-*/**",
+        "Download and Install/**",
+        "CitrixWorkspaceApp_Remediation/**",
+        "Migrate-AdobeProducts/**",
+        "Schedule-Reboot/**",
+        "CursorFix/**",
+        "Network-Troubleshooting-Palette/**",
+        "Set-PrinterDefaults/**",
+        "Juniper-ConsoleSetup/**"
+      ],
+      "keywords": [
+        "Set-ItemProperty",
+        "New-ItemProperty",
+        "Remove-ItemProperty",
+        "Register-ScheduledTask",
+        "Set-Service",
+        "Stop-Service",
+        "Restart-Computer",
+        "msiexec",
+        "netsh",
+        "reg add",
+        "reg delete"
+      ]
+    },
+    {
+      "name": "personal-data",
+      "file": "squad/risks/personal-data.md",
+      "paths": [
+        "Get-M365SecurityEvidence/**",
+        "AD-LockoutDiagnostics/**",
+        "FSLogix-Profile-Backup/**",
+        "Entra-DeviceActivityTimeline/**",
+        "AD-GroupMembership-Export/**",
+        "DriveMap-Diagnostics/**"
+      ],
+      "keywords": [
+        "Export-Csv",
+        "Export-Clixml",
+        "ConvertTo-SecureString",
+        "PSCredential",
+        "Get-Credential",
+        "password",
+        "AccessToken",
+        "ClientSecret",
+        "Login Data"
+      ]
+    }
+  ],
+  "guard": {
+    "mode": "during-runs",
+    "packs": [],
+    "custom": [],
+    "appLaunchPatterns": [
+      "(-File\\s+|Start-Process\\s+(-FilePath\\s+)?|cmd(\\.exe)?\\s+/c\\s+|(^|[;&|(])\\s*)[\"']?[^\\s\"';|]*GUI\\.ps1\\b",
+      "(-File\\s+|Start-Process\\s+(-FilePath\\s+)?|cmd(\\.exe)?\\s+/c\\s+|(^|[;&|(])\\s*)[\"']?[^\\s\"';|]*Start-(M365SyncedUserFixes|AccessReport)\\.ps1\\b",
+      "(-File\\s+|Start-Process\\s+(-FilePath\\s+)?|cmd(\\.exe)?\\s+/c\\s+|(^|[;&|(])\\s*)[\"']?[^\"';|]*(Launch-[\\w-]+|Start M365 Synced User Fixes)\\.cmd\\b"
+    ]
+  },
+  "planDocsPath": "docs/plans",
+  "contextWindowTokens": 200000
+}

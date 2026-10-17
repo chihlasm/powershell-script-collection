@@ -48,3 +48,8 @@ dist/
 # M365-SyncedUserFixes: cached Entra Connect server name and the AD change log (client data)
 **/EntraConnectSettings.json
 M365-SyncedUserFixes/Logs/
+
+# Squad plugin (runtime state and logs)
+squad/.state/
+squad/logs/
+squad/STOP

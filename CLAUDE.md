@@ -152,3 +152,7 @@ Anti-references: generic Bootstrap admin dashboards, Azure Portal blandness, rou
 3. **Drive letters and paths are data, not decoration** — always show where you are. Drive letters, folder names, full paths in context headers. Never leave the user guessing what they're looking at.
 4. **Icons as anchors** — use icons to help non-technical users identify action types at a glance, but never as the sole communication (always paired with text labels).
 5. **Confidence under the cursor** — every interactive element should feel solid and responsive. Hover states, active states, and loading indicators are mandatory, not optional.
+
+## Squad
+
+@squad/SQUAD.md

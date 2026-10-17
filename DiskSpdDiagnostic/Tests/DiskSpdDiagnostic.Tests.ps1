@@ -4,7 +4,20 @@
 # Requires Pester 5.x: Install-Module Pester -MinimumVersion 5.0 -Force
 
 BeforeAll {
-    $script:ScriptUnderTest = Join-Path $PSScriptRoot '..\Invoke-DiskSpdDiagnostic.ps1'
+    $script:ScriptDir = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+    $realScript = Join-Path $script:ScriptDir 'Invoke-DiskSpdDiagnostic.ps1'
+
+    # The script declares '#Requires -RunAsAdministrator', which refuses to load in a
+    # non-elevated shell before any code runs - so the whole suite failed unless Pester was
+    # started as admin. The engine functions under test don't need elevation, so load a copy
+    # with only that line removed. Integration-tagged tests that run diskspd still need admin.
+    $source = [System.IO.File]::ReadAllText($realScript)
+    $source = [regex]::Replace($source, '(?im)^#Requires\s+-RunAsAdministrator\s*$', '')
+    $script:ScriptUnderTest = Join-Path $TestDrive 'Invoke-DiskSpdDiagnostic.ps1'
+    [System.IO.File]::WriteAllText($script:ScriptUnderTest, $source, (New-Object System.Text.UTF8Encoding $true))
+    # The script finds its report template next to itself ($PSScriptRoot), so it goes too.
+    Copy-Item -LiteralPath (Join-Path $script:ScriptDir 'ReportTemplate.html') -Destination $TestDrive
+
     # Load the engine functions once for the whole file. Each Describe block runs
     # in its own scope in Pester 5, but functions loaded in the file-level BeforeAll
     # are visible to all of them. Don't add a per-Describe BeforeAll just for this.
