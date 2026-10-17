@@ -55,8 +55,8 @@ service. It recommends; you act.
 | 2 | FSLogix service stopped or crashed | `frxsvc` is stopped or not installed, or a Service Control Manager "terminated unexpectedly" event (7034 / 7031) for it is in the lookback window | |
 | 3 | FSLogix profiles off or not configured | `Enabled` is not 1, or no `VHDLocations` / `CCDLocations` | |
 | 4 | No permission on the profile share | The user's FSLogix log has an access-denied (5) or bad user name/password (1326) error, or an FSLogix event says access was denied for the user | |
-| 5 | Cloud Cache storage / profile share unreachable | Every location fails from the server and from your PC | Some do |
-| 6 | An existing local profile stopped FSLogix | The user's FSLogix log has `Reason set to 3` (REASON_LOCAL_PROFILE_EXISTS) | |
+| 5 | Cloud Cache storage / profile share unreachable | Every location fails from the server and from your PC (the test also fails when your account has no access to the share, so open it from your PC before escalating) | Some do |
+| 6 | An existing local profile stopped FSLogix | The user's FSLogix log has `Reason set to 3` (REASON_LOCAL_PROFILE_EXISTS) in a sign-in that began inside the lookback window | |
 | 7 | The server's disk is full | A disk at the triage's Fail threshold | At the Warn threshold |
 
 The top cause is the highest-ranked Confirmed one, else the highest-ranked Possible one. Every
@@ -82,13 +82,18 @@ Other evidence is shown but never decides the verdict: whether the user is on a 
 profile right now (`Win32_UserProfile`), their Citrix sessions, FSLogix codes this version does
 not recognise (shown word for word), and anything else the server check flagged.
 
+Only the user's own sign-ins are read from the FSLogix profile log: they are picked out on the
+server by user name and SID, so other users' log lines never leave it, and a sign-in counts only
+when it began inside `-EventLookbackHours`. A log file that cannot be read is named in the
+evidence; nothing is ruled out on the rest of the log.
+
 ### Parameters
 
 | Parameter | Meaning |
 |---|---|
-| `-UserName` | `jdoe` or `CONTOSO\jdoe`. A bare name gets your PC's domain. Alias `-AffectedUser`. |
+| `-UserName` | `jdoe`, `CONTOSO\jdoe` or `jdoe@contoso.com`. A bare name gets your PC's domain. Alias `-AffectedUser`. |
 | `-ComputerName` | The session host. Alias `-AffectedDevice`. |
-| `-DeliveryController` | A Citrix Delivery Controller. Finds the server of the user's Active session and lists the others. Needs the Citrix Broker snap-in (a Delivery Controller, or a PC with Studio). With `-ComputerName` too, that server is checked and Citrix only supplies session states. |
+| `-DeliveryController` | A Citrix Delivery Controller. Finds the server of the user's Active session and lists the others. Needs the Citrix Broker snap-in (a Delivery Controller, or a PC with Studio). With `-ComputerName` too, that server is checked and Citrix only supplies session states; if Citrix cannot be asked, the server is still checked and the evidence says the sessions were not. |
 | `-EventLookbackHours` | Hours of FSLogix log and events to read. Default 24, maximum 168. |
 | `-OutputPath` | Folder for `TempProfile_<user>_<server>_<timestamp>.txt` and `.csv`, and the ticket note. |
 | `-TicketNumber` | Save the report and the ticket note in `<OutputPath or Documents\TicketNotes>\Ticket_<number>`. |

@@ -100,15 +100,25 @@ BeforeAll {
 
     # The REAL Invoke-CitrixFSLogixTriage run against a pretend host, so the host evidence the
     # new script has to read has exactly the shape the triage produces.
+    # Cloud Cache scenarios: two SMB providers; smb2 is the one that is down in CloudCacheSomeDown.
+    $script:CcdTwoProviders = 'type=smb,connectionString=\\smb1\profiles;type=smb,connectionString=\\smb2\profiles'
+    function Test-ScenarioShareUp([string]$Path) {
+        switch ($script:Scn) {
+            'CloudCacheAllDown' { $false }
+            'CloudCacheSomeDown' { $Path -notlike '\\smb2*' }
+            default { $true }
+        }
+    }
     function Set-TriageScenario {
-        param([ValidateSet('Healthy', 'DiskWarn', 'DiskFail', 'Unreachable')][string]$Name)
+        param([ValidateSet('Healthy', 'DiskWarn', 'DiskFail', 'Unreachable', 'FSLogixOff', 'NotConfigured', 'ServiceStopped', 'CloudCacheAllDown', 'CloudCacheSomeDown')][string]$Name)
         $script:Scn = $Name
         Mock Test-Connection { if (-not $script:Scn) { throw 'unmocked Test-Connection' }; $script:Scn -ne 'Unreachable' }
         Mock Get-CimInstance -ParameterFilter { $ClassName -eq 'Win32_Service' } {
             if (-not $script:Scn) { throw 'unmocked Get-CimInstance' }
             if ($script:Scn -eq 'Unreachable') { throw 'The WinRM client cannot process the request.' }
+            $frxState = if ($script:Scn -eq 'ServiceStopped') { 'Stopped' } else { 'Running' }
             @(
-                [PSCustomObject]@{ Name = 'frxsvc'; DisplayName = 'FSLogix Apps Services'; State = 'Running'; StartMode = 'Auto' }
+                [PSCustomObject]@{ Name = 'frxsvc'; DisplayName = 'FSLogix Apps Services'; State = $frxState; StartMode = 'Auto' }
                 [PSCustomObject]@{ Name = 'frxccds'; DisplayName = 'FSLogix Cloud Caching Service'; State = 'Running'; StartMode = 'Auto' }
             )
         }
@@ -129,15 +139,28 @@ BeforeAll {
         Mock Get-FSLogixRegistrySnapshot {
             if (-not $script:Scn) { throw 'unmocked Get-FSLogixRegistrySnapshot' }
             if ($script:Scn -eq 'Unreachable') { throw 'The RPC server is unavailable.' }
+            $values = switch ($script:Scn) {
+                'FSLogixOff' { @{ Enabled = '0'; VHDLocations = '\\files\profiles' } }
+                'NotConfigured' { @{ Enabled = '1' } }
+                'CloudCacheAllDown' { @{ Enabled = '1'; CCDLocations = $script:CcdTwoProviders } }
+                'CloudCacheSomeDown' { @{ Enabled = '1'; CCDLocations = $script:CcdTwoProviders } }
+                default { @{ Enabled = '1'; VHDLocations = '\\files\profiles' } }
+            }
             @(
-                New-RegKey -SubKey 'SOFTWARE\FSLogix\Profiles' -Values @{ Enabled = '1'; VHDLocations = '\\files\profiles' }
+                New-RegKey -SubKey 'SOFTWARE\FSLogix\Profiles' -Values $values
                 New-RegKey -SubKey 'SOFTWARE\Policies\FSLogix\Profiles' -Missing
             )
         }
+        # The triage tests each share from the host (Invoke-Command) and, when that fails, from
+        # this PC (Test-Path on the UNC path): both answer from the scenario, never the network.
         Mock Invoke-Command {
             if (-not $script:Scn) { throw 'unmocked Invoke-Command' }
             if ($script:Scn -eq 'Unreachable') { throw 'The WinRM client cannot process the request.' }
-            $true
+            Test-ScenarioShareUp ([string]@($ArgumentList)[0])
+        }
+        Mock Test-Path -ParameterFilter { "$LiteralPath$Path" -like '\\*' } {
+            if (-not $script:Scn) { throw 'unmocked Test-Path on a share' }
+            Test-ScenarioShareUp ([string]$LiteralPath)
         }
     }
 
@@ -156,10 +179,12 @@ BeforeAll {
         Mock Get-FSLogixRegistrySnapshot { throw 'unmocked Get-FSLogixRegistrySnapshot' }
         Mock Set-Clipboard { }
         Mock Invoke-WinFormsClipboard { }
+        Mock Get-TempProfileHostAddress { throw 'unmocked Get-TempProfileHostAddress (DNS)' }
+        Mock ConvertTo-TempProfileAccountName { throw 'unmocked ConvertTo-TempProfileAccountName (SID lookup)' }
     }
 
     $script:Triage = @{}
-    foreach ($name in 'Healthy', 'DiskWarn', 'DiskFail', 'Unreachable') {
+    foreach ($name in 'Healthy', 'DiskWarn', 'DiskFail', 'Unreachable', 'FSLogixOff', 'NotConfigured', 'ServiceStopped', 'CloudCacheAllDown', 'CloudCacheSomeDown') {
         Set-TriageScenario $name
         $script:Triage[$name] = Invoke-CitrixFSLogixTriage -ComputerName CTX07 -UserName jdoe -EventLookbackHours 24
     }
@@ -210,8 +235,20 @@ BeforeAll {
         Mock Get-TempProfileCrashFact { New-Obj @{ State = 'None'; Reason = ''; Time = ''; EventId = 0 } }
         Mock Get-TempProfileLoadedProfileFact { New-Obj @{ State = 'NotSignedIn'; Reason = '' } }
         Mock Import-CitrixBrokerSdk { $true }
+        Mock Get-TempProfileHostAddress { @() }
         Mock Set-Clipboard { }
         Mock Invoke-WinFormsClipboard { }
+    }
+    # A copy of a triage result whose RawOutput.Events are the given FSLogix events.
+    function New-TriageWithEvents([object]$Base, [object[]]$Events) {
+        $copy = $Base.PSObject.Copy()
+        $raw = $Base.RawOutput.PSObject.Copy()
+        $raw.Events = @($Events)
+        $copy.RawOutput = $raw
+        $copy
+    }
+    function New-FslogixEvent([string]$Message, [int]$Id = 26) {
+        [pscustomobject]@{ LogName = 'Microsoft-FSLogix-Apps/Operational'; TimeCreated = '2026-10-17 10:15:03'; Id = $Id; Level = 'Error'; ProviderName = 'Microsoft-FSLogix-Apps'; Message = $Message; Error = '' }
     }
     function Invoke-Main {
         param([hashtable]$Splat = @{})
@@ -585,9 +622,29 @@ Describe 'Get-TempProfileLockFact: who holds the profile disk' {
         (Join-Evidence $c) | Should -Match 'FS01 shows no open profile disk for jdoe'
     }
 
+    It 'AC2_LockByOtherHostIsTopCause: the search of every open file is narrowed to the share''s scope and says it may be slow; -Quiet keeps it silent' {
+        Set-SmbScenario -Shares @([pscustomobject]@{ Name = 'profiles'; ScopeName = 'FS-SOFS'; Path = 'D:\Profiles' }) -OpenFiles (New-OpenFile $script:JdoeVhdx -User 'CONTOSO\CTX04$')
+        $out = @(Get-TempProfileLockFact -UserName 'CONTOSO\jdoe' -Sid $script:Sid -VhdLocations @('\\FS01\profiles') 6>&1)
+        $lock = @($out | Where-Object { $_ -isnot [System.Management.Automation.InformationRecord] })[0]
+        $lock.State | Should -Be 'Held'
+        $info = (@($out | Where-Object { $_ -is [System.Management.Automation.InformationRecord] }) | ForEach-Object { "$($_.MessageData)" }) -join "`n"
+        $info | Should -Match '^\[INFO\] FS01 shows no profile disk open under jdoe''s own name'
+        $info | Should -Match '(?i)can take a while on a busy file server'
+        Should -Invoke Get-SmbOpenFile -ParameterFilter { -not $ClientUserName -and $ScopeName -contains 'FS-SOFS' } -Times 1 -Exactly
+
+        $quiet = @(Get-TempProfileLockFact -UserName 'CONTOSO\jdoe' -Sid $script:Sid -VhdLocations @('\\FS01\profiles') -Quiet 6>&1)
+        @($quiet | Where-Object { $_ -is [System.Management.Automation.InformationRecord] }).Count | Should -Be 0
+    }
+
+    It 'AC2_LockByOtherHostIsTopCause: a share in the default scope (*) is searched without a scope filter' {
+        Set-SmbScenario -Shares @([pscustomobject]@{ Name = 'profiles'; ScopeName = '*'; Path = 'D:\Profiles' }) -OpenFiles (New-OpenFile $script:JdoeVhdx -User 'CONTOSO\CTX04$')
+        (Get-TempProfileLockFact -UserName 'CONTOSO\jdoe' -Sid $script:Sid -VhdLocations @('\\FS01\profiles') -Quiet).State | Should -Be 'Held'
+        Should -Invoke Get-SmbOpenFile -ParameterFilter { -not $ClientUserName -and -not $ScopeName } -Times 1 -Exactly
+    }
+
     It 'checks the cmdlet parameter names it relies on against the real SmbShare cmdlets (mocks can lie)' -Skip:(-not (Get-Command Get-SmbOpenFile -Module SmbShare -ErrorAction SilentlyContinue)) {
         $open = (Get-Command Get-SmbOpenFile -Module SmbShare).Parameters.Keys
-        foreach ($p in 'ClientUserName', 'ClientComputerName', 'CimSession') { $open | Should -Contain $p }
+        foreach ($p in 'ClientUserName', 'ClientComputerName', 'ScopeName', 'CimSession') { $open | Should -Contain $p }
         $share = (Get-Command Get-SmbShare -Module SmbShare).Parameters.Keys
         foreach ($p in 'Name', 'CimSession') { $share | Should -Contain $p }
     }
@@ -667,6 +724,167 @@ Describe 'FSLogix profile log' {
         @($p.UnknownCodes)[0].Text | Should -Be 'Something new'
         $p.LocalProfile.State | Should -Not -Be 'Found'
         $p.ShareAccess.State | Should -Not -Be 'Denied'
+    }
+
+    It 'reads a log FSLogix still has open for writing (the reader shares ReadWrite and Delete)' {
+        $path = Join-Path $TestDrive 'Profile-open.log'
+        $lines = @('[10:14:58.001][tid:00000a10.00000b20][INFO]   ===== Begin Session: LoadProfile: jdoe')
+        [System.IO.File]::WriteAllLines($path, [string[]]$lines, (New-Object System.Text.UnicodeEncoding($false, $true)))
+        $writer = New-Object System.IO.FileStream($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+        try {
+            $read = @(Read-TempProfileLogLines -Path $path)
+        } finally {
+            $writer.Dispose()
+        }
+        $read.Count | Should -Be 1
+        $read[0] | Should -Be $lines[0]
+    }
+
+    It 'AC17_ShareAccessDenied: an HRESULT-wrapped access denied ([ERROR:80070005]) maps to Win32 error 5 and is Denied' {
+        $mine = New-LogLines -Who 'jdoe' -UserSid $script:Sid -Body @('[ERROR:80070005]   Failed to open the virtual disk. Access is denied.')
+        $p = Get-Parsed $mine
+        $p.ShareAccess.State | Should -Be 'Denied'
+        $p.ShareAccess.Line | Should -Match '80070005'
+    }
+
+    It 'AC16_LocalProfileExists: a session for OTHERDOM\jdoe (same name, another SID) is ignored when jdoe''s SID is known' {
+        $other = New-LogLines -Who 'jdoe' -UserSid $script:OtherSid -Body @('[INFO]   Reason set to 7: Local profile exists', '[ERROR:00000005]   Access is denied.')
+        $p = Get-Parsed $other
+        $p.LocalProfile.State | Should -Be 'CouldNotCheck'
+        $p.ShareAccess.State | Should -Be 'CouldNotCheck'
+        $p.SignIns | Should -Be 0
+        # Without the SID the name is all there is, so the session is taken.
+        (ConvertFrom-TempProfileLog -Lines $other -UserName 'jdoe' -Reference $script:Ref).LocalProfile.State | Should -Be 'Found'
+    }
+
+    It 'AC16_LocalProfileExists: only sign-ins that began in the lookback window count: an old "Reason set to 3" before a newer clean sign-in does not confirm a local profile' {
+        $ref = Get-FSLogixReference
+        $old = @{ Name = 'Profile_20261010.log'; Lines = @(New-LogLines -Who 'jdoe' -UserSid $script:Sid -Body @('[INFO]   Reason set to 3: A local profile for this user exists on this system')) }
+        $new = @{ Name = 'Profile-20261017.log'; Lines = @(New-LogLines -Who 'jdoe' -UserSid $script:Sid -Body @('[INFO]   Reason set to 0: The container is attached')) }
+        $p = ConvertFrom-TempProfileLog -LogFiles @([pscustomobject]$old, [pscustomobject]$new) -UserName 'CONTOSO\jdoe' -Sid $script:Sid -Reference $ref -Since ([datetime]'2026-10-16 12:00')
+        $p.LocalProfile.State | Should -Be 'None'
+        $p.SignIns | Should -Be 1
+        (@($p.Notes) -join "`n") | Should -Match '1 older sign-in'
+        # The same old sign-in inside the window does confirm it, with its date.
+        $p2 = ConvertFrom-TempProfileLog -LogFiles @([pscustomobject]$old, [pscustomobject]$new) -UserName 'CONTOSO\jdoe' -Sid $script:Sid -Reference $ref -Since ([datetime]'2026-10-09')
+        $p2.LocalProfile.State | Should -Be 'Found'
+        "$($p2.LocalProfile.Time)" | Should -Match '^2026-10-10 10:14:58'
+    }
+
+    It 'AC16_LocalProfileExists: when the log file name has no date only the latest sign-in is judged' {
+        $ref = Get-FSLogixReference
+        $lines = @(New-LogLines -Who 'jdoe' -UserSid $script:Sid -Body @('[INFO]   Reason set to 3: A local profile for this user exists on this system')) +
+        @(New-LogLines -Who 'jdoe' -UserSid $script:Sid -Body @('[INFO]   Reason set to 0: The container is attached'))
+        $p = ConvertFrom-TempProfileLog -LogFiles @([pscustomobject]@{ Name = 'Profile.log'; Lines = $lines }) -UserName 'jdoe' -Sid $script:Sid -Reference $ref -Since (Get-Date).AddHours(-24)
+        $p.LocalProfile.State | Should -Be 'None'
+        (@($p.Notes) -join "`n") | Should -Match '(?i)only the latest sign-in'
+    }
+
+    It 'reads the date from both log file name forms (Profile-yyyyMMdd and Profile_yyyy-MM-dd) and none from other names' {
+        (Get-TempProfileLogFileDate -Name 'Profile-20261017.log') | Should -Be ([datetime]'2026-10-17')
+        (Get-TempProfileLogFileDate -Name 'Profile_2026-10-17.log') | Should -Be ([datetime]'2026-10-17')
+        (Get-TempProfileLogFileDate -Name 'Profile_20261017.log') | Should -Be ([datetime]'2026-10-17')
+        Get-TempProfileLogFileDate -Name 'Profile.log' | Should -BeNullOrEmpty
+        Get-TempProfileLogFileDate -Name 'Profile-20261399.log' | Should -BeNullOrEmpty
+    }
+
+    It 'Select-TempProfileUserLogLines keeps only jdoe''s own sessions (by SID when known), so other users'' lines never leave the host' {
+        $mine = New-LogLines -Who 'jdoe' -UserSid $script:Sid -Body @('[INFO]   Reason set to 7: Local profile exists')
+        $otherDomain = New-LogLines -Who 'jdoe' -UserSid $script:OtherSid -Body @('[INFO]   Status set to 100: other domain')
+        $kept = @(Select-TempProfileUserLogLines -Lines ($script:OtherBlock + $mine + $otherDomain) -Sam 'jdoe' -Sid $script:Sid)
+        $kept.Count | Should -Be $mine.Count
+        ($kept -join "`n") | Should -Not -Match 'asmith|other domain'
+        ($kept -join "`n") | Should -Match 'Reason set to 7'
+        @(Select-TempProfileUserLogLines -Lines ($script:OtherBlock + $mine + $otherDomain) -Sam 'jdoe').Count | Should -Be ($mine.Count + $otherDomain.Count) -Because 'without the SID the name decides'
+    }
+}
+
+Describe 'Get-TempProfileLogFact: reading the log on the session host' {
+    BeforeAll {
+        $script:LogRoot = Join-Path $TestDrive 'FSLogixLogs'
+        $script:ProfileLogs = Join-Path $script:LogRoot 'Profile'
+        $null = New-Item -ItemType Directory -Path $script:ProfileLogs -Force
+        $script:Utf16 = New-Object System.Text.UnicodeEncoding($false, $true)
+        function New-SessionLines([string]$Who, [string]$UserSid, [datetime]$When, [string]$Tid, [string[]]$Body) {
+            $t = $When.ToString('HH:mm:ss.fff')
+            $out = @("[$t][tid:$Tid][INFO]   ===== Begin Session: LoadProfile: $Who", "[$t][tid:$Tid][INFO]   User: $UserSid ($Who)")
+            foreach ($b in $Body) { $out += "[$t][tid:$Tid]$b" }
+            $out += "[$t][tid:$Tid][INFO]   ===== End Session: LoadProfile: $Who"
+            $out
+        }
+        function Write-ProfileLog([string]$Name, [string[]]$Lines) {
+            $path = Join-Path $script:ProfileLogs $Name
+            [System.IO.File]::WriteAllLines($path, [string[]]$Lines, $script:Utf16)
+            $path
+        }
+        $script:Recent = (Get-Date).AddHours(-1)
+        $script:Old = (Get-Date).AddDays(-3)
+    }
+    BeforeEach {
+        Get-ChildItem -LiteralPath $script:ProfileLogs | Remove-Item -Force
+        # The session host's FSLogix logging settings point at the $TestDrive folder, and the
+        # remote call runs the real block here; nothing reaches a real host or registry value.
+        Mock Get-ItemProperty -ParameterFilter { $LiteralPath -eq 'HKLM:\SOFTWARE\FSLogix\Logging' } { [pscustomobject]@{ LogDir = $script:LogRoot; LoggingEnabled = 1 } }
+        Mock Invoke-Command { $script:Shipped = & $ScriptBlock @ArgumentList; $script:Shipped }
+    }
+
+    It 'AC16_LocalProfileExists: sends jdoe''s sam and SID to the host, ships back only jdoe''s lines, reads a log FSLogix is writing, and skips sign-ins before the lookback window' {
+        $null = Write-ProfileLog ('Profile-{0:yyyyMMdd}.log' -f $script:Old) (New-SessionLines 'jdoe' $script:Sid $script:Old 'a1' @('[INFO]   Reason set to 3: A local profile for this user exists on this system'))
+        $today = Write-ProfileLog ('Profile-{0:yyyyMMdd}.log' -f $script:Recent) (
+            @(New-SessionLines 'asmith' $script:OtherSid $script:Recent 'b2' @('[INFO]   Reason set to 3: A local profile for this user exists on this system', '[ERROR:00000005]   Access is denied.')) +
+            @(New-SessionLines 'jdoe' $script:Sid $script:Recent 'c3' @('[INFO]   Reason set to 0: The container is attached')))
+        $writer = New-Object System.IO.FileStream($today, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+        try {
+            $f = Get-TempProfileLogFact -ComputerName CTX07 -UserName 'CONTOSO\jdoe' -Sid $script:Sid -EventLookbackHours 24
+        } finally {
+            $writer.Dispose()
+        }
+        Should -Invoke Invoke-Command -ParameterFilter { $ComputerName -eq 'CTX07' -and $ArgumentList[3] -eq 'jdoe' -and $ArgumentList[4] -eq $script:Sid } -Times 1 -Exactly
+        @($script:Shipped.Unreadable).Count | Should -Be 0
+        $shipped = (@($script:Shipped.Logs) | ForEach-Object { @($_.Lines) }) -join "`n"
+        $shipped | Should -Not -Match 'asmith'
+        $shipped | Should -Not -Match ([regex]::Escape($script:OtherSid))
+        $f.LocalProfile.State | Should -Be 'None' -Because 'the only "local profile exists" for jdoe began three days ago'
+        $f.ShareAccess.State | Should -Be 'NoDenial' -Because 'the access denied line is asmith''s'
+    }
+
+    It 'names a log file that could not be read; what the others confirm still counts, and nothing is ruled out on part of the log' {
+        $null = Write-ProfileLog ('Profile-{0:yyyyMMdd}.log' -f $script:Recent) (New-SessionLines 'jdoe' $script:Sid $script:Recent 'c3' @('[INFO]   Reason set to 0: The container is attached'))
+        $locked = Write-ProfileLog ('Profile_{0:yyyy-MM-dd}.log' -f $script:Recent) @('[00:00:00.000][tid:d4][INFO]   x')
+        $hold = New-Object System.IO.FileStream($locked, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        try {
+            $f = Get-TempProfileLogFact -ComputerName CTX07 -UserName 'CONTOSO\jdoe' -Sid $script:Sid -EventLookbackHours 24
+        } finally {
+            $hold.Dispose()
+        }
+        $name = Split-Path -Leaf $locked
+        @($script:Shipped.Unreadable) -join ' ' | Should -Match ([regex]::Escape($name))
+        $f.LocalProfile.State | Should -Be 'CouldNotCheck'
+        $f.LocalProfile.Reason | Should -Match ([regex]::Escape($name))
+        $f.ShareAccess.State | Should -Be 'CouldNotCheck'
+        (@($f.Notes) -join "`n") | Should -Match ([regex]::Escape($name))
+
+        # A confirmed finding in a readable file is not hidden by the unreadable one.
+        $null = Write-ProfileLog ('Profile-{0:yyyyMMdd}.log' -f $script:Recent) (New-SessionLines 'jdoe' $script:Sid $script:Recent 'c3' @('[INFO]   Reason set to 3: A local profile for this user exists on this system'))
+        $hold = New-Object System.IO.FileStream($locked, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        try {
+            $f2 = Get-TempProfileLogFact -ComputerName CTX07 -UserName 'CONTOSO\jdoe' -Sid $script:Sid -EventLookbackHours 24
+        } finally {
+            $hold.Dispose()
+        }
+        $f2.LocalProfile.State | Should -Be 'Found'
+    }
+
+    It 'every log file unreadable is Could not check, naming the files' {
+        $locked = Write-ProfileLog ('Profile-{0:yyyyMMdd}.log' -f $script:Recent) (New-SessionLines 'jdoe' $script:Sid $script:Recent 'c3' @('[INFO]   Reason set to 3: x'))
+        $hold = New-Object System.IO.FileStream($locked, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        try {
+            $f = Get-TempProfileLogFact -ComputerName CTX07 -UserName 'CONTOSO\jdoe' -Sid $script:Sid -EventLookbackHours 24
+        } finally {
+            $hold.Dispose()
+        }
+        $f.LocalProfile.State | Should -Be 'CouldNotCheck'
+        $f.LocalProfile.Reason | Should -Match ([regex]::Escape((Split-Path -Leaf $locked)))
     }
 }
 
@@ -853,6 +1071,202 @@ Describe 'Invoke-TempProfileInvestigation: console, verdicts, exit codes' {
     }
 }
 
+Describe 'Get-TempProfileCrashFact: Service Control Manager events' {
+    BeforeAll {
+        function New-ScmEvent([string]$Service, [datetime]$When, [int]$Id = 7034) {
+            [pscustomobject]@{
+                Id = $Id; TimeCreated = $When; ProviderName = 'Service Control Manager'
+                Message = ('The {0} service terminated unexpectedly.  It has done this 1 time(s).' -f $Service)
+                Properties = @([pscustomobject]@{ Value = $Service }, [pscustomobject]@{ Value = 1 })
+            }
+        }
+    }
+
+    It 'AC15_FrxsvcCrashed: a 7034 for FSLogix Apps Services in the System log is Crashed with its time; the query asks CTX07''s System log for 7034/7031 in the window' {
+        Mock Get-WinEvent { @((New-ScmEvent 'Print Spooler' ([datetime]'2026-10-17 08:00:00')), (New-ScmEvent 'FSLogix Apps Services' ([datetime]'2026-10-17 09:12:31'))) }
+        $f = Get-TempProfileCrashFact -ComputerName CTX07 -EventLookbackHours 24
+        $f.State | Should -Be 'Crashed'
+        $f.EventId | Should -Be 7034
+        $f.Time | Should -Be ([datetime]'2026-10-17 09:12:31')
+        Should -Invoke Get-WinEvent -ParameterFilter {
+            $ComputerName -eq 'CTX07' -and $FilterHashtable.LogName -eq 'System' -and $FilterHashtable.ProviderName -eq 'Service Control Manager' -and
+            @($FilterHashtable.Id) -contains 7034 -and $FilterHashtable.StartTime -is [datetime]
+        } -Times 1 -Exactly
+        $c = Get-Cause (Get-TempProfileVerdict -Facts (New-Facts @{ ServiceCrash = $f })) 'frxsvc'
+        $c.State | Should -Be 'Confirmed'
+        (Join-Evidence $c) | Should -Match '2026-10-17 09:12:31'
+    }
+
+    It 'AC15_FrxsvcCrashed: a 7034 for another service only is None' {
+        Mock Get-WinEvent { New-ScmEvent 'Print Spooler' ([datetime]'2026-10-17 08:00:00') }
+        (Get-TempProfileCrashFact -ComputerName CTX07).State | Should -Be 'None'
+    }
+
+    It 'AC15_FrxsvcCrashed: "No events were found" is None (a clean answer), and the RPC server being unavailable is CouldNotCheck' {
+        Mock Get-WinEvent { throw 'No events were found that match the specified selection criteria.' }
+        (Get-TempProfileCrashFact -ComputerName CTX07).State | Should -Be 'None'
+        Mock Get-WinEvent { throw 'The RPC server is unavailable.' }
+        $f = Get-TempProfileCrashFact -ComputerName CTX07
+        $f.State | Should -Be 'CouldNotCheck'
+        $f.Reason | Should -Match 'RPC server is unavailable'
+        (Get-Cause (Get-TempProfileVerdict -Facts (New-Facts @{ ServiceCrash = $f })) 'frxsvc').State | Should -Be 'CouldNotCheck'
+    }
+}
+
+Describe 'Invoke-TempProfileInvestigation: host causes from the real triage output' {
+    BeforeEach { Set-CleanCollectors }
+
+    It 'AC14_FrxsvcStopped: the triage seeing frxsvc Stopped confirms "FSLogix service stopped on CTX07"' {
+        Mock Invoke-CitrixFSLogixTriage { $script:Triage.ServiceStopped }
+        $r = (Invoke-Main @{ Quiet = $true }).Result
+        $c = @($r.Causes | Where-Object { $_.Id -eq 'frxsvc' })[0]
+        $c.State | Should -Be 'Confirmed'
+        $c.Title | Should -Be 'FSLogix service stopped on CTX07'
+        (@($c.Evidence) -join ' ') | Should -Match '(?i)Stopped'
+        $r.Verdict | Should -Be 'CAUSE FOUND'
+    }
+
+    It 'AC19_FslogixOffOrNotConfigured: Enabled = 0, and Enabled = 1 with no profile location, both confirm "FSLogix profiles are off or not configured on CTX07"' {
+        foreach ($scenario in 'FSLogixOff', 'NotConfigured') {
+            $script:UseScenario = $scenario
+            Mock Invoke-CitrixFSLogixTriage { $script:Triage[$script:UseScenario] }
+            $r = (Invoke-Main @{ Quiet = $true }).Result
+            $c = @($r.Causes | Where-Object { $_.Id -eq 'fslogix-off' })[0]
+            $c.State | Should -Be 'Confirmed' -Because $scenario
+            $c.Title | Should -Be 'FSLogix profiles are off or not configured on CTX07'
+        }
+    }
+
+    It 'AC18_CloudCacheUnreachable: every Cloud Cache provider unreachable from the host and this PC is confirmed (with the share-test caveat); one of two is possible' {
+        Mock Invoke-CitrixFSLogixTriage { $script:Triage.CloudCacheAllDown }
+        $all = (Invoke-Main @{ Quiet = $true }).Result
+        $c = @($all.Causes | Where-Object { $_.Id -eq 'storage' })[0]
+        $c.State | Should -Be 'Confirmed'
+        $c.Title | Should -Be 'Cloud Cache storage unreachable'
+        $ev = @($c.Evidence) -join "`n"
+        $ev | Should -Match '2 of 2 Cloud Cache location'
+        $ev | Should -Match '(?i)no access to the share'
+
+        Mock Invoke-CitrixFSLogixTriage { $script:Triage.CloudCacheSomeDown }
+        $some = (Invoke-Main @{ Quiet = $true }).Result
+        $c = @($some.Causes | Where-Object { $_.Id -eq 'storage' })[0]
+        $c.State | Should -Be 'Possible'
+        (@($c.Evidence) -join "`n") | Should -Match 'smb2'
+        (@($c.Evidence) -join "`n") | Should -Not -Match 'smb1'
+    }
+}
+
+Describe 'Invoke-TempProfileInvestigation: FSLogix events, user matching, lock holder, Citrix and user names' {
+    BeforeEach { Set-CleanCollectors }
+
+    It 'AC17_ShareAccessDenied: an FSLogix event with "Access is denied" on jdoe''s SID profile folder confirms "no permission on the profile share"; one saying the file is locked does not' {
+        $denied = New-FslogixEvent ('Failed to open virtual disk \\files\profiles\{0}_jdoe\Profile_jdoe.vhdx. Access is denied.' -f $script:Sid)
+        $script:TriageEvents = @($denied)
+        Mock Invoke-CitrixFSLogixTriage { New-TriageWithEvents $script:Triage.Healthy $script:TriageEvents }
+        $r = (Invoke-Main @{ Quiet = $true }).Result
+        $c = @($r.Causes | Where-Object { $_.Id -eq 'share-denied' })[0]
+        $c.State | Should -Be 'Confirmed'
+        (@($c.Evidence) -join ' ') | Should -Match 'FSLogix event 26'
+
+        $locked = New-FslogixEvent ('Failed to open virtual disk \\files\profiles\{0}_jdoe\Profile_jdoe.vhdx: the file is locked. Access is denied.' -f $script:Sid)
+        $script:TriageEvents = @($locked)
+        $r = (Invoke-Main @{ Quiet = $true }).Result
+        @($r.Causes | Where-Object { $_.Id -eq 'share-denied' })[0].State | Should -Be 'RuledOut'
+    }
+
+    It 'AC17_ShareAccessDenied: an access-denied event about CONTOSO\jdoe.smith (or jdoe-admin) confirms nothing for jdoe; one naming CONTOSO\jdoe does' {
+        $events = @(
+            (New-FslogixEvent 'Access is denied for CONTOSO\jdoe.smith opening \\files\profiles\S-1-5-21-1111111111-2222222222-3333333333-1199_jdoe.smith\Profile_jdoe.smith.vhdx.')
+            (New-FslogixEvent 'Access is denied for CONTOSO\jdoe-admin.')
+        )
+        $script:TriageEvents = $events
+        Mock Invoke-CitrixFSLogixTriage { New-TriageWithEvents $script:Triage.Healthy $script:TriageEvents }
+        $r = (Invoke-Main @{ UserName = 'CONTOSO\jdoe'; Quiet = $true }).Result
+        @($r.Causes | Where-Object { $_.Id -eq 'share-denied' })[0].State | Should -Be 'RuledOut'
+
+        $mine = New-FslogixEvent 'Access is denied for CONTOSO\jdoe.'
+        $script:TriageEvents = @($mine)
+        $r = (Invoke-Main @{ UserName = 'CONTOSO\jdoe'; Quiet = $true }).Result
+        @($r.Causes | Where-Object { $_.Id -eq 'share-denied' })[0].State | Should -Be 'Confirmed'
+    }
+
+    It 'Test-TempProfileTextNamesUser matches the SID, DOMAIN\sam and the SID profile folder, never a longer name' {
+        Test-TempProfileTextNamesUser -Text "path \\fs\p\$($script:Sid)_jdoe\x" -UserName 'CONTOSO\jdoe' -Sid $script:Sid | Should -BeTrue
+        Test-TempProfileTextNamesUser -Text 'user CONTOSO\jdoe.' -UserName 'CONTOSO\jdoe' -Sid $script:Sid | Should -BeTrue
+        Test-TempProfileTextNamesUser -Text 'path \\fs\p\S-1-5-21-9-9-9-1105_jdoe\x' -UserName 'CONTOSO\jdoe' | Should -BeTrue -Because 'without the SID the folder name is used'
+        Test-TempProfileTextNamesUser -Text 'path \\fs\p\jdoe_S-1-5-21-9-9-9-1105\x' -UserName 'CONTOSO\jdoe' | Should -BeTrue
+        foreach ($t in 'CONTOSO\jdoe.smith', 'CONTOSO\jdoe-admin', 'CONTOSO\jdoe2', 'jdoe', 'OTHERDOM\jdoe', "$($script:Sid)0", 'S-1-5-21-9-9-9-1105_jdoe.smith\x') {
+            Test-TempProfileTextNamesUser -Text "Access is denied: $t" -UserName 'CONTOSO\jdoe' -Sid $script:Sid | Should -BeFalse -Because $t
+        }
+    }
+
+    It 'AC4_UnresolvedClientShownAsIp: an unresolved holder address that is one of CTX07''s own addresses is the host itself (Possible), not "another computer"' {
+        $own = New-Obj @{ State = 'Held'; Reason = ''; Detail = ''; FileServer = 'FS01'; FileName = 'S-1-5-21-1111111111-2222222222-3333333333-1105_jdoe\Profile_jdoe.vhdx'; ClientComputer = ''; ClientAddress = '10.20.30.47'; ClientResolved = $false }
+        $script:OwnLock = $own
+        Mock Get-TempProfileLockFact { $script:OwnLock }
+        Mock Get-TempProfileHostAddress { @('10.20.30.47', 'fe80::1') }
+        $r = (Invoke-Main @{ Quiet = $true }).Result
+        Should -Invoke Get-TempProfileHostAddress -ParameterFilter { $ComputerName -eq 'CTX07' } -Times 1 -Exactly
+        $c = @($r.Causes | Where-Object { $_.Id -eq 'lock-held' })[0]
+        $c.State | Should -Be 'Possible'
+        $r.Summary | Should -Match 'CTX07 itself'
+
+        # The ranker alone: no host addresses known -> the address is "elsewhere" and confirmed.
+        (Get-Cause (Get-TempProfileVerdict -Facts (New-Facts @{ Lock = $own })) 'lock-held').State | Should -Be 'Confirmed'
+        (Get-Cause (Get-TempProfileVerdict -Facts (New-Facts @{ Lock = $own; HostAddresses = @('10.20.30.47') })) 'lock-held').State | Should -Be 'Possible'
+    }
+
+    It 'AC3_LockHolderSessionStateFromCitrix: a holder session that is not known to be Disconnected gets "ask jdoe to save their work and sign out", with logging it off as the fallback' {
+        $active = Get-TempProfileVerdict -Facts (New-Facts @{ Lock = $script:HeldLock; Sessions = @((New-Obj @{ Machine = 'CTX04'; State = 'Active' })) })
+        $active.NextStep | Should -Match "(?i)ask jdoe to save their work and sign out of CTX04, or if they can't, log that session off in Director/Studio"
+        $unknown = Get-TempProfileVerdict -Facts (New-Facts @{ Lock = $script:HeldLock })
+        $unknown.NextStep | Should -Match "(?i)ask jdoe to save their work and sign out of CTX04, or if they can't, log that session off in Director/Studio"
+        $hint = Get-TempProfileVerdict -Facts (New-Facts @{ Lock = $script:BlindLock; LockHint = (New-Obj @{ Line = '[ERROR:00000021] locked'; Time = '10:14:58' }) })
+        $hint.NextStep | Should -Match "(?i)save their work and sign out of it, or if they can't, log that session off"
+    }
+
+    It 'UPN: -UserName jdoe@contoso.com is jdoe everywhere, and the collectors get CONTOSO\jdoe from the SID' {
+        Mock ConvertTo-TempProfileAccountName { 'CONTOSO\jdoe' }
+        Mock Get-BrokerSession { @((New-BrokerSessionMock 'CTX07' 'Active')) }
+        $r = (Invoke-Main @{ UserName = 'jdoe@contoso.com'; ComputerName = 'CTX07'; DeliveryController = 'CTX-DDC01'; Quiet = $true }).Result
+        $r.UserName | Should -Be 'jdoe'
+        Should -Invoke Get-TempProfileUserSid -ParameterFilter { $UserName -eq 'jdoe@contoso.com' } -Times 1 -Exactly
+        Should -Invoke ConvertTo-TempProfileAccountName -ParameterFilter { $Sid -eq $script:Sid } -Times 1 -Exactly
+        Should -Invoke Invoke-CitrixFSLogixTriage -ParameterFilter { $UserName -eq 'jdoe' } -Times 1 -Exactly
+        Should -Invoke Get-TempProfileLockFact -ParameterFilter { $UserName -eq 'CONTOSO\jdoe' } -Times 1 -Exactly
+        Should -Invoke Get-TempProfileLogFact -ParameterFilter { $UserName -eq 'CONTOSO\jdoe' } -Times 1 -Exactly
+        Should -Invoke Get-BrokerSession -ParameterFilter { $UserName -eq 'CONTOSO\jdoe' } -Times 1 -Exactly
+    }
+
+    It 'UPN: when the SID cannot be turned back into a name, the collectors get DOMAIN\jdoe with this PC''s domain, never the UPN' {
+        Mock ConvertTo-TempProfileAccountName { throw 'The trust relationship failed.' }
+        $null = Invoke-Main @{ UserName = 'jdoe@contoso.com'; Quiet = $true }
+        Should -Invoke Get-TempProfileLockFact -ParameterFilter { $UserName -match '^[^\\@]+\\jdoe$' } -Times 1 -Exactly
+        Should -Invoke Get-TempProfileLogFact -ParameterFilter { $UserName -match '^[^\\@]+\\jdoe$' } -Times 1 -Exactly
+        Get-TempProfileSamName 'jdoe@contoso.com' | Should -Be 'jdoe'
+        Get-TempProfileSamName 'CONTOSO\jdoe' | Should -Be 'jdoe'
+        Get-TempProfileSamName 'svc$' | Should -Be 'svc$'
+    }
+
+    It 'with -ComputerName and -DeliveryController, a missing Broker snap-in is a "could not check Citrix sessions" note and the host checks still run' {
+        Mock Import-CitrixBrokerSdk { $false }
+        $c = Invoke-Main @{ ComputerName = 'CTX07'; DeliveryController = 'CTX-DDC01' }
+        Should -Invoke Invoke-CitrixFSLogixTriage -ParameterFilter { $ComputerName -eq 'CTX07' } -Times 1 -Exactly
+        Should -Invoke Get-BrokerSession -Times 0 -Exactly
+        $c.Result.Verdict | Should -Be 'NO CAUSE FOUND'
+        (@($c.Result.Evidence) -join "`n") | Should -Match "(?i)Could not check jdoe's Citrix sessions: the Citrix Broker snap-in"
+        $c.Text | Should -Match '\[WARN\] Could not check jdoe''s Citrix sessions'
+    }
+
+    It 'with -ComputerName and -DeliveryController, a failed Broker query is a note too and the host checks still run' {
+        Mock Get-BrokerSession { throw 'Insufficient administrative privilege' }
+        $r = (Invoke-Main @{ ComputerName = 'CTX07'; DeliveryController = 'CTX-DDC01'; Quiet = $true }).Result
+        Should -Invoke Invoke-CitrixFSLogixTriage -Times 1 -Exactly
+        (@($r.Evidence) -join "`n") | Should -Match "(?i)Could not check jdoe's Citrix sessions: CTX-DDC01 could not be asked \(Insufficient administrative privilege\)"
+        $r.Error | Should -Match 'Citrix sessions'
+    }
+}
+
 Describe 'Invoke-TempProfileInvestigation: ticket note, paste-safe, pass-thru' {
     BeforeEach { Set-CleanCollectors }
 
@@ -881,7 +1295,8 @@ Describe 'Invoke-TempProfileInvestigation: ticket note, paste-safe, pass-thru' {
         }
         Mock Get-TempProfileLogFact {
             New-Obj @{
-                LocalProfile = New-Obj @{ State = 'Found'; Reason = ''; Line = 'Reason set to 7: Local profile exists (\\files\profiles\S-1-5-21-1111111111-2222222222-3333333333-1105_jdoe\Profile_jdoe.vhdx)'; Time = '10:14:58.060'; Code = '7' }
+                # A UNC disk path, a bare SID, an Entra (S-1-12-) SID and local paths with spaces.
+                LocalProfile = New-Obj @{ State = 'Found'; Reason = ''; Line = 'Reason set to 7: Local profile exists (\\files\profiles\S-1-5-21-1111111111-2222222222-3333333333-1105_jdoe\Profile_jdoe.vhdx) for S-1-5-21-1111111111-2222222222-3333333333-1105 (Entra S-1-12-1-1111111111-2222222222-3333333333-4444444444), old copy at D:\Profile Disks\jdoe old\Profile_jdoe.vhdx and C:\Users\TEMP.CONTOSO\App Data\x.dat'; Time = '10:14:58.060'; Code = '7' }
                 ShareAccess  = New-Obj @{ State = 'NoDenial'; Reason = ''; Line = ''; Time = '' }
                 UnknownCodes = @()
             }
@@ -896,8 +1311,33 @@ Describe 'Invoke-TempProfileInvestigation: ticket note, paste-safe, pass-thru' {
         $text | Should -Not -Match '(?i)\.vhdx?\b'
         $text | Should -Not -Match '\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'
         $text | Should -Not -Match 'S-1-5-21-\d+-\d+-\d+-\d+_jdoe\\'
+        $text | Should -Not -Match 'S-1-\d+(-\d+)+' -Because 'bare SIDs, including Entra S-1-12- SIDs, are removed'
+        $text | Should -Not -Match 'Profile Disks|jdoe old|App Data' -Because 'a path with spaces is removed whole'
+        $text | Should -Not -Match '(?<![\w])[A-Za-z]:\\'
         $text | Should -Match 'CTX07'
         $text | Should -Match 'jdoe'
+    }
+
+    It 'AC28_PasteSafeDropsPaths: a session host given as an IP address is removed from the note, headline included; -FullDetail keeps it' {
+        $out = Join-Path $TestDrive 'ac28ip'
+        $null = New-Item -ItemType Directory -Path $out
+        $c = Invoke-Main @{ ComputerName = '10.20.30.47'; TicketNumber = '482114'; OutputPath = $out }
+        $file = @(Get-ChildItem -LiteralPath (Join-Path $out 'Ticket_482114') -Filter 'Note_*.txt')
+        $file.Count | Should -Be 1
+        $text = [System.IO.File]::ReadAllText($file[0].FullName)
+        $text | Should -Not -Match '10\.20\.30\.47'
+        $text | Should -Match 'jdoe'
+        $c.Result.TicketNote.Headline | Should -Not -Match '10\.20\.30\.47'
+        $full = (Invoke-Main @{ ComputerName = '10.20.30.47'; FullDetail = $true; Quiet = $true }).Result
+        $full.TicketNote.Headline | Should -Match '10\.20\.30\.47'
+    }
+
+    It 'AC28_PasteSafeDropsPaths: Protect-TempProfileNoteText removes spaced disk and local paths and bare SIDs, and keeps names and plain text' {
+        $t = Protect-TempProfileNoteText -Text 'jdoe on CTX07: D:\Profile Disks\S-1-5-21-1-2-3-1105_jdoe\Profile_jdoe.vhdx, user S-1-12-1-11-22-33-44, folder C:\Users\TEMP.CONTOSO\App Data\x.dat. Done.'
+        $t | Should -Not -Match 'Profile Disks|App Data|S-1-|\.vhdx'
+        $t | Should -Match '^jdoe on CTX07: '
+        $t | Should -Match '\[SID removed\]'
+        $t | Should -Match 'Done\.$'
     }
 
     It 'AC29_PassThruShape: -Quiet returns the result object with the contracted properties and writes nothing to the host' {
@@ -973,6 +1413,41 @@ Describe 'static checks on the script and its data' {
                 (($_ -match '^(Stop|Restart|Set|Remove|Disconnect|Close|Suspend|Clear|Disable)-') -and ($allowed -notcontains $_))
             })
         $offenders | Should -BeNullOrEmpty
+    }
+
+    It 'AC26_NeverChangesAnything: neither the script nor the companions it loads (the triage, CaseKit) call a command or .NET method that changes anything' {
+        $files = @($script:ScriptPath, $script:TriagePath, (Join-Path $script:Root 'CaseKit.ps1'))
+        $forbidden = @(
+            'Stop-BrokerSession', 'Disconnect-BrokerSession', 'Close-SmbOpenFile', 'Invoke-CimMethod', 'Invoke-WmiMethod',
+            'New-ItemProperty', 'New-Service', 'Invoke-Expression', 'iex', 'Out-File',
+            'logoff', 'logoff.exe', 'rwinsta', 'rwinsta.exe', 'reset', 'reset.exe', 'shutdown', 'shutdown.exe'
+        )
+        # Set-Content writes the tools' own reports, Set-Clipboard is CaseKit's clipboard helper;
+        # Set-StrictMode and Remove-CimSession change nothing on a target.
+        $allowed = @('Set-Content', 'Set-Clipboard', 'Set-StrictMode', 'Remove-CimSession')
+        $blockedMembers = @('Delete', 'Kill', 'Terminate', 'SetValue', 'DeleteValue', 'CreateSubKey')
+        $offenders = New-Object System.Collections.Generic.List[string]
+        foreach ($file in $files) {
+            $tokens = $null; $parseErrors = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$parseErrors)
+            $leaf = Split-Path -Leaf $file
+            foreach ($cmd in @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] }, $true))) {
+                $name = $cmd.GetCommandName()
+                if (-not $name) { continue }
+                if (($forbidden -contains $name) -or
+                    (($name -match '^(Stop|Restart|Set|Remove|Disconnect|Close|Suspend|Clear|Disable|Start|Enable|Rename|Move|Register)-') -and ($allowed -notcontains $name))) {
+                    $offenders.Add("${leaf} line $($cmd.Extent.StartLineNumber): $name")
+                }
+            }
+            foreach ($call in @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))) {
+                $member = $call.Member.Extent.Text.Trim("'", '"')
+                $writableOpen = ($member -eq 'OpenSubKey' -and @($call.Arguments).Count -ge 2 -and $call.Arguments[1].Extent.Text -notmatch '^\$false$')
+                if (($blockedMembers -contains $member) -or ($member -like 'DeleteSubKey*') -or $writableOpen) {
+                    $offenders.Add("${leaf} line $($call.Extent.StartLineNumber): .$member()")
+                }
+            }
+        }
+        @($offenders) | Should -BeNullOrEmpty
     }
 
     It 'AC30_ReferenceTableCitedAndInParity: every code in FSLogixReference.psd1 has a learn.microsoft.com URL' {

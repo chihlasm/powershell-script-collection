@@ -146,10 +146,11 @@
       Known issues: frxsvc crash during sign-in gives a temporary profile (2210); Event ID 26
       errors on Entra-only joined devices are expected and are not used as a cause here
         https://learn.microsoft.com/fslogix/troubleshooting-known-issues
-      Get-SmbOpenFile: -ClientUserName, -ClientComputerName, -CimSession; output Path,
-      ShareRelativePath, ClientComputerName (an IP address), ClientUserName (DOMAIN\name)
+      Get-SmbOpenFile: -ClientUserName, -ClientComputerName, -ScopeName, -CimSession (no path
+      or file-name filter, and no wildcards); output Path, ShareRelativePath,
+      ClientComputerName (an IP address), ClientUserName (DOMAIN\name)
         https://learn.microsoft.com/powershell/module/smbshare/get-smbopenfile
-      Get-SmbShare: -Name, -CimSession; output Name, Path
+      Get-SmbShare: -Name, -CimSession; output Name, ScopeName, Path
         https://learn.microsoft.com/powershell/module/smbshare/get-smbshare
       Win32_UserProfile: SID (key), Loaded, Status bit field (1 = Temporary, 8 = Corrupted)
         https://learn.microsoft.com/previous-versions/windows/desktop/legacy/ee886409(v=vs.85)
@@ -159,8 +160,16 @@
       Dns.GetHostEntry on an IP address does a reverse lookup and may return the address itself
       as HostName, or throw SocketException
         https://learn.microsoft.com/dotnet/api/system.net.dns.gethostentry
-      NTAccount.Translate throws IdentityNotMappedException for an unknown account
+      Dns.GetHostAddresses: the session host's own addresses, to tell a disk the host itself
+      holds from one held elsewhere when the holder's address has no DNS name
+        https://learn.microsoft.com/dotnet/api/system.net.dns.gethostaddresses
+      NTAccount.Translate throws IdentityNotMappedException for an unknown account;
+      SecurityIdentifier.Translate turns the SID of a user given as a UPN back into DOMAIN\name
         https://learn.microsoft.com/dotnet/api/system.security.principal.ntaccount.translate
+        https://learn.microsoft.com/dotnet/api/system.security.principal.securityidentifier.translate
+      FileShare ReadWrite and Delete: the profile log is opened so FSLogix can keep writing,
+      renaming and deleting it while it is read
+        https://learn.microsoft.com/dotnet/api/system.io.fileshare
       Citrix Broker SDK Get-BrokerSession: -AdminAddress (common Citrix parameter), -UserName
       (DOMAIN\user), -MaxRecordCount; output DNSName, HostedMachineName (hypervisor name, may
       not match DNS), MachineName, SessionState (Connected, Active, Disconnected, ...)
@@ -176,8 +185,12 @@
         corrective action will be taken", logged instead of 7034 when a recovery action is
         set). Only Microsoft Q&A answers describe it, so it is read alongside 7034 and
         reported as the same crash.
-      - The profile log file name. Learn shows Profile_%date%.log; FSLogix writes
-        Profile-<yyyyMMdd>.log on current versions. Both are read (Profile*.log).
+      - The profile log file name. Learn shows Profile_%date%.log without the date format;
+        FSLogix writes Profile-<yyyyMMdd>.log on current versions. Both separators are read
+        (Profile*.log), and the date is taken from yyyyMMdd or yyyy-MM-dd after it. A sign-in
+        counts only when it began inside the lookback window (file date plus the line's time,
+        against the session host's own clock). When the date cannot be read, only the user's
+        latest sign-in in the log is judged.
       - Tying an access-denied line that says "file is locked" to the lock rather than to
         permissions follows the Learn example of a locked disk, not a documented rule.
       - The free-disk thresholds are the triage's own rule of thumb (see that script).
@@ -317,6 +330,51 @@ function Get-TempProfileShortName {
     return ($leaf -split '\.')[0]
 }
 
+function Get-TempProfileSamName {
+    # CONTOSO\jdoe / jdoe@contoso.com / jdoe -> jdoe (the logon name FSLogix logs and folders use).
+    param([AllowEmptyString()][AllowNull()][string]$UserName)
+    if ([string]::IsNullOrWhiteSpace($UserName)) { return '' }
+    return (((($UserName.Trim()) -split '\\')[-1]) -split '@')[0]
+}
+
+function Get-TempProfileDomainName {
+    # CONTOSO\jdoe -> CONTOSO; '' for a bare name or a UPN.
+    param([AllowEmptyString()][AllowNull()][string]$UserName)
+    $m = [regex]::Match([string]$UserName, '^\s*(?<domain>[^\\]+)\\')
+    if ($m.Success) { return $m.Groups['domain'].Value }
+    return ''
+}
+
+function Test-TempProfileTextNamesUser {
+    <#
+    .SYNOPSIS
+        True when a message names this user, not just a word that contains the name.
+    .DESCRIPTION
+        Matches the user's SID (not part of a longer SID), DOMAIN\sam, or, when the SID is not
+        known, a profile folder <SID>_<sam> or <sam>_<SID>. A plain word match is not enough:
+        "jdoe" is inside "jdoe.smith", "jdoe-admin" and "CONTOSO\jdoe2", and a host-wide event
+        about one of them must not be blamed on jdoe.
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$Text, [Parameter(Mandatory = $true)][string]$UserName, [string]$Sid)
+    if ([string]::IsNullOrEmpty($Text)) { return $false }
+    if ($Sid -and $Text -match ('(?<![\w-]){0}(?![\d-])' -f [regex]::Escape($Sid))) { return $true }
+    $sam = Get-TempProfileSamName $UserName
+    if (-not $sam) { return $false }
+    $u = [regex]::Escape($sam)
+    # The name ends here: no more name characters after it (a full stop ends a sentence, but
+    # ".smith" continues the name).
+    $end = '(?![\w$-]|\.\w)'
+    $domain = Get-TempProfileDomainName $UserName
+    if ($domain -and $Text -match ('(?i)(?<![\w.-]){0}\\{1}{2}' -f [regex]::Escape($domain), $u, $end)) { return $true }
+    if (-not $Sid) {
+        # %sid%_%username% or %username%_%sid% (FlipFlopProfileDirectoryName)
+        # https://learn.microsoft.com/fslogix/reference-configuration-settings
+        if ($Text -match ('(?i)S-1-[0-9-]+_{0}{1}' -f $u, $end)) { return $true }
+        if ($Text -match ('(?i)(?<![\w.$-]){0}_S-1-\d' -f $u)) { return $true }
+    }
+    return $false
+}
+
 function Test-TempProfileAccessDenied {
     # True when an error (exception or message) says access was denied.
     # 0x80070005 is E_ACCESSDENIED, ERROR_ACCESS_DENIED (5) as an HRESULT.
@@ -396,6 +454,31 @@ function Get-TempProfileUserSid {
     return $account.Translate([System.Security.Principal.SecurityIdentifier]).Value
 }
 
+function ConvertTo-TempProfileAccountName {
+    # SID -> DOMAIN\name, for a user given as a UPN: the file server (ClientUserName) and the
+    # Citrix Broker name users DOMAIN\name, never by UPN.
+    # https://learn.microsoft.com/dotnet/api/system.security.principal.securityidentifier.translate
+    param([Parameter(Mandatory = $true)][string]$Sid)
+    $id = New-Object System.Security.Principal.SecurityIdentifier($Sid)
+    return $id.Translate([System.Security.Principal.NTAccount]).Value
+}
+
+function Get-TempProfileHostAddress {
+    # The session host's own IP addresses (empty when DNS has none), so a profile disk held from
+    # an address with no DNS name can still be recognised as held by the host itself. An IP
+    # address given as the host is returned as it is.
+    # https://learn.microsoft.com/dotnet/api/system.net.dns.gethostaddresses
+    param([AllowEmptyString()][AllowNull()][string]$ComputerName)
+    if ([string]::IsNullOrWhiteSpace($ComputerName)) { return @() }
+    $ip = $null
+    if ([System.Net.IPAddress]::TryParse($ComputerName.Trim().Trim('[', ']'), [ref]$ip)) { return @($ip.ToString()) }
+    try {
+        return @([System.Net.Dns]::GetHostAddresses($ComputerName.Trim()) | ForEach-Object { $_.ToString() })
+    } catch {
+        return @()
+    }
+}
+
 function Resolve-TempProfileClientName {
     # Reverse DNS for an SMB client address; $null when DNS has no name for it. GetHostEntry
     # can return the address itself as HostName when there is no PTR record, or throw.
@@ -425,9 +508,10 @@ function ConvertTo-TempProfileShareTarget {
 function Get-TempProfileOpenFile {
     # Get-SmbOpenFile that returns an empty list instead of the "No MSFT_SmbOpenFile objects
     # found" error a CDXML cmdlet raises when a filter matches nothing.
-    param([Parameter(Mandatory = $true)][object]$CimSession, [string]$ClientUserName)
+    param([Parameter(Mandatory = $true)][object]$CimSession, [string]$ClientUserName, [string]$ScopeName)
     $splat = @{ CimSession = $CimSession; ErrorAction = 'Stop' }
     if ($ClientUserName) { $splat.ClientUserName = $ClientUserName }
+    if ($ScopeName) { $splat.ScopeName = $ScopeName }
     try {
         return @(Get-SmbOpenFile @splat)
     } catch {
@@ -462,9 +546,10 @@ function Get-TempProfileLockFact {
         [Parameter(Mandatory = $true)][string]$UserName,
         [string]$Sid,
         [string[]]$VhdLocations = @(),
-        [string[]]$CcdLocations = @()
+        [string[]]$CcdLocations = @(),
+        [switch]$Quiet
     )
-    $sam = ($UserName -split '\\')[-1]
+    $sam = Get-TempProfileSamName $UserName
     $targets = New-Object System.Collections.Generic.List[object]
     $notShares = New-Object System.Collections.Generic.List[string]
     $azure = $false
@@ -505,7 +590,7 @@ function Get-TempProfileLockFact {
         $key = ('{0}\{1}' -f $t.Server, $t.Share).ToLowerInvariant()
         if ($seen.ContainsKey($key)) { continue }
         $seen[$key] = $true
-        $results.Add((Get-TempProfileLockFactForShare -Target $t -UserName $UserName -Sam $sam -Sid $Sid))
+        $results.Add((Get-TempProfileLockFactForShare -Target $t -UserName $UserName -Sam $sam -Sid $Sid -Quiet:$Quiet))
     }
 
     $blank = @{ FileServer = ''; FileName = ''; ClientComputer = ''; ClientAddress = ''; ClientResolved = $true; Detail = ''; Holders = @() }
@@ -541,7 +626,8 @@ function Get-TempProfileLockFactForShare {
         [Parameter(Mandatory = $true)][object]$Target,
         [Parameter(Mandatory = $true)][string]$UserName,
         [Parameter(Mandatory = $true)][string]$Sam,
-        [string]$Sid
+        [string]$Sid,
+        [switch]$Quiet
     )
     $server = $Target.Server
     $base = @{ FileServer = $server; FileName = ''; ClientComputer = ''; ClientAddress = ''; ClientResolved = $true; Detail = ''; Holders = @() }
@@ -571,13 +657,23 @@ function Get-TempProfileLockFactForShare {
             return (New-TempProfileFact -State 'CouldNotCheck' -Reason $why -More $base)
         }
         $sharePath = [string]$shares[0].Path
+        # A share on a clustered or scale-out file server has its own scope name; '*' (or none)
+        # is the server's default scope and narrows nothing.
+        $scope = [string]$(if ($shares[0].PSObject.Properties['ScopeName']) { $shares[0].ScopeName })
+        if ($scope -eq '*') { $scope = '' }
 
         try {
             $disks = @(Select-TempProfileDisk -Files (Get-TempProfileOpenFile -CimSession $session -ClientUserName $UserName) -SharePath $sharePath)
             if ($disks.Count -eq 0) {
                 # Cloud Cache (and some setups) open the disk as the session host's machine
                 # account, so look for the user's profile folder among every open file.
-                $disks = @(Select-TempProfileDisk -Files (Get-TempProfileOpenFile -CimSession $session) -SharePath $sharePath -Sam $Sam -Sid $Sid -RequireFolder)
+                # Get-SmbOpenFile has no path or file-name filter, so the share's scope is the
+                # only narrowing the file server can do itself.
+                # https://learn.microsoft.com/powershell/module/smbshare/get-smbopenfile
+                if (-not $Quiet) {
+                    Write-TempProfileStatus ("{0} shows no profile disk open under {1}'s own name, so every open file on {0} is searched for {1}'s profile folder (Cloud Cache opens it as the server's computer account). This can take a while on a busy file server." -f $server, $Sam) 'INFO'
+                }
+                $disks = @(Select-TempProfileDisk -Files (Get-TempProfileOpenFile -CimSession $session -ScopeName $scope) -SharePath $sharePath -Sam $Sam -Sid $Sid -RequireFolder)
             }
         } catch {
             $why = if (Test-TempProfileAccessDenied $_) { $deniedReason } else { "could not list open files on $server ($($_.Exception.Message))" }
@@ -665,16 +761,98 @@ function Select-TempProfileDisk {
 function Read-TempProfileLogLines {
     # The lines of one FSLogix log file. FSLogix writes UTF-16LE with a byte order mark;
     # detectEncodingFromByteOrderMarks handles that (and UTF-8 with BOM), UTF-8 otherwise.
-    # Same reader as Parse-FSLogixLogs\Parse-FSLogixLogs.ps1. This function's text is also
-    # sent to the session host by Get-TempProfileLogFact, so it uses nothing else from here.
+    # The file is opened sharing ReadWrite and Delete, so a log FSLogix has open is still
+    # read and FSLogix is never blocked from writing, rolling or deleting it while it is.
+    # https://learn.microsoft.com/dotnet/api/system.io.fileshare
+    # This function's text is also sent to the session host by Get-TempProfileLogFact, so it
+    # uses nothing else from here.
     param([Parameter(Mandatory = $true)][string]$Path)
+    $stream = $null
     $reader = $null
     try {
-        $reader = New-Object System.IO.StreamReader($Path, [System.Text.Encoding]::UTF8, $true)
-        while (-not $reader.EndOfStream) { $reader.ReadLine() }
+        $stream = New-Object -TypeName System.IO.FileStream -ArgumentList $Path, ([System.IO.FileMode]::Open), ([System.IO.FileAccess]::Read), ([System.IO.FileShare]'ReadWrite, Delete') -ErrorAction Stop
+        $reader = New-Object -TypeName System.IO.StreamReader -ArgumentList $stream, ([System.Text.Encoding]::UTF8), $true -ErrorAction Stop
+        while ($null -ne ($line = $reader.ReadLine())) { $line }
     } finally {
         if ($null -ne $reader) { $reader.Dispose() }
+        if ($null -ne $stream) { $stream.Dispose() }
     }
+}
+
+function Select-TempProfileUserLogLines {
+    <#
+    .SYNOPSIS
+        Only the lines of the user's own LoadProfile sessions in FSLogix profile log lines.
+    .DESCRIPTION
+        A session starts at "===== Begin Session: LoadProfile: <sam>" and is followed through
+        its thread id ([tid:...]), because other users' sign-ins run at the same time (Learn).
+        It is the user's when its "User: <SID>" line carries the user's SID; when the SID is not
+        known or the session has no User: line, when the Begin line names the user's sam. So
+        OTHERDOM\jdoe (same sam, another SID) is not taken for CONTOSO\jdoe.
+        Sessions come back whole, in the order they began. Runs on the session host too
+        (Get-TempProfileLogFact sends its text there, so other users' lines never leave the
+        host), so it uses nothing else from this script.
+        https://learn.microsoft.com/fslogix/troubleshooting-events-logs-diagnostics
+    #>
+    param([string[]]$Lines = @(), [Parameter(Mandatory = $true)][string]$Sam, [string]$Sid)
+    $lineRe = '^\[[0-9:.]+\]\[tid:(?<tid>[^\]]+)\]\[[^\]]+\]\s*(?<msg>.*?)\s*$'
+    $open = @{}
+    $done = New-Object System.Collections.Generic.List[object]
+    $seq = 0
+    foreach ($raw in @($Lines)) {
+        if ($null -eq $raw) { continue }
+        $m = [regex]::Match([string]$raw, $lineRe)
+        if (-not $m.Success) { continue }
+        $tid = $m.Groups['tid'].Value
+        $msg = $m.Groups['msg'].Value
+        $begin = [regex]::Match($msg, '^=+\s*Begin Session:\s*(?<kind>\w+)(?::\s*(?<who>\S+))?')
+        if ($begin.Success) {
+            if ($open.ContainsKey($tid)) { $done.Add($open[$tid]); $open.Remove($tid) }
+            if ($begin.Groups['kind'].Value -eq 'LoadProfile') {
+                $who = ($begin.Groups['who'].Value -split '\\')[-1]
+                $s = @{ Seq = $seq; ByName = ($who -ieq $Sam); SidSeen = ''; Lines = (New-Object System.Collections.Generic.List[string]) }
+                $seq++
+                $s.Lines.Add([string]$raw)
+                $open[$tid] = $s
+            }
+            continue
+        }
+        if (-not $open.ContainsKey($tid)) { continue }
+        $s = $open[$tid]
+        $s.Lines.Add([string]$raw)
+        $u = [regex]::Match($msg, '^User:\s*(?<sid>S-1-[0-9-]+)')
+        if ($u.Success -and -not $s.SidSeen) { $s.SidSeen = $u.Groups['sid'].Value }
+        if ($msg -match '^=+\s*End Session') { $done.Add($s); $open.Remove($tid) }
+    }
+    foreach ($s in @($open.Values)) { $done.Add($s) }
+    foreach ($s in @($done.ToArray() | Sort-Object { $_.Seq })) {
+        $mine = if ($Sid -and $s.SidSeen) { $s.SidSeen -eq $Sid } else { $s.ByName }
+        if ($mine) { $s.Lines.ToArray() }
+    }
+}
+
+function Get-TempProfileLogFileDate {
+    # The date in an FSLogix profile log file name, or $null. Learn shows Profile_%date%.log
+    # without the format; FSLogix writes Profile-yyyyMMdd.log (NOT VERIFIED ON LEARN, .NOTES).
+    # https://learn.microsoft.com/fslogix/troubleshooting-events-logs-diagnostics
+    param([AllowEmptyString()][AllowNull()][string]$Name)
+    $m = [regex]::Match([string]$Name, '(?i)^Profile[-_](?<y>\d{4})-?(?<mo>\d{2})-?(?<d>\d{2})(?!\d)')
+    if (-not $m.Success) { return $null }
+    try {
+        return (New-Object -TypeName System.DateTime -ArgumentList ([int]$m.Groups['y'].Value), ([int]$m.Groups['mo'].Value), ([int]$m.Groups['d'].Value))
+    } catch {
+        return $null
+    }
+}
+
+function ConvertTo-TempProfileLogTime {
+    # A log line's time of day (10:14:58.060) on the file's date, or $null without a date.
+    param([AllowNull()][object]$Date, [AllowEmptyString()][AllowNull()][string]$Time)
+    if ($Date -isnot [datetime]) { return $null }
+    $m = [regex]::Match([string]$Time, '^(?<h>\d{1,2}):(?<m>\d{2}):(?<s>\d{2})(?:\.(?<f>\d{1,3}))?')
+    if (-not $m.Success) { return $null }
+    $ms = if ($m.Groups['f'].Success) { [int]($m.Groups['f'].Value.PadRight(3, '0')) } else { 0 }
+    return $Date.Date.Add((New-Object -TypeName System.TimeSpan -ArgumentList 0, ([int]$m.Groups['h'].Value), ([int]$m.Groups['m'].Value), ([int]$m.Groups['s'].Value), $ms))
 }
 
 function ConvertFrom-TempProfileLog {
@@ -684,43 +862,64 @@ function ConvertFrom-TempProfileLog {
     .DESCRIPTION
         A session starts at "===== Begin Session: LoadProfile: <user>" and is followed by its
         thread id ([tid:...]); Learn says to follow that id because other users' sign-ins run
-        at the same time. Only the user's sessions are read (matched by name, or by the
-        "User: <SID>" line). In them:
+        at the same time. Only the user's sessions are read (the same rule as
+        Select-TempProfileUserLogLines: the User: <SID> line when the SID is known, else the
+        name). In them:
           Reason set to N   -> LocalProfile Found when the table's Meaning is LocalProfileExists
           [ERROR:xxxxxxxx]  -> ShareAccess Denied for AccessDenied (5) or LogonFailure (1326);
                                FileInUse codes (and access denied "file is locked") are lock
                                evidence (LockHint)
           a code that is not in the table -> UnknownCodes, shown verbatim, confirms nothing
-        No session for the user in the lines -> both Could not check (never a false all-clear).
+        -LogFiles (each with Name and Lines) dates every session from the file name; with
+        -Since, only sessions that began at or after it count, and when a session's date
+        cannot be read only the user's latest session is judged. -Lines are undated.
+        No session for the user -> both Could not check (never a false all-clear).
         https://learn.microsoft.com/fslogix/troubleshooting-events-logs-diagnostics
         https://learn.microsoft.com/fslogix/troubleshooting-error-codes
         https://learn.microsoft.com/fslogix/troubleshooting-old-temp-local-profiles
     #>
     param(
         [string[]]$Lines = @(),
+        [object[]]$LogFiles = @(),
         [Parameter(Mandatory = $true)][string]$UserName,
         [string]$Sid,
-        [hashtable]$Reference
+        [hashtable]$Reference,
+        [AllowNull()][object]$Since
     )
     if (-not $Reference) { $Reference = Get-FSLogixReference }
-    $sam = ($UserName -split '\\')[-1]
+    $sam = Get-TempProfileSamName $UserName
     $lineRe = '^\[(?<time>[0-9:.]+)\]\[tid:(?<tid>[^\]]+)\]\[(?<level>[^\]]+)\]\s*(?<msg>.*?)\s*$'
+
+    # Every line with the date of the file it came from ($null when not known).
+    $entries = New-Object System.Collections.Generic.List[object]
+    foreach ($raw in @($Lines)) { $entries.Add(@{ Line = $raw; Date = $null }) }
+    foreach ($file in @($LogFiles | Where-Object { $_ })) {
+        $date = Get-TempProfileLogFileDate -Name ([string]$file.Name)
+        foreach ($raw in @($file.Lines)) { $entries.Add(@{ Line = $raw; Date = $date }) }
+    }
 
     # Split into sessions, keyed by thread id so interleaved sign-ins stay apart.
     $open = @{}
     $sessions = New-Object System.Collections.Generic.List[object]
-    foreach ($raw in @($Lines)) {
+    foreach ($entry in $entries) {
+        $raw = $entry.Line
         if ($null -eq $raw) { continue }
         $m = [regex]::Match([string]$raw, $lineRe)
         if (-not $m.Success) { continue }
         $tid = $m.Groups['tid'].Value
         $msg = $m.Groups['msg'].Value
+        $time = $m.Groups['time'].Value
+        $shown = if ($entry.Date -is [datetime]) { '{0} {1}' -f $entry.Date.ToString('yyyy-MM-dd'), $time } else { $time }
         $begin = [regex]::Match($msg, '^=+\s*Begin Session:\s*(?<kind>\w+)(?::\s*(?<who>\S+))?')
         if ($begin.Success) {
             $open.Remove($tid)
             if ($begin.Groups['kind'].Value -eq 'LoadProfile') {
                 $who = ($begin.Groups['who'].Value -split '\\')[-1]
-                $s = [pscustomobject]@{ Tid = $tid; IsUser = ($who -ieq $sam); Start = $m.Groups['time'].Value; Lines = (New-Object System.Collections.Generic.List[object]) }
+                $s = [pscustomobject]@{
+                    Tid = $tid; ByName = ($who -ieq $sam); SidSeen = ''; Start = $shown
+                    StartTime = (ConvertTo-TempProfileLogTime -Date $entry.Date -Time $time)
+                    Lines = (New-Object System.Collections.Generic.List[object])
+                }
                 $open[$tid] = $s
                 $sessions.Add($s)
             }
@@ -729,19 +928,38 @@ function ConvertFrom-TempProfileLog {
         if (-not $open.ContainsKey($tid)) { continue }
         $current = $open[$tid]
         if ($msg -match '^=+\s*End Session') { $open.Remove($tid); continue }
-        if ($Sid -and $msg -match '^User:\s*(?<sid>S-1-[0-9-]+)' -and $Matches['sid'] -eq $Sid) { $current.IsUser = $true }
-        $current.Lines.Add([pscustomobject]@{ Time = $m.Groups['time'].Value; Level = $m.Groups['level'].Value.Trim(); Message = $msg })
+        $u = [regex]::Match($msg, '^User:\s*(?<sid>S-1-[0-9-]+)')
+        if ($u.Success -and -not $current.SidSeen) { $current.SidSeen = $u.Groups['sid'].Value }
+        $current.Lines.Add([pscustomobject]@{ Time = $shown; Level = $m.Groups['level'].Value.Trim(); Message = $msg })
     }
 
-    $mine = @($sessions | Where-Object { $_.IsUser })
+    # The user's sessions: by SID when the SID is known and the session logged one (another
+    # domain's jdoe has another SID), else by name.
+    $mine = @($sessions | Where-Object { if ($Sid -and $_.SidSeen) { $_.SidSeen -eq $Sid } else { $_.ByName } })
     $unknown = New-Object System.Collections.Generic.List[object]
     $notes = New-Object System.Collections.Generic.List[string]
+
+    # Only sign-ins inside the lookback window count: an old "local profile exists" from last
+    # week must not explain today's temporary profile.
+    if ($Since -is [datetime] -and $mine.Count -gt 0) {
+        if (@($mine | Where-Object { $null -eq $_.StartTime }).Count -gt 0) {
+            $mine = @($mine[$mine.Count - 1])
+            $notes.Add(('The date of {0}''s FSLogix sign-ins could not be read from the log file name, so only the latest sign-in in the log was judged.' -f $sam))
+        } else {
+            $mine = @($mine | Sort-Object StartTime)
+        }
+        $inWindow = @($mine | Where-Object { $null -eq $_.StartTime -or $_.StartTime -ge $Since })
+        $older = $mine.Count - $inWindow.Count
+        if ($older -gt 0) { $notes.Add(('{0} older sign-in(s) by {1} in the log began before the time looked at and were not judged.' -f $older, $sam)) }
+        $mine = $inWindow
+    }
+
     if ($mine.Count -eq 0) {
         $why = "the FSLogix profile log has no sign-in by $sam in the time looked at"
         return [pscustomobject]@{
             LocalProfile = (New-TempProfileFact -State 'CouldNotCheck' -Reason $why -More @{ Line = ''; Time = ''; Code = '' })
             ShareAccess  = (New-TempProfileFact -State 'CouldNotCheck' -Reason $why -More @{ Line = ''; Time = '' })
-            UnknownCodes = @(); LockHint = $null; Notes = @(); SignIns = 0
+            UnknownCodes = @(); LockHint = $null; Notes = $notes.ToArray(); SignIns = 0
         }
     }
 
@@ -773,8 +991,11 @@ function ConvertFrom-TempProfileLog {
             $win32 = $null
             if ($err.Success) {
                 $value = [Convert]::ToInt64($err.Groups['hex'].Value, 16)
-                # 0x8007xxxx is a Win32 error wrapped in an HRESULT.
-                if (($value -band 0xFFFF0000) -eq 0x80070000) { $value = $value -band 0xFFFF }
+                # 0x8007xxxx is a Win32 error wrapped in an HRESULT (FACILITY_WIN32). Both masks
+                # are Int64 literals: as Int32, 0xFFFF0000 and 0x80070000 are negative and the
+                # comparison never matches.
+                # https://learn.microsoft.com/windows/win32/com/structure-of-com-error-codes
+                if (($value -band 0xFFFF0000L) -eq 0x80070000L) { $value = $value -band 0xFFFFL }
                 $win32 = [string]$value
             } elseif ($ec.Success) {
                 $win32 = $ec.Groups['code'].Value
@@ -806,9 +1027,13 @@ function Get-TempProfileLogFact {
         Reads the user's part of the FSLogix profile log on the session host.
     .DESCRIPTION
         The log folder is LogDir under HKLM\SOFTWARE\FSLogix\Logging (default
-        %ProgramData%\FSLogix\Logs), then \Profile; files written in the lookback window are
-        read on the host (Invoke-Command) and only the lines that matter come back. When
-        LoggingEnabled is 0, or the folder is missing, both facts are Could not check.
+        %ProgramData%\FSLogix\Logs), then \Profile. Files written in the lookback window are
+        read on the host (Invoke-Command), filtered there to the user's own sessions (by sam
+        and SID, so other users' lines stay on the host), and only the lines that matter come
+        back, with the host's clock for the lookback window. When LoggingEnabled is 0, the
+        folder is missing, or no file could be read, both facts are Could not check. A file
+        that could not be read is named; what the readable files confirm still counts, but
+        nothing is ruled out while a file in the window was unreadable.
         https://learn.microsoft.com/fslogix/reference-configuration-settings
         https://learn.microsoft.com/fslogix/troubleshooting-events-logs-diagnostics
     #>
@@ -818,34 +1043,45 @@ function Get-TempProfileLogFact {
         [string]$Sid,
         [int]$EventLookbackHours = 24
     )
-    $since = (Get-Date).AddHours(-1 * $EventLookbackHours)
+    $sam = Get-TempProfileSamName $UserName
     $reader = ${function:Read-TempProfileLogLines}.ToString()
+    $selector = ${function:Select-TempProfileUserLogLines}.ToString()
     $block = {
-        param([string]$ReaderText, [datetime]$Since)
+        param([string]$ReaderText, [string]$SelectorText, [int]$Hours, [string]$Sam, [string]$Sid)
         $read = [scriptblock]::Create($ReaderText)
+        $select = [scriptblock]::Create($SelectorText)
+        $since = (Get-Date).AddHours(-1 * $Hours)
         $settings = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\FSLogix\Logging' -ErrorAction SilentlyContinue
         $enabled = if ($settings -and $null -ne $settings.LoggingEnabled) { [string]$settings.LoggingEnabled } else { '' }
         $dir = if ($settings -and $settings.LogDir) { [string]$settings.LogDir } else { '%ProgramData%\FSLogix\Logs' }
         $folder = Join-Path ([Environment]::ExpandEnvironmentVariables($dir)) 'Profile'
-        $out = [pscustomobject]@{ Folder = $folder; LoggingEnabled = $enabled; Found = $false; Files = @(); Lines = @() }
+        $out = [pscustomobject]@{ Folder = $folder; LoggingEnabled = $enabled; Found = $false; Files = @(); Logs = @(); Unreadable = @(); HostSince = $since }
         if (-not (Test-Path -LiteralPath $folder)) { return $out }
         $out.Found = $true
-        $files = @(Get-ChildItem -LiteralPath $folder -Filter 'Profile*.log' -ErrorAction Stop | Where-Object { $_.LastWriteTime -ge $Since } | Sort-Object LastWriteTime)
+        $files = @(Get-ChildItem -LiteralPath $folder -Filter 'Profile*.log' -ErrorAction Stop | Where-Object { $_.LastWriteTime -ge $since } | Sort-Object LastWriteTime)
         $out.Files = @($files | ForEach-Object { $_.Name })
         $keep = 'Begin Session|End Session|\]\s*User:|Status set to|Reason set to|ErrorCode set to|\[ERROR:'
-        $lines = New-Object System.Collections.Generic.List[string]
+        $logs = New-Object System.Collections.Generic.List[object]
+        $bad = New-Object System.Collections.Generic.List[string]
         foreach ($f in $files) {
-            foreach ($line in @(& $read -Path $f.FullName)) { if ($line -match $keep) { $lines.Add($line) } }
+            # One unreadable file (locked, or removed by FSLogix's own clean-up) must not hide
+            # the others.
+            try {
+                $mine = @(& $select -Lines @(& $read -Path $f.FullName) -Sam $Sam -Sid $Sid)
+                $logs.Add([pscustomobject]@{ Name = $f.Name; Lines = @($mine | Where-Object { $_ -match $keep }) })
+            } catch {
+                $bad.Add(('{0} ({1})' -f $f.Name, $_.Exception.Message))
+            }
         }
-        $out.Lines = $lines.ToArray()
+        $out.Logs = $logs.ToArray()
+        $out.Unreadable = $bad.ToArray()
         return $out
     }
 
-    $splat = @{ ScriptBlock = $block; ArgumentList = @($reader, $since); ErrorAction = 'Stop' }
+    $splat = @{ ScriptBlock = $block; ArgumentList = @($reader, $selector, $EventLookbackHours, $sam, [string]$Sid); ErrorAction = 'Stop' }
     if (-not (Test-IsLocalComputerTarget -ComputerName $ComputerName)) { $splat.ComputerName = $ComputerName }
     $read = Invoke-Command @splat
 
-    $sam = ($UserName -split '\\')[-1]
     $blindWith = {
         param([string]$Why)
         [pscustomobject]@{
@@ -857,11 +1093,28 @@ function Get-TempProfileLogFact {
     if ($read.LoggingEnabled -eq '0') { return (& $blindWith "FSLogix logging is turned off on $ComputerName (LoggingEnabled = 0)") }
     if (-not $read.Found) { return (& $blindWith "there is no FSLogix profile log folder on $ComputerName ($($read.Folder))") }
     if (@($read.Files).Count -eq 0) { return (& $blindWith "no FSLogix profile log on $ComputerName was written in the last $EventLookbackHours hour(s)") }
-    $parsed = ConvertFrom-TempProfileLog -Lines @($read.Lines) -UserName $UserName -Sid $Sid -Reference (Get-FSLogixReference)
+    $logs = @($read.Logs | Where-Object { $_ })
+    $unreadable = @($read.Unreadable | Where-Object { $_ })
+    $unreadableText = $unreadable -join '; '
+    if ($logs.Count -eq 0 -and $unreadable.Count -gt 0) {
+        return (& $blindWith "the FSLogix profile log on $ComputerName could not be read: $unreadableText")
+    }
+
+    $since = if ($read.HostSince -is [datetime]) { $read.HostSince } else { (Get-Date).AddHours(-1 * $EventLookbackHours) }
+    $parsed = ConvertFrom-TempProfileLog -LogFiles $logs -UserName $UserName -Sid $Sid -Reference (Get-FSLogixReference) -Since $since
     if ($parsed.SignIns -eq 0) {
         $why = "the FSLogix profile log on $ComputerName has no sign-in by $sam in the last $EventLookbackHours hour(s)"
+        if ($unreadable.Count -gt 0) { $why += " that could be read (not readable: $unreadableText)" }
         $parsed.LocalProfile.Reason = $why
         $parsed.ShareAccess.Reason = $why
+        return $parsed
+    }
+    if ($unreadable.Count -gt 0) {
+        # What the readable files show still counts; nothing is ruled out on part of the log.
+        $why = "part of the FSLogix profile log on $ComputerName could not be read ($unreadableText), so this is not ruled out"
+        if ($parsed.LocalProfile.State -eq 'None') { $parsed.LocalProfile = New-TempProfileFact -State 'CouldNotCheck' -Reason $why -More @{ Line = ''; Time = ''; Code = '' } }
+        if ($parsed.ShareAccess.State -eq 'NoDenial') { $parsed.ShareAccess = New-TempProfileFact -State 'CouldNotCheck' -Reason $why -More @{ Line = ''; Time = '' } }
+        $parsed.Notes = @($parsed.Notes) + @("Could not read these FSLogix profile log files on ${ComputerName}: $unreadableText")
     }
     return $parsed
 }
@@ -1154,7 +1407,15 @@ function Get-TempProfileVerdict {
         $holders = @($lock.Holders | Where-Object { $_ })
         if ($holders.Count -eq 0) { $holders = @($lock) }
         $hostShort = Get-TempProfileShortName $hostName
-        $elsewhere = @($holders | Where-Object { -not $_.ClientResolved -or -not $_.ClientComputer -or ((Get-TempProfileShortName $_.ClientComputer) -ine $hostShort) })
+        # The host's own addresses (from DNS, collected before ranking): a holder whose address
+        # has no DNS name is still the host itself when the address is one of them.
+        $hostAddresses = @(@(Get-TempProfileFactPart $Facts 'HostAddresses') + @($hostName) | Where-Object { $_ } | ForEach-Object { ([string]$_).Trim('[', ']') -replace '^::ffff:', '' })
+        $isThisHost = {
+            param($Holder)
+            if ($Holder.ClientResolved -and $Holder.ClientComputer) { return ((Get-TempProfileShortName $Holder.ClientComputer) -ieq $hostShort) }
+            return ($hostAddresses -contains (([string]$Holder.ClientAddress).Trim('[', ']') -replace '^::ffff:', ''))
+        }
+        $elsewhere = @($holders | Where-Object { -not (& $isThisHost $_) })
         $h = if ($elsewhere.Count -gt 0) { $elsewhere[0] } else { $holders[0] }
         $holderName = if ($h.ClientResolved -and $h.ClientComputer) { [string]$h.ClientComputer } else { '{0} (name not found in DNS)' -f $h.ClientAddress }
         $server = [string]$h.FileServer
@@ -1171,7 +1432,7 @@ function Get-TempProfileVerdict {
         if ($elsewhere.Count -eq 0) {
             $causes.Add((New-TempProfileCause -Id 'lock-held' -Title $lockTitle -State 'Possible' -Evidence $ev -CheckName $lockCheck `
                         -Summary ("{0}'s profile disk is open from {1} itself, so an older session of {0} on {1} may still hold it." -f $user, $hostName) `
-                        -NextStep ("Check Citrix Director or Studio (or Task Manager > Users on {1}) for a second session of {0} on {1}; log it off, then have {0} sign in again." -f $user, $hostName)))
+                        -NextStep ("Check Citrix Director or Studio (or Task Manager > Users on {1}) for a second session of {0} on {1}. Ask {0} to save their work and sign out of it, or if they can't, log that session off in Director/Studio, then have {0} sign in again." -f $user, $hostName)))
         } elseif ($session -and [string]$session.State -eq 'Disconnected') {
             $causes.Add((New-TempProfileCause -Id 'lock-held' -Title $lockTitle -State 'Confirmed' -Evidence $ev -CheckName $lockCheck `
                         -Summary ("The Citrix session on {0} is disconnected and still holds {1}'s profile disk open on {2}, so FSLogix could not attach it on {3}." -f $holderName, $user, $server, $hostName) `
@@ -1179,15 +1440,15 @@ function Get-TempProfileVerdict {
         } elseif ($session) {
             $causes.Add((New-TempProfileCause -Id 'lock-held' -Title $lockTitle -State 'Confirmed' -Evidence $ev -CheckName $lockCheck `
                         -Summary ("{0} is also signed in on {1} ({2} Citrix session), and that session holds the profile disk open on {3}, so FSLogix could not attach it on {4}." -f $user, $holderName, ([string]$session.State).ToLowerInvariant(), $server, $hostName) `
-                        -NextStep ("Ask {0} to sign out of {1} (or log that session off in Citrix Director or Studio), then sign out of {2} and sign in again." -f $user, $holderName, $hostName)))
+                        -NextStep ("Ask {0} to save their work and sign out of {1}, or if they can't, log that session off in Director/Studio. Then have {0} sign out of {2} and sign in again." -f $user, $holderName, $hostName)))
         } elseif (-not ($h.ClientResolved -and $h.ClientComputer)) {
             $causes.Add((New-TempProfileCause -Id 'lock-held' -Title $lockTitle -State 'Confirmed' -Evidence $ev -CheckName $lockCheck `
                         -Summary ("{0}'s profile disk is held open on {1} by {2}, so FSLogix could not attach it on {3}." -f $user, $server, $holderName, $hostName) `
-                        -NextStep ("Find the computer with address {0} (it is not in DNS), log off {1}'s session there, then have {1} sign in again." -f $h.ClientAddress, $user)))
+                        -NextStep ("Find the computer with address {0} (it is not in DNS). Ask {1} to save their work and sign out of it, or if they can't, log that session off in Director/Studio, then have {1} sign in again." -f $h.ClientAddress, $user)))
         } else {
             $causes.Add((New-TempProfileCause -Id 'lock-held' -Title $lockTitle -State 'Confirmed' -Evidence $ev -CheckName $lockCheck `
                         -Summary ("{0}'s profile disk is held open on {1} by {2}, so FSLogix could not attach it on {3}." -f $user, $server, $holderName, $hostName) `
-                        -NextStep ("Find {0}'s session on {1} (Citrix Director or Studio, or Task Manager > Users on {1}), log it off, then have {0} sign in again." -f $user, $holderName)))
+                        -NextStep ("Ask {0} to save their work and sign out of {1}, or if they can't, log that session off in Director/Studio (or Task Manager > Users on {1}), then have {0} sign in again." -f $user, $holderName)))
         }
     } elseif ($lockState -eq 'NotHeld') {
         $causes.Add((New-TempProfileCause -Id 'lock-held' -Title $lockTitle -State 'RuledOut' -Evidence @([string]$lock.Detail) -CheckName $lockCheck))
@@ -1197,7 +1458,7 @@ function Get-TempProfileVerdict {
             $causes.Add((New-TempProfileCause -Id 'lock-held' -Title $lockTitle -State 'Possible' -CheckName $lockCheck -Reason $why `
                         -Evidence @(('FSLogix log at {0}: {1}' -f $lockHint.Time, $lockHint.Line), "The file server could not be checked: $why") `
                         -Summary ("{0}'s FSLogix log says the profile disk was locked (in use somewhere else), but the file server could not be checked to say where: {1}." -f $user, $why) `
-                        -NextStep ("Look in Citrix Director or Studio for another session of {0} (often a disconnected one); log it off, then have {0} sign in again." -f $user)))
+                        -NextStep ("Look in Citrix Director or Studio for another session of {0} (often a disconnected one). Ask {0} to save their work and sign out of it, or if they can't, log that session off in Director/Studio, then have {0} sign in again." -f $user)))
         } else {
             $causes.Add((New-TempProfileCause -Id 'lock-held' -Title $lockTitle -State 'CouldNotCheck' -Reason $why -CheckName $lockCheck))
         }
@@ -1276,6 +1537,10 @@ function Get-TempProfileVerdict {
         $list = @($storage.Unreachable)
         $ev = @(('{0} of {1} {2}(s) cannot be reached from {3} or from this PC: {4}' -f $list.Count, $storage.Total, $where, $hostName, ($list -join ', ')))
         if ($storageState -eq 'AllUnreachable') {
+            # The triage's share test is Test-Path, which also answers "no" when the share is up
+            # but the account testing it has no access. AC18 confirms this cause, so the limit is
+            # stated next to the evidence instead of lowering it to Possible.
+            $ev += ('"Cannot be reached" means the share test got no answer; it says the same when the file server is up but your account has no access to the share. Open the location from this PC (File Explorer) before escalating.')
             $causes.Add((New-TempProfileCause -Id 'storage' -Title $storageTitle -State 'Confirmed' -Evidence $ev -CheckName $storageCheck `
                         -Summary ("{0} cannot reach any {1}, so FSLogix has nowhere to load {2}'s profile from." -f $hostName, $where, $user) `
                         -NextStep ("Escalate: the profile storage cannot be reached from {0}. Check the file server is up and reachable from {0}." -f $hostName)))
@@ -1338,6 +1603,7 @@ function Get-TempProfileVerdict {
     }
     if ($now -and $now.PSObject.Properties['Corrupted'] -and $now.Corrupted) { $evidence.Add("Windows marks $user's profile on $hostName as corrupted.") }
     foreach ($s in $sessions) { $evidence.Add(('Citrix session on {0}: {1}' -f (Get-TempProfileShortName $s.Machine), $s.State)) }
+    foreach ($n in @(Get-TempProfileFactPart $Facts 'CitrixNote' | Where-Object { $_ })) { $evidence.Add([string]$n) }
     foreach ($u in @(Get-TempProfileFactPart $Facts 'UnknownCodes' | Where-Object { $_ })) {
         $kind = if ($u.PSObject.Properties['Kind'] -and $u.Kind) { [string]$u.Kind } else { 'reason' }
         $evidence.Add(('Unrecognized FSLogix {0} {1}: {2}' -f $kind, $u.Code, $u.Text))
@@ -1493,13 +1759,19 @@ function Export-TempProfileReport {
 
 function Protect-TempProfileNoteText {
     # Paste-safe for this tool's own data, before CaseKit removes share paths and IP addresses:
-    # profile disk files and paths (VHD/VHDX), user profile folders named after a SID, and
-    # local paths such as C:\Users\TEMP.
+    # profile disk files and paths (VHD/VHDX), user profile folders named after a SID, local
+    # paths such as C:\Users\TEMP, and bare SIDs (S-1-5-21-..., Entra S-1-12-...). Folder names
+    # may contain spaces (D:\Profile Disks\...): when in doubt this removes more, never less.
     param([AllowEmptyString()][AllowNull()][string]$Text)
     if ([string]::IsNullOrEmpty($Text)) { return [string]$Text }
-    $t = [regex]::Replace($Text, '[^\s"''()<>|,;]*\.vhdx?\b', '[disk file removed]', 'IgnoreCase')
-    $t = [regex]::Replace($t, '[^\s"''()<>|,;]*S-1-5-[0-9-]+_[^\s"''()<>|,;]*|[^\s"''()<>|,;\\]+_S-1-5-[0-9-]+[^\s"''()<>|,;]*', '[profile folder removed]')
-    $t = [regex]::Replace($t, '(?<![\w\\])[A-Za-z]:\\[^\s"''()<>|,;]*', '[path removed]')
+    # A whole path that ends in a disk file, spaces and all: from the drive or \\ to .vhd(x).
+    $t = [regex]::Replace($Text, '(?:(?<![\w\\])[A-Za-z]:\\|\\\\)[^"''<>|\r\n,;]*?\.vhdx?\b', '[disk file removed]', 'IgnoreCase')
+    $t = [regex]::Replace($t, '[^\s"''()<>|,;]*\.vhdx?\b', '[disk file removed]', 'IgnoreCase')
+    $t = [regex]::Replace($t, '[^\s"''()<>|,;]*S-1-\d+(?:-\d+)+_[^\s"''()<>|,;]*|[^\s"''()<>|,;\\]+_S-1-\d+(?:-\d+)+[^\s"''()<>|,;]*', '[profile folder removed]')
+    # A local path: folders may contain spaces when another folder follows; the last part ends
+    # at whitespace.
+    $t = [regex]::Replace($t, '(?<![\w\\])[A-Za-z]:\\(?:[^\\\r\n"''<>|,;()]+\\(?=[^\\\s]))*[^\s"''()<>|,;]*', '[path removed]')
+    $t = [regex]::Replace($t, '(?<![\w-])S-1-\d+(?:-\d+)+(?![\w-])', '[SID removed]')
     return $t
 }
 
@@ -1545,6 +1817,14 @@ function ConvertTo-TempProfileTicketNote {
     if ($Result.StartedAtTime -is [datetime]) { $stampArgs['Now'] = $Result.StartedAtTime }
     $stamp = New-TicketNoteStamp @stampArgs
     $headline = 'Temporary profile check for {0} on {1}: {2}' -f $Result.UserName, $Result.ComputerName, $Result.Verdict
+    # CaseKit leaves the headline alone; a host given as an IP address is removed here so the
+    # paste-safe note holds no IP address anywhere.
+    if (-not $FullDetail) {
+        $headline = Protect-TicketNoteText -Line $headline
+        # The report files are named after the host, so their names carry it when it is an IP
+        # address (TempProfile_jdoe_10.1.2.3_...). The note only shows the names.
+        $EvidencePaths = @($EvidencePaths | Where-Object { $_ } | ForEach-Object { [regex]::Replace([string]$_, '(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?![\d.])', '[IP removed]') })
+    }
     return New-TicketNote -Tool 'TempProfileInvestigation' -Headline $headline -ScopeLine $scope -Items $items.ToArray() `
         -NextSteps $next.ToArray() -Stamp $stamp -EvidencePaths $EvidencePaths
 }
@@ -1618,10 +1898,13 @@ function Invoke-TempProfileInvestigation {
     )
     $started = Get-Date
     $UserName = $UserName.Trim()
+    $userDomain = if ($env:USERDOMAIN) { $env:USERDOMAIN } else { $env:COMPUTERNAME }
     # Bare names take this PC's domain (spec SQ-003): it is how techs type names, and the SID
-    # lookup below fails loudly when it is wrong.
-    $qualified = if ($UserName -match '[\\@]') { $UserName } else { '{0}\{1}' -f $(if ($env:USERDOMAIN) { $env:USERDOMAIN } else { $env:COMPUTERNAME }), $UserName }
-    $sam = (($qualified -split '\\')[-1] -split '@')[0]
+    # lookup below fails loudly when it is wrong. A UPN is looked up as typed.
+    $lookupName = if ($UserName -match '[\\@]') { $UserName } else { '{0}\{1}' -f $userDomain, $UserName }
+    $isUpn = ($UserName -notmatch '\\' -and $UserName -match '@')
+    # The logon name, once, for every collector and message (jdoe, never jdoe@contoso.com).
+    $sam = Get-TempProfileSamName $UserName
     $errors = New-Object System.Collections.Generic.List[string]
     $common = @{ UserName = $sam; DeliveryController = $DeliveryController; EventLookbackHours = $EventLookbackHours; StartedAt = $started }
     $result = $null
@@ -1629,12 +1912,12 @@ function Invoke-TempProfileInvestigation {
     # --- The user's SID ---
     $sid = $null
     try {
-        $sid = Get-TempProfileUserSid -UserName $qualified
+        $sid = Get-TempProfileUserSid -UserName $lookupName
     } catch {
         $inner = $_.Exception
         while ($inner.InnerException) { $inner = $inner.InnerException }
         if ($inner -is [System.Security.Principal.IdentityNotMappedException]) {
-            $msg = "No account named $qualified was found. Check the spelling (jdoe or CONTOSO\jdoe) and run this again."
+            $msg = "No account named $lookupName was found. Check the spelling (jdoe or CONTOSO\jdoe) and run this again."
             if (-not $Quiet) { Write-TempProfileStatus $msg 'FAIL' }
             $result = New-TempProfileStartFailure -Message $msg -ComputerName $ComputerName -NextStep 'Check the user name and run this again.' @common
         } else {
@@ -1642,29 +1925,51 @@ function Invoke-TempProfileInvestigation {
         }
     }
 
+    # DOMAIN\sam, the form the file server (ClientUserName) and the Citrix Broker use. For a
+    # UPN it comes from the SID; without the SID, this PC's domain is the best guess.
+    $qualified = $lookupName
+    if ($isUpn) {
+        $qualified = ''
+        if ($sid) {
+            try { $qualified = [string](ConvertTo-TempProfileAccountName -Sid $sid) } catch { $errors.Add("Account name for ${sid}: $($_.Exception.Message)") }
+        }
+        if (-not $qualified -or $qualified -notmatch '\\') { $qualified = '{0}\{1}' -f $userDomain, $sam }
+    }
+
     # --- Citrix: the user's sessions, and the host when none was given ---
+    # With -ComputerName as well, Citrix only adds session states: when it cannot be asked, the
+    # host checks still run and the evidence says the sessions were not checked.
     $sessions = @()
     $target = $ComputerName
     $chosenMachine = $null
+    $citrixNote = ''
     if (-not $result -and $DeliveryController) {
+        $citrixProblem = ''
         if (-not (Import-CitrixBrokerSdk)) {
-            $msg = 'The Citrix Broker snap-in (Citrix.Broker.Admin.V2) is not on this PC. Run this on a Delivery Controller or a PC with Citrix Studio, or use -ComputerName instead.'
-            if (-not $Quiet) { Write-TempProfileStatus $msg 'FAIL' }
-            $result = New-TempProfileStartFailure -Message $msg -ComputerName $ComputerName -NextStep 'Run this on a Delivery Controller or a PC with Citrix Studio, or use -ComputerName instead.' @common
+            if ($ComputerName) {
+                $citrixProblem = 'the Citrix Broker snap-in (Citrix.Broker.Admin.V2) is not on this PC'
+            } else {
+                $msg = 'The Citrix Broker snap-in (Citrix.Broker.Admin.V2) is not on this PC. Run this on a Delivery Controller or a PC with Citrix Studio, or use -ComputerName instead.'
+                if (-not $Quiet) { Write-TempProfileStatus $msg 'FAIL' }
+                $result = New-TempProfileStartFailure -Message $msg -ComputerName $ComputerName -NextStep 'Run this on a Delivery Controller or a PC with Citrix Studio, or use -ComputerName instead.' @common
+            }
         } else {
-            $brokerUser = if ($qualified -match '\\') { $qualified } else { $UserName }
             try {
                 # -MaxRecordCount is always passed: without it Broker cmdlets stop at 250 records
                 # with only a warning (see Get-CitrixFSLogixHealth.ps1).
-                $found = @(Get-BrokerSession -AdminAddress $DeliveryController -UserName $brokerUser -MaxRecordCount 100 -ErrorAction Stop)
+                $found = @(Get-BrokerSession -AdminAddress $DeliveryController -UserName $qualified -MaxRecordCount 100 -ErrorAction Stop)
                 $sessions = @($found | ForEach-Object {
                         $machine = if ($_.MachineName) { Get-TempProfileShortName ([string]$_.MachineName) } elseif ($_.DNSName) { Get-TempProfileShortName ([string]$_.DNSName) } else { [string]$_.HostedMachineName }
                         [pscustomobject]@{ Machine = $machine; State = [string]$_.SessionState; DNSName = [string]$_.DNSName; HostedMachineName = [string]$_.HostedMachineName }
                     })
             } catch {
-                $msg = "Could not ask $DeliveryController for ${sam}'s Citrix sessions: $($_.Exception.Message)"
-                if (-not $Quiet) { Write-TempProfileStatus $msg 'FAIL' }
-                $result = New-TempProfileStartFailure -Message $msg -ComputerName $ComputerName -NextStep "Check the Delivery Controller name and your Citrix admin rights, or use -ComputerName <the server $sam last used>." @common
+                if ($ComputerName) {
+                    $citrixProblem = "$DeliveryController could not be asked ($($_.Exception.Message))"
+                } else {
+                    $msg = "Could not ask $DeliveryController for ${sam}'s Citrix sessions: $($_.Exception.Message)"
+                    if (-not $Quiet) { Write-TempProfileStatus $msg 'FAIL' }
+                    $result = New-TempProfileStartFailure -Message $msg -ComputerName $ComputerName -NextStep "Check the Delivery Controller name and your Citrix admin rights, or use -ComputerName <the server $sam last used>." @common
+                }
             }
             if (-not $result -and -not $target) {
                 if ($sessions.Count -eq 0) {
@@ -1682,6 +1987,11 @@ function Invoke-TempProfileInvestigation {
                     $chosenMachine = $chosen.Machine
                 }
             }
+        }
+        if ($citrixProblem) {
+            $citrixNote = "Could not check ${sam}'s Citrix sessions: $citrixProblem. The checks on $ComputerName ran without the session states, so a disconnected session elsewhere is not known."
+            $errors.Add("Citrix sessions: $citrixProblem")
+            if (-not $Quiet) { Write-TempProfileStatus $citrixNote 'WARN' }
         }
     }
 
@@ -1713,7 +2023,7 @@ function Invoke-TempProfileInvestigation {
         if (@($hostFacts.VhdLocations).Count + @($hostFacts.CcdLocations).Count -gt 0) {
             & $progress 'Who has the profile disk open on the file server'
             try {
-                $lock = Get-TempProfileLockFact -UserName $qualified -Sid $sid -VhdLocations @($hostFacts.VhdLocations) -CcdLocations @($hostFacts.CcdLocations)
+                $lock = Get-TempProfileLockFact -UserName $qualified -Sid $sid -VhdLocations @($hostFacts.VhdLocations) -CcdLocations @($hostFacts.CcdLocations) -Quiet:$Quiet
             } catch {
                 $errors.Add("Lock check: $($_.Exception.Message)")
                 $lock = New-TempProfileFact -State 'CouldNotCheck' -Reason "the lock check failed: $($_.Exception.Message)" -More @{ FileServer = ''; FileName = ''; ClientComputer = ''; ClientAddress = ''; ClientResolved = $true; Detail = '' }
@@ -1722,6 +2032,12 @@ function Invoke-TempProfileInvestigation {
             $why = if ($reached) { "no profile location is set on $display, so there is no file server to ask" } else { "the profile location could not be read from $display" }
             $lock = New-TempProfileFact -State 'CouldNotCheck' -Reason $why -More @{ FileServer = ''; FileName = ''; ClientComputer = ''; ClientAddress = ''; ClientResolved = $true; Detail = '' }
         }
+        # A holder address with no DNS name may still be the host itself: look up the host's
+        # own addresses, only when that question comes up.
+        $hostAddresses = @()
+        if ([string]$lock.State -eq 'Held' -and @(@($lock.Holders) + @($lock) | Where-Object { $_ -and $_.PSObject.Properties['ClientResolved'] -and -not $_.ClientResolved }).Count -gt 0) {
+            $hostAddresses = @(Get-TempProfileHostAddress -ComputerName $target)
+        }
 
         # --- The user's FSLogix log, service crashes, and whether they are on a temp profile now ---
         $log = $null
@@ -1729,7 +2045,7 @@ function Invoke-TempProfileInvestigation {
         $now = $null
         if ($reached) {
             & $progress "$sam's FSLogix profile log, service crashes and signed-in profile"
-            try { $log =Get-TempProfileLogFact -ComputerName $target -UserName $qualified -Sid $sid -EventLookbackHours $EventLookbackHours }
+            try { $log = Get-TempProfileLogFact -ComputerName $target -UserName $qualified -Sid $sid -EventLookbackHours $EventLookbackHours }
             catch { $errors.Add("FSLogix log: $($_.Exception.Message)"); $log = $null; $logWhy = "could not read the FSLogix profile log on ${display}: $($_.Exception.Message)" }
             try { $crash = Get-TempProfileCrashFact -ComputerName $target -EventLookbackHours $EventLookbackHours }
             catch { $crash = New-TempProfileFact -State 'CouldNotCheck' -Reason "could not read the System log on ${display}: $($_.Exception.Message)" -More @{ Time = ''; EventId = 0 } }
@@ -1752,10 +2068,15 @@ function Invoke-TempProfileInvestigation {
             }
         }
 
-        # An FSLogix event saying access was denied for this user counts like the log line.
+        # An FSLogix event saying access was denied for this user counts like the log line. The
+        # events are host-wide, so the message must name this user by SID or DOMAIN\name (or
+        # their profile folder), not merely contain the name (jdoe.smith, jdoe-admin).
         $shareAccess = $log.ShareAccess
         if ([string]$shareAccess.State -ne 'Denied') {
-            $deniedEvent = @(@($hostFacts.FslogixEvents) | Where-Object { [string]$_.Message -match '(?i)access is denied' -and [string]$_.Message -match ('(?i)\b{0}\b' -f [regex]::Escape($sam)) -and [string]$_.Message -notmatch '(?i)file is locked' })
+            $deniedEvent = @(@($hostFacts.FslogixEvents) | Where-Object {
+                    $text = [string]$_.Message
+                    $text -match '(?i)access is denied' -and $text -notmatch '(?i)file is locked' -and (Test-TempProfileTextNamesUser -Text $text -UserName $qualified -Sid $sid)
+                })
             if ($deniedEvent.Count -gt 0) {
                 $shareAccess = New-TempProfileFact -State 'Denied' -More @{ Line = ('FSLogix event {0}: {1}' -f $deniedEvent[0].Id, $deniedEvent[0].Message); Time = [string]$deniedEvent[0].TimeCreated }
             }
@@ -1777,6 +2098,8 @@ function Invoke-TempProfileInvestigation {
             UnknownCodes   = @($log.UnknownCodes)
             TempProfileNow = $now
             Sessions       = @($sessions)
+            CitrixNote     = $citrixNote
+            HostAddresses  = @($hostAddresses)
             LogNotes       = @($log.Notes)
             HostNotes      = @($hostFacts.HostNotes)
         }
