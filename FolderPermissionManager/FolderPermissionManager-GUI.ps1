@@ -118,7 +118,10 @@ function Send-Json {
         [object]$Data
     )
     if ($null -eq $Data) { $Data = @() }
-    $json = $Data | ConvertTo-Json -Depth 10 -Compress
+    # -InputObject, not the pipeline: piping a one-element array unrolls it, so a folder with a
+    # single subfolder (or a single permission entry) came back as a JSON object instead of a
+    # list and the page's .forEach() failed.
+    $json = ConvertTo-Json -InputObject $Data -Depth 10 -Compress
     if ([string]::IsNullOrEmpty($json)) { $json = '[]' }
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
     $Response.ContentType = 'application/json; charset=utf-8'
@@ -265,6 +268,20 @@ function Get-Drives {
     Send-Json $Response @($drives)
 }
 
+# Plain-English text for a folder that can't be listed. Owning a folder only lets you read and
+# change its permissions; it doesn't let you open it, so when the current user (or Administrators,
+# which takeown /A uses) is already the owner, the next step is Add Permission, not take ownership.
+function Get-AccessDeniedMessage {
+    param([string]$Path)
+    $ownerSid = $null
+    try { $ownerSid = (Get-Acl -LiteralPath $Path -ErrorAction Stop).GetOwner([System.Security.Principal.SecurityIdentifier]).Value } catch {}
+    $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    if ($ownerSid -and ($ownerSid -eq $me -or $ownerSid -eq 'S-1-5-32-544')) {
+        return "You own '$Path' but have no permission to open it. Use Add Permission to give yourself access."
+    }
+    return "Access denied to '$Path'. Take ownership (this folder only) first, then use Add Permission to give yourself access."
+}
+
 function Get-Children {
     param(
         [System.Net.HttpListenerRequest]$Request,
@@ -283,7 +300,7 @@ function Get-Children {
     }
     catch [System.UnauthorizedAccessException] {
         $Response.StatusCode = 403
-        Send-Json $Response @{ error = "Access denied to '$folderPath'. Try taking ownership first." }
+        Send-Json $Response @{ error = (Get-AccessDeniedMessage $folderPath) }
         return
     }
     catch {
@@ -326,7 +343,7 @@ function Get-Files {
     }
     catch [System.UnauthorizedAccessException] {
         $Response.StatusCode = 403
-        Send-Json $Response @{ error = "Access denied to '$folderPath'. Try taking ownership first." }
+        Send-Json $Response @{ error = (Get-AccessDeniedMessage $folderPath) }
         return
     }
     catch {
@@ -1689,6 +1706,7 @@ function makeTreeNode(label, path, depth, hasChildren) {
     node.className = 'tree-node';
     node.style.paddingLeft = (8 + depth * 16) + 'px';
     node.dataset.path = path;
+    node.dataset.depth = depth;
 
     var toggle = document.createElement('span');
     toggle.className = 'toggle';
@@ -1724,12 +1742,28 @@ function makeTreeNode(label, path, depth, hasChildren) {
 }
 
 function loadChildren(path, depth, container) {
-    api('/api/children?path=' + encodeURIComponent(path)).then(function(children) {
+    return api('/api/children?path=' + encodeURIComponent(path)).then(function(children) {
         container.innerHTML = '';
         children.forEach(function(c) {
             container.appendChild(makeTreeNode(c.name, c.path, depth, c.hasChildren));
         });
+        // Keep the highlight on the selected folder after a reload.
+        document.querySelectorAll('.tree-node').forEach(function(n) {
+            n.classList.toggle('selected', n.dataset.path === currentFolder);
+        });
     }).catch(function(e) { setStatus('Error loading children: ' + e.message, 'error'); });
+}
+
+// Rebuild a folder's entry in the tree after its access changed (e.g. take ownership), by
+// reloading its parent's list, so "has subfolders" and the expand arrow are worked out again.
+function refreshTreeEntry(path) {
+    var target = null;
+    document.querySelectorAll('.tree-node').forEach(function(n) { if (n.dataset.path === path) { target = n; } });
+    if (!target) return;
+    var container = target.parentElement && target.parentElement.parentElement;
+    var parentNode = container && container.previousElementSibling;
+    if (!container || !parentNode || !container.classList.contains('tree-children') || !parentNode.dataset.path) return;
+    loadChildren(parentNode.dataset.path, Number(target.dataset.depth), container);
 }
 
 function selectFolder(path) {
@@ -1948,7 +1982,7 @@ function submitAddAce() {
     } else {
         setStatus('Backing up and adding the permission...', 'info');
         api('/api/add-ace', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: currentFolder, identity: identity, rights: rights, type: type }) })
-            .then(function(r) { showChangeResult(r); loadFolderAcl(currentFolder); })
+            .then(function(r) { showChangeResult(r); loadFolderAcl(currentFolder); loadFiles(currentFolder); refreshTreeEntry(currentFolder); })
             .catch(showChangeError);
     }
 }
@@ -1996,7 +2030,7 @@ function submitRemoveAce() {
     } else {
         setStatus('Backing up and removing the permission...', 'info');
         api('/api/remove-ace', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: currentFolder, identity: identity, rights: rights, type: type }) })
-            .then(function(r) { showChangeResult(r); loadFolderAcl(currentFolder); })
+            .then(function(r) { showChangeResult(r); loadFolderAcl(currentFolder); loadFiles(currentFolder); refreshTreeEntry(currentFolder); })
             .catch(showChangeError);
     }
 }
@@ -2013,7 +2047,10 @@ function takeOwnership(recursive) {
             // The whole-tree action is not backed up or logged yet (SQ-014), and says so.
             if (recursive) { setStatus((r.message || 'Ownership taken') + '. Not backed up or logged.', 'success'); }
             else { showChangeResult(r); }
+            // Ownership changes what can be listed, so reload everything shown for this folder.
             loadFolderAcl(currentFolder);
+            loadFiles(currentFolder);
+            refreshTreeEntry(currentFolder);
         })
         .catch(function(e) {
             if (recursive) { setStatus('Failed: ' + e.message, 'error'); }
