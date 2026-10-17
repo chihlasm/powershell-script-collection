@@ -12,6 +12,7 @@ AD-LockoutDiagnostics/**/Case_*/
 **/TicketNotes_Combined_*.txt
 **/UserQuickCheck_*.html
 **/UserQuickCheck_*.csv
+M365-UserQuickCheck/**/M365UserCheck_*
 
 # --- Runtime artifacts from running the tools ---
 Entra-DeviceActivityTimeline/Reports/

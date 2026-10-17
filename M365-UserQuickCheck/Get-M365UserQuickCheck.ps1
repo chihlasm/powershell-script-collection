@@ -1,0 +1,787 @@
+# 5.1 because Microsoft.Graph.Authentication requires Windows PowerShell 5.1 (root CLAUDE.md,
+# version floors). Tests\PSVersionFloor.Tests.ps1 guards it.
+#Requires -Version 5.1
+
+<#
+.SYNOPSIS
+    "I can't sign in to Outlook / Teams" - answers in plain English whether a Microsoft 365 user
+    can sign in, and why not.
+.DESCRIPTION
+    Built for the service desk, mid-ticket. Sign in to the client's tenant in the browser and the
+    tool prints, in this order:
+
+      1. A banner: which tenant (name, default domain, tenant ID) and which account you are signed
+         in as, with its admin roles, "This tool only reads", then what this run could see:
+         sign-in history, Conditional Access detail, MFA methods, risky user, on-premises AD,
+         each "available" or "not available (why)".
+      2. The answer:   Can Jane Doe sign in to Microsoft 365?  YES / NO / PROBABLY NOT / PROBABLY YES
+      3. Why not (with "What to do"), Also worth knowing, Looks fine, Could not check, then a
+         detail table and the recent sign-ins for sysadmins.
+
+    WHAT IT CHECKS
+      1. Sign-in blocked in Microsoft 365 (and, for a synced user, that the fix is in AD)
+      2. No licence, or a licence that failed to apply
+      3. The latest sign-in in the last -Days days: its error code, Microsoft's own reason, how
+         many failed in a row, the Conditional Access policy that blocked it, and a link to
+         Microsoft's live lookup. Older failures are summarised, never decisive.
+      4. MFA methods registered (warning when there is only a password)
+      5. Risky user (Entra ID P2 tenants)
+
+    VERDICT
+      NO            sign-in blocked, or the latest sign-in failed with 50053, 50055, 50057,
+                    53003 or 530035
+      PROBABLY NOT  no licence, a licence error, or the latest sign-in failed with another code
+      YES           none of the above, and sign-in history was readable
+      PROBABLY YES  none of the above, but sign-in history could not be read (a tenant without
+                    Entra ID P1, or a role that cannot read it): there is no evidence either way
+
+    A source that could not be read is never treated as clean: it goes under "Could not check"
+    with the reason, and the ticket note never lists it as ruled out.
+
+    READ-ONLY. Every Graph request is a GET, and every permission asked for is a .Read scope, so
+    nothing can be changed even when you sign in as the client's Global Administrator.
+
+    The on-premises AD comparison (is it a sync problem?) is not part of this version: it is
+    listed under "Could not check" as "On-premises AD: not checked in this version".
+.PARAMETER UserPrincipalName
+    The user's sign-in name, for example jdoe@contoso.com. If no user has that sign-in name, the
+    tool looks for it as an email or proxy address. If that finds more than one user, the
+    candidates are listed and the tool exits with code 2 rather than guessing.
+.PARAMETER TenantId
+    The client's tenant ID or domain (contoso.onmicrosoft.com). Recommended when you have access
+    to many tenants.
+.PARAMETER DisableWam
+    Use when Windows keeps signing you in with your own work account (Web Account Manager)
+    instead of the client account. The tool then signs in with a device code, where you choose
+    the account yourself. It does not change the Graph module's WAM setting: Microsoft documents
+    that Set-MgGraphOption -DisableLoginByWAM only works with a custom app and persists across
+    sessions.
+.PARAMETER UseDeviceCode
+    Sign in with a device code instead of a browser window.
+.PARAMETER Days
+    How many days of sign-ins to read (1 to 30, default 7). Tenants keep 7 days of sign-ins
+    without Entra ID P1 and 30 days with it.
+.PARAMETER Server
+    Reserved for the on-premises AD comparison (next version). Not used yet.
+.PARAMETER Credential
+    Reserved for the on-premises AD comparison (next version). Not used yet.
+.PARAMETER SkipOnPremises
+    Do not look at on-premises AD. In this version on-premises AD is never checked; the switch
+    only changes the reason shown.
+.PARAMETER OutputPath
+    Optional folder. When given, an HTML report and a one-row CSV named
+    M365UserCheck_<sign-in name>_<yyyy-MM-dd_HHmmss> are written there. When omitted the tool is
+    console-only. With -TicketNumber, this is the folder that holds Ticket_<number>.
+.PARAMETER TicketNumber
+    Optional ticket number (letters, digits, - or _, up to 32 characters). The HTML, the CSV and
+    the ticket note are saved in <root>\Ticket_<number>, where root is -OutputPath if given, else
+    %USERPROFILE%\Documents\TicketNotes. A number that does not fit is refused with a [FAIL] line
+    and exit code 3, before anything is checked.
+.PARAMETER NoClipboard
+    Do not copy the ticket note to the clipboard.
+.PARAMETER FullDetail
+    Keep IP addresses in the ticket note. By default the note is paste-safe.
+.PARAMETER PassThru
+    Return the result object (Status, ExitCode, UserPrincipalName, Message, Candidates, MatchedBy,
+    Tenant, User, Facts, Assessment, Now, TicketNote) instead of setting an exit code.
+.PARAMETER Quiet
+    Do not write the console report. Combine with -PassThru or -OutputPath. Also leaves the
+    clipboard alone, because another script is the caller.
+.PARAMETER LoadFunctionsOnly
+    Define the functions and return without running a check (used by the tests).
+.EXAMPLE
+    .\Get-M365UserQuickCheck.ps1 -UserPrincipalName jdoe@contoso.com
+    Sign in to the tenant in the browser, then answer "can jdoe sign in to Microsoft 365?".
+.EXAMPLE
+    .\Get-M365UserQuickCheck.ps1 jdoe@contoso.com -TenantId contoso.onmicrosoft.com -Days 30 -OutputPath C:\Temp
+    Same, in a named tenant, reading 30 days of sign-ins, and saving an HTML report and a CSV row.
+.EXAMPLE
+    .\Get-M365UserQuickCheck.ps1 jdoe@contoso.com -TicketNumber 482113
+    The HTML, the CSV and the ticket note go into %USERPROFILE%\Documents\TicketNotes\Ticket_482113,
+    and the note is copied to the clipboard.
+.NOTES
+    Exit codes (without -PassThru): 0 = can sign in (YES or PROBABLY YES), 1 = cannot / probably
+    not, 2 = user not found or ambiguous, 3 = could not run (Graph module missing, sign-in or
+    preflight failed, the sign-in name's domain is not in this tenant, or an unusable
+    -TicketNumber).
+
+    Needs the Microsoft.Graph.Authentication module (Install-Module Microsoft.Graph.Authentication
+    -Scope CurrentUser) and an account in the client's tenant that can read users. Sign-in history
+    needs Entra ID P1 and a reports role; risky user needs Entra ID P2. Missing either is reported,
+    not fatal.
+
+    At the consent prompt, consent for yourself only. Leave "Consent on behalf of your
+    organization" unticked (owner decision D-007).
+
+    TICKET NOTE. Every run ends with a four-part note (Checked, Ruled out, Could not check, Next
+    step) built by CaseKit.ps1 in this folder (a copy of TicketNote\CaseKit.ps1). The stamp names
+    the tenant and the signed-in account and says "Changed anything: No". If CaseKit.ps1 is
+    missing the check still runs, without a note.
+
+    REFERENCES
+      Connect-MgGraph: -Scopes, -TenantId, -ContextScope Process (this process only, so the
+      client's token stays out of your persistent cache), -UseDeviceCode, -NoWelcome
+        https://learn.microsoft.com/powershell/module/microsoft.graph.authentication/connect-mggraph
+      Invoke-MgGraphRequest (-Method, -Uri, -Headers, -OutputType)
+        https://learn.microsoft.com/powershell/module/microsoft.graph.authentication/invoke-mggraphrequest
+      Set-MgGraphOption -DisableLoginByWAM: only takes effect with a custom ClientId; persists
+      across sessions
+        https://learn.microsoft.com/powershell/module/microsoft.graph.authentication/set-mggraphoption
+      Disconnect-MgGraph
+        https://learn.microsoft.com/powershell/module/microsoft.graph.authentication/disconnect-mggraph
+      Graph reads, scopes, roles, licence errors and the error-code map: see the REFERENCES in
+      M365UserCheck.Core.ps1
+      Ticket note clipboard (in CaseKit.ps1): see TicketNote\CaseKit.ps1
+#>
+[CmdletBinding(DefaultParameterSetName = 'Check')]
+param(
+    [Parameter(Mandatory = $true, ParameterSetName = 'Check', Position = 0)]
+    [Alias('Identity')]
+    [ValidateNotNullOrEmpty()]
+    [string]$UserPrincipalName,
+
+    [string]$TenantId,
+
+    [switch]$DisableWam,
+
+    [switch]$UseDeviceCode,
+
+    [ValidateRange(1, 30)]
+    [int]$Days = 7,
+
+    [string]$Server,
+
+    [System.Management.Automation.PSCredential]$Credential,
+
+    [switch]$SkipOnPremises,
+
+    [string]$OutputPath,
+
+    # Checked in the script body (Test-TicketNumber in CaseKit.ps1), not with ValidatePattern,
+    # so a mistyped number gets a plain-English [FAIL] line instead of a parameter-binding error.
+    [string]$TicketNumber,
+
+    [switch]$NoClipboard,
+
+    [switch]$FullDetail,
+
+    [switch]$PassThru,
+
+    [switch]$Quiet,
+
+    [Parameter(ParameterSetName = 'Load')]
+    [switch]$LoadFunctionsOnly
+)
+
+# No global $ErrorActionPreference change here (the functions are dot-sourced by the tests):
+# every call that must stop says -ErrorAction Stop.
+
+# Dot-sourcing runs the core's param block in THIS scope, so its -LoadFunctionsOnly would
+# overwrite ours: remember ours first.
+$entryLoadOnly = [bool]$LoadFunctionsOnly
+$corePath = Join-Path $PSScriptRoot 'M365UserCheck.Core.ps1'
+if (-not (Test-Path -LiteralPath $corePath)) {
+    Write-Host "[FAIL] M365UserCheck.Core.ps1 is missing from $PSScriptRoot. Keep all the files in the folder together." -ForegroundColor Red
+    if ($PassThru) { return [PSCustomObject]@{ Status = 'Error'; ExitCode = 3; UserPrincipalName = $UserPrincipalName; Message = 'M365UserCheck.Core.ps1 is missing.'; TicketNote = $null } }
+    exit 3
+}
+. $corePath -LoadFunctionsOnly
+$LoadFunctionsOnly = $entryLoadOnly
+
+# =============================================================================
+# Small helpers
+# =============================================================================
+
+function Write-Status {
+    param(
+        [Parameter(Mandatory = $true)][string]$Message,
+        [ValidateSet('PASS', 'WARN', 'FAIL', 'INFO')][string]$Level = 'INFO'
+    )
+    $color = @{ PASS = 'Green'; WARN = 'Yellow'; FAIL = 'Red'; INFO = 'Cyan' }[$Level]
+    Write-Host ("[{0}] {1}" -f $Level, $Message) -ForegroundColor $color
+}
+
+function Get-M365SafeFileName {
+    # jdoe@contoso.com -> jdoe_contoso.com
+    param([string]$Value)
+    return (([string]$Value) -replace '[^\w\.\-]', '_')
+}
+
+# =============================================================================
+# Run the check
+# =============================================================================
+
+function Write-M365CheckBanner {
+    # Always first: where you are, as whom, and that nothing is changed (D-002).
+    param([Parameter(Mandatory = $true)][object]$Tenant)
+    $roles = if (@($Tenant.Roles).Count -gt 0) { @($Tenant.Roles) -join ', ' } elseif ($Tenant.RolesNote) { $Tenant.RolesNote } else { 'none (no directory role is active for this account)' }
+    $domain = if ($Tenant.DefaultDomain) { $Tenant.DefaultDomain } else { 'not known' }
+    Write-Host ''
+    Write-Host ('=' * 70) -ForegroundColor DarkGray
+    Write-Host ' Microsoft 365 user check. This tool only reads: it changes nothing.' -ForegroundColor White
+    Write-Host (' Tenant      : {0}   (default domain {1})' -f $Tenant.DisplayName, $domain) -ForegroundColor White
+    Write-Host (' Tenant ID   : {0}' -f $Tenant.TenantId) -ForegroundColor White
+    Write-Host (' Signed in as: {0}' -f $Tenant.Account) -ForegroundColor White
+    Write-Host (' Admin roles : {0}' -f $roles) -ForegroundColor White
+    Write-Host ('=' * 70) -ForegroundColor DarkGray
+}
+
+function Invoke-M365UserQuickCheck {
+    <#
+    .SYNOPSIS
+        Banner, wrong-tenant guard, find the user, read, assess. Assumes Connect-MgGraph has run.
+        Never calls exit; returns a result object with ExitCode.
+    .DESCRIPTION
+        The banner is written before any user is looked up, and the wrong-tenant guard runs
+        before the first /users request, so a tech signed in to the wrong client sees it first.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$UserPrincipalName,
+        [Parameter(Mandatory = $true)][object]$Context,
+        [int]$Days = 7,
+        [switch]$SkipOnPremises,
+        [switch]$Quiet,
+        [datetime]$Now = [datetime]::UtcNow
+    )
+    $upn = $UserPrincipalName.Trim()
+    $result = [PSCustomObject]@{
+        Status = 'Error'; ExitCode = 3; UserPrincipalName = $upn; Message = ''; Candidates = @(); MatchedBy = ''
+        Tenant = $null; User = $null; Facts = $null; Assessment = $null; Now = $Now
+    }
+
+    try {
+        $tenant = Get-M365TenantContext -Context $Context
+    } catch {
+        $msg = Get-M365ErrorText -ErrorRecord $_
+        $result.Message = "The Graph session cannot answer requests, so nothing was checked: $(Get-M365ErrorSummary -Message $msg)"
+        if ($msg -match 'DeviceCodeCredential|Object reference not set') {
+            # Known SDK defect: device-code sign-in succeeds, then every request throws.
+            # https://github.com/microsoftgraph/msgraph-sdk-powershell/issues/3495
+            $result.Message += ' This matches a known Graph module problem with -UseDeviceCode: update Microsoft.Graph.Authentication (Update-Module Microsoft.Graph.Authentication), or run again without -UseDeviceCode / -DisableWam.'
+        }
+        return $result
+    }
+    $result.Tenant = $tenant
+    if (-not $Quiet) { Write-M365CheckBanner -Tenant $tenant }
+
+    # --- Wrong tenant? (before any user lookup) ---
+    if ($upn.IndexOf('@') -lt 1) {
+        $result.Message = "'$upn' is not a full sign-in name. Use the form jdoe@contoso.com."
+        return $result
+    }
+    $domains = @(Get-M365VerifiedDomain -Fallback @($tenant.VerifiedDomains))
+    if (-not (Test-M365UpnInTenant -UserPrincipalName $upn -VerifiedDomains $domains)) {
+        $upnDomain = $upn.Substring($upn.LastIndexOf('@') + 1)
+        $list = if ($domains.Count -gt 0) { ' (' + (($domains | Select-Object -First 6) -join ', ') + $(if ($domains.Count -gt 6) { ', ...' } else { '' }) + ')' } else { '' }
+        $result.Status = 'WrongTenant'
+        $result.Message = ("Wrong tenant? {0} is not a domain of {1}{2}, so {3} cannot be a sign-in name here. Sign in to the right client (add -TenantId {0}). For a guest, use their sign-in name in this tenant (it contains #EXT#)." -f $upnDomain, $tenant.DisplayName, $list, $upn)
+        return $result
+    }
+
+    # --- Find the user ---
+    try {
+        $found = Find-M365User -UserPrincipalName $upn
+    } catch {
+        $result.Message = "Could not look the user up in Microsoft 365: $(Get-M365ErrorSummary -Message (Get-M365ErrorText -ErrorRecord $_))"
+        return $result
+    }
+    $result.MatchedBy = $found.MatchedBy
+    if ($found.Status -eq 'NotFound') {
+        $result.Status = 'NotFound'; $result.ExitCode = 2
+        $result.Message = "No Microsoft 365 user matched '$upn' in $($tenant.DisplayName) (by sign-in name, email or proxy address). Check the spelling, or that this is the right tenant."
+        return $result
+    }
+    if ($found.Status -eq 'Ambiguous') {
+        $result.Status = 'Ambiguous'; $result.ExitCode = 2; $result.Candidates = @($found.Candidates)
+        $result.Message = "'$upn' is an email or proxy address of $(@($found.Candidates).Count) users. Run it again with the sign-in name of the right one."
+        return $result
+    }
+    $result.User = $found.User
+
+    # --- Read and assess ---
+    $onPrem = if ($SkipOnPremises) {
+        New-M365Gate -Source 'On-premises AD' -State NotChecked -Reason 'skipped with -SkipOnPremises'
+    } else {
+        New-M365Gate -Source 'On-premises AD' -State NotChecked -Reason 'not checked in this version'
+    }
+    $facts = Get-M365UserFacts -User $found.User -Days $Days -Now $Now -OnPremisesGate $onPrem
+    $assessment = Get-M365UserAssessment -Facts $facts
+    $result.Status = 'Ok'; $result.ExitCode = $assessment.ExitCode
+    $result.Facts = $facts; $result.Assessment = $assessment
+    return $result
+}
+
+# =============================================================================
+# Output
+# =============================================================================
+
+function Get-M365SourceGates {
+    # The five sources in banner order.
+    param([Parameter(Mandatory = $true)][object]$Facts)
+    return @($Facts.SignInGate, $Facts.ConditionalAccessGate, $Facts.MfaGate, $Facts.RiskGate, $Facts.OnPremisesGate | Where-Object { $null -ne $_ })
+}
+
+function Get-M365UserDisplayName {
+    param([object]$Result)
+    $name = [string](Get-M365Prop -Object $Result.User -Name 'displayName')
+    if (-not $name) { $name = [string]$Result.UserPrincipalName }
+    return $name
+}
+
+function Get-M365UserCheckDetail {
+    # Compact Item/Value table for sysadmins (console, HTML). No IP addresses.
+    param([Parameter(Mandatory = $true)][object]$Result)
+    $u = $Result.User; $f = $Result.Facts
+    $rows = New-Object System.Collections.Generic.List[object]
+    function Add-Row($Item, $Value) { $rows.Add([PSCustomObject]@{ Item = $Item; Value = [string]$Value }) }
+
+    Add-Row 'Name' (Get-M365Prop -Object $u -Name 'displayName')
+    Add-Row 'Sign-in name' (Get-M365Prop -Object $u -Name 'userPrincipalName')
+    Add-Row 'Email' (Get-M365Prop -Object $u -Name 'mail')
+    Add-Row 'Found by' $Result.MatchedBy
+    $type = [string](Get-M365Prop -Object $u -Name 'userType')
+    Add-Row 'Account type' $(if ($type -eq 'Guest') { 'Guest account (B2B)' } elseif ($type) { $type } else { 'not recorded' })
+    $enabled = Get-M365Prop -Object $u -Name 'accountEnabled'
+    Add-Row 'Sign-in allowed' $(if ($enabled -eq $false) { 'No (blocked)' } elseif ($enabled -eq $true) { 'Yes' } else { 'not recorded' })
+    if (Test-M365UserSynced -User $u) {
+        $last = ConvertTo-M365UtcTime -Value (Get-M365Prop -Object $u -Name 'onPremisesLastSyncDateTime')
+        $onPremName = @((Get-M365Prop -Object $u -Name 'onPremisesDomainName'), (Get-M365Prop -Object $u -Name 'onPremisesSamAccountName')) | Where-Object { $_ }
+        Add-Row 'Synced from on-premises AD' ("Yes{0}{1}" -f $(if ($onPremName) { ' (' + ($onPremName -join '\') + ')' } else { '' }), $(if ($last) { ', last synced ' + (Format-M365Time $last) } else { '' }))
+    } else {
+        Add-Row 'Synced from on-premises AD' 'No (cloud-only)'
+    }
+    $lic = @(Get-M365Prop -Object $u -Name 'assignedLicenses' | Where-Object { $null -ne $_ })
+    $states = @(Get-M365Prop -Object $u -Name 'licenseAssignmentStates' | Where-Object { $null -ne $_ })
+    $stateText = (@($states | ForEach-Object { [string](Get-M365Prop -Object $_ -Name 'state') } | Where-Object { $_ } | Group-Object | ForEach-Object { '{0} {1}' -f $_.Count, $_.Name })) -join ', '
+    Add-Row 'Licences' ("{0} assigned{1}" -f $lic.Count, $(if ($stateText) { " ($stateText)" } else { '' }))
+    if ($f) {
+        $mfa = if ($f.MfaGate.State -eq 'Available') {
+            $types = @($f.MfaMethods | ForEach-Object { ([string](Get-M365Prop -Object $_ -Name '@odata.type')) -replace '^#microsoft\.graph\.', '' -replace 'AuthenticationMethod$', '' } | Where-Object { $_ } | Sort-Object -Unique)
+            if ($types.Count -gt 0) { $types -join ', ' } else { 'none' }
+        } else { 'could not check' }
+        Add-Row 'Authentication methods' $mfa
+        $risk = if ($f.RiskGate.State -ne 'Available') { 'could not check' }
+        elseif (-not [string](Get-M365Prop -Object $f.RiskyUser -Name 'riskLevel')) { 'not flagged' }
+        else { 'risk level {0}, risk state {1}' -f (Get-M365Prop -Object $f.RiskyUser -Name 'riskLevel'), (Get-M365Prop -Object $f.RiskyUser -Name 'riskState') }
+        Add-Row 'Risky user' $risk
+        $si = if ($f.SignInGate.State -eq 'Available') { '{0} read from the last {1} days (interactive sign-ins only; at most {2})' -f @($f.SignIns).Count, $f.Days, $script:M365SignInPageSize } else { 'could not check' }
+        Add-Row 'Sign-ins' $si
+    }
+    return $rows.ToArray()
+}
+
+function Get-M365SignInTable {
+    # Recent sign-in rows for the console and HTML. IP addresses only with -IncludeIp (HTML).
+    param([Parameter(Mandatory = $true)][object]$Facts, [switch]$IncludeIp)
+    $out = foreach ($r in @(Get-M365SignInRows -SignIns @($Facts.SignIns))) {
+        $row = $r.Row
+        $loc = Get-M365Prop -Object $row -Name 'location'
+        $place = (@((Get-M365Prop -Object $loc -Name 'city'), (Get-M365Prop -Object $loc -Name 'countryOrRegion')) | Where-Object { $_ }) -join ', '
+        $hasCa = Test-M365Prop -Object $row -Name 'appliedConditionalAccessPolicies'
+        $ca = if (-not $hasCa) { 'not visible' } else {
+            $failed = @(@(Get-M365Prop -Object $row -Name 'appliedConditionalAccessPolicies') | Where-Object { $null -ne $_ -and [string](Get-M365Prop -Object $_ -Name 'result') -eq 'failure' } | ForEach-Object { [string](Get-M365Prop -Object $_ -Name 'displayName') })
+            if ($failed.Count -gt 0) { 'blocked by: ' + ($failed -join ', ') } else { '-' }
+        }
+        $item = [ordered]@{
+            Time = Format-M365Time $r.Time
+            App = $r.App
+            Client = [string](Get-M365Prop -Object $row -Name 'clientAppUsed')
+            Result = $(if ($r.Code -eq 0) { 'Success' } else { "Failed $($r.Code)" })
+            Reason = $(if ($r.Code -eq 0) { '' } else { $r.FailureReason })
+            ConditionalAccess = $ca
+            Location = $place
+        }
+        if ($IncludeIp) { $item['IpAddress'] = [string](Get-M365Prop -Object $row -Name 'ipAddress') }
+        [PSCustomObject]$item
+    }
+    return @($out)
+}
+
+function Write-M365UserCheckConsole {
+    param([Parameter(Mandatory = $true)][object]$Result)
+
+    if ($Result.Status -eq 'Ambiguous') {
+        Write-Status $Result.Message 'FAIL'
+        foreach ($c in @($Result.Candidates)) {
+            Write-Host ("       {0,-30} {1,-40} {2}" -f $c.DisplayName, $c.UserPrincipalName, $(if ($c.AccountEnabled) { 'sign-in allowed' } else { 'sign-in blocked' })) -ForegroundColor Gray
+        }
+        return
+    }
+    if ($Result.Status -ne 'Ok') { Write-Status $Result.Message 'FAIL'; return }
+
+    $f = $Result.Facts; $a = $Result.Assessment
+    Write-Host ''
+    Write-Host 'What this run could see:' -ForegroundColor White
+    foreach ($g in (Get-M365SourceGates -Facts $f)) {
+        Write-Host ('  ' + (Format-M365SourceLine -Gate $g)) -ForegroundColor $(if ($g.State -eq 'Available') { 'Gray' } else { 'Yellow' })
+    }
+
+    $color = switch ($a.Verdict) { 'YES' { 'Green' } 'NO' { 'Red' } default { 'Yellow' } }
+    Write-Host ''
+    Write-Host ("Can {0} sign in to Microsoft 365?  {1}" -f (Get-M365UserDisplayName $Result), $a.Verdict) -ForegroundColor $color
+    if ($a.VerdictNote) { Write-Host ("  {0}" -f $a.VerdictNote) -ForegroundColor $color }
+    Write-Host ('=' * 70) -ForegroundColor DarkGray
+
+    $block = @($a.Reasons | Where-Object { $_.Level -eq 'Blocker' -or $_.Level -eq 'Probable' })
+    $notes = @($a.Reasons | Where-Object { $_.Level -eq 'Warning' -or $_.Level -eq 'Info' })
+    if ($block.Count -gt 0) {
+        Write-Host 'Why not:' -ForegroundColor White
+        foreach ($r in $block) {
+            Write-Status $r.Message $(if ($r.Level -eq 'Blocker') { 'FAIL' } else { 'WARN' })
+            Write-Host ("       What to do: {0}" -f $r.Action) -ForegroundColor Gray
+        }
+    }
+    if ($notes.Count -gt 0) {
+        Write-Host ''
+        Write-Host $(if ($block.Count -gt 0) { 'Also worth knowing:' } else { 'Worth knowing:' }) -ForegroundColor White
+        foreach ($r in $notes) {
+            Write-Status $r.Message $(if ($r.Level -eq 'Warning') { 'WARN' } else { 'INFO' })
+            Write-Host ("       What to do: {0}" -f $r.Action) -ForegroundColor Gray
+        }
+    }
+    if (@($a.Passes).Count -gt 0) {
+        Write-Host ''
+        Write-Host 'Looks fine:' -ForegroundColor White
+        foreach ($p in $a.Passes) { Write-Status $p 'PASS' }
+    }
+    if (@($a.CouldNotCheck).Count -gt 0) {
+        Write-Host ''
+        Write-Host 'Could not check:' -ForegroundColor White
+        foreach ($c in $a.CouldNotCheck) { Write-Status ('{0}: {1}' -f $c.Source, $c.Reason) 'WARN' }
+        if ($f.SignInGate.State -ne 'Available') { Write-Host ("       What to do: {0}" -f $script:M365NoSignInHistoryStep) -ForegroundColor Gray }
+    }
+
+    Write-Host ''
+    Write-Host 'Details' -ForegroundColor White
+    Write-Host ('-' * 70) -ForegroundColor DarkGray
+    foreach ($d in (Get-M365UserCheckDetail -Result $Result)) { Write-Host ("{0,-28} {1}" -f $d.Item, $d.Value) -ForegroundColor Gray }
+
+    if ($f.SignInGate.State -eq 'Available' -and @($f.SignIns).Count -gt 0) {
+        Write-Host ''
+        Write-Host 'Recent sign-ins (newest first, IP addresses in the HTML report only)' -ForegroundColor White
+        Write-Host ('-' * 70) -ForegroundColor DarkGray
+        foreach ($s in @(Get-M365SignInTable -Facts $f | Select-Object -First 10)) {
+            Write-Host ("{0,-21} {1,-14} {2,-30} {3}" -f $s.Time, $s.Result, $s.App, $s.Location) -ForegroundColor $(if ($s.Result -eq 'Success') { 'Gray' } else { 'Yellow' })
+        }
+    }
+    Write-Host ''
+    Write-Status 'Sign-in history here is interactive sign-ins only. Cloud password expiry: Get-EntraPasswordPolicy. On-premises account state: AD-UserQuickCheck.' 'INFO'
+}
+
+function Get-M365UserCheckCsvRow {
+    # One row for the ticket. Never an IP address: free text goes through ConvertTo-M365SafeText.
+    param([Parameter(Mandatory = $true)][object]$Result)
+    $u = $Result.User; $f = $Result.Facts; $a = $Result.Assessment; $t = $Result.Tenant
+    $rows = @(Get-M365SignInRows -SignIns @($f.SignIns))
+    $latest = if ($rows.Count -gt 0) { $rows[0] } else { $null }
+    $safe = { param($s) ConvertTo-M365SafeText -Text ([string]$s) }
+    return [PSCustomObject]@{
+        CheckedAt = (Format-M365Time $Result.Now)
+        Tenant = $t.DisplayName; TenantId = $t.TenantId; SignedInAs = $t.Account
+        Verdict = $a.Verdict; VerdictNote = $a.VerdictNote
+        Reasons = (& $safe ((@($a.Reasons | Where-Object { $_.Level -eq 'Blocker' -or $_.Level -eq 'Probable' } | ForEach-Object { $_.Message })) -join ' | '))
+        Warnings = (& $safe ((@($a.Reasons | Where-Object { $_.Level -eq 'Warning' } | ForEach-Object { $_.Message })) -join ' | '))
+        CouldNotCheck = (@($a.CouldNotCheck | ForEach-Object { '{0}: {1}' -f $_.Source, $_.Reason }) -join ' | ')
+        DisplayName = [string](Get-M365Prop -Object $u -Name 'displayName')
+        UserPrincipalName = [string](Get-M365Prop -Object $u -Name 'userPrincipalName')
+        Mail = [string](Get-M365Prop -Object $u -Name 'mail')
+        UserType = [string](Get-M365Prop -Object $u -Name 'userType')
+        AccountEnabled = Get-M365Prop -Object $u -Name 'accountEnabled'
+        SyncedFromOnPremises = (Test-M365UserSynced -User $u)
+        LicencesAssigned = @(Get-M365Prop -Object $u -Name 'assignedLicenses' | Where-Object { $null -ne $_ }).Count
+        SignInHistory = $f.SignInGate.State
+        SignInsRead = $(if ($f.SignInGate.State -eq 'Available') { @($f.SignIns).Count } else { $null })
+        LatestSignIn = $(if ($latest) { Format-M365Time $latest.Time })
+        LatestSignInErrorCode = $(if ($latest) { $latest.Code })
+        LatestSignInApp = $(if ($latest) { $latest.App })
+        MfaMethods = $f.MfaGate.State
+        RiskyUser = $(if ($f.RiskGate.State -ne 'Available') { $f.RiskGate.State } elseif ($null -eq $f.RiskyUser) { 'NotFlagged' } else { '{0}/{1}' -f (Get-M365Prop -Object $f.RiskyUser -Name 'riskLevel'), (Get-M365Prop -Object $f.RiskyUser -Name 'riskState') })
+        DaysChecked = $f.Days
+    }
+}
+
+function ConvertTo-M365UserCheckHtml {
+    # Every value from Graph is HTML-encoded (AC27): names, failure reasons and policy names can
+    # contain markup.
+    param([Parameter(Mandatory = $true)][object]$Result)
+    function Enc([object]$s) { [System.Net.WebUtility]::HtmlEncode([string]$s) }
+    $f = $Result.Facts; $a = $Result.Assessment; $t = $Result.Tenant
+    $name = Get-M365UserDisplayName $Result
+    $cls = switch ($a.Verdict) { 'YES' { 'ok' } 'NO' { 'bad' } default { 'warn' } }
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine('<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">')
+    [void]$sb.AppendLine("<title>Microsoft 365 sign-in check - $(Enc $name)</title>")
+    [void]$sb.AppendLine('<style>body{background:#15181c;color:#e8eaed;font-family:"Segoe UI",sans-serif;max-width:1080px;margin:0 auto;padding:32px;line-height:1.5}' +
+        '.banner{border:1px solid #333a44;border-radius:4px;padding:10px 14px;margin-bottom:20px;font-size:13px;color:#c3cad4}.banner b{color:#e8eaed}' +
+        '.verdict{border-left:6px solid;padding:6px 0 6px 18px;margin-bottom:24px}.verdict h1{margin:0;font-size:26px}' +
+        '.ok{border-color:#5fc98a}.bad{border-color:#e2686a}.warn{border-color:#e0a458}.v{font-weight:700}' +
+        '.reason{background:#1d2126;border:1px solid #333a44;border-radius:4px;padding:10px 14px;margin:8px 0}' +
+        '.reason small{display:block;color:#98a2b0}table{border-collapse:collapse;width:100%;font-size:13px;margin-top:8px}' +
+        'td,th{padding:6px 10px;border-bottom:1px solid #242931;text-align:left;vertical-align:top}th{color:#98a2b0}h2{font-size:15px;letter-spacing:.1em;text-transform:uppercase;color:#98a2b0;margin-top:32px}' +
+        '.FAIL{color:#e2686a}.WARN{color:#e0a458}.INFO{color:#5dade2}.PASS{color:#5fc98a}</style></head><body>')
+    $roles = if (@($t.Roles).Count -gt 0) { @($t.Roles) -join ', ' } elseif ($t.RolesNote) { $t.RolesNote } else { 'none' }
+    [void]$sb.AppendLine("<div class=`"banner`"><b>This tool only reads: it changed nothing.</b><br>Tenant: <b>$(Enc $t.DisplayName)</b> (default domain $(Enc $t.DefaultDomain)), tenant ID $(Enc $t.TenantId)<br>Signed in as: <b>$(Enc $t.Account)</b>, admin roles: $(Enc $roles)<br>")
+    foreach ($g in (Get-M365SourceGates -Facts $f)) {
+        [void]$sb.AppendLine("<span class=`"$(if ($g.State -eq 'Available') { 'PASS' } else { 'WARN' })`">$(Enc (Format-M365SourceLine -Gate $g))</span><br>")
+    }
+    [void]$sb.AppendLine('</div>')
+    $note = if ($a.VerdictNote) { "<div>$(Enc $a.VerdictNote)</div>" } else { '' }
+    [void]$sb.AppendLine("<div class=`"verdict $cls`"><h1>Can $(Enc $name) sign in to Microsoft 365? <span class=`"v`">$(Enc $a.Verdict)</span></h1>$note<div>Checked $(Enc (Format-M365Time $Result.Now))</div></div>")
+    foreach ($r in $a.Reasons) {
+        $tag = switch ($r.Level) { 'Blocker' { 'FAIL' } 'Probable' { 'WARN' } 'Warning' { 'WARN' } default { 'INFO' } }
+        [void]$sb.AppendLine("<div class=`"reason`"><span class=`"$tag`">[$tag]</span> $(Enc $r.Message)<small>What to do: $(Enc $r.Action)</small></div>")
+    }
+    foreach ($p in $a.Passes) { [void]$sb.AppendLine("<div class=`"reason`"><span class=`"PASS`">[PASS]</span> $(Enc $p)</div>") }
+    if (@($a.CouldNotCheck).Count -gt 0) {
+        [void]$sb.AppendLine('<h2>Could not check</h2>')
+        foreach ($c in $a.CouldNotCheck) { [void]$sb.AppendLine("<div class=`"reason`"><span class=`"WARN`">[WARN]</span> $(Enc $c.Source): $(Enc $c.Reason)</div>") }
+        if ($f.SignInGate.State -ne 'Available') { [void]$sb.AppendLine("<p class=`"INFO`">$(Enc $script:M365NoSignInHistoryStep)</p>") }
+    }
+    [void]$sb.AppendLine('<h2>Details</h2><table>')
+    foreach ($d in (Get-M365UserCheckDetail -Result $Result)) { [void]$sb.AppendLine("<tr><th>$(Enc $d.Item)</th><td>$(Enc $d.Value)</td></tr>") }
+    [void]$sb.AppendLine('</table>')
+    if ($f.SignInGate.State -eq 'Available') {
+        [void]$sb.AppendLine('<h2>Recent sign-ins (newest first, interactive only)</h2><table><tr><th>Time</th><th>App</th><th>Client</th><th>Result</th><th>Reason</th><th>Conditional Access</th><th>Location</th><th>IP address</th></tr>')
+        foreach ($s in @(Get-M365SignInTable -Facts $f -IncludeIp)) {
+            [void]$sb.AppendLine("<tr><td>$(Enc $s.Time)</td><td>$(Enc $s.App)</td><td>$(Enc $s.Client)</td><td class=`"$(if ($s.Result -eq 'Success') { 'PASS' } else { 'WARN' })`">$(Enc $s.Result)</td><td>$(Enc $s.Reason)</td><td>$(Enc $s.ConditionalAccess)</td><td>$(Enc $s.Location)</td><td>$(Enc $s.IpAddress)</td></tr>")
+        }
+        [void]$sb.AppendLine('</table>')
+    }
+    [void]$sb.AppendLine('<p class="INFO">Sign-in history here is interactive sign-ins only. Cloud password expiry: Get-EntraPasswordPolicy. On-premises account state: AD-UserQuickCheck.</p></body></html>')
+    return $sb.ToString()
+}
+
+function Export-M365UserCheckReport {
+    # Writes M365UserCheck_<safe-upn>_<yyyy-MM-dd_HHmmss>.html and .csv. Returns the two paths.
+    param([Parameter(Mandatory = $true)][object]$Result, [Parameter(Mandatory = $true)][string]$OutputPath)
+    if (-not (Test-Path -LiteralPath $OutputPath)) { $null = New-Item -ItemType Directory -Path $OutputPath -Force -ErrorAction Stop }
+    $upn = [string](Get-M365Prop -Object $Result.User -Name 'userPrincipalName')
+    if (-not $upn) { $upn = $Result.UserPrincipalName }
+    $stamp = ([datetime]$Result.Now).ToLocalTime().ToString('yyyy-MM-dd_HHmmss')
+    $stem = Join-Path $OutputPath ("M365UserCheck_{0}_{1}" -f (Get-M365SafeFileName $upn), $stamp)
+    $csv = "$stem.csv"; $html = "$stem.html"
+    Get-M365UserCheckCsvRow -Result $Result | Export-Csv -LiteralPath $csv -NoTypeInformation -Encoding UTF8
+    [System.IO.File]::WriteAllText($html, (ConvertTo-M365UserCheckHtml -Result $Result), (New-Object System.Text.UTF8Encoding($true)))
+    return [PSCustomObject]@{ Html = $html; Csv = $csv }
+}
+
+# =============================================================================
+# Ticket note (CaseKit.ps1)
+# =============================================================================
+
+function ConvertTo-M365UserCheckTicketNote {
+    <#
+    .SYNOPSIS
+        Maps a check result to a ticket note. The gate decisions for this tool live here.
+    .DESCRIPTION
+        Blocker -> PROBLEM, Probable and Warning -> WARNING, Info -> INFO. Every source that could
+        not be read -> Could not check, with its reason; Cleared checks go to Ruled out only with
+        CouldLook (the assessment never clears anything from an unreadable source). Next steps
+        are the Blocker and Probable actions, plus the admin-center step when sign-in history
+        could not be read. The stamp names the tenant and the signed-in account.
+    #>
+    param([Parameter(Mandatory = $true)][object]$Result, [string[]]$EvidencePaths = @())
+    $items = New-Object System.Collections.Generic.List[object]
+    $next = New-Object System.Collections.Generic.List[string]
+    $upn = [string]$Result.UserPrincipalName
+    $t = $Result.Tenant
+
+    if ($Result.Status -eq 'Ok') {
+        $a = $Result.Assessment; $f = $Result.Facts
+        $headline = 'Can {0} sign in to Microsoft 365? {1}' -f (Get-M365UserDisplayName $Result), $a.Verdict
+        if ($a.VerdictNote) { $headline += " - $($a.VerdictNote)" }
+        $scopeLine = 'Microsoft 365 account {0} in {1}, sign-ins from the last {2} days.' -f [string](Get-M365Prop -Object $Result.User -Name 'userPrincipalName'), $t.DisplayName, $f.Days
+        foreach ($r in @($a.Reasons)) {
+            $kind = switch ($r.Level) { 'Blocker' { 'Problem' } 'Info' { 'Info' } default { 'Warning' } }
+            $items.Add((New-TicketNoteItem -Kind $kind -Text $r.Message))
+        }
+        foreach ($c in @($a.CouldNotCheck)) { $items.Add((New-TicketNoteItem -Kind NotChecked -Text ('{0}: {1}' -f $c.Source, $c.Reason))) }
+        foreach ($c in @($a.Cleared)) { $items.Add((New-TicketNoteItem -Kind Clear -Text $c.Message -CouldLook ([bool]$c.CouldLook))) }
+
+        foreach ($r in @($a.Reasons | Where-Object { $_.Level -eq 'Blocker' -or $_.Level -eq 'Probable' })) { $next.Add($r.Action) }
+        if ($f.SignInGate.State -ne 'Available') { $next.Add($script:M365NoSignInHistoryStep) }
+        if ($next.Count -eq 0 -and $a.Verdict -eq 'YES') {
+            $next.Add('No Microsoft 365 account problem found. Look at the device, the app or the network next, and at the on-premises account with AD-UserQuickCheck.')
+        }
+    } else {
+        $notRun = 'The Microsoft 365 account checks did not run (blocked, licence, sign-ins, MFA, risk).'
+        switch ($Result.Status) {
+            'NotFound' {
+                $headline = "Microsoft 365 sign-in check did not run - no user matched '$upn'"
+                $next.Add('Check the spelling and that this is the right tenant, then run the check again.')
+            }
+            'Ambiguous' {
+                $headline = "Microsoft 365 sign-in check did not run - '$upn' matches $(@($Result.Candidates).Count) users"
+                foreach ($c in @($Result.Candidates | Select-Object -First 5)) {
+                    $items.Add((New-TicketNoteItem -Kind Info -Text ('Matches {0} ({1}).' -f $c.DisplayName, $c.UserPrincipalName)))
+                }
+                $next.Add('Run it again with the sign-in name of the right user.')
+            }
+            'WrongTenant' {
+                $headline = "Microsoft 365 sign-in check did not run - '$upn' is not in this tenant"
+                if ($Result.Message) { $items.Add((New-TicketNoteItem -Kind Problem -Text $Result.Message)) }
+                $next.Add('Sign in to the right client tenant (-TenantId) and run the check again.')
+            }
+            default {
+                $headline = "Microsoft 365 sign-in check for '$upn' did not run - could not read Microsoft 365"
+                if ($Result.Message) { $items.Add((New-TicketNoteItem -Kind Problem -Text $Result.Message)) }
+                $next.Add('Check the sign-in and the Microsoft.Graph.Authentication module, then run the check again.')
+            }
+        }
+        $scopeLine = if ($t) { "Looked up '$upn' in $($t.DisplayName)." } else { "Looked up '$upn' in Microsoft 365." }
+        $items.Add((New-TicketNoteItem -Kind NotChecked -Text $notRun))
+    }
+
+    $scope = if ($t) { '{0}{1}' -f $t.DisplayName, $(if ($t.DefaultDomain) { " ($($t.DefaultDomain))" } else { '' }) } else { 'not known' }
+    $stampArgs = @{ ScopeLabel = 'Tenant'; Scope = $scope }
+    if ($Result.Now -is [datetime]) { $stampArgs['Now'] = ([datetime]$Result.Now).ToLocalTime() }
+    if ($t -and $t.Account) { $stampArgs['RunAs'] = $t.Account }
+    $stamp = New-TicketNoteStamp @stampArgs
+
+    return New-TicketNote -Tool 'M365-UserQuickCheck' -Headline $headline -ScopeLine $scopeLine -Items $items.ToArray() `
+        -NextSteps $next.ToArray() -Stamp $stamp -EvidencePaths $EvidencePaths
+}
+
+# The ticket-note kit ships beside this script (a copy of TicketNote\CaseKit.ps1). Without it
+# the check still runs; only the note is skipped.
+$kit = Join-Path $PSScriptRoot 'CaseKit.ps1'
+if (Test-Path -LiteralPath $kit) { . $kit } else { $script:CaseKitMissing = $true }
+
+if ($LoadFunctionsOnly) { return }
+
+# =============================================================================
+# Main
+# =============================================================================
+
+# A result for the cases where the check cannot start (-PassThru callers get it instead of exit 3).
+function New-M365CheckStartFailure([string]$Message) {
+    [PSCustomObject]@{
+        Status = 'Error'; ExitCode = 3; UserPrincipalName = $UserPrincipalName; Message = $Message; Candidates = @(); MatchedBy = ''
+        Tenant = $null; User = $null; Facts = $null; Assessment = $null; Now = [datetime]::UtcNow; TicketNote = $null
+    }
+}
+
+if ($TicketNumber -and $script:CaseKitMissing) {
+    if (-not $Quiet) { Write-Status "CaseKit.ps1 is missing from this folder, so -TicketNumber $TicketNumber was ignored: the reports go to -OutputPath (if given) and there is no ticket note this time." 'WARN' }
+    $TicketNumber = ''
+    $script:CaseKitWarned = $true
+}
+if ($TicketNumber -and -not (Test-TicketNumber -TicketNumber $TicketNumber)) {
+    $msg = "'$TicketNumber' is not a usable ticket number. Use letters, digits, - or _ (up to 32 characters, starting with a letter or digit), for example 482113."
+    if (-not $Quiet) { Write-Status $msg 'FAIL' }
+    if ($PassThru) { return (New-M365CheckStartFailure $msg) }
+    exit 3
+}
+
+try {
+    Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
+} catch {
+    $msg = "The Microsoft.Graph.Authentication module is not available: $($_.Exception.Message)"
+    if (-not $Quiet) {
+        Write-Status $msg 'FAIL'
+        Write-Status 'Install it once with: Install-Module Microsoft.Graph.Authentication -Scope CurrentUser' 'INFO'
+    }
+    if ($PassThru) { return (New-M365CheckStartFailure $msg) }
+    exit 3
+}
+
+if ($DisableWam -and -not $UseDeviceCode) {
+    # Set-MgGraphOption -DisableLoginByWAM is not used: Microsoft documents that it only takes
+    # effect with a custom ClientId (this tool uses the default one) and that it persists
+    # across sessions, so it would change the tech's module settings and still not help
+    # (set-mggraphoption). It is also a Set-Mg* command, which this read-only tool never runs.
+    # Device code sign-in never uses WAM, so it lets the tech choose the account.
+    $UseDeviceCode = [switch]$true
+    if (-not $Quiet) { Write-Status '-DisableWam: signing in with a device code instead, so you can choose the client account (Windows would otherwise pick your own account).' 'INFO' }
+}
+
+# ContextScope Process keeps the client's token out of the tech's persistent token cache.
+$connectParams = @{ Scopes = $script:M365Scopes; NoWelcome = $true; ContextScope = 'Process' }
+if ($TenantId) { $connectParams['TenantId'] = $TenantId }
+if ($UseDeviceCode) { $connectParams['UseDeviceCode'] = $true }
+
+$result = $null
+$connectAttempted = $false
+try {
+    try {
+        if (-not $Quiet) { Write-Status 'Signing in to Microsoft Graph (read-only permissions; consent for yourself only)...' 'INFO' }
+        $connectAttempted = $true
+        try {
+            Connect-MgGraph @connectParams -ErrorAction Stop | Out-Null
+        } catch [System.Management.Automation.ParameterBindingException] {
+            # Older module versions have no -NoWelcome / -ContextScope (Get-M365SecurityEvidence
+            # does the same). Any other failure, such as a cancelled sign-in, is not retried.
+            $connectParams.Remove('NoWelcome'); $connectParams.Remove('ContextScope')
+            Connect-MgGraph @connectParams -ErrorAction Stop | Out-Null
+        }
+        $context = Get-MgContext
+        if (-not $context) { throw 'Connect-MgGraph finished without a Graph context.' }
+    } catch {
+        $result = New-M365CheckStartFailure "Could not sign in to Microsoft Graph: $($_.Exception.Message)"
+    }
+    if (-not $result) {
+        try {
+            $result = Invoke-M365UserQuickCheck -UserPrincipalName $UserPrincipalName -Context $context -Days $Days -SkipOnPremises:$SkipOnPremises -Quiet:$Quiet
+        } catch {
+            $result = New-M365CheckStartFailure "The check stopped unexpectedly: $($_.Exception.Message)"
+        }
+    }
+} finally {
+    # Always sign out, whatever happened above (Get-EntraPasswordPolicy pattern).
+    if ($connectAttempted) {
+        try { Disconnect-MgGraph -ErrorAction Stop | Out-Null } catch { Write-Verbose "Disconnect-MgGraph: $($_.Exception.Message)" }
+    }
+}
+
+if (-not $Quiet) { Write-M365UserCheckConsole -Result $result }
+
+# Where the files go: with -TicketNumber, <OutputPath or the default root>\Ticket_<n> (reports
+# and note together); with only -OutputPath, that folder; with neither, no files (the note goes
+# to the clipboard, or the console).
+$folder = $OutputPath
+if ($TicketNumber) {
+    $root = if ($OutputPath) { $OutputPath } else { Get-TicketNoteDefaultRoot }
+    try {
+        $folder = Resolve-TicketFolder -TicketNumber $TicketNumber -Root $root
+    } catch {
+        if (-not $Quiet) { Write-Status "Could not create the ticket folder under ${root}: $($_.Exception.Message)" 'WARN' }
+    }
+}
+
+$evidence = @()
+if ($folder -and $result.Status -eq 'Ok') {
+    try {
+        $files = Export-M365UserCheckReport -Result $result -OutputPath $folder
+        $evidence = @($files.Html, $files.Csv)
+        if (-not $Quiet) {
+            Write-Status "Report saved: $($files.Html)" 'PASS'
+            Write-Status "CSV saved   : $($files.Csv)" 'PASS'
+        }
+    } catch {
+        if (-not $Quiet) { Write-Status "Could not write the report to ${folder}: $($_.Exception.Message)" 'WARN' }
+    }
+}
+
+$note = $null
+if ($script:CaseKitMissing) {
+    if (-not $Quiet -and -not $script:CaseKitWarned) { Write-Status 'CaseKit.ps1 is missing from this folder - no ticket note this time.' 'WARN' }
+} else {
+    # The note is extra: a failure while building or saving it never changes the answer or the
+    # exit code.
+    try {
+        $note = ConvertTo-M365UserCheckTicketNote -Result $result -EvidencePaths $evidence
+        if ($Quiet) {
+            if ($folder) { $null = Save-TicketNote -Note $note -Folder $folder -PasteSafe:(-not $FullDetail) }
+        } else {
+            Write-Host ''
+            $null = Publish-TicketNote -Note $note -Folder $folder -PasteSafe:(-not $FullDetail) -NoClipboard:$NoClipboard
+        }
+    } catch {
+        if (-not $Quiet) { Write-Status "Could not make the ticket note: $($_.Exception.Message). The check above is still valid." 'WARN' }
+        $note = $null
+    }
+}
+$result | Add-Member -NotePropertyName TicketNote -NotePropertyValue $note -Force
+
+if ($PassThru) { return $result }
+exit $result.ExitCode

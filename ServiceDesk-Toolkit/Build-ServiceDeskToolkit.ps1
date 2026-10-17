@@ -76,6 +76,7 @@ $manifest = @(
     @{ Source = 'Get-CitrixVDAResources';                                Destination = 'Get-CitrixVDAResources' }
     @{ Source = 'Get-RAM-Usage';                                         Destination = 'Get-RAM-Usage' }
     @{ Source = 'M365-SyncedUserFixes';                                  Destination = 'M365-SyncedUserFixes' }
+    @{ Source = 'M365-UserQuickCheck';                                   Destination = 'M365-UserQuickCheck' }
     @{ Source = 'Network-QuickCheck';                                    Destination = 'Network-QuickCheck' }
     @{ Source = 'RDS-FSLogix-EventExport';                               Destination = 'RDS-FSLogix-EventExport' }
     @{ Source = 'TicketNote';                                            Destination = 'TicketNote' }

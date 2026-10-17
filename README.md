@@ -39,6 +39,7 @@ handed out, so it always matches this repository.
 
 | Folder | What it does |
 |---|---|
+| [M365-UserQuickCheck](M365-UserQuickCheck/) | Can this user sign in to Microsoft 365? Plain-English answer with the sign-in error, licence, MFA and risk, read-only |
 | [Get-EntraPasswordPolicy](Get-EntraPasswordPolicy/) | Tenant password policy, smart lockout and per-user expiry |
 | [Get-M365SecurityEvidence](Get-M365SecurityEvidence/) | MFA, password policy and privileged-account evidence for audits |
 | [Entra-DeviceActivityTimeline](Entra-DeviceActivityTimeline/) | When was this Entra-joined device on, asleep, locked and signed in to? |

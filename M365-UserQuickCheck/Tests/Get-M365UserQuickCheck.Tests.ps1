@@ -98,7 +98,9 @@ BeforeAll {
         $splat = @{ UserPrincipalName = 'jdoe@contoso.com'; NoClipboard = $true; PassThru = $true; SkipOnPremises = $true }
         foreach ($k in $Extra.Keys) { $splat[$k] = $Extra[$k] }
         $script:LastError = $null
-        try { $out = @(& $script:Entry @splat) } catch { $script:LastError = $_; $out = @() }
+        # Dot-sourced, not '&': a script run with '&' gets its own script scope, and the mock
+        # bodies above would then resolve $script:Events / $script:Scn in THAT scope (null).
+        try { $out = @(. $script:Entry @splat) } catch { $script:LastError = $_; $out = @() }
         if ($out.Count -gt 0) { return $out[-1] }
         return $null
     }

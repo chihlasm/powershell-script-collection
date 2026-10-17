@@ -1,4 +1,4 @@
-<#
+﻿<#
     SQ-002 AC29: the new tool is in the service-desk bundle and the indexes.
     Static text checks only; nothing is built or run.
 
