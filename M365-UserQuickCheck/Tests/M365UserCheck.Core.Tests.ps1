@@ -849,7 +849,9 @@ Describe 'SQ-011 Get-M365OnPremisesFacts (AD and Graph faked)' {
         Mock Get-ADUser {
             $script:AdCalls.Add(@{ Identity = $Identity; LDAPFilter = $LDAPFilter; Server = $Server; Credential = $Credential; Properties = @($Properties) })
             if ($script:AdThrow) { throw $script:AdThrow }
-            if ($PSBoundParameters.ContainsKey('Identity')) {
+            # Pester 5.7 leaves $PSBoundParameters empty in a mock body without param(); the
+            # bound value is still in $Identity.
+            if ($null -ne $Identity) {
                 if ($null -eq $script:AdBySid) { throw $script:NotFoundAd }
                 return $script:AdBySid
             }

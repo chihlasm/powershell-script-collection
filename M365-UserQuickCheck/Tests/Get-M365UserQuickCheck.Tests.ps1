@@ -686,7 +686,9 @@ Describe 'SQ-011 on-premises AD stage' {
         Mock Get-ADUser {
             $script:AdCalls.Add(@{ Identity = $Identity; LDAPFilter = $LDAPFilter; Server = $Server })
             if ($script:AdThrow) { throw $script:AdThrow }
-            if ($PSBoundParameters.ContainsKey('Identity')) {
+            # Pester 5.7 leaves $PSBoundParameters empty in a mock body without param(); the
+            # bound value is still in $Identity.
+            if ($null -ne $Identity) {
                 if ($null -eq $script:AdBySid) { throw 'Cannot find an object with identity: ''S-1-5-21-1111111111-2222222222-3333333333-1105'' under: ''DC=contoso,DC=com''.' }
                 return $script:AdBySid
             }
