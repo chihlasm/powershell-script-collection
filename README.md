@@ -47,7 +47,7 @@ handed out, so it always matches this repository.
 
 | Folder | What it does |
 |---|---|
-| [Citrix-FSLogix-Triage](Citrix-FSLogix-Triage/) | Profile won't load? Plain-English FSLogix check of one session host, with next steps |
+| [Citrix-FSLogix-Triage](Citrix-FSLogix-Triage/) | Temporary profile? Why one user got it (lock holder, FSLogix log, service, settings) with one next step, plus a plain-English FSLogix check of one session host |
 | [Citrix-FSLogix-HealthCollector](Citrix-FSLogix-HealthCollector/) | Health verdict per session host: performance plus event logs |
 | [Citrix-PerfTriage](Citrix-PerfTriage/) | One-command performance triage on a session host |
 | [CitrixVDADiagnostics](CitrixVDADiagnostics/) | Deeper VDA and FSLogix performance diagnostics |

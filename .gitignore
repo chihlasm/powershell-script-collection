@@ -12,6 +12,8 @@ AD-LockoutDiagnostics/**/Case_*/
 **/TicketNotes_Combined_*.txt
 **/UserQuickCheck_*.html
 **/UserQuickCheck_*.csv
+**/TempProfile_*.txt
+**/TempProfile_*.csv
 
 # --- Runtime artifacts from running the tools ---
 Entra-DeviceActivityTimeline/Reports/
