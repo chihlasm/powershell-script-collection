@@ -23,7 +23,7 @@ why it matters, and anything you already know (screens, edge cases, examples).
 ---
 
 ## SQ-001 · Ticket note from every quick check (kit, joiner, AD-UserQuickCheck)
-- status: blocked
+- status: ready
 - priority: P1
 - type: feature
 - branch: squad/SQ-001-ticket-note
@@ -39,7 +39,7 @@ joiner, the parity test, and AD-UserQuickCheck adopting the note (plus `-PassThr
 Approved by Michael in the 2026-10-17 pitch session; split per D-004.
 
 ## SQ-002 · M365 user check: can this user sign in? (Graph stage)
-- status: review
+- status: done
 - priority: P1
 - type: feature
 - branch: squad/SQ-002-m365-user-check
@@ -53,7 +53,7 @@ tenant without Entra ID P1 the headline is PROBABLY YES with "sign-in history no
 (D-006). Read-only whatever account is used. Builds after SQ-001. Split per D-004.
 
 ## SQ-011 · M365 user check: is it a sync problem? (on-prem AD comparison)
-- status: review
+- status: ready
 - priority: P1
 - type: feature
 - branch: squad/SQ-011-m365-sync-check
@@ -66,7 +66,7 @@ sync, and a UPN mismatch. Says "could not check" when no DC answers (D-014). Bui
 Split from SQ-002 per D-004.
 
 ## SQ-003 · "Why did this user get a temporary profile?" one-user VDI verdict
-- status: review
+- status: done
 - priority: P1
 - type: feature
 - branch: squad/SQ-003-temp-profile-verdict
@@ -80,7 +80,7 @@ step, with the evidence for each candidate cause. A second entry script in Citri
 (D-015). Destructive fixes say "Escalate" plus the reason (D-017). Builds after SQ-001.
 
 ## SQ-008 · FolderPermissionManager: back up permissions and log every change (single items)
-- status: review
+- status: done
 - priority: P1
 - type: fix
 - branch: squad/SQ-008-fpm-backup-log
@@ -93,7 +93,7 @@ the shared change-log format (D-030), and SDDL backup plus logging for every sin
 in the GUI. A change whose backup can't be written is refused. Split per D-004.
 
 ## SQ-014 · FolderPermissionManager: whole-tree actions and the CLI script
-- status: blocked
+- status: ready
 - priority: P1
 - type: fix
 - branch: squad/SQ-014-fpm-tree-cli
@@ -107,7 +107,7 @@ The copy-permissions tree backup is no longer needed (D-031). The old CLI
 ownership, `-Force` and a help block (D-010). Builds after SQ-008. Split per D-004.
 
 ## SQ-015 · FolderPermissionManager: fix recursive copy permissions
-- status: blocked
+- status: ready
 - priority: P1
 - type: fix
 - branch: squad/SQ-015-fpm-recursive-copy
@@ -121,7 +121,7 @@ turns inherited rules into explicit ones, and handlers use `-Path`, which breaks
 subfolders untouched (D-031). Fix with a regression test for each. Builds after SQ-014 (D-011).
 
 ## SQ-010 · Ticket note in Network-QuickCheck and Citrix-FSLogix-Triage
-- status: review
+- status: done
 - priority: P2
 - type: feature
 - branch: squad/SQ-010-ticket-note-network-triage
@@ -133,7 +133,7 @@ results are marked so they land under "Could not check", not "Ruled out". Builds
 Split from SQ-001 per D-004.
 
 ## SQ-004 · "Can this user open this folder?" access evidence and hedged verdict
-- status: review
+- status: done
 - priority: P2
 - type: feature
 - branch: squad/SQ-004-folder-access-check

@@ -14,7 +14,7 @@ Format:
 ---
 
 ### Q-001 · SQ-001 · Should the ticket note skip Windows clipboard history and cloud clipboard?
-- status: open
+- status: answered (D-033)
 - context: The note is copied to the clipboard by default. `Set-Clipboard` (the spec's first
   choice) puts plain text on the clipboard, so the note (client user names, DC names, findings)
   lands in Win+V clipboard history and, if "Sync across devices" is on, is uploaded to the tech's
@@ -31,7 +31,7 @@ Format:
   switch or open the note file to paste.
 
 ### Q-002 · SQ-014 · Should whole-tree take ownership refuse drive roots and Windows folders?
-- status: open
+- status: answered (D-036)
 - context: Recursive take ownership (GUI and, since SQ-014, the CLI with `-Force` and no prompt)
   will run on any folder, including `C:\`, `C:\Windows`, `C:\Program Files` or a share root. On OS
   folders it replaces TrustedInstaller/SYSTEM ownership across the tree; undoing it means replaying
@@ -46,7 +46,7 @@ Format:
   extra switch. B) Relies on the tech reading the warning. C) No change.
 
 ### Q-003 · SQ-014 · How should whole-tree take ownership handle folders it can't open?
-- status: open
+- status: answered (D-034)
 - blocks: SQ-014 (blocked after two fix rounds; branch `squad/SQ-014-fpm-tree-cli`, gates green).
 - context: `takeown /R /D Y` replaces the permissions of any folder the tech can't open with
   "full control for you only" (documented on Learn). SQ-014 now backs those permissions up first
@@ -67,7 +67,7 @@ Format:
   on exactly the folders it is usually run for.
 
 ### Q-004 · SQ-015 · Should the old CLI still copy the top folder's permissions onto every subfolder?
-- status: open
+- status: answered (D-035)
 - blocks: SQ-015 (blocked after two fix rounds; branch `squad/SQ-015-fpm-recursive-copy`, gates
   green; the GUI copy is fixed and passes review).
 - context: SQ-015 made the GUI's "Copy Permissions To..." add-only with one Set-Acl per target
