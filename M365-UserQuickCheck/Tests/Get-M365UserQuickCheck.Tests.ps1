@@ -646,3 +646,148 @@ $r | ConvertTo-Json -Compress
         }
     }
 }
+
+# =============================================================================
+# SQ-011, on-premises AD stage, end to end: AC18 plus the AD call counts of AC19 and AC20.
+# The entry is run WITHOUT -SkipOnPremises (Invoke-Entry defaults it on). Import-Module and
+# Get-ADUser are faked; nothing reaches a domain controller. Pinned wording: the banner line and
+# the Could not check line both read "On-premises AD: could not check (<reason>)".
+# =============================================================================
+Describe 'SQ-011 on-premises AD stage' {
+    BeforeAll {
+        $script:Sid = 'S-1-5-21-1111111111-2222222222-3333333333-1105'
+        # Stub with the real parameter names (Get-ADUser; checked with Get-Command).
+        function Get-ADUser {
+            [CmdletBinding()]
+            param($Identity, $LDAPFilter, $Filter, $Server, [pscredential]$Credential, $Properties, $SearchBase, $ResultSetSize)
+        }
+        function New-AdAccount {
+            param([hashtable]$Set = @{})
+            $a = @{ Enabled = $true; UserPrincipalName = 'jdoe@contoso.com'; mail = 'jdoe@contoso.com'; proxyAddresses = @('SMTP:jdoe@contoso.com')
+                SamAccountName = 'jdoe'; DistinguishedName = 'CN=Jane Doe,OU=Staff,DC=contoso,DC=com'; 'msDS-cloudExtensionAttribute10' = $null }
+            foreach ($k in $Set.Keys) { $a[$k] = $Set[$k] }
+            $a
+        }
+        function New-SyncedCloudUser { New-User @{ onPremisesSyncEnabled = $true; onPremisesSecurityIdentifier = $script:Sid; onPremisesProvisioningErrors = @() } }
+        $script:NoDcMessage = 'Unable to contact the server. This may be because this server does not exist, it is currently down, or it does not have the Active Directory Web Services running.'
+    }
+    BeforeEach {
+        New-Scenario
+        $script:AdCalls = New-Object System.Collections.Generic.List[hashtable]
+        $script:AdBySid = New-AdAccount; $script:AdByFilter = @(); $script:AdThrow = $null; $script:ImportAdThrows = $false
+        $script:Events = New-Object System.Collections.Generic.List[string]
+        Mock Import-Module { if ($script:ImportAdThrows -and $Name -eq 'ActiveDirectory') { throw 'The specified module ''ActiveDirectory'' was not loaded because no valid module file was found in any module directory.' } }
+        Mock Connect-MgGraph { $script:Events.Add('CONNECT') }
+        Mock Get-MgContext { [PSCustomObject]@{ Account = $script:Scn.Me; TenantId = $script:TenantId; Scopes = @('Directory.Read.All'); AuthType = 'Delegated'; ContextScope = 'Process' } }
+        Mock Disconnect-MgGraph { $script:Events.Add('DISCONNECT') }
+        Mock Set-Clipboard { }
+        Mock Write-Host { $script:Events.Add('HOST:' + ($Object -join ' ')) }
+        Mock Invoke-MgGraphRequest -MockWith $script:FakeGraph
+        Mock Get-ADUser {
+            $script:AdCalls.Add(@{ Identity = $Identity; LDAPFilter = $LDAPFilter; Server = $Server })
+            if ($script:AdThrow) { throw $script:AdThrow }
+            if ($PSBoundParameters.ContainsKey('Identity')) {
+                if ($null -eq $script:AdBySid) { throw 'Cannot find an object with identity: ''S-1-5-21-1111111111-2222222222-3333333333-1105'' under: ''DC=contoso,DC=com''.' }
+                return $script:AdBySid
+            }
+            return @($script:AdByFilter)
+        }
+    }
+
+    It 'AC18_AdStageUnavailableStillGivesVerdict: ActiveDirectory module missing -> Graph verdict printed, banner and Could not check say "could not check (...)", exit code from Graph' {
+        New-Scenario @{ UpnMatches = @((New-SyncedCloudUser)) }
+        $script:ImportAdThrows = $true
+        $r = Invoke-Entry @{ SkipOnPremises = $false }
+        $script:LastError | Should -BeNullOrEmpty
+        $r.ExitCode | Should -Be 0
+        $text = Get-HostText
+        $text | Should -Match 'Can Jane Doe sign in to Microsoft 365\?\s+YES'
+        @([regex]::Matches($text, 'On-premises AD: could not check \(')).Count | Should -BeGreaterOrEqual 2 -Because 'once in the banner, once under Could not check'
+        $text | Should -Match 'ActiveDirectory'
+        $text.IndexOf('On-premises AD: could not check') | Should -BeLessThan $text.IndexOf('Can Jane Doe sign in')
+        @($r.Assessment.CouldNotCheck | Where-Object { $_.Source -eq 'On-premises AD' }).Count | Should -Be 1
+        $text | Should -Not -Match 'not checked in this version'
+        Should -Invoke Get-ADUser -Times 0 -Exactly -Scope It
+    }
+
+    It 'AC18_AdStageUnavailableStillGivesVerdict: no DC answers (Get-ADUser throws) -> same, and a Graph blocker still exits 1' {
+        New-Scenario @{ UpnMatches = @((New-User @{ onPremisesSyncEnabled = $true; onPremisesSecurityIdentifier = $script:Sid; accountEnabled = $false })) }
+        $script:AdThrow = $script:NoDcMessage
+        $r = Invoke-Entry @{ SkipOnPremises = $false }
+        $script:LastError | Should -BeNullOrEmpty
+        $r.ExitCode | Should -Be 1
+        $text = Get-HostText
+        $text | Should -Match 'Can Jane Doe sign in to Microsoft 365\?\s+NO'
+        @([regex]::Matches($text, 'On-premises AD: could not check \(')).Count | Should -BeGreaterOrEqual 2
+        $text | Should -Not -Match 'not checked in this version'
+    }
+
+    It 'AC18_AdStageUnavailableStillGivesVerdict: with -SkipOnPremises nothing is imported for AD and Get-ADUser is never called' {
+        New-Scenario @{ UpnMatches = @((New-SyncedCloudUser)) }
+        $r = Invoke-Entry @{ SkipOnPremises = $true }
+        $r.ExitCode | Should -Be 0
+        Should -Invoke Get-ADUser -Times 0 -Exactly -Scope It
+        @($r.Assessment.CouldNotCheck | Where-Object { $_.Source -eq 'On-premises AD' }).Count | Should -Be 1
+    }
+
+    It 'AC19_CloudOnlySkipsAd: cloud-only user, no AD account has the UPN -> pass "Cloud-only account: sync is not involved", one Get-ADUser call (the UPN search)' {
+        New-Scenario @{ UpnMatches = @((New-User)) }
+        $r = Invoke-Entry @{ SkipOnPremises = $false }
+        $r.ExitCode | Should -Be 0
+        (Get-HostText) | Should -Match 'Cloud-only account: sync is not involved'
+        $script:AdCalls.Count | Should -Be 1
+        $script:AdCalls[0].LDAPFilter | Should -Match 'userPrincipalName='
+        $script:AdCalls[0].Identity | Should -BeNullOrEmpty
+        (Get-HostText) | Should -Match 'On-premises AD: available'
+    }
+
+    It 'AC20_NeverSynced: no Microsoft 365 user but the AD user exists -> NO, exit 1, "exists in AD but not in Microsoft 365"' {
+        New-Scenario @{ UpnMatches = @(); FallbackMatches = @() }
+        $script:AdByFilter = @((New-AdAccount))
+        $r = Invoke-Entry @{ SkipOnPremises = $false }
+        $r.ExitCode | Should -Be 1
+        $text = Get-HostText
+        $text | Should -Match 'This account exists in AD but not in Microsoft 365'
+        $text | Should -Match 'Can .* sign in to Microsoft 365\?\s+NO'
+        @($script:Events | Where-Object { $_ -match 'signIns|authentication/methods' }).Count | Should -Be 0 -Because 'there is no cloud user to read sign-ins for'
+    }
+
+    It 'AC4_UserNotFoundOrAmbiguous: nothing in Microsoft 365 and nothing in AD -> still "No Microsoft 365 user matched", exit 2' {
+        New-Scenario @{ UpnMatches = @(); FallbackMatches = @() }
+        $r = Invoke-Entry @{ SkipOnPremises = $false }
+        $r.ExitCode | Should -Be 2
+        ((Get-HostText) + "`n" + $r.Message) | Should -Match 'No Microsoft 365 user matched'
+    }
+
+    It 'AC4_UserNotFoundOrAmbiguous: nothing in Microsoft 365 and no DC answers -> exit 2, not a crash' {
+        New-Scenario @{ UpnMatches = @(); FallbackMatches = @() }
+        $script:AdThrow = $script:NoDcMessage
+        $r = Invoke-Entry @{ SkipOnPremises = $false }
+        $script:LastError | Should -BeNullOrEmpty
+        $r.ExitCode | Should -Be 2
+    }
+
+    It 'AC25_UpnMismatch: synced user is matched by SID first (Get-ADUser -Identity <SID>), own Graph object is not an address conflict' {
+        New-Scenario @{ UpnMatches = @((New-SyncedCloudUser)) }
+        $r = Invoke-Entry @{ SkipOnPremises = $false }
+        $script:AdCalls.Count | Should -Be 1
+        $script:AdCalls[0].Identity | Should -Be $script:Sid
+        $r.ExitCode | Should -Be 0 -Because 'the only /users hit for the AD address is the user itself'
+        (Get-HostText) | Should -Match 'Can Jane Doe sign in to Microsoft 365\?\s+YES'
+    }
+
+    It 'AC25_UpnMismatch: AD UPN differs -> Warning with both values printed' {
+        New-Scenario @{ UpnMatches = @((New-SyncedCloudUser)) }
+        $script:AdBySid = New-AdAccount @{ UserPrincipalName = 'jane.doe@contoso.com' }
+        $null = Invoke-Entry @{ SkipOnPremises = $false }
+        $text = Get-HostText
+        $text | Should -Match 'jane\.doe@contoso\.com'
+        $text | Should -Match 'jdoe@contoso\.com'
+    }
+
+    It 'Edge_ServerParameterReachesGetADUser: -Server dc01.contoso.com is passed to Get-ADUser' {
+        New-Scenario @{ UpnMatches = @((New-SyncedCloudUser)) }
+        $null = Invoke-Entry @{ SkipOnPremises = $false; Server = 'dc01.contoso.com' }
+        $script:AdCalls[0].Server | Should -Be 'dc01.contoso.com'
+    }
+}

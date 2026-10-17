@@ -553,3 +553,406 @@ Describe 'Edge cases' {
         (Get-Reason $a 'SignInBlocked').Action | Should -Match 'admin center'
     }
 }
+
+# =============================================================================
+# SQ-011, on-premises AD comparison: AC18-AC25 (spec squad/specs/SQ-002.md Part B)
+#
+# PINNED INTERFACE ADDED BY SQ-011 (the implementer must honour these names and shapes):
+#   Facts gains (all optional; read with Get-M365Prop, an absent key means "not collected"):
+#     OnPremisesGate   gate for 'On-premises AD'. Only when State is Available are the AD facts used.
+#     AdUser           $null, or the AD account as a hashtable/object with: Enabled, UserPrincipalName,
+#                      mail, proxyAddresses, DistinguishedName, SamAccountName, pwdLastSet,
+#                      'msDS-cloudExtensionAttribute10'.
+#     AdMatchedBy      'SID' or 'UserPrincipalName'.
+#     AddressConflicts array of [PSCustomObject]{ Type 'user'|'group'|'contact'; DisplayName; Address; Id }
+#                      (objects OTHER than the cloud user that hold the AD user's UPN or primary SMTP).
+#     TenantLastSync   ISO string, the organization's onPremisesLastSyncDateTime, or $null.
+#   Facts.User may be $null (no Microsoft 365 user; AC20). Then the source gates other than
+#   OnPremisesGate are NotChecked and must not add reasons.
+#   Reason codes: NeverSynced (Blocker; the BlockCloudSignIn marker only changes its text),
+#     ProvisioningError (Blocker), AddressHeld (Blocker), BlockedOnPurpose (Info),
+#     AdEnabledMismatch (Probable), StaleTenantSync (Warning), UpnMismatch (Warning).
+#     Pass codes in Cleared: CloudOnly, TenantSyncRecent.
+#   Block marker: msDS-cloudExtensionAttribute10 = 'BlockCloudSignIn'
+#     (M365-SyncedUserFixes/SyncedUserFixes.Core.ps1:111-112).
+#   Stale means STRICTLY more than 3 hours old; exactly 3 hours is a pass.
+#   Format-M365SourceLine for source 'On-premises AD' in any state but Available reads
+#     "On-premises AD: could not check (<Reason>)" (other sources keep "not available (...)").
+#   Get-M365OnPremisesFacts -User <cloud user or $null> -UserPrincipalName <upn> [-Server <string>]
+#     [-Credential <pscredential>] -> [PSCustomObject]{ Gate; AdUser; AdMatchedBy; AddressConflicts }.
+#     Runtime Import-Module ActiveDirectory in try/catch (failure -> Gate Failed, reason names the
+#     module); Get-ADUser -Identity <SID> first (when the cloud user has onPremisesSecurityIdentifier),
+#     else Get-ADUser -LDAPFilter with RFC 4515 escaping; -Properties includes
+#     msDS-cloudExtensionAttribute10, proxyAddresses, mail, pwdLastSet, Enabled,
+#     UserPrincipalName, DistinguishedName; -Server/-Credential passed through when given.
+#     "Cannot find an object with identity" = not found (fall back / Available with AdUser $null);
+#     any other Get-ADUser error = Gate Failed (no DC). Conflicts: GET only, users/groups/contacts
+#     filtered on the AD UPN and primary SMTP (proxyAddresses entry starting 'SMTP:', else mail);
+#     the cloud user's own id is never a conflict.
+# =============================================================================
+
+Describe 'SQ-011 on-premises comparison, pure assessment' {
+    BeforeAll {
+        $script:Sid = 'S-1-5-21-1111111111-2222222222-3333333333-1105'
+        function New-AdUser {
+            param([hashtable]$Set = @{})
+            $a = @{
+                Enabled = $true; UserPrincipalName = 'jdoe@contoso.com'; mail = 'jdoe@contoso.com'
+                proxyAddresses = @('SMTP:jdoe@contoso.com'); SamAccountName = 'jdoe'
+                DistinguishedName = 'CN=Jane Doe,OU=Staff,DC=contoso,DC=com'; pwdLastSet = 133700000000000000
+                'msDS-cloudExtensionAttribute10' = $null
+            }
+            foreach ($k in $Set.Keys) { $a[$k] = $Set[$k] }
+            return $a
+        }
+        function New-SyncedUser {
+            param([hashtable]$Set = @{})
+            $s = @{ onPremisesSyncEnabled = $true; onPremisesSecurityIdentifier = $script:Sid; onPremisesProvisioningErrors = @() }
+            foreach ($k in $Set.Keys) { $s[$k] = $Set[$k] }
+            return (New-User $s)
+        }
+        function New-AdGate { param([string]$State = 'Available', [string]$Reason) New-M365Gate -Source 'On-premises AD' -State $State -Reason $Reason }
+        # Synced, healthy, AD agrees. Override any Facts property.
+        function New-HybridFacts {
+            param([hashtable]$Override = @{}, [hashtable]$UserSet = @{})
+            $o = @{
+                User = (New-SyncedUser $UserSet); OnPremisesGate = (New-AdGate); AdUser = (New-AdUser); AdMatchedBy = 'SID'
+                AddressConflicts = @(); TenantLastSync = ($script:Now - (New-TimeSpan -Minutes 20)).ToString('yyyy-MM-ddTHH:mm:ssZ')
+            }
+            foreach ($k in $Override.Keys) { $o[$k] = $Override[$k] }
+            return (New-Facts $o)
+        }
+        function New-NoCloudUserFacts {
+            param([object]$AdUser)
+            $nc = 'no Microsoft 365 user'
+            return (New-Facts @{
+                    User = $null; OnPremisesGate = (New-AdGate); AdUser = $AdUser; AdMatchedBy = 'UserPrincipalName'
+                    SignInGate = (New-M365Gate -Source 'Sign-in history' -State NotChecked -Reason $nc)
+                    ConditionalAccessGate = (New-M365Gate -Source 'Conditional Access detail' -State NotChecked -Reason $nc)
+                    MfaGate = (New-M365Gate -Source 'MFA methods' -State NotChecked -Reason $nc)
+                    RiskGate = (New-M365Gate -Source 'Risky user' -State NotChecked -Reason $nc)
+                    SignIns = @(); MfaMethods = @()
+                })
+        }
+    }
+
+    It 'AC18_AdStageUnavailableStillGivesVerdict: gate Failed -> still a verdict from Graph, AD under Could not check with its reason, no AD reasons' {
+        $g = New-AdGate -State Failed -Reason 'no domain controller answered'
+        $a = Get-M365UserAssessment -Facts (New-HybridFacts @{ OnPremisesGate = $g; AdUser = $null })
+        $a.Verdict | Should -Be 'YES'
+        $a.ExitCode | Should -Be 0
+        $c = @($a.CouldNotCheck | Where-Object { $_.Source -eq 'On-premises AD' })
+        $c.Count | Should -Be 1
+        $c[0].Reason | Should -Match 'no domain controller answered'
+        foreach ($code in 'NeverSynced', 'AdEnabledMismatch', 'UpnMismatch', 'AddressHeld', 'BlockedOnPurpose') { Get-Reason $a $code | Should -BeNullOrEmpty }
+        ($a.Passes -join "`n") | Should -Not -Match 'Cloud-only'
+    }
+
+    It 'AC18_AdStageUnavailableStillGivesVerdict: the banner line reads "On-premises AD: could not check (<reason>)"' {
+        $line = Format-M365SourceLine -Gate (New-AdGate -State Failed -Reason 'the ActiveDirectory module is not installed on this computer')
+        $line | Should -Be 'On-premises AD: could not check (the ActiveDirectory module is not installed on this computer)'
+        (Format-M365SourceLine -Gate (New-AdGate)) | Should -Be 'On-premises AD: available'
+        (Format-M365SourceLine -Gate (New-M365Gate -Source 'Risky user' -State NotLicensed -Reason 'needs Entra ID P2')) | Should -Be 'Risky user: not available (needs Entra ID P2)'
+    }
+
+    It 'AC18_AdStageUnavailableStillGivesVerdict: -SkipOnPremises (NotChecked) is also Could not check, and a blocker still gives NO' {
+        $g = New-AdGate -State NotChecked -Reason 'skipped with -SkipOnPremises'
+        $a = Get-M365UserAssessment -Facts (New-HybridFacts @{ OnPremisesGate = $g; AdUser = $null } @{ accountEnabled = $false })
+        $a.Verdict | Should -Be 'NO'
+        @($a.CouldNotCheck | Where-Object { $_.Source -eq 'On-premises AD' }).Count | Should -Be 1
+    }
+
+    It 'AC19_CloudOnlySkipsAd: cloud-only user, AD searched and empty -> pass "Cloud-only account: sync is not involved"' {
+        $f = New-Facts @{ OnPremisesGate = (New-AdGate); AdUser = $null; AddressConflicts = @(); TenantLastSync = $null }
+        $a = Get-M365UserAssessment -Facts $f
+        ($a.Passes -join "`n") | Should -Match 'Cloud-only account: sync is not involved'
+        @($a.Cleared | Where-Object { $_.Code -eq 'CloudOnly' }).Count | Should -Be 1
+        $a.Verdict | Should -Be 'YES'
+        Get-Reason $a 'StaleTenantSync' | Should -BeNullOrEmpty
+    }
+
+    It 'AC19_CloudOnlySkipsAd: no cloud-only pass when AD was not searched (gate not Available)' {
+        $f = New-Facts @{ OnPremisesGate = (New-AdGate -State NotChecked -Reason 'skipped with -SkipOnPremises'); AdUser = $null }
+        $a = Get-M365UserAssessment -Facts $f
+        ($a.Passes -join "`n") | Should -Not -Match 'Cloud-only'
+    }
+
+    It 'AC20_NeverSynced: no cloud user, AD user exists -> NO, "exists in AD but not in Microsoft 365", names sync scope (OU) and Entra Connect' {
+        $a = Get-M365UserAssessment -Facts (New-NoCloudUserFacts -AdUser (New-AdUser))
+        $a.Verdict | Should -Be 'NO'
+        $a.ExitCode | Should -Be 1
+        $r = Get-Reason $a 'NeverSynced'
+        $r.Level | Should -Be 'Blocker'
+        $r.Message | Should -Match 'This account exists in AD but not in Microsoft 365'
+        (Get-ReasonText $r) | Should -Match '(?i)\bOU\b'
+        (Get-ReasonText $r) | Should -Match 'Entra Connect'
+        (Get-ReasonText $r) | Should -Not -Match 'on purpose'
+    }
+
+    It 'AC20_NeverSynced: AD user carries BlockCloudSignIn -> reason says removed from Microsoft 365 on purpose by M365-SyncedUserFixes' {
+        $ad = New-AdUser @{ 'msDS-cloudExtensionAttribute10' = 'BlockCloudSignIn' }
+        $a = Get-M365UserAssessment -Facts (New-NoCloudUserFacts -AdUser $ad)
+        $a.Verdict | Should -Be 'NO'
+        $r = Get-Reason $a 'NeverSynced'
+        $r.Level | Should -Be 'Blocker'
+        (Get-ReasonText $r) | Should -Match 'on purpose'
+        (Get-ReasonText $r) | Should -Match 'M365-SyncedUserFixes'
+        (Get-ReasonText $r) | Should -Not -Match 'OU filtering' -Because 'the marker replaces the sync-scope advice'
+    }
+
+    It 'AC21_ProvisioningErrorNamesConflict: onPremisesProvisioningErrors entry -> NO, reason shows category, property and value' {
+        $err = @{ category = 'PropertyConflict'; propertyCausingError = 'ProxyAddresses'; value = 'smtp:jdoe@contoso.com'; occurredDateTime = '2026-10-16T09:00:00Z' }
+        $a = Get-M365UserAssessment -Facts (New-HybridFacts -UserSet @{ onPremisesProvisioningErrors = @($err) })
+        $a.Verdict | Should -Be 'NO'
+        $r = Get-Reason $a 'ProvisioningError'
+        $r.Level | Should -Be 'Blocker'
+        $r.Message | Should -Match 'PropertyConflict'
+        $r.Message | Should -Match 'ProxyAddresses'
+        $r.Message | Should -Match 'smtp:jdoe@contoso\.com'
+    }
+
+    It 'AC21_ProvisioningErrorNamesConflict: an empty list, or no such key, adds no reason' {
+        (Get-Reason (Get-M365UserAssessment -Facts (New-HybridFacts)) 'ProvisioningError') | Should -BeNullOrEmpty
+        $u = New-SyncedUser; $u.Remove('onPremisesProvisioningErrors')
+        (Get-Reason (Get-M365UserAssessment -Facts (New-HybridFacts @{ User = $u })) 'ProvisioningError') | Should -BeNullOrEmpty
+    }
+
+    It 'AC22_AddressHeldByAnotherObject: a group holds the address -> NO, reason names the type and display name' {
+        $c = [PSCustomObject]@{ Type = 'group'; DisplayName = 'Sales Team'; Address = 'jdoe@contoso.com'; Id = 'eeeeeeee-0000-0000-0000-000000000001' }
+        $a = Get-M365UserAssessment -Facts (New-HybridFacts @{ AddressConflicts = @($c) })
+        $a.Verdict | Should -Be 'NO'
+        $r = Get-Reason $a 'AddressHeld'
+        $r.Level | Should -Be 'Blocker'
+        $r.Message | Should -Match 'group'
+        $r.Message | Should -Match 'Sales Team'
+        $r.Message | Should -Match 'jdoe@contoso\.com'
+    }
+
+    It 'AC22_AddressHeldByAnotherObject: a cloud-only user and a contact are named too' {
+        $c1 = [PSCustomObject]@{ Type = 'user'; DisplayName = 'Jane Doe (cloud copy)'; Address = 'jdoe@contoso.com'; Id = 'eeeeeeee-0000-0000-0000-000000000002' }
+        $c2 = [PSCustomObject]@{ Type = 'contact'; DisplayName = 'J Doe External'; Address = 'jdoe@contoso.com'; Id = 'eeeeeeee-0000-0000-0000-000000000003' }
+        $a = Get-M365UserAssessment -Facts (New-HybridFacts @{ AddressConflicts = @($c1, $c2) })
+        $text = (@($a.Reasons | Where-Object { $_.Code -eq 'AddressHeld' }) | ForEach-Object { $_.Message }) -join "`n"
+        $text | Should -Match 'Jane Doe \(cloud copy\)'
+        $text | Should -Match 'J Doe External'
+        $text | Should -Match 'contact'
+    }
+
+    It 'AC22_AddressHeldByAnotherObject: no conflicts -> no AddressHeld reason' {
+        (Get-Reason (Get-M365UserAssessment -Facts (New-HybridFacts)) 'AddressHeld') | Should -BeNullOrEmpty
+    }
+
+    It 'AC23_EnabledMismatch: AD enabled + cloud blocked + marker -> Info "on purpose", blocker next step says remove the marker with M365-SyncedUserFixes' {
+        $ad = New-AdUser @{ Enabled = $true; 'msDS-cloudExtensionAttribute10' = 'BlockCloudSignIn' }
+        $a = Get-M365UserAssessment -Facts (New-HybridFacts @{ AdUser = $ad } @{ accountEnabled = $false })
+        $a.Verdict | Should -Be 'NO'
+        $i = Get-Reason $a 'BlockedOnPurpose'
+        $i.Level | Should -Be 'Info'
+        $i.Message | Should -Match 'on purpose'
+        (Get-Reason $a 'AdEnabledMismatch') | Should -BeNullOrEmpty
+        (Get-Reason $a 'SignInBlocked').Action | Should -Match 'remove the marker'
+        (Get-Reason $a 'SignInBlocked').Action | Should -Match 'M365-SyncedUserFixes'
+    }
+
+    It 'AC23_EnabledMismatch: AD enabled + cloud blocked, no marker -> Probable "disagree" with the tenant last sync time' {
+        $a = Get-M365UserAssessment -Facts (New-HybridFacts @{ TenantLastSync = '2026-10-17T13:40:00Z' } @{ accountEnabled = $false })
+        $r = Get-Reason $a 'AdEnabledMismatch'
+        $r.Level | Should -Be 'Probable'
+        $r.Message | Should -Match 'disagree'
+        (Get-ReasonText $r) | Should -Match '2026-10-17 13:40 UTC'
+        (Get-Reason $a 'BlockedOnPurpose') | Should -BeNullOrEmpty
+        $a.Verdict | Should -Be 'NO' -Because 'the cloud block is still a Blocker'
+    }
+
+    It 'AC23_EnabledMismatch: both sides disabled agree -> no mismatch reason' {
+        $a = Get-M365UserAssessment -Facts (New-HybridFacts @{ AdUser = (New-AdUser @{ Enabled = $false }) } @{ accountEnabled = $false })
+        (Get-Reason $a 'AdEnabledMismatch') | Should -BeNullOrEmpty
+        (Get-Reason $a 'BlockedOnPurpose') | Should -BeNullOrEmpty
+    }
+
+    It 'AC24_StaleTenantSync: last sync 4 hours old -> Warning with its age and "every 30 minutes"; verdict unchanged' {
+        $a = Get-M365UserAssessment -Facts (New-HybridFacts @{ TenantLastSync = ($script:Now - (New-TimeSpan -Hours 4)).ToString('yyyy-MM-ddTHH:mm:ssZ') })
+        $r = Get-Reason $a 'StaleTenantSync'
+        $r.Level | Should -Be 'Warning'
+        $r.Message | Should -Match '4 hours'
+        (Get-ReasonText $r) | Should -Match '30 minutes'
+        $a.Verdict | Should -Be 'YES'
+    }
+
+    It 'AC24_StaleTenantSync: under 3 hours -> pass showing the time, no warning' {
+        $a = Get-M365UserAssessment -Facts (New-HybridFacts @{ TenantLastSync = '2026-10-17T12:30:00Z' })
+        Get-Reason $a 'StaleTenantSync' | Should -BeNullOrEmpty
+        ($a.Passes -join "`n") | Should -Match '2026-10-17 12:30 UTC'
+        @($a.Cleared | Where-Object { $_.Code -eq 'TenantSyncRecent' }).Count | Should -Be 1
+    }
+
+    It 'Edge_TenantSyncExactlyThreeHoursOld: not stale (more than 3 hours is the rule); one second over is' {
+        $exact = Get-M365UserAssessment -Facts (New-HybridFacts @{ TenantLastSync = ($script:Now - (New-TimeSpan -Hours 3)).ToString('yyyy-MM-ddTHH:mm:ssZ') })
+        Get-Reason $exact 'StaleTenantSync' | Should -BeNullOrEmpty
+        $over = Get-M365UserAssessment -Facts (New-HybridFacts @{ TenantLastSync = ($script:Now - (New-TimeSpan -Hours 3 -Seconds 1)).ToString('yyyy-MM-ddTHH:mm:ssZ') })
+        (Get-Reason $over 'StaleTenantSync').Level | Should -Be 'Warning'
+    }
+
+    It 'Edge_TenantSyncUnknown: no last-sync value -> no stale warning and no "recent" pass' {
+        $a = Get-M365UserAssessment -Facts (New-HybridFacts @{ TenantLastSync = $null })
+        Get-Reason $a 'StaleTenantSync' | Should -BeNullOrEmpty
+        @($a.Cleared | Where-Object { $_.Code -eq 'TenantSyncRecent' }).Count | Should -Be 0
+    }
+
+    It 'AC25_UpnMismatch: AD UPN differs from the cloud UPN -> Warning showing both, verdict unchanged' {
+        $ad = New-AdUser @{ UserPrincipalName = 'jane.doe@contoso.com' }
+        $a = Get-M365UserAssessment -Facts (New-HybridFacts @{ AdUser = $ad })
+        $r = Get-Reason $a 'UpnMismatch'
+        $r.Level | Should -Be 'Warning'
+        $r.Message | Should -Match 'jane\.doe@contoso\.com'
+        $r.Message | Should -Match 'jdoe@contoso\.com'
+        $a.Verdict | Should -Be 'YES'
+    }
+
+    It 'AC25_UpnMismatch: same UPN in different case -> no warning' {
+        $ad = New-AdUser @{ UserPrincipalName = 'JDoe@Contoso.com' }
+        Get-Reason (Get-M365UserAssessment -Facts (New-HybridFacts @{ AdUser = $ad })) 'UpnMismatch' | Should -BeNullOrEmpty
+    }
+
+    It 'Edge_HealthyHybridAccount: synced, AD agrees, nothing held, recent sync -> YES with no AD reasons' {
+        $a = Get-M365UserAssessment -Facts (New-HybridFacts)
+        $a.Verdict | Should -Be 'YES'
+        foreach ($code in 'NeverSynced', 'ProvisioningError', 'AddressHeld', 'AdEnabledMismatch', 'StaleTenantSync', 'UpnMismatch', 'BlockedOnPurpose') { Get-Reason $a $code | Should -BeNullOrEmpty }
+        @($a.CouldNotCheck | Where-Object { $_.Source -eq 'On-premises AD' }).Count | Should -Be 0
+    }
+
+    It 'Edge_ExistingFactsWithoutAdKeys: Facts built before SQ-011 (no OnPremisesGate/AdUser keys) still assess' {
+        $a = Get-M365UserAssessment -Facts (New-Facts)
+        $a.Verdict | Should -Be 'YES'
+    }
+}
+
+Describe 'SQ-011 Get-M365OnPremisesFacts (AD and Graph faked)' {
+    BeforeAll {
+        $script:Sid = 'S-1-5-21-1111111111-2222222222-3333333333-1105'
+        # Stub with the real parameter names (Get-ADUser: Identity, LDAPFilter, Filter, Server,
+        # Credential, Properties, SearchBase, ResultSetSize; checked with Get-Command).
+        function Get-ADUser {
+            [CmdletBinding()]
+            param($Identity, $LDAPFilter, $Filter, $Server, [pscredential]$Credential, $Properties, $SearchBase, $ResultSetSize)
+        }
+        function New-AdUserObj { @{ Enabled = $true; UserPrincipalName = 'jdoe@contoso.com'; mail = 'jdoe@contoso.com'; proxyAddresses = @('SMTP:jdoe@contoso.com', 'smtp:alias@contoso.com'); SamAccountName = 'jdoe'; DistinguishedName = 'CN=Jane Doe,OU=Staff,DC=contoso,DC=com'; 'msDS-cloudExtensionAttribute10' = $null } }
+        $script:NotFoundAd = 'Cannot find an object with identity: ''S-1-5-21-1111111111-2222222222-3333333333-1105'' under: ''DC=contoso,DC=com''.'
+        $script:NoDcAd = 'Unable to contact the server. This may be because this server does not exist, it is currently down, or it does not have the Active Directory Web Services running.'
+    }
+    BeforeEach {
+        $script:AdCalls = New-Object System.Collections.Generic.List[hashtable]
+        $script:ImportThrows = $false; $script:AdBySid = (New-AdUserObj); $script:AdByFilter = @(); $script:AdThrow = $null
+        $script:GraphUris = New-Object System.Collections.Generic.List[string]
+        $script:ConflictUsers = @(); $script:ConflictGroups = @(); $script:ConflictContacts = @()
+        Mock Import-Module { if ($script:ImportThrows -and $Name -eq 'ActiveDirectory') { throw 'The specified module ''ActiveDirectory'' was not loaded because no valid module file was found in any module directory.' } }
+        Mock Get-ADUser {
+            $script:AdCalls.Add(@{ Identity = $Identity; LDAPFilter = $LDAPFilter; Server = $Server; Credential = $Credential; Properties = @($Properties) })
+            if ($script:AdThrow) { throw $script:AdThrow }
+            if ($PSBoundParameters.ContainsKey('Identity')) {
+                if ($null -eq $script:AdBySid) { throw $script:NotFoundAd }
+                return $script:AdBySid
+            }
+            return @($script:AdByFilter)
+        }
+        Mock Invoke-MgGraphRequest {
+            $u = [uri]::UnescapeDataString([string]$Uri)
+            $script:GraphUris.Add("$Method $u")
+            if ($u -match '/groups') { return @{ value = @($script:ConflictGroups) } }
+            if ($u -match '/contacts') { return @{ value = @($script:ConflictContacts) } }
+            if ($u -match '/users') { return @{ value = @($script:ConflictUsers) } }
+            return @{ value = @() }
+        }
+    }
+
+    It 'AC18_AdStageUnavailableStillGivesVerdict: ActiveDirectory module cannot be imported -> Gate Failed naming the module, Get-ADUser never called' {
+        $script:ImportThrows = $true
+        $r = Get-M365OnPremisesFacts -User (New-User @{ onPremisesSyncEnabled = $true; onPremisesSecurityIdentifier = $script:Sid }) -UserPrincipalName 'jdoe@contoso.com'
+        $r.Gate.Source | Should -Be 'On-premises AD'
+        $r.Gate.State | Should -Be 'Failed'
+        $r.Gate.Reason | Should -Match 'ActiveDirectory'
+        $r.AdUser | Should -BeNullOrEmpty
+        Should -Invoke Get-ADUser -Times 0 -Exactly
+    }
+
+    It 'AC18_AdStageUnavailableStillGivesVerdict: no domain controller answers -> Gate Failed with a reason, no exception' {
+        $script:AdThrow = $script:NoDcAd
+        $r = Get-M365OnPremisesFacts -User (New-User @{ onPremisesSyncEnabled = $true; onPremisesSecurityIdentifier = $script:Sid }) -UserPrincipalName 'jdoe@contoso.com'
+        $r.Gate.State | Should -Be 'Failed'
+        $r.Gate.Reason | Should -Not -BeNullOrEmpty
+        $r.Gate.Reason | Should -Match '(?i)domain controller|Active Directory Web Services|contact'
+    }
+
+    It 'AC25_UpnMismatch: matches by on-premises SID first (Get-ADUser -Identity <SID>), no UPN search needed' {
+        $r = Get-M365OnPremisesFacts -User (New-User @{ onPremisesSyncEnabled = $true; onPremisesSecurityIdentifier = $script:Sid }) -UserPrincipalName 'jdoe@contoso.com'
+        $r.Gate.State | Should -Be 'Available'
+        $r.AdMatchedBy | Should -Be 'SID'
+        $r.AdUser.SamAccountName | Should -Be 'jdoe'
+        $script:AdCalls.Count | Should -Be 1
+        $script:AdCalls[0].Identity | Should -Be $script:Sid
+        foreach ($p in 'msDS-cloudExtensionAttribute10', 'proxyAddresses', 'mail', 'pwdLastSet', 'Enabled', 'UserPrincipalName', 'DistinguishedName') {
+            $script:AdCalls[0].Properties | Should -Contain $p
+        }
+    }
+
+    It 'AC25_UpnMismatch: SID not found in AD -> falls back to the UPN with an RFC 4515 escaped LDAP filter' {
+        $script:AdBySid = $null; $script:AdByFilter = @((New-AdUserObj))
+        $r = Get-M365OnPremisesFacts -User (New-User @{ onPremisesSyncEnabled = $true; onPremisesSecurityIdentifier = $script:Sid }) -UserPrincipalName 'j(doe)*@contoso.com'
+        $r.AdMatchedBy | Should -Be 'UserPrincipalName'
+        $r.Gate.State | Should -Be 'Available'
+        $script:AdCalls.Count | Should -Be 2
+        $script:AdCalls[1].LDAPFilter | Should -Match ([regex]::Escape('userPrincipalName=j\28doe\29\2a@contoso.com'))
+    }
+
+    It 'AC19_CloudOnlySkipsAd: cloud-only user -> exactly one Get-ADUser call (the UPN search, no -Identity); nothing found = Available with AdUser empty' {
+        $r = Get-M365OnPremisesFacts -User (New-User) -UserPrincipalName 'jdoe@contoso.com'
+        $r.Gate.State | Should -Be 'Available'
+        $r.AdUser | Should -BeNullOrEmpty
+        $script:AdCalls.Count | Should -Be 1
+        $script:AdCalls[0].Identity | Should -BeNullOrEmpty
+        $script:AdCalls[0].LDAPFilter | Should -Match 'userPrincipalName=jdoe@contoso\.com'
+        @($r.AddressConflicts).Count | Should -Be 0
+        @($script:GraphUris).Count | Should -Be 0 -Because 'with no AD account there is nothing to look up in Graph'
+    }
+
+    It 'AC20_NeverSynced: no cloud user (User $null) -> finds the AD account by UPN' {
+        $script:AdByFilter = @((New-AdUserObj))
+        $r = Get-M365OnPremisesFacts -User $null -UserPrincipalName 'jdoe@contoso.com'
+        $r.AdUser.SamAccountName | Should -Be 'jdoe'
+        $r.AdMatchedBy | Should -Be 'UserPrincipalName'
+        $r.Gate.State | Should -Be 'Available'
+    }
+
+    It 'Edge_ServerAndCredentialPassThrough: -Server is passed to Get-ADUser; neither given means neither is passed' {
+        $null = Get-M365OnPremisesFacts -User $null -UserPrincipalName 'jdoe@contoso.com' -Server 'dc01.contoso.com'
+        $script:AdCalls[0].Server | Should -Be 'dc01.contoso.com'
+        $script:AdCalls.Clear()
+        $null = Get-M365OnPremisesFacts -User $null -UserPrincipalName 'jdoe@contoso.com'
+        $script:AdCalls[0].Server | Should -BeNullOrEmpty
+        $script:AdCalls[0].Credential | Should -BeNullOrEmpty
+    }
+
+    It 'AC22_AddressHeldByAnotherObject: groups, contacts and other users holding the address are returned (type, name, address); own id excluded; GET only' {
+        $script:ConflictUsers = @(
+            @{ id = 'aaaaaaaa-0000-0000-0000-000000000001'; displayName = 'Jane Doe'; userPrincipalName = 'jdoe@contoso.com' },
+            @{ id = 'eeeeeeee-0000-0000-0000-000000000002'; displayName = 'Jane Doe (cloud copy)'; userPrincipalName = 'jdoe@contoso.com' })
+        $script:ConflictGroups = @(@{ id = 'eeeeeeee-0000-0000-0000-000000000001'; displayName = 'Sales Team'; mail = 'jdoe@contoso.com' })
+        $script:ConflictContacts = @(@{ id = 'eeeeeeee-0000-0000-0000-000000000003'; displayName = 'J Doe External'; mail = 'jdoe@contoso.com' })
+        $r = Get-M365OnPremisesFacts -User (New-User @{ onPremisesSyncEnabled = $true; onPremisesSecurityIdentifier = $script:Sid }) -UserPrincipalName 'jdoe@contoso.com'
+        $c = @($r.AddressConflicts)
+        $c.Count | Should -Be 3
+        @($c | Where-Object { $_.Id -eq 'aaaaaaaa-0000-0000-0000-000000000001' }).Count | Should -Be 0
+        (@($c | Where-Object { $_.Type -eq 'group' })[0]).DisplayName | Should -Be 'Sales Team'
+        (@($c | Where-Object { $_.Type -eq 'contact' })[0]).DisplayName | Should -Be 'J Doe External'
+        (@($c | Where-Object { $_.Type -eq 'user' })[0]).DisplayName | Should -Be 'Jane Doe (cloud copy)'
+        @($script:GraphUris | Where-Object { $_ -notmatch '^GET ' }).Count | Should -Be 0
+        @($script:GraphUris | Where-Object { $_ -match '/groups' }).Count | Should -BeGreaterThan 0
+        @($script:GraphUris | Where-Object { $_ -match '/contacts' }).Count | Should -BeGreaterThan 0
+        @($script:GraphUris | Where-Object { $_ -match 'jdoe@contoso\.com' }).Count | Should -BeGreaterThan 0
+    }
+
+    It 'AC22_AddressHeldByAnotherObject: only the PRIMARY smtp address (SMTP:) is looked up, not secondary aliases' {
+        $null = Get-M365OnPremisesFacts -User (New-User @{ onPremisesSyncEnabled = $true; onPremisesSecurityIdentifier = $script:Sid }) -UserPrincipalName 'jdoe@contoso.com'
+        @($script:GraphUris | Where-Object { $_ -match 'alias@contoso\.com' }).Count | Should -Be 0
+    }
+}

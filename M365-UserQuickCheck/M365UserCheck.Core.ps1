@@ -895,4 +895,14 @@ function Get-M365UserFacts {
     }
 }
 
+function Get-M365OnPremisesFacts {
+    # STUB (SQ-011): the on-premises AD stage is not implemented yet.
+    param(
+        [object]$User,
+        [Parameter(Mandatory = $true)][string]$UserPrincipalName,
+        [string]$Server,
+        [pscredential]$Credential
+    )
+    throw 'Get-M365OnPremisesFacts: not implemented (SQ-011)'
+}
 if ($LoadFunctionsOnly) { return }
