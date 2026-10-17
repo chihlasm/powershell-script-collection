@@ -68,6 +68,7 @@ handed out, so it always matches this repository.
 
 | Folder | What it does |
 |---|---|
+| [FolderAccess-Check](FolderAccess-Check/) | Can this user open this folder? Share and folder permissions walked the way Windows does, with a hedged verdict and next steps |
 | [FolderPermissionManager](FolderPermissionManager/) | Browser GUI for NTFS permissions |
 | [RobocopyMigration](RobocopyMigration/) | GUI for server-to-server file migrations |
 | [CopyFileToServer](CopyFileToServer/) | GUI to copy files to many servers |
