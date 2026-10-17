@@ -518,9 +518,11 @@ function Set-ItemOwnerToCurrentUser {
     [CmdletBinding(SupportsShouldProcess)]
     param(
         [Parameter(Mandatory)][AllowEmptyString()][AllowEmptyCollection()][string[]]$Path,
-        [Parameter(Mandatory)][string]$LogFolder
+        [Parameter(Mandatory)][string]$LogFolder,
+        [switch]$Recurse   # SQ-014 STUB
     )
 
+    if ($Recurse) { throw 'Set-ItemOwnerToCurrentUser -Recurse is not implemented' }
     $me = [System.Security.Principal.WindowsIdentity]::GetCurrent()
     Invoke-SingleItemAclChange -Cmdlet $PSCmdlet -Path $Path -Action 'Take ownership' -ActionSlug 'TakeOwnership' `
         -Detail "Owner set to $($me.Name)" -LogFolder $LogFolder -ProceedWhenUnreadable -Change {

@@ -1,6 +1,22 @@
+[CmdletBinding(SupportsShouldProcess)]
 param(
-    [string]$Path
+    [string]$Path,
+    [string]$LogFolder,
+    [switch]$Force,
+    [switch]$LoadFunctionsOnly
 )
+
+# SQ-014 STUB: the tests need this entry point to exist. The implementer replaces the body and
+# moves the old top-level flow below into it.
+. (Join-Path $PSScriptRoot 'FolderPermissions.Core.ps1') -LoadFunctionsOnly
+
+function Invoke-FolderPermissionCli {
+    [CmdletBinding(SupportsShouldProcess)]
+    param([string]$Path, [string]$LogFolder, [switch]$Force)
+    throw 'Invoke-FolderPermissionCli is not implemented'
+}
+
+if ($LoadFunctionsOnly) { return }
 
 # Check if path is provided
 if (-not $Path) {
