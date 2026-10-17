@@ -13,6 +13,7 @@ Every tool writes a report (HTML and/or CSV) you can attach to the ticket.
 | The ticket says...                                                  | Go to                                                        | Changes anything? |
 |---------------------------------------------------------------------|--------------------------------------------------------------|-------------------|
 | "I can't sign in" / "Is my account OK?" (start here)               | [AD-UserQuickCheck](#cant-sign-in)                           | No                |
+| "I can't sign in to Microsoft 365 / Outlook / Teams"                | [M365-UserQuickCheck](#cant-sign-in-to-microsoft-365)        | No                |
 | "My account keeps locking out"                                      | [AD-LockoutDiagnostics](#account-keeps-locking-out)          | No                |
 | "Who has access to what?" / "Who is in Domain Admins?" / offboarding check | [AD-GroupMembership-Export](#who-has-access-to-what)  | No                |
 | "My H: / S: / X: drive is missing" (or only shows up sometimes)     | [DriveMap-Diagnostics](#mapped-drive-is-missing)             | No                |
@@ -23,6 +24,7 @@ Every tool writes a report (HTML and/or CSV) you can attach to the ticket.
 | "I can't reach the server" / "the app won't connect" / "is port 445 open?" | [Network-QuickCheck](#cant-reach-a-server-or-app)            | No                |
 | "Hide this person from the address book (GAL)"                      | [M365-SyncedUserFixes](#hide-someone-from-the-address-book)  | **Yes — AD**      |
 | "Block this user from Microsoft 365 but keep their PC login"        | [M365-SyncedUserFixes](#block-someone-from-microsoft-365)    | **Yes — AD**      |
+| Ran several checks on one ticket and want one note to paste         | [TicketNote](#one-note-for-the-whole-ticket)                 | No                |
 
 Each folder has its own `README.md` with the full detail. This page covers when to use
 each tool and the one command to start with.
@@ -84,13 +86,61 @@ person can sign in.
 
 Add `-OutputPath C:\Temp` to save an HTML report you can attach to the ticket.
 
+When it finishes, a **ticket note** is on your clipboard, ready to paste into the ticket:
+what was checked, what is ruled out, what it could not check, and the next step. Add
+`-TicketNumber 482113` to save the report and the note in that ticket's folder
+(`Documents\TicketNotes\Ticket_482113`). See [One note for the whole ticket](#one-note-for-the-whole-ticket).
+
 **Things to know:**
 - If it says the account is **locked out** and the user keeps getting locked again, go to
   [Account keeps locking out](#account-keeps-locking-out) to find the device causing it.
 - It checks the **on-premises** account only. A user who can sign in to their PC but not to
-  Microsoft 365 needs a cloud-side check (MFA, Conditional Access, cloud password).
+  Microsoft 365 needs the cloud-side check: see
+  [Can't sign in to Microsoft 365](#cant-sign-in-to-microsoft-365).
 - If it warns that it **couldn't reach a domain controller**, the last-sign-in and
   bad-password numbers may be incomplete. Don't treat them as final.
+
+---
+
+## Can't sign in to Microsoft 365
+
+**Folder:** `M365-UserQuickCheck`  **Run from:** your own workstation (or a client server) with
+the `Microsoft.Graph.Authentication` module. It only reads; it changes nothing, even when you
+sign in as the client's Global Administrator. Install the module once with
+`Install-Module Microsoft.Graph.Authentication -Scope CurrentUser`.
+
+Run this when Outlook, Teams or the Microsoft 365 portal will not let someone in. It answers
+**"Can this person sign in to Microsoft 365?"** with the reason in plain English and what to
+do next:
+
+```powershell
+.\Get-M365UserQuickCheck.ps1 -UserPrincipalName jdoe@contoso.com -TenantId contoso.onmicrosoft.com
+```
+
+A browser window opens: **sign in to the client's tenant**. At the permissions prompt, consent
+for yourself only and **leave "Consent on behalf of your organization" unticked**.
+
+Before the answer it prints which tenant and account you are signed in as. **Check that it is
+the right client.** If the sign-in name's domain does not belong to that tenant, it stops with
+"Wrong tenant?" instead of guessing.
+
+It checks whether sign-in is blocked, whether a licence is assigned and working, the user's
+latest sign-in (the error code, Microsoft's own reason, and which Conditional Access policy
+blocked it), MFA methods, and whether ID Protection flags the user as risky.
+
+Add `-TicketNumber 482113` to save the [ticket note](#one-note-for-the-whole-ticket) in the
+ticket's folder, and `-OutputPath C:\Temp` to also save an HTML report and a CSV (with both, all
+three go into `C:\Temp\Ticket_482113`). Without `-OutputPath` no report is written.
+
+**Things to know:**
+- **PROBABLY YES** means nothing blocking was found, but the tenant has no Entra ID P1, so
+  Microsoft does not let tools read sign-in history. Look at the user's sign-ins in the Entra
+  admin center (it keeps seven days of them). This is normal for about half of our clients.
+- Anything listed under **Could not check** was not checked, so it is not ruled out.
+- If Windows signs you in with your own work account instead of the client's, run it again
+  with `-DisableWam` (it then uses a device code, where you choose the account).
+- It does not check the on-premises AD account yet. For a synced user who is blocked, run
+  [AD-UserQuickCheck](#cant-sign-in) too.
 
 ---
 
@@ -357,6 +407,30 @@ and the default gateway.
 Common ports: **445** file shares, **3389** Remote Desktop, **443** websites and most cloud
 apps, **1494 / 2598** Citrix, **1433** SQL Server. A failed **ping** on its own is usually
 fine, because many servers block it. A failed **port** is what matters.
+
+---
+
+## One note for the whole ticket
+
+**Folder:** `TicketNote`  It only writes one text file in the ticket folder; it changes nothing.
+
+Run the quick checks with the same `-TicketNumber`, then join their notes:
+
+```powershell
+..\AD-UserQuickCheck\Get-ADUserQuickCheck.ps1 -Identity jdoe -TicketNumber 482113
+.\Join-TicketNotes.ps1 -TicketNumber 482113
+```
+
+It asks "What did the user report?" and "What did you already try by hand?" (press Enter to
+skip), then saves `TicketNotes_Combined_<date>_<time>.txt` in
+`Documents\TicketNotes\Ticket_482113` and copies it to the clipboard.
+
+**Things to know:**
+- Read **Could not check** before closing the ticket. Those checks did not happen, so they
+  are not ruled out.
+- IP addresses and share paths are removed from the note by default, so it is safe to paste.
+  Add `-FullDetail` to the tool to keep them.
+- Add `-NoClipboard` to leave your clipboard alone.
 
 ---
 

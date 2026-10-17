@@ -15,6 +15,7 @@ handed out, so it always matches this repository.
 | Folder | What it does |
 |---|---|
 | [ServiceDesk-Toolkit](ServiceDesk-Toolkit/) | Builds the service desk bundle and its START HERE page |
+| [TicketNote](TicketNote/) | Joins every quick check's ticket note for one ticket into a single note to paste, and holds the shared note kit (`CaseKit.ps1`) |
 
 ### Active Directory and Group Policy
 
@@ -38,6 +39,7 @@ handed out, so it always matches this repository.
 
 | Folder | What it does |
 |---|---|
+| [M365-UserQuickCheck](M365-UserQuickCheck/) | Can this user sign in to Microsoft 365? Plain-English answer with the sign-in error, licence, MFA and risk, read-only |
 | [Get-EntraPasswordPolicy](Get-EntraPasswordPolicy/) | Tenant password policy, smart lockout and per-user expiry |
 | [Get-M365SecurityEvidence](Get-M365SecurityEvidence/) | MFA, password policy and privileged-account evidence for audits |
 | [Entra-DeviceActivityTimeline](Entra-DeviceActivityTimeline/) | When was this Entra-joined device on, asleep, locked and signed in to? |

@@ -5,6 +5,15 @@ work-in-progress/
 Get-M365SecurityEvidence/*_SecurityEvidence_*/
 AD-GroupMembership-Export/Uploads/
 AD-LockoutDiagnostics/**/Case_*/
+# Ticket folders from -TicketNumber (ticket notes and reports; same reason as Case_*).
+**/Ticket_*/
+# Notes and reports saved outside a Ticket_* folder (-OutputPath without -TicketNumber).
+**/Note_*_*.txt
+**/TicketNotes_Combined_*.txt
+**/UserQuickCheck_*.html
+**/UserQuickCheck_*.csv
+**/M365UserCheck_*.html
+**/M365UserCheck_*.csv
 
 # --- Runtime artifacts from running the tools ---
 Entra-DeviceActivityTimeline/Reports/

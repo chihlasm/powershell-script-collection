@@ -49,7 +49,27 @@
 .PARAMETER OutputPath
     Optional folder. When given, an HTML report and a one-row CSV named
     UserQuickCheck_<sam>_<yyyy-MM-dd_HHmmss> are written there. When omitted the tool is
-    console-only.
+    console-only. With -TicketNumber, this is the folder that holds Ticket_<number>.
+.PARAMETER TicketNumber
+    Optional ticket number (letters, digits, - or _, up to 32 characters). The HTML, the CSV and
+    the ticket note are saved in <root>\Ticket_<number>, where root is -OutputPath if given,
+    else %USERPROFILE%\Documents\TicketNotes. TicketNote\Join-TicketNotes.ps1 later joins
+    every tool's note in that folder into one. A number that does not fit is refused with a
+    [FAIL] line and exit code 3, before anything is checked.
+.PARAMETER NoClipboard
+    Do not copy the ticket note to the clipboard. Without it the note goes to the clipboard,
+    where it can enter clipboard history (Win+V) or the cloud clipboard on Windows PowerShell
+    5.0 and later, and travels over RDP clipboard redirection.
+.PARAMETER FullDetail
+    Keep IP addresses and share paths in the ticket note. By default the note is paste-safe:
+    they are replaced by [IP removed] / [share path removed]. The question at the top is
+    never changed.
+.PARAMETER PassThru
+    Return the result object (Status, ExitCode, Identity, Message, Candidates, MatchedBy, Facts,
+    Assessment, Now, TicketNote) instead of setting an exit code.
+.PARAMETER Quiet
+    Do not write the console report. Combine with -PassThru or -OutputPath. Also leaves the
+    clipboard alone, because another script is the caller.
 .PARAMETER LoadFunctionsOnly
     Define the functions and return without running a check (used by the tests).
 .EXAMPLE
@@ -61,9 +81,22 @@
 .EXAMPLE
     .\Get-ADUserQuickCheck.ps1 -Identity "Jane Doe" -DomainController DC01,DC02
     Find by display name and check only two DCs.
+.EXAMPLE
+    .\Get-ADUserQuickCheck.ps1 -Identity jdoe -TicketNumber 482113
+    Same answer; the HTML, the CSV and the ticket note go into
+    %USERPROFILE%\Documents\TicketNotes\Ticket_482113, and the note is copied to the clipboard.
 .NOTES
-    Exit codes: 0 = can sign in, 1 = cannot / probably not, 2 = user not found or ambiguous,
-    3 = ActiveDirectory module or connectivity failure.
+    Exit codes (without -PassThru): 0 = can sign in, 1 = cannot / probably not, 2 = user not
+    found or ambiguous, 3 = could not run (ActiveDirectory module missing, connectivity
+    failure, or an unusable -TicketNumber).
+
+    TICKET NOTE. Every run ends with a four-part note (Checked, Ruled out, Could not check,
+    Next step) copied to the clipboard. It is also saved as Note_<time>_AD-UserQuickCheck.txt
+    when -TicketNumber or -OutputPath is given. A check is only "Ruled out" when it could
+    really be made: with a domain controller unreachable, "no wrong passwords" is listed under
+    "Could not check", and so is "not locked out" when the PDC emulator could not be read.
+    The note is built by CaseKit.ps1 in this folder (a copy of TicketNote\CaseKit.ps1). If it
+    is missing the check still runs, without a note.
 
     Needs the ActiveDirectory (RSAT) module and permission to read user attributes. Domain
     Users can normally read everything used here.
@@ -110,6 +143,16 @@
         https://learn.microsoft.com/powershell/module/activedirectory/get-addefaultdomainpasswordpolicy
         https://learn.microsoft.com/powershell/module/activedirectory/get-addomain
         https://learn.microsoft.com/powershell/module/activedirectory/get-aduser
+      Ticket note clipboard (in CaseKit.ps1): Set-Clipboard is 5.0, so it is used behind a
+      Get-Command check with a WinForms fallback; STA is the default since 3.0; never clip.exe,
+      because $OutputEncoding is ASCII in 5.1 and would mangle non-ASCII names
+        https://learn.microsoft.com/powershell/scripting/whats-new/what-s-new-in-windows-powershell-50
+        https://learn.microsoft.com/powershell/module/microsoft.powershell.management/set-clipboard?view=powershell-5.1
+        https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_powershell_exe?view=powershell-5.1
+        https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_preference_variables?view=powershell-5.1
+      Clipboard history / cloud clipboard opt-out formats (CanIncludeInClipboardHistory,
+      CanUploadToCloudClipboard; set by the kit's WinForms path, not by Set-Clipboard)
+        https://learn.microsoft.com/windows/win32/dataxchg/clipboard-formats
 
     NOT VERIFIED ON LEARN: that msDS-LogonTimeSyncInterval defaults to 14 days. The
     lastLogonTimestamp page documents "14 days minus random percentage of 5 days" only for
@@ -129,6 +172,18 @@ param(
     [string[]]$DomainController,
 
     [string]$OutputPath,
+
+    # Checked in the script body (Test-TicketNumber in CaseKit.ps1), not with ValidatePattern,
+    # so a mistyped number gets a plain-English [FAIL] line instead of a parameter-binding error.
+    [string]$TicketNumber,
+
+    [switch]$NoClipboard,
+
+    [switch]$FullDetail,
+
+    [switch]$PassThru,
+
+    [switch]$Quiet,
 
     [Parameter(ParameterSetName = 'Load')]
     [switch]$LoadFunctionsOnly
@@ -160,6 +215,12 @@ $script:PasswordExpiryWarnDays = 14
 # default MaxTokenSize value does not create a large enough buffer". Used as a WARN-only
 # early signal on the total (nested) group count, never as a blocker.
 $script:TokenBloatWarnGroups = 120
+
+# A display-name search returns at most this many people (Get-ADUser -ResultSetSize); when it
+# is reached there may be more, so the ticket note says "25 or more".
+$script:NameSearchLimit = 25
+# The ticket note lists this many of an ambiguous search's candidates, then "...and N more".
+$script:NoteCandidateLimit = 5
 
 # =============================================================================
 # Small helpers
@@ -333,20 +394,32 @@ function Get-QuickCheckAssessment {
         Turns the collected facts into a verdict plus plain-English reasons.
     .DESCRIPTION
         Blocker  -> NO. Probable -> PROBABLY NOT. Warning/Info never change the verdict.
+
+        Passes are the plain strings shown under "Looks fine". Cleared holds the same checks as
+        { Code; Message; CouldLook } for the ticket note, where CouldLook says whether the
+        check could really be made: lockout status read from a DC other than the PDC emulator
+        may be stale, and wrong-password counts are per DC (badPwdCount is not replicated), so
+        a missing DC means those two are not confirmed.
+        https://learn.microsoft.com/windows/win32/adschema/a-badpwdcount
     #>
     param([Parameter(Mandatory = $true)][object]$Facts, [datetime]$Now = (Get-Date))
 
     $reasons = New-Object System.Collections.Generic.List[object]
     $passes = New-Object System.Collections.Generic.List[string]
+    $cleared = New-Object System.Collections.Generic.List[object]
     function Add-Reason($Level, $Code, $Message, $Action) {
         $reasons.Add([PSCustomObject]@{ Level = $Level; Code = $Code; Message = $Message; Action = $Action })
+    }
+    function Add-Pass($Code, $Message, [bool]$CouldLook = $true) {
+        $passes.Add($Message)
+        $cleared.Add([PSCustomObject]@{ Code = $Code; Message = $Message; CouldLook = $CouldLook })
     }
 
     # 1. Disabled
     if (-not $Facts.Enabled) {
         Add-Reason 'Blocker' 'Disabled' 'Their account is turned off (disabled).' `
             "Check with their manager that the account should be back in use, then enable it (Enable-ADAccount or Active Directory Users and Computers)."
-    } else { $passes.Add('Account is turned on.') }
+    } else { Add-Pass 'Enabled' 'Account is turned on.' }
 
     # 2. Locked out
     if ($Facts.LockedOut) {
@@ -359,7 +432,7 @@ function Get-QuickCheckAssessment {
         }
         Add-Reason 'Blocker' 'LockedOut' ("Their account is locked because of too many wrong passwords.$until") `
             "Unlock it (Unlock-ADAccount). Then ask whether an old password is saved on a phone, laptop or mapped drive - if it locks again, run AD-LockoutDiagnostics\Diagnose-ADAccountLockout.ps1."
-    } else { $passes.Add('Not locked out.') }
+    } else { Add-Pass 'NotLocked' 'Not locked out.' (-not $Facts.PdcNote) }
 
     # 4. Account expiry
     $ax = $Facts.AccountExpiry
@@ -369,7 +442,7 @@ function Get-QuickCheckAssessment {
     } elseif (-not $ax.Never -and $ax.DaysLeft -le $script:AccountExpiryWarnDays) {
         Add-Reason 'Warning' 'AccountExpiresSoon' ("Their account expires $(Format-When $ax.Expires $Now).") `
             "If they should keep working past that date, ask their manager to request an extension before then."
-    } else { $passes.Add($(if ($ax.Never) { 'Account does not expire.' } else { "Account expires $(Format-When $ax.Expires $Now)." })) }
+    } else { Add-Pass 'AccountNotExpired' $(if ($ax.Never) { 'Account does not expire.' } else { "Account expires $(Format-When $ax.Expires $Now)." }) }
 
     # 5. Password
     $pw = $Facts.Password
@@ -381,11 +454,11 @@ function Get-QuickCheckAssessment {
         Add-Reason 'Blocker' 'PasswordExpired' "Their password expired$on." `
             "Reset their password (Set-ADAccountPassword) or have them change it from a signed-in PC. Tell them to update it on their phone too."
     } elseif ($pw.NeverExpires) {
-        $passes.Add('Password is set not to expire.')
+        Add-Pass 'PasswordOk' 'Password is set not to expire.'
     } elseif ($pw.Expiry -and $pw.DaysLeft -le $script:PasswordExpiryWarnDays) {
         Add-Reason 'Warning' 'PasswordExpiresSoon' ("Their password expires $(Format-When $pw.Expiry $Now).") `
             "Ask them to change it soon (Ctrl+Alt+Del, then Change a password), then update it on their phone and any saved connections."
-    } else { $passes.Add($(if ($pw.Expiry) { "Password is fine until $($pw.Expiry.ToString('yyyy-MM-dd'))." } else { 'Password is not expired.' })) }
+    } else { Add-Pass 'PasswordOk' $(if ($pw.Expiry) { "Password is fine until $($pw.Expiry.ToString('yyyy-MM-dd'))." } else { 'Password is not expired.' }) }
 
     # 7. Restrictions
     $ws = @($Facts.Workstations)
@@ -402,7 +475,7 @@ function Get-QuickCheckAssessment {
             "Make sure they are using their smart card. If it is lost or broken, arrange a replacement."
     }
     if ($ws.Count -eq 0 -and -not $Facts.LogonHoursRestricted -and -not $Facts.SmartcardRequired) {
-        $passes.Add('No limits on where, when or how they sign in.')
+        Add-Pass 'NoSignInLimits' 'No limits on where, when or how they sign in.'
     }
 
     # 3. Bad passwords (information and warning only - never changes the verdict)
@@ -422,7 +495,9 @@ function Get-QuickCheckAssessment {
         }
         Add-Reason $lvl 'BadPasswords' $msg `
             "Ask if they recently changed their password. An old one saved on a phone, laptop or mapped drive keeps retrying and causes lockouts."
-    } elseif ($answered.Count -gt 0) { $passes.Add('No recent wrong-password attempts on the domain controllers checked.') }
+    } elseif ($answered.Count -gt 0) {
+        Add-Pass 'NoBadPasswords' 'No recent wrong-password attempts on the domain controllers checked.' (@($Facts.UnreachableDCs).Count -eq 0)
+    }
 
     # Unreachable DCs / PDC fallback
     foreach ($dc in @($Facts.UnreachableDCs)) {
@@ -449,7 +524,7 @@ function Get-QuickCheckAssessment {
 
     $order = @{ Blocker = 0; Probable = 1; Warning = 2; Info = 3 }
     $sorted = @($reasons | Sort-Object -Property @{ Expression = { $order[$_.Level] } })
-    return [PSCustomObject]@{ Verdict = $verdict; ExitCode = $exit; Reasons = $sorted; Passes = $passes.ToArray() }
+    return [PSCustomObject]@{ Verdict = $verdict; ExitCode = $exit; Reasons = $sorted; Passes = $passes.ToArray(); Cleared = $cleared.ToArray() }
 }
 
 # =============================================================================
@@ -488,7 +563,7 @@ function Resolve-QuickCheckUser {
         $matchedBy = 'sign-in name'
         if ($found.Count -eq 0) {
             $e2 = ConvertTo-LdapFilterValue $id
-            $found = @(Get-ADUser @ad -LDAPFilter "(&(objectCategory=person)(objectClass=user)(|(anr=$e2)(displayName=$e2)))" -Properties $props -ResultSetSize 25 -ErrorAction Stop)
+            $found = @(Get-ADUser @ad -LDAPFilter "(&(objectCategory=person)(objectClass=user)(|(anr=$e2)(displayName=$e2)))" -Properties $props -ResultSetSize $script:NameSearchLimit -ErrorAction Stop)
             $matchedBy = 'name search'
         }
     }
@@ -928,30 +1003,200 @@ function Export-QuickCheckReport {
     return [PSCustomObject]@{ Html = $html; Csv = $csv }
 }
 
+# =============================================================================
+# Ticket note (CaseKit.ps1)
+# =============================================================================
+
+function ConvertTo-UserQuickCheckTicketNote {
+    <#
+    .SYNOPSIS
+        Maps a quick-check result to a ticket note. The gate decisions for this tool live here.
+    .DESCRIPTION
+        Blocker -> PROBLEM, Probable and Warning -> WARNING, Info -> INFO. An unreachable DC, the
+        PDC fallback and each Facts.Notes entry (something not readable) -> Could not check.
+        Cleared checks go to Ruled out only when the assessment says it could look (see
+        Get-QuickCheckAssessment). Next steps are the Blocker and Probable actions.
+
+        When the account was never read (Error / NotFound / Ambiguous) the note says why in
+        the headline, rules nothing out, and says the account checks did not run.
+
+        -Credential only contributes its user name, shown as "(as <name>)" in the stamp.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][object]$Result,
+        [string[]]$EvidencePaths = @(),
+        [System.Management.Automation.PSCredential]$Credential
+    )
+    $items = New-Object System.Collections.Generic.List[object]
+    $next = New-Object System.Collections.Generic.List[string]
+    $id = [string]$Result.Identity
+    $domain = ''
+
+    if ($Result.Status -eq 'Ok') {
+        $f = $Result.Facts; $a = $Result.Assessment
+        $domain = Get-DomainDnsFromDn -DistinguishedName $f.DistinguishedName
+        $headline = 'Can {0} sign in right now? {1}' -f $f.DisplayName, $a.Verdict
+        $scopeLine = 'AD account {0} in {1}, on {2} of {3} domain controllers.' -f $f.SamAccountName, $domain, $f.DcsChecked, $f.DcsTotal
+
+        foreach ($r in @($a.Reasons)) {
+            switch ($r.Code) {
+                # Listed per DC below, in the note's own words.
+                'DcUnreachable' { continue }
+                'PdcFallback' { $items.Add((New-TicketNoteItem -Kind NotChecked -Text $r.Message)); continue }
+                default {
+                    $kind = switch ($r.Level) { 'Blocker' { 'Problem' } 'Info' { 'Info' } default { 'Warning' } }
+                    $items.Add((New-TicketNoteItem -Kind $kind -Text $r.Message))
+                }
+            }
+        }
+        foreach ($dc in @($f.UnreachableDCs)) {
+            $items.Add((New-TicketNoteItem -Kind NotChecked -Text ('{0}: wrong-password count and last sign-in (could not reach it).' -f $dc)))
+        }
+        foreach ($n in @($f.Notes)) { $items.Add((New-TicketNoteItem -Kind NotChecked -Text $n)) }
+        foreach ($c in @($a.Cleared)) { $items.Add((New-TicketNoteItem -Kind Clear -Text $c.Message -CouldLook ([bool]$c.CouldLook))) }
+
+        foreach ($r in @($a.Reasons | Where-Object { $_.Level -eq 'Blocker' -or $_.Level -eq 'Probable' })) { $next.Add($r.Action) }
+        if ($next.Count -eq 0 -and $a.Verdict -eq 'YES') {
+            $next.Add('No account problem found. Look at the device, the network or the app next (DriveMap-Diagnostics, Network-QuickCheck).')
+        }
+    } else {
+        $notRun = 'The account checks did not run (turned on, locked out, expiry, password, sign-in limits, wrong passwords).'
+        switch ($Result.Status) {
+            'NotFound' {
+                $headline = "Sign-in check did not run - no user matched '$id'"
+                $next.Add('Check the spelling, or try their sign-in name (for example jdoe or jdoe@contoso.com), then run the check again.')
+            }
+            'Ambiguous' {
+                $cands = @($Result.Candidates)
+                # The name search stops at $script:NameSearchLimit, so a full page means "or more".
+                $howMany = if ($cands.Count -ge $script:NameSearchLimit) { "$($script:NameSearchLimit) or more" } else { [string]$cands.Count }
+                $headline = "Sign-in check did not run - '$id' matches $howMany people"
+                # Enough to recognise the right person; not a directory dump in the ticket.
+                foreach ($c in @($cands | Select-Object -First $script:NoteCandidateLimit)) {
+                    $items.Add((New-TicketNoteItem -Kind Info -Text ('Matches {0} ({1}).' -f $c.DisplayName, $c.SamAccountName)))
+                }
+                if ($cands.Count -gt $script:NoteCandidateLimit) {
+                    $more = if ($cands.Count -ge $script:NameSearchLimit) { "at least $($cands.Count - $script:NoteCandidateLimit)" } else { [string]($cands.Count - $script:NoteCandidateLimit) }
+                    $items.Add((New-TicketNoteItem -Kind Info -Text "...and $more more (refine the search)."))
+                }
+                if ($cands.Count -gt 0) { $domain = Get-DomainDnsFromDn -DistinguishedName ([string]$cands[0].DistinguishedName) }
+                $next.Add('Run it again with the exact sign-in name of the right person.')
+            }
+            default {
+                $headline = "Sign-in check for '$id' did not run - could not read Active Directory"
+                if ($Result.Message) { $items.Add((New-TicketNoteItem -Kind Problem -Text $Result.Message)) }
+                $next.Add('Check that this PC can reach a domain controller (and that -Server / -Credential are right), then run the check again.')
+            }
+        }
+        $scopeLine = "Looked up '$id' in Active Directory."
+        $items.Add((New-TicketNoteItem -Kind NotChecked -Text $notRun))
+    }
+
+    if (-not $domain) { $domain = if ($env:USERDNSDOMAIN) { $env:USERDNSDOMAIN.ToLower() } else { 'not known' } }
+    $stampArgs = @{ ScopeLabel = 'Domain'; Scope = $domain }
+    if ($Result.Now -is [datetime]) { $stampArgs['Now'] = $Result.Now }
+    if ($Credential) { $stampArgs['RunAs'] = $Credential.UserName }
+    $stamp = New-TicketNoteStamp @stampArgs
+
+    return New-TicketNote -Tool 'AD-UserQuickCheck' -Headline $headline -ScopeLine $scopeLine -Items $items.ToArray() `
+        -NextSteps $next.ToArray() -Stamp $stamp -EvidencePaths $EvidencePaths
+}
+
+# The ticket-note kit ships beside this script (a copy of TicketNote\CaseKit.ps1). Without it
+# the check still runs; only the note is skipped.
+$kit = Join-Path $PSScriptRoot 'CaseKit.ps1'
+if (Test-Path -LiteralPath $kit) { . $kit } else { $script:CaseKitMissing = $true }
+
 if ($LoadFunctionsOnly) { return }
 
 # =============================================================================
 # Main
 # =============================================================================
 
+# A result for the cases where the check cannot start (-PassThru callers get it instead of exit 3).
+function New-QuickCheckStartFailure([string]$Message) {
+    [PSCustomObject]@{
+        Status = 'Error'; ExitCode = 3; Identity = $Identity; Message = $Message
+        Candidates = @(); MatchedBy = ''; Facts = $null; Assessment = $null; Now = (Get-Date); TicketNote = $null
+    }
+}
+
+if ($TicketNumber -and $script:CaseKitMissing) {
+    if (-not $Quiet) { Write-Status "CaseKit.ps1 is missing from this folder, so -TicketNumber $TicketNumber was ignored: the reports go to -OutputPath (if given) and there is no ticket note this time." 'WARN' }
+    $TicketNumber = ''
+    $script:CaseKitWarned = $true
+}
+if ($TicketNumber -and -not (Test-TicketNumber -TicketNumber $TicketNumber)) {
+    $msg = "'$TicketNumber' is not a usable ticket number. Use letters, digits, - or _ (up to 32 characters, starting with a letter or digit), for example 482113."
+    if (-not $Quiet) { Write-Status $msg 'FAIL' }
+    if ($PassThru) { return (New-QuickCheckStartFailure $msg) }
+    exit 3
+}
+
 try {
     Import-Module ActiveDirectory -ErrorAction Stop
 } catch {
-    Write-Status "The ActiveDirectory PowerShell module is not available: $($_.Exception.Message)" 'FAIL'
-    Write-Status 'Install the RSAT Active Directory tools, or run this on a domain controller / admin server.' 'INFO'
+    $msg = "The ActiveDirectory PowerShell module is not available: $($_.Exception.Message)"
+    if (-not $Quiet) {
+        Write-Status $msg 'FAIL'
+        Write-Status 'Install the RSAT Active Directory tools, or run this on a domain controller / admin server.' 'INFO'
+    }
+    if ($PassThru) { return (New-QuickCheckStartFailure $msg) }
     exit 3
 }
 
 $result = Invoke-UserQuickCheck -Identity $Identity -Server $Server -Credential $Credential -DomainController $DomainController
-Write-QuickCheckConsole -Result $result
+if (-not $Quiet) { Write-QuickCheckConsole -Result $result }
 
-if ($OutputPath -and $result.Status -eq 'Ok') {
+# Where the files go: with -TicketNumber, <OutputPath or the default root>\Ticket_<n> (reports
+# and note together, so the note's evidence names sit beside it); with only -OutputPath, that
+# folder; with neither, no files (the note goes to the clipboard, or the console).
+$folder = $OutputPath
+if ($TicketNumber) {
+    $root = if ($OutputPath) { $OutputPath } else { Get-TicketNoteDefaultRoot }
     try {
-        $files = Export-QuickCheckReport -Result $result -OutputPath $OutputPath
-        Write-Status "Report saved: $($files.Html)" 'PASS'
-        Write-Status "CSV saved   : $($files.Csv)" 'PASS'
+        $folder = Resolve-TicketFolder -TicketNumber $TicketNumber -Root $root
     } catch {
-        Write-Status "Could not write the report to ${OutputPath}: $($_.Exception.Message)" 'WARN'
+        if (-not $Quiet) { Write-Status "Could not create the ticket folder under ${root}: $($_.Exception.Message)" 'WARN' }
     }
 }
+
+$evidence = @()
+if ($folder -and $result.Status -eq 'Ok') {
+    try {
+        $files = Export-QuickCheckReport -Result $result -OutputPath $folder
+        $evidence = @($files.Html, $files.Csv)
+        if (-not $Quiet) {
+            Write-Status "Report saved: $($files.Html)" 'PASS'
+            Write-Status "CSV saved   : $($files.Csv)" 'PASS'
+        }
+    } catch {
+        if (-not $Quiet) { Write-Status "Could not write the report to ${folder}: $($_.Exception.Message)" 'WARN' }
+    }
+}
+
+$note = $null
+if ($script:CaseKitMissing) {
+    if (-not $Quiet -and -not $script:CaseKitWarned) { Write-Status 'CaseKit.ps1 is missing from this folder - no ticket note this time.' 'WARN' }
+} else {
+    # The note is extra: a failure while building or saving it never changes the answer or the
+    # exit code. The check's own result above stands.
+    try {
+        $note = ConvertTo-UserQuickCheckTicketNote -Result $result -EvidencePaths $evidence -Credential $Credential
+        if ($Quiet) {
+            # Another script is the caller: no console and no clipboard. The note is still saved
+            # when a folder is in play, and it is always on the result object.
+            if ($folder) { $null = Save-TicketNote -Note $note -Folder $folder -PasteSafe:(-not $FullDetail) }
+        } else {
+            Write-Host ''
+            $null = Publish-TicketNote -Note $note -Folder $folder -PasteSafe:(-not $FullDetail) -NoClipboard:$NoClipboard
+        }
+    } catch {
+        if (-not $Quiet) { Write-Status "Could not make the ticket note: $($_.Exception.Message). The check above is still valid." 'WARN' }
+        $note = $null
+    }
+}
+$result | Add-Member -NotePropertyName TicketNote -NotePropertyValue $note -Force
+
+if ($PassThru) { return $result }
 exit $result.ExitCode
