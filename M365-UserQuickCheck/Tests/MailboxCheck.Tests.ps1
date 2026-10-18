@@ -355,6 +355,8 @@ Describe 'running the check' {
             }
             $r = Invoke-Entry
             $r.TicketNote | Should -Not -BeNullOrEmpty
+            # The kit is loaded inside Invoke-Entry's scope only; load it here to render the note.
+            . (Join-Path $script:Root 'CaseKit.ps1')
             foreach ($paste in @($false, $true)) {
                 $text = (ConvertTo-TicketNoteText -Note $r.TicketNote -PasteSafe:$paste) -join "`n"
                 $text | Should -Match 'ExternalRuleForward'
@@ -454,6 +456,13 @@ Describe 'running the check' {
             Mock Get-EXOMailboxStatistics { throw 'stats denied' }
             $r = Invoke-Entry
             @($r.Assessment.CouldNotCheck | Where-Object { $_ }).Count | Should -BeGreaterThan 0 -Because 'a section that failed is always listed (AC18, AC19 spirit)'
+            $size = @($r.Assessment.CouldNotCheck | Where-Object { $_.Source -eq 'Mailbox size' })
+            $size.Count | Should -Be 1 -Because 'the failed section is named'
+            $size[0].Reason | Should -Match 'stats denied' -Because 'the reason is the error'
+            ($r.Facts.FactRows | Where-Object { $_.Item -eq 'Total size' }).Value | Should -Be 'not available'
+            $r.ExitCode | Should -Be 2 -Because 'a section that could not be read never gives the all-clear'
+            ($r.Assessment.Lines -join "`n") | Should -Not -Match 'No takeover signs found'
+            (ConvertTo-Json -InputObject @($r.TicketNote.RuledOut) -Compress) | Should -Not -Match '(?i)size'
         }
     }
 }

@@ -14,6 +14,7 @@ Every tool writes a report (HTML and/or CSV) you can attach to the ticket.
 |---------------------------------------------------------------------|--------------------------------------------------------------|-------------------|
 | "I can't sign in" / "Is my account OK?" (start here)               | [AD-UserQuickCheck](#cant-sign-in)                           | No                |
 | "I can't sign in to Microsoft 365 / Outlook / Teams"                | [M365-UserQuickCheck](#cant-sign-in-to-microsoft-365)        | No                |
+| "Mail is going missing" / "Who can see this mailbox?"              | [Get-M365MailboxCheck](#mail-going-missing--who-can-see-this-mailbox) (in M365-UserQuickCheck) | No                |
 | "My account keeps locking out"                                      | [AD-LockoutDiagnostics](#account-keeps-locking-out)          | No                |
 | "Who has access to what?" / "Who is in Domain Admins?" / offboarding check | [AD-GroupMembership-Export](#who-has-access-to-what)  | No                |
 | "I get 'Access denied' on a folder" / "Can this user open this folder?" | [FolderAccess-Check](#access-denied-on-a-folder)        | No                |
@@ -142,6 +143,37 @@ three go into `C:\Temp\Ticket_482113`). Without `-OutputPath` no report is writt
   with `-DisableWam` (it then uses a device code, where you choose the account).
 - It does not check the on-premises AD account yet. For a synced user who is blocked, run
   [AD-UserQuickCheck](#cant-sign-in) too.
+
+---
+
+## Mail going missing / who can see this mailbox?
+
+**Folder:** `M365-UserQuickCheck`  **Run from:** your own workstation with the
+`ExchangeOnlineManagement` module (`Install-Module ExchangeOnlineManagement -Scope CurrentUser`;
+3.7.0 or later for the message trace). It only reads; it changes nothing, even when you sign in
+as the client's Global Administrator.
+
+Run this when mail disappears, arrives late, or someone asks who can open or send as a mailbox:
+
+```powershell
+.\Get-M365MailboxCheck.ps1 -Identity accounts@contoso.com
+```
+
+Sign in to the client's tenant. Before any mailbox is read it prints the tenant and the account
+you signed in as. **Check that it is the right client** (Ctrl+C if not).
+
+It lists who has Full Access, Send As and Send on Behalf, the mailbox's forwarding, every inbox
+rule (hidden ones included), size against the quota, archive, holds, and a message trace for
+the last 7 days (`-TraceDays 1` to `10`).
+
+**If the first line says "Possible account takeover: do NOT reset the password or delete the
+rule yet. Escalate."**, do exactly that: touch nothing, escalate, and check CIPP's BEC report
+for this user. **PARTLY CHECKED** means your account could not read some sections (each is
+named with the role it needs): nothing there is ruled out.
+
+Add `-OutputPath C:\Temp` for the HTML report and CSVs (rule conditions and message subjects
+are only in those) and `-TicketNumber 482113` for the ticket note. The note never contains
+rule conditions, full addresses or message subjects.
 
 ---
 
