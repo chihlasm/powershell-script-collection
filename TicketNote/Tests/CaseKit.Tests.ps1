@@ -182,6 +182,31 @@ Describe 'paste-safe redaction' {
         (Protect-TicketNoteText -Line 'portal https://contoso.com/help') | Should -Be 'portal https://contoso.com/help'
     }
 
+    It 'a quoted path with an apostrophe in a folder name is removed whole, double- or single-quoted (SQ-013)' {
+        # An apostrophe inside the path is not the closing quote: the path ends at the matching
+        # quote followed by whitespace, punctuation or the end of the line.
+        (Protect-TicketNoteText -Line 'Share and folder permissions of "\\FS01\HR\Joe''s Reviews" for jdoe.') | Should -Be 'Share and folder permissions of "[share path removed]" for jdoe.'
+        (Protect-TicketNoteText -Line 'Permissions of "\\FS01\Joe''s Team\Reviews" for jdoe.') | Should -Be 'Permissions of "[share path removed]" for jdoe.'
+        (Protect-TicketNoteText -Line 'path "\\FS01\HR\Joe''s Reviews"') | Should -Be 'path "[share path removed]"'
+        (Protect-TicketNoteText -Line "Cannot find path '\\FS01\HR\Joe's Reviews' because it does not exist.") | Should -Be "Cannot find path '[share path removed]' because it does not exist."
+        (Protect-TicketNoteText -Line "Cannot find path '\\FS01\Joe's Team\Reviews' because it does not exist.") | Should -Be "Cannot find path '[share path removed]' because it does not exist."
+        (Protect-TicketNoteText -Line "not read ('\\FS01\HR\Joe's Reviews')") | Should -Be "not read ('[share path removed]')"
+        (Protect-TicketNoteText -Line "Two: '\\fs01\a', '\\fs02\b'.") | Should -Be "Two: '[share path removed]', '[share path removed]'."
+    }
+
+    It 'an unquoted path with an apostrophe in a folder name leaves nothing of the name behind (SQ-013)' {
+        (Protect-TicketNoteText -Line 'at \\FS01\HR\Joe''s now') | Should -Be 'at [share path removed] now'
+        (Protect-TicketNoteText -Line 'at \\FS01\Joe''s Team\Reviews now') | Should -Be 'at [share path removed] now'
+    }
+
+    It 'an IPv6 literal host name (*.ipv6-literal.net) counts as an IP address (SQ-013)' {
+        # MS-DTYP 2.2.57: an IPv6 host name is the address with hyphens for colons, plus ".ipv6-literal.net".
+        (Protect-TicketNoteText -Line 'reached 2001-DB8-D87-FFFF-CCAA-132B-1-221B.ipv6-literal.net fine') | Should -Be 'reached [IP removed] fine'
+        (Protect-TicketNoteText -Line 'reached fe80--1s4.ipv6-literal.net.') | Should -Be 'reached [IP removed].'
+        (Protect-TicketNoteText -Line 'share \\2001-db8--5.ipv6-literal.net\Finance now') | Should -Be 'share [share path removed] now'
+        (Protect-TicketNoteText -Line 'not an address: cafe.ipv6-literal.network') | Should -Be 'not an address: cafe.ipv6-literal.network'
+    }
+
     It 'keeps two share paths in one sentence apart, and is idempotent' {
         $once = Protect-TicketNoteText -Line '\\fs01\a is on \\fs02\b'
         $once | Should -Be '[share path removed] is on [share path removed]'

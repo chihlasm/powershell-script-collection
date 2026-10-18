@@ -653,6 +653,67 @@ Describe 'verdict wording, exit codes, read-only, report (AC21-AC24)' {
                 ($w.Extent.StartOffset -ge $script:ReportFunction.Extent.StartOffset -and $w.Extent.EndOffset -le $script:ReportFunction.Extent.EndOffset) | Should -BeTrue -Because "$($w.Extent.Text) is outside Export-FolderAccessReport"
             }
         }
+        It "calls the kit's writers (note file, ticket folder, clipboard) only from the main block, never from a function" {
+            # The main block is everything after "if ($LoadFunctionsOnly) { return }", outside any function.
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:ScriptPath, [ref]$null, [ref]$null)
+            $gate = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.IfStatementAst] -and $n.Extent.Text -match '^if \(\$LoadFunctionsOnly\)' }, $false)
+            $gate | Should -Not -BeNullOrEmpty
+            $functions = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true))
+            $kitWriters = @('Save-TicketNote', 'Save-TicketNoteLines', 'Publish-TicketNote', 'Resolve-TicketFolder', 'Copy-TicketNoteToClipboard', 'Invoke-WinFormsClipboard', 'Set-Clipboard')
+            $calls = @($script:CommandAsts | Where-Object { $kitWriters -contains $_.GetCommandName() })
+            $calls.Count | Should -BeGreaterThan 0
+            foreach ($c in $calls) {
+                $c.Extent.StartOffset | Should -BeGreaterThan $gate.Extent.EndOffset -Because "$($c.Extent.Text) runs before the -LoadFunctionsOnly return"
+                $inside = @($functions | Where-Object { $c.Extent.StartOffset -ge $_.Extent.StartOffset -and $c.Extent.EndOffset -le $_.Extent.EndOffset })
+                $inside.Count | Should -Be 0 -Because "$($c.Extent.Text) is inside function $(@($inside | ForEach-Object { $_.Name }) -join ', ')"
+            }
+        }
+    }
+
+    Context 'AC22 read-only by construction: the ticket-note kit this tool dot-sources (CaseKit.ps1)' {
+        BeforeAll {
+            $kitPath = Join-Path $script:Root 'CaseKit.ps1'
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($kitPath, [ref]$null, [ref]$null)
+            $defined = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) | ForEach-Object { $_.Name })
+            $script:KitCommandAsts = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true))
+            $script:KitCommands = @($script:KitCommandAsts | ForEach-Object { $_.GetCommandName() } | Where-Object { $_ -and $defined -notcontains $_ } | Sort-Object -Unique)
+            $script:KitMemberAsts = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))
+            $script:KitMethods = @($script:KitMemberAsts | ForEach-Object { $_.Member.Extent.Text } | Sort-Object -Unique)
+            $script:KitNewObjectTypes = @($script:KitCommandAsts | Where-Object { $_.GetCommandName() -eq 'New-Object' } | ForEach-Object { $_.CommandElements[1].Extent.Text.Trim("'") } | Sort-Object -Unique)
+        }
+        It 'calls only allowlisted commands; its only writers are New-Item -ItemType Directory and Set-Clipboard' {
+            $allowed = @(
+                'Add-Type', 'ForEach-Object', 'Get-Command', 'Get-Date', 'Join-Path', 'New-Item', 'New-Object', 'Set-Clipboard',
+                'Test-Path', 'Where-Object', 'Write-Host', 'Write-Verbose'
+            )
+            foreach ($c in $script:KitCommands) { $allowed | Should -Contain $c -Because "$c is not on the kit's allowlist" }
+            foreach ($bad in 'Remove-Item', 'Move-Item', 'Copy-Item', 'Rename-Item', 'Set-Acl', 'Set-Content', 'Add-Content', 'Out-File', 'Clear-Content', 'Set-ItemProperty', 'New-ItemProperty', 'Export-Csv', 'Start-Process', 'Invoke-Expression') {
+                $script:KitCommands | Should -Not -Contain $bad
+            }
+            $newItems = @($script:KitCommandAsts | Where-Object { $_.GetCommandName() -eq 'New-Item' })
+            $newItems.Count | Should -BeGreaterThan 0
+            foreach ($n in $newItems) {
+                $n.Extent.Text | Should -Match '-ItemType Directory\b' -Because 'the kit only creates folders with New-Item; files go through WriteAllLines'
+            }
+        }
+        It 'calls only allowlisted .NET methods; its only writers are File.WriteAllLines and Clipboard.SetDataObject' {
+            $allowed = @(
+                'Abs', 'Add', 'Contains', 'EndsWith', 'GetApartmentState', 'GetFileName', 'GetFolderPath', 'GetUtcOffset', 'IsNullOrEmpty',
+                'IsNullOrWhiteSpace', 'Replace', 'SetData', 'SetDataObject', 'Substring', 'ToArray', 'ToString', 'TryParse', 'WriteAllLines'
+            )
+            foreach ($m in $script:KitMethods) { $allowed | Should -Contain $m -Because ".$m() is not on the kit's allowlist" }
+            foreach ($bad in 'WriteAllText', 'AppendAllText', 'AppendAllLines', 'WriteAllBytes', 'Delete', 'Move', 'Copy', 'SetAccessControl', 'Create', 'OpenWrite', 'MoveTo', 'CopyTo') {
+                $script:KitMethods | Should -Not -Contain $bad
+            }
+            # Names alone can't tell String.Replace from File.Replace: every call on File or Directory is WriteAllLines.
+            $io = @($script:KitMemberAsts | Where-Object { $_.Expression.Extent.Text -match '(?i)IO\.(File|Directory)\]$' })
+            $io.Count | Should -BeGreaterThan 0
+            foreach ($m in $io) { $m.Member.Extent.Text | Should -Be 'WriteAllLines' -Because "$($m.Extent.Text) is a file-system call" }
+        }
+        It 'creates only allowlisted .NET types' {
+            $allowed = @('System.Collections.Generic.List[string]', 'System.IO.MemoryStream', 'System.Text.UTF8Encoding', 'System.Windows.Forms.DataObject')
+            foreach ($t in $script:KitNewObjectTypes) { $allowed | Should -Contain $t }
+        }
     }
 
     It 'AC23_WritesHtmlAndCsvNamedBySamAndTimestamp_CsvHasOneRowPerEvidenceEntry' {
@@ -1053,13 +1114,109 @@ Describe 'parameter names match the real CIM cmdlets and Get-Acl (SQUAD.md: mock
 Describe 'narrowest group (AC28-AC32)' {
     BeforeAll {
         function New-Cand {
-            param([string]$Sid, [string]$Name, [int]$Members, [string]$Class = 'group', [int]$AdminCount = 0, [string[]]$Privileged = @())
-            [PSCustomObject]@{ Sid = $Sid; Name = $Name; ObjectClass = $Class; MemberCount = $Members; AdminCount = $AdminCount; PrivilegedVia = @($Privileged) }
+            param([string]$Sid, [string]$Name, [int]$Members, [string]$Class = 'group', [int]$AdminCount = 0, [string[]]$Privileged = @(),
+                  [bool]$Incomplete = $false, [string[]]$Parents = @())
+            [PSCustomObject]@{ Sid = $Sid; Name = $Name; ObjectClass = $Class; MemberCount = $Members; AdminCount = $AdminCount; PrivilegedVia = @($Privileged)
+                Incomplete = $Incomplete; ParentSids = @($Parents) }
         }
         $script:AdminsSid = "$($script:Dom)-1109"
         $script:OpsSid = "$($script:Dom)-1113"
+        $script:DomAdmins = "$($script:Dom)-512"
         $script:FirstStep = 'Narrowest existing group that grants this: '
         $script:NoGroupStep = 'No existing group grants this. Ask who owns the folder which group should have access, then add that group (not the user) with FolderPermissionManager, which logs the change.'
+        $script:EscalateStep = 'Only privileged groups grant this. Escalate to a senior engineer: '
+        $script:Approval = 'Get senior approval first, then add jdoe to '
+        # The add step for the recommended group, and where in it the approval condition sits.
+        function Get-AddStep($Result, [string]$Group) { @($Result.NextSteps | Where-Object { $_ -like "$($script:FirstStep)$Group*" }) }
+        function Assert-ApprovalInsideAddStep([string]$Text, [string]$Group) {
+            $line = @(($Text -split "`r?`n") | Where-Object { $_ -match ([regex]::Escape("$($script:FirstStep)$Group")) })
+            $line.Count | Should -Be 1 -Because "the add step for $Group appears once"
+            $line[0] | Should -Match ([regex]::Escape("$($script:Approval)$Group"))
+            $line[0].IndexOf('Get senior approval first') | Should -BeLessThan $line[0].IndexOf('add jdoe to') -Because 'the approval comes before the action, inside the same step'
+        }
+    }
+
+    It 'D017_AWellKnownPrivilegedGroupIsNeverRecommended_EvenWithoutPrivilegedVia: RID <_>' -ForEach @(512, 516, 518, 519, 520, 521) {
+        # Matched on the candidate's own SID (Find-PrivilegedGroupBySid), not on what the walk found.
+        $sid = "$($script:Dom)-$_"
+        $r = Invoke-Assess @{
+            FolderAces = @(New-Ace $sid "RID $_" $script:Mask.Full)
+            CandidateGroups = @(New-Cand $sid "RID $_" 2)
+        }
+        $r.Verdict | Should -Be 'PROBABLY NO'
+        $r.Recommendation | Should -BeNullOrEmpty
+        (@($r.NextSteps) -join "`n") | Should -Not -Match ([regex]::Escape($script:FirstStep))
+        @($r.NextSteps | Where-Object { $_ -like "$($script:EscalateStep)*" }).Count | Should -Be 1
+        $r.NextSteps | Should -Not -Contain $script:NoGroupStep
+        @($r.NextSteps)[-1] | Should -Be $script:EffectiveStep
+    }
+
+    It 'D017_DomainAdminsTheOnlyAllow_TypicalHomeFolder_EscalateNamingTheGroup' {
+        $r = Invoke-Assess @{
+            FolderAces = @(
+                (New-Ace 'S-1-5-18' 'SYSTEM' $script:Mask.Full), (New-Ace $script:Sid.BuiltinAdmins 'BUILTIN\Administrators' $script:Mask.Full)
+                (New-Ace $script:DomAdmins 'Domain Admins' $script:Mask.Full)
+            )
+            LocalGroupExpansions = @{ $script:Sid.BuiltinAdmins = [PSCustomObject]@{ Readable = $true; Found = $true; Name = 'Administrators'; MemberSids = @($script:DomAdmins); Error = $null } }
+            CandidateGroups = @(New-Cand $script:DomAdmins 'Domain Admins' 3 'group' 1 @('Domain Admins'))
+        }
+        $r.Recommendation | Should -BeNullOrEmpty
+        $step = @($r.NextSteps | Where-Object { $_ -like "$($script:EscalateStep)*" })
+        $step.Count | Should -Be 1
+        $step[0] | Should -Match 'Domain Admins'
+        $r.NextSteps | Should -Not -Contain $script:NoGroupStep
+        (@($r.NextSteps) -join "`n") | Should -Not -Match ([regex]::Escape($script:FirstStep))
+    }
+
+    It 'D017_ACandidateThatIsItselfAPrivilegedGroupByName_IsNeverRecommended' {
+        # DnsAdmins has no well-known SID; the upward walk names it (Get-NameOnlyPrivilegedGroup).
+        $dns = "$($script:Dom)-1150"
+        $r = Invoke-Assess @{
+            FolderAces = @((New-Ace $dns 'DnsAdmins' $script:Mask.Read), (New-Ace $script:Sid.FinAll 'FIN-All' $script:Mask.Read))
+            CandidateGroups = @((New-Cand $dns 'DnsAdmins' 2 'group' 0 @('DnsAdmins')), (New-Cand $script:Sid.FinAll 'FIN-All' 80))
+        }
+        $r.Recommendation.Name | Should -Be 'FIN-All'
+        $only = Invoke-Assess @{ FolderAces = @(New-Ace $dns 'DnsAdmins' $script:Mask.Read); CandidateGroups = @(New-Cand $dns 'DnsAdmins' 2 'group' 0 @('DnsAdmins')) }
+        $only.Recommendation | Should -BeNullOrEmpty
+        @($only.NextSteps | Where-Object { $_ -like "$($script:EscalateStep)*DnsAdmins*" }).Count | Should -Be 1
+    }
+
+    It 'AC29_TheUserThemselfIsNeverACandidate' {
+        Test-FolderAccessCandidateEligible -Candidate (New-Cand $script:Sid.Jdoe 'jdoe' 0) -UserSid $script:Sid.Jdoe | Should -BeFalse
+        Test-FolderAccessCandidateEligible -Candidate (New-Cand $script:Sid.FinMgr 'FIN-Managers' 12) -UserSid $script:Sid.Jdoe | Should -BeTrue
+    }
+
+    It 'AC30_ACandidateWhoseParentGroupIsDenied_IsSkipped' {
+        # FIN-Managers is in FIN-Parent, and FIN-Parent is denied first: adding jdoe to FIN-Managers
+        # would put FIN-Parent in her token too, so it would not let her in.
+        $parent = "$($script:Dom)-1130"
+        $r = Invoke-Assess @{
+            FolderAces = @(
+                (New-Ace $parent 'FIN-Parent' $script:Mask.Read 'Deny')
+                (New-Ace $script:Sid.FinMgr 'FIN-Managers' $script:Mask.Read)
+                (New-Ace $script:Sid.FinAll 'FIN-All' $script:Mask.Read)
+            )
+            CandidateGroups = @((New-Cand $script:Sid.FinMgr 'FIN-Managers' 12 'group' 0 @() $false @($parent)), (New-Cand $script:Sid.FinAll 'FIN-All' 80))
+        }
+        $r.Recommendation.Name | Should -Be 'FIN-All'
+    }
+
+    It 'FailClosed_ACandidateWhosePrivilegeCheckIsIncomplete_RanksAfterAVerifiedOne_AndBeforeAPrivilegedOne' {
+        $aces = @((New-Ace $script:AdminsSid 'FIN-Admins' $script:Mask.Read), (New-Ace $script:Sid.FinMgr 'FIN-Managers' $script:Mask.Read), (New-Ace $script:Sid.FinAll 'FIN-All' $script:Mask.Read))
+        $r = Invoke-Assess @{
+            FolderAces = $aces
+            CandidateGroups = @((New-Cand $script:Sid.FinMgr 'FIN-Managers' 12 'group' 0 @() $true), (New-Cand $script:Sid.FinAll 'FIN-All' 80))
+        }
+        $r.Recommendation.Name | Should -Be 'FIN-All' -Because 'a verified non-privileged group outranks a smaller one that could not be checked'
+        $r2 = Invoke-Assess @{
+            FolderAces = $aces
+            CandidateGroups = @((New-Cand $script:AdminsSid 'FIN-Admins' 5 'group' 0 @('Domain Admins')), (New-Cand $script:Sid.FinMgr 'FIN-Managers' 12 'group' 0 @() $true))
+        }
+        $r2.Recommendation.Name | Should -Be 'FIN-Managers'
+        $warn = "Couldn't confirm FIN-Managers is not in a privileged group. Get senior approval first."
+        $r2.Recommendation.Warning | Should -Be $warn
+        $r2.NextSteps | Should -Contain $warn
+        Assert-ApprovalInsideAddStep (@($r2.NextSteps) -join "`n") 'FIN-Managers'
     }
 
     It 'AC28_RecommendsTheSmallestGroupThatGrantsAccess' {
@@ -1087,8 +1244,11 @@ Describe 'narrowest group (AC28-AC32)' {
                 (New-Ace $script:Sid.BuiltinUsers 'BUILTIN\Users' $mask), (New-Ace 'S-1-5-4' 'INTERACTIVE' $mask)
                 (New-Ace 'S-1-5-2' 'NETWORK' $mask), (New-Ace $script:Sid.Local 'FS01\Finance Local' $mask 'Allow' $false $false $false $true)
                 (New-Ace "$($script:Dom)-1111" 'CONTOSO\psmith' $mask)
+                # The user themself: an entry that matches her but doesn't include opening the folder.
+                (New-Ace $script:Sid.Jdoe 'CONTOSO\jdoe' $script:Mask.Traverse)
             )
             CandidateGroups = @(
+                (New-Cand $script:Sid.Jdoe 'jdoe' 0)
                 (New-Cand $script:Sid.Everyone 'Everyone' 1000), (New-Cand $script:Sid.AuthUsers 'Authenticated Users' 1000)
                 (New-Cand $script:Sid.DomUsers 'Domain Users' 400), (New-Cand "$($script:Dom)-515" 'Domain Computers' 90)
                 (New-Cand $script:Sid.BuiltinUsers 'BUILTIN\Users' 3), (New-Cand 'S-1-5-4' 'INTERACTIVE' 1)
@@ -1165,6 +1325,16 @@ Describe 'narrowest group (AC28-AC32)' {
         $r.NextSteps | Should -Contain $warn
         @($r.NextSteps | Where-Object { $_ -like "$($script:FirstStep)FIN-Admins*" }).Count | Should -Be 1
         @($r.NextSteps)[-1] | Should -Be $script:EffectiveStep
+        # The approval is a condition of the action, so it sits inside the add step, first.
+        Assert-ApprovalInsideAddStep (@($r.NextSteps) -join "`n") 'FIN-Admins'
+    }
+
+    It 'AC31_ANonPrivilegedRecommendation_HasNoApprovalCondition' {
+        $r = Invoke-Assess @{
+            FolderAces = @(New-Ace $script:Sid.FinMgr 'FIN-Managers' $script:Mask.Read)
+            CandidateGroups = @(New-Cand $script:Sid.FinMgr 'FIN-Managers' 12)
+        }
+        (Get-AddStep $r 'FIN-Managers')[0] | Should -Not -Match 'senior approval'
     }
 
     It 'AC32_AdminCountOneCarriesThePrivilegedWarning' {
@@ -1176,6 +1346,7 @@ Describe 'narrowest group (AC28-AC32)' {
         $r.Recommendation.Warning | Should -Match 'FIN-Ops'
         $r.Recommendation.Warning | Should -Match 'protected by AdminSDHolder'
         (@($r.NextSteps) -join "`n") | Should -Match 'protected by AdminSDHolder'
+        Assert-ApprovalInsideAddStep (@($r.NextSteps) -join "`n") 'FIN-Ops'
     }
 
     Context 'end to end against FakeAD (member counts, adminCount and nesting come from Get-ADGroup)' {
@@ -1194,6 +1365,82 @@ Describe 'narrowest group (AC28-AC32)' {
             $r = Invoke-Check
             $r.Assessment.Recommendation.Name | Should -Be 'FIN-Admins'
             $r.Assessment.Recommendation.Warning | Should -Be 'Warning: FIN-Admins is also in Domain Admins. Adding jdoe gives them domain admin rights. Get senior approval first.'
+        }
+        It 'AC31_EndToEnd_ApprovalComesFirstInsideTheAddStep_InConsoleHtmlAndTicketNote' {
+            $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:AdminsSid; M = $script:Mask.Read; F = '' })
+            $r = Invoke-Check
+            $warn = 'Warning: FIN-Admins is also in Domain Admins. Adding jdoe gives them domain admin rights. Get senior approval first.'
+            $console = Get-ConsoleText $r
+            Assert-ApprovalInsideAddStep $console 'FIN-Admins'
+            $console | Should -Match ([regex]::Escape($warn))
+            $html = [System.Net.WebUtility]::HtmlDecode((ConvertTo-FolderAccessHtml -Result $r))
+            Assert-ApprovalInsideAddStep $html 'FIN-Admins'
+            $html | Should -Match ([regex]::Escape($warn))
+            $lines = @(ConvertTo-TicketNoteText -Note (ConvertTo-FolderAccessTicketNote -Result $r -EvidencePaths @()) -PasteSafe)
+            $at = [array]::IndexOf($lines, 'Next step:')
+            $at | Should -BeGreaterThan 0
+            Assert-ApprovalInsideAddStep (@($lines[$at..($lines.Count - 1)]) -join "`n") 'FIN-Admins'
+            ($lines -join "`n") | Should -Match ([regex]::Escape($warn))
+        }
+        It 'D017_EndToEnd_HomeFolderWhereOnlyAdministratorsAndDomainAdminsGrant_Escalates' {
+            $script:World.FolderSddl = New-Sddl @(
+                @{ T = 'A'; S = 'S-1-5-18'; M = $script:Mask.Full; F = '' }
+                @{ T = 'A'; S = $script:Sid.BuiltinAdmins; M = $script:Mask.Full; F = '' }
+                @{ T = 'A'; S = $script:DomAdmins; M = $script:Mask.Full; F = '' }
+            )
+            $r = Invoke-Check
+            $r.Assessment.Verdict | Should -Be 'PROBABLY NO'
+            $r.Assessment.Recommendation | Should -BeNullOrEmpty
+            $step = @($r.Assessment.NextSteps | Where-Object { $_ -like "$($script:EscalateStep)*" })
+            $step.Count | Should -Be 1
+            $step[0] | Should -Match 'Domain Admins'
+            (Get-ConsoleText $r) | Should -Not -Match ([regex]::Escape($script:FirstStep))
+        }
+        It 'FailClosed_EndToEnd_AParentGroupThatCannotBeRead_MeansCouldNotConfirm' {
+            $daDn = 'CN=Domain Admins,OU=Groups,DC=contoso,DC=com'
+            Mock Get-ADGroup { throw 'The server has returned the following error: invalid enumeration context.' } -ParameterFilter { "$Identity" -eq $daDn }
+            $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:AdminsSid; M = $script:Mask.Read; F = '' })
+            $r = Invoke-Check
+            $r.Assessment.Recommendation.Name | Should -Be 'FIN-Admins'
+            $r.Assessment.Recommendation.Warning | Should -Be "Couldn't confirm FIN-Admins is not in a privileged group. Get senior approval first."
+            Assert-ApprovalInsideAddStep (@($r.Assessment.NextSteps) -join "`n") 'FIN-Admins'
+            # With a verified group alongside, that one wins.
+            $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:AdminsSid; M = $script:Mask.Read; F = '' }, @{ T = 'A'; S = $script:Sid.FinAll; M = $script:Mask.Read; F = '' })
+            $script:World.ShareSd = New-ShareSd @(New-ShareAce 'S-1-5-11' 'Authenticated Users' $script:Mask.Change)
+            $override = @{ jdoe = @{ memberOf = @() } } | ConvertTo-Json -Compress
+            $env:FAC_OVERRIDE = $override
+            $r2 = Invoke-Check
+            $r2.Assessment.Recommendation.Name | Should -Be 'FIN-All'
+        }
+        It 'FailClosed_TheNestingDepthLimitCutsTheWalkShort_MeansIncomplete' {
+            $ace = New-Ace $script:AdminsSid 'FIN-Admins' $script:Mask.Read
+            $cut = @(Get-FolderAccessCandidateGroup -FolderAces @($ace) -DomainSid $script:Dom -MaxNestingDepth 0)[0]
+            $cut.Incomplete | Should -BeTrue
+            @($cut.PrivilegedVia).Count | Should -Be 0
+            $full = @(Get-FolderAccessCandidateGroup -FolderAces @($ace) -DomainSid $script:Dom -MaxNestingDepth 10)[0]
+            $full.Incomplete | Should -BeFalse
+            $full.PrivilegedVia | Should -Contain 'Domain Admins'
+            $full.ParentSids | Should -Contain $script:DomAdmins
+        }
+        It 'FailClosed_AParentInAnotherDomain_IsLookedUpInThatDomain_OrMarksTheCandidateIncomplete' {
+            $sid = "$($script:Dom)-1140"
+            $eaDn = 'CN=Enterprise Admins,CN=Users,DC=fabrikam,DC=com'
+            Mock Get-ADGroup {
+                [PSCustomObject]@{ Name = 'FIN-Global'; DistinguishedName = 'CN=FIN-Global,OU=Groups,DC=contoso,DC=com'; SID = $sid; GroupCategory = 'Security'
+                    MemberOf = @($eaDn); member = @('CN=a,DC=contoso,DC=com'); adminCount = $null }
+            } -ParameterFilter { "$Identity" -eq $sid }
+            Mock Get-ADGroup {
+                [PSCustomObject]@{ Name = 'Enterprise Admins'; DistinguishedName = $eaDn; SID = 'S-1-5-21-4444444444-5555555555-6666666666-519'; MemberOf = @() }
+            } -ParameterFilter { "$Identity" -eq $eaDn -and $Server -eq 'fabrikam.com' }
+            $ace = New-Ace $sid 'FIN-Global' $script:Mask.Read
+            $c = @(Get-FolderAccessCandidateGroup -FolderAces @($ace) -DomainSid $script:Dom)[0]
+            $c.PrivilegedVia | Should -Contain 'Enterprise Admins'
+            $c.Incomplete | Should -BeFalse
+            Should -Invoke Get-ADGroup -Times 1 -Exactly -ParameterFilter { "$Identity" -eq $eaDn -and $Server -eq 'fabrikam.com' }
+
+            Mock Get-ADGroup { throw 'A referral was returned from the server.' } -ParameterFilter { "$Identity" -eq $eaDn -and $Server -eq 'fabrikam.com' }
+            $c2 = @(Get-FolderAccessCandidateGroup -FolderAces @($ace) -DomainSid $script:Dom)[0]
+            $c2.Incomplete | Should -BeTrue
         }
         It 'AC32_EndToEnd_AdminCountIsReadFromTheGroup' {
             $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:OpsSid; M = $script:Mask.Read; F = '' })
@@ -1474,6 +1721,62 @@ Describe 'ticket note (AC36)' {
         ((Get-NoteSection $n.Lines 'Could not check:') -join "`n") | Should -Match '(?i)share permissions'
     }
 
+    It 'AC36_ProbablyYesOrNo_TheLayersThatWereReadAreRuledOut' {
+        # PROBABLY NO: the share was read and lets her in; the folder was read and has no Deny for her.
+        $no = Invoke-Check
+        $no.Assessment.Verdict | Should -Be 'PROBABLY NO'
+        $ruled = (Get-NoteSection (Get-NoteFor $no).Lines 'Ruled out:') -join "`n"
+        $ruled | Should -Match ([regex]::Escape('Share permissions on FS01: they let jdoe in.'))
+        $ruled | Should -Match ([regex]::Escape('Deny entries: none in the folder permissions blocks jdoe.'))
+        # PROBABLY YES: both layers let her in.
+        $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:Sid.FinStaff; M = $script:Mask.Read; F = '' })
+        $yes = Invoke-Check
+        $yes.Assessment.Verdict | Should -Be 'PROBABLY YES'
+        $ruled = (Get-NoteSection (Get-NoteFor $yes).Lines 'Ruled out:') -join "`n"
+        $ruled | Should -Match ([regex]::Escape('Share permissions on FS01: they let jdoe in.'))
+        $ruled | Should -Match ([regex]::Escape('Folder permissions: they let jdoe open and list it.'))
+    }
+
+    It 'AC36_PasteSafe_AFolderNameWithAnApostropheLeavesNothingBehind' {
+        $path = "\\FS01\HR\Joe's Reviews"
+        $root = Join-Path $TestDrive 'ac36apos'
+        $null = New-Item -ItemType Directory -Path $root
+        # The scope line: in paste-safe mode the path is left out entirely.
+        $null = Invoke-ScriptInProcess @{ Identity = 'jdoe'; Path = $path; TicketNumber = '3'; OutputPath = $root; NoClipboard = $true; PassThru = $true }
+        $safe = [System.IO.File]::ReadAllText((@(Get-ChildItem -LiteralPath (Join-Path $root 'Ticket_3') -Filter 'Note_*_FolderAccess-Check.txt'))[0].FullName)
+        $safe | Should -Not -Match 'Reviews|Joe|\\\\FS01'
+        $safe | Should -Match 'Share and folder permissions of the folder for jdoe'
+        # Get-Acl's error quotes the path in single quotes, apostrophe and all.
+        $script:World.FolderThrow = "Cannot find path '$path' because it does not exist."
+        $null = Invoke-ScriptInProcess @{ Identity = 'jdoe'; Path = $path; TicketNumber = '4'; OutputPath = $root; NoClipboard = $true; PassThru = $true }
+        $safe = [System.IO.File]::ReadAllText((@(Get-ChildItem -LiteralPath (Join-Path $root 'Ticket_4') -Filter 'Note_*_FolderAccess-Check.txt'))[0].FullName)
+        $safe | Should -Match 'not read'
+        $safe | Should -Not -Match 'Reviews|Joe|\\\\FS01'
+        # -FullDetail keeps it.
+        $null = Invoke-ScriptInProcess @{ Identity = 'jdoe'; Path = $path; TicketNumber = '5'; OutputPath = $root; NoClipboard = $true; FullDetail = $true; PassThru = $true }
+        $full = [System.IO.File]::ReadAllText((@(Get-ChildItem -LiteralPath (Join-Path $root 'Ticket_5') -Filter 'Note_*_FolderAccess-Check.txt'))[0].FullName)
+        $full | Should -Match ([regex]::Escape($path))
+    }
+
+    It 'AC36_Quiet_TheNoteIsOnTheResultEvenWhenSavingItFails_AndTheFailureIsRecorded' {
+        $root = Join-Path $TestDrive 'ac36quiet'
+        $null = New-Item -ItemType Directory -Path $root
+        # A global alias outranks the function the script dot-sources from the kit.
+        function global:FacFail-SaveTicketNote { throw 'The disk is full.' }
+        Set-Alias -Name Save-TicketNote -Value FacFail-SaveTicketNote -Scope Global
+        try {
+            (Get-Command Save-TicketNote).CommandType | Should -Be 'Alias'
+            $out = Invoke-ScriptInProcess @{ Identity = 'jdoe'; Path = $script:Unc; TicketNumber = '6'; OutputPath = $root; Quiet = $true; PassThru = $true }
+            $res = @($out | Where-Object { $_ -is [PSCustomObject] -and $_.PSObject.Properties['TicketNote'] })[-1]
+            $res.TicketNote | Should -Not -BeNullOrEmpty
+            $res.TicketNoteError | Should -Match 'The disk is full'
+            $res.ExitCode | Should -Be 1
+        } finally {
+            Remove-Item -LiteralPath Alias:\Save-TicketNote -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath Function:\FacFail-SaveTicketNote -ErrorAction SilentlyContinue
+        }
+    }
+
     It 'AC36_NoteCarriesTheNextStepsEndingWithEffectiveAccess' {
         $r = Invoke-Check
         $n = Get-NoteFor $r
@@ -1487,6 +1790,8 @@ Describe 'ticket note (AC36)' {
         function global:FacFake-Clipboard { param($Text) $global:FacClipboard.Add($Text) }
         Set-Alias -Name Invoke-WinFormsClipboard -Value FacFake-Clipboard -Scope Global
         try {
+            # Without the alias in place the last run below would reach the real clipboard.
+            (Get-Command Invoke-WinFormsClipboard).CommandType | Should -Be 'Alias'
             $null = Invoke-ScriptInProcess @{ Identity = 'jdoe'; Path = $script:Unc; NoClipboard = $true; PassThru = $true }
             $global:FacClipboard.Count | Should -Be 0
             $null = Invoke-ScriptInProcess @{ Identity = 'jdoe'; Path = $script:Unc; Quiet = $true; PassThru = $true }
