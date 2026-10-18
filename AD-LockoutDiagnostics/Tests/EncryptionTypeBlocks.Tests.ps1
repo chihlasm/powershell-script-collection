@@ -1,7 +1,8 @@
 ﻿#
 # SQ-006: lockout tools recognise Kerberos encryption-type blocks (RC4 enforcement).
-# One test per acceptance criterion (AC1..AC22). AC23 lives in
-# Invoke-ADLockoutInvestigation.Tests.ps1 (only if the owner picks Q2 option A; D-023 says yes).
+# One test per acceptance criterion (AC1..AC22), plus review regressions named after the AC
+# they extend. AC23 (the SUMMARY.txt block, owner decision D-023) lives in
+# Invoke-ADLockoutInvestigation.Tests.ps1.
 #
 # Microsoft facts used by the fixtures (verified on Learn / the KB on 2026-10-18):
 #   * 4769 (Kerberos Service Ticket Operations) and 4768 (Kerberos Authentication Service) are
@@ -174,6 +175,57 @@ Describe 'Parsing' {
     It 'AC6_KdcsvcWarning201IsNotABlock' {
         @(ConvertFrom-KdcsvcEvent -EventXml (New-KdcsvcXml -EventId 201) -EventId 201 -DcName 'DC02').Count | Should -Be 0
     }
+
+    It 'AC5_UnrecognisedElementNamesFallBackToMessageOrder' {
+        # The KB documents only the rendered message, so real events may use element names the
+        # parser doesn't know. With no name resolved and no message, the documented message
+        # order is used: Account Name (0), Service Name (4), Client Address (11).
+        $values = @('jdoe', 'CONTOSO.COM', '0x0', 'RC4', 'svc-scan', 'S-1-5-21-1-2-3-1105', '0x0', 'RC4',
+                    '0x18', '0x24', 'AES256', '::ffff:192.0.2.55')
+        $data = (0..($values.Count - 1) | ForEach-Object { "<Data Name=`"Param$($_ + 1)`">$($values[$_])</Data>" }) -join ''
+        $xml = "<Event xmlns=`"http://schemas.microsoft.com/win/2004/08/events/event`"><System><Provider Name=`"Kdcsvc`"/><EventID>204</EventID><TimeCreated SystemTime=`"2026-10-17T09:31:00.000Z`"/></System><EventData>$data</EventData></Event>"
+        $rows = @(ConvertFrom-KdcsvcEvent -EventXml $xml -EventId 204 -DcName 'DC02' -Message '')
+        $rows.Count | Should -Be 1
+        $rows[0].Account       | Should -Be 'jdoe'
+        $rows[0].Service       | Should -Be 'svc-scan'
+        $rows[0].ClientAddress | Should -Be '192.0.2.55'
+        $rows[0].AccountNotRecorded | Should -BeFalse
+    }
+
+    It 'AC7_KdcsvcBlockWithNoReadableAccountIsKeptAndFlagged' {
+        # A block row whose account can't be read must never be filtered out: dropping it
+        # turns "a block was logged, check it" into a clean result.
+        $xml = "<Event xmlns=`"http://schemas.microsoft.com/win/2004/08/events/event`"><System><Provider Name=`"Kdcsvc`"/><EventID>204</EventID><TimeCreated SystemTime=`"2026-10-17T09:31:00.000Z`"/></System><EventData><Data Name=`"Unknown1`"></Data></EventData></Event>"
+        $rows = @(ConvertFrom-KdcsvcEvent -EventXml $xml -EventId 204 -DcName 'DC02' -Message '')
+        $rows.Count | Should -Be 1
+        $rows[0].AccountNotRecorded | Should -BeTrue
+
+        $kept = @(Select-EtypeEvidenceForAccount -Rows @($rows[0], (New-EtypeRow -Account 'asmith')) -SamAccountName 'jdoe')
+        $kept.Count | Should -Be 1
+        $kept[0].AccountNotRecorded | Should -BeTrue
+
+        $v = @(Get-LockoutVerdict -Lockouts @() -BadLogons @() -Policy $script:Policy -EtypeEvidence $kept -EtypeGate @(New-GateRow -Dc 'DC02'))
+        $text = $v -join "`n"
+        $text | Should -Match "an encryption-type block was logged on DC02 but the account couldn't be read - check the event"
+        # It is not known to concern this account, so it must not become "not a password problem".
+        $text | Should -Not -Match 'Not a password problem'
+    }
+
+    It 'AC17_UnreadableKdcsvcBlockShowsTheEventMessageInTheReport' {
+        $row = [pscustomobject]@{ Time = [datetime]'2026-10-17T09:31:00Z'; EventId = 204; Account = ''; Service = ''
+                                  Accounts = @(); ClientAddress = ''; Status = ''; DC = 'DC02'; Who = 'Account'
+                                  NextStep = $script:Ref.EncryptionTypeBlocks.KdcsvcEvents[204].NextStep
+                                  Message = 'The KDC blocked a ticket: <odd layout>'; AccountNotRecorded = $true }
+        $user = [pscustomobject]@{ SamAccountName = 'jdoe'; DistinguishedName = 'CN=jdoe,OU=Users,DC=contoso,DC=com'
+                                   LockedOut = $false; badPwdCount = 0; lockoutTime = 0; pwdLastSet = 0; LastBadPasswordAttempt = $null }
+        $path = Write-LockoutReport -User $user -Policy $script:Policy -Lockouts @() -BadLogons @() -Resets @() `
+            -Verdict @('x') -EntraConnectDiagnostics $null -OutputPath $TestDrive -DaysBack 7 -DcList @('DC02') -Pdc 'DC02' `
+            -EtypeEvidence @($row) -EtypeGate @(New-GateRow -Dc 'DC02')
+        $html = Get-Content -LiteralPath $path -Raw
+        $section = $html.Substring($html.IndexOf('<h2>Encryption-type blocks</h2>'))
+        $section | Should -Match 'The KDC blocked a ticket: &lt;odd layout&gt;'
+        $section | Should -Match "account couldn't be read"
+    }
 }
 
 Describe 'Matching the investigated account' {
@@ -238,6 +290,8 @@ Describe 'Verdict' {
         $v[0] | Should -BeLike 'Not a password problem: encryption type blocked*'
         $v[0] | Should -Match 'jdoe'
         $v[0] | Should -Match '(?i)next step|reset|update|replace'
+        # A 4769 row does not say which side to fix, so the next step is the psd1 FailureNextStep.
+        $v[0] | Should -Match ([regex]::Escape("Next step: $($script:Ref.EncryptionTypeBlocks.FailureNextStep)"))
         foreach ($line in $v) {
             if ($line -match 'no on-prem lockout or bad-password events') {
                 $line | Should -Match '(?i)encryption type' -Because 'the empty-result line must also state the block'
@@ -420,5 +474,90 @@ Describe 'Collection' {
         $g = @($r.Gate)[0]
         $g.KdcEvents      | Should -Be 'Checked'
         $g.TicketFailures | Should -Be 'Checked'
+    }
+
+    It 'AC9_ProviderListFailureStillReadsTheSystemLog' {
+        # The -ListProvider probe only explains an empty result; it must never stop the
+        # System-log read, or a real 204 is missed and the DC looks clean.
+        Mock Get-WinEvent {
+            if ($ListProvider) { throw 'The RPC server is too busy to complete this operation.' }
+            if ($FilterHashtable.LogName -eq 'Security') { throw $script:NoEventsMessage }
+            return @(New-FakeEvent -Id 204 -Xml (New-KdcsvcXml -EventId 204))
+        }
+        $r = Get-EtypeEvidence -DomainControllers @('DC01') -SamAccountName 'jdoe' -DaysBack 7
+        @($r.Rows | Where-Object { $_.EventId -eq 204 }).Count | Should -Be 1
+        @($r.Gate)[0].KdcEvents | Should -Be 'Checked'
+        Should -Invoke Get-WinEvent -Times 1 -Exactly -ParameterFilter { $FilterHashtable -and $FilterHashtable.LogName -eq 'System' }
+    }
+
+    It 'AC9_EmptyProviderListWithNoEventsIsCantTellWithoutBlamingTheUpdate' {
+        Mock Get-WinEvent {
+            if ($ListProvider) { return [pscustomobject]@{ Name = 'Kdcsvc'; Events = @() } }
+            throw $script:NoEventsMessage
+        }
+        $g = @((Get-EtypeEvidence -DomainControllers @('DC01') -SamAccountName 'jdoe' -DaysBack 7).Gate)[0]
+        $g.KdcEvents | Should -Be "Can't tell"
+        $g.KdcReason | Should -Match "couldn't read the Kdcsvc event list"
+        $g.KdcReason | Should -Not -Match 'KB5073381'
+
+        Mock Get-WinEvent {
+            if ($ListProvider) { throw 'Access is denied' }
+            throw $script:NoEventsMessage
+        }
+        $g = @((Get-EtypeEvidence -DomainControllers @('DC01') -SamAccountName 'jdoe' -DaysBack 7).Gate)[0]
+        $g.KdcEvents | Should -Be "Can't tell"
+        $g.KdcReason | Should -Match "couldn't read the Kdcsvc event list"
+        $g.KdcReason | Should -Not -Match 'KB5073381'
+    }
+
+    It 'AC9_UnregisteredKdcsvcProviderNamesTheUpdate' {
+        Mock Get-WinEvent {
+            if ($ListProvider) { throw 'There is not an event provider on the DC01 computer that matches "Kdcsvc".' }
+            if ($FilterHashtable.LogName -eq 'System') { throw 'There is not an event provider on the DC01 computer that matches "Kdcsvc".' }
+            throw $script:NoEventsMessage
+        }
+        $g = @((Get-EtypeEvidence -DomainControllers @('DC01') -SamAccountName 'jdoe' -DaysBack 7).Gate)[0]
+        $g.KdcEvents | Should -Be "Can't tell"
+        $g.KdcReason | Should -Match 'KB5073381'
+    }
+
+    It 'AC20_MalformedSecurityEventDegradesThatDcToCantTell' {
+        Mock Get-WinEvent {
+            if ($ListProvider) {
+                return [pscustomobject]@{ Name = 'Kdcsvc'; Events = @(203, 204, 208, 209 | ForEach-Object { [pscustomobject]@{ Id = $_ } }) }
+            }
+            if ($FilterHashtable.LogName -eq 'Security') {
+                if ($ComputerName -eq 'DC01') { return @(New-FakeEvent -Id 4769 -Xml '<Event><broken') }
+                return @(New-FakeEvent -Id 4769 -Xml (New-KerbXml -EventId 4769 -Status '0xe'))
+            }
+            throw $script:NoEventsMessage
+        }
+        $r = Get-EtypeEvidence -DomainControllers @('DC01', 'DC03') -SamAccountName 'jdoe' -DaysBack 7
+        $g1 = @($r.Gate | Where-Object { $_.DC -eq 'DC01' })[0]
+        $g1.TicketFailures | Should -Be "Can't tell"
+        $g1.TicketReason   | Should -Match "couldn't read the 4768/4769 events on DC01"
+        @($r.Rows | Where-Object { $_.DC -eq 'DC03' }).Count | Should -Be 1
+        @($r.Gate | Where-Object { $_.DC -eq 'DC03' })[0].TicketFailures | Should -Be 'Checked'
+    }
+}
+
+Describe 'Findings CSV' {
+    It 'AC23_FindingsCsvCellsCannotRunAsFormulas' {
+        # Account and service names come from the client's directory, so they are untrusted:
+        # a cell starting with = + - @ (or tab/CR) must open in Excel as text.
+        # https://owasp.org/www-community/attacks/CSV_Injection
+        $f = [pscustomobject]@{ Kind = 'Account'; Account = '=HYPERLINK("http://x")'; ClientAddress = '+192.0.2.1'
+                                DC = '@DC01'; Sentence = '-Not a password problem'; NextStep = 'Reset it.' }
+        $g = New-GateRow -Dc "`tDC02" -Gap $true -Reason '=cmd'
+        $path = Export-EtypeFindingsCsv -Findings @($f) -Gate @($g) -SamAccountName 'jdoe' -OutputPath $TestDrive
+        $rows = @(Import-Csv -LiteralPath $path)
+        $rows[0].Account       | Should -Be "'=HYPERLINK(`"http://x`")"
+        $rows[0].ClientAddress | Should -Be "'+192.0.2.1"
+        $rows[0].DC            | Should -Be "'@DC01"
+        $rows[0].Sentence      | Should -Be "'-Not a password problem"
+        $rows[0].NextStep      | Should -Be 'Reset it.'
+        $rows[1].Kind          | Should -Be 'CantTell'
+        $rows[1].Reason        | Should -Be "'=cmd"
+        $rows[1].DC            | Should -Be "'`tDC02"
     }
 }

@@ -478,7 +478,7 @@ Since the 2026 Kerberos RC4 changes ([KB5073381](https://support.microsoft.com/t
   - **203 / 208: the device.** The device at the client address only offers RC4. Next step: update or replace it. Only as a last resort, Microsoft documents allowing RC4 on that one service account (`msDS-SupportedEncryptionTypes` `0x24`). That keeps RC4 on and needs senior or security sign-off first.
   - The warnings 201/202/206/207 ("will break when enforced") are not reported.
 
-Rows for the investigated account match whether it was the account asking for the ticket or the service it was trying to reach, in `sam`, `DOMAIN\sam` or UPN form.
+Rows for the investigated account match whether it was the account asking for the ticket or the service it was trying to reach, in `sam`, `DOMAIN\sam` or UPN form. A Kdcsvc block whose account can't be read from the event is kept rather than dropped: the verdict says "an encryption-type block was logged on *DC* but the account couldn't be read - check the event", and the report shows the event's message text so you can see whose it was.
 
 When there are no lockouts and no bad passwords, the headline says **"Not a password problem: encryption type blocked"** and names the account or device and the next step. When there are real lockouts or bad passwords, they stay the headline and the block is listed after them, so a stale-password problem is never hidden.
 
@@ -487,13 +487,15 @@ Each DC gets a **Checked / Can't tell** row for each kind of evidence, with the 
 | Can't tell because | What it means |
 |---|---|
 | couldn't reach the DC | The Security log query failed (DC down, RPC/firewall, no rights). |
-| the DC doesn't have the KB5073381 updates | Its Kdcsvc event list has no event 203, so it can't write these events. |
-| not logging failures | Kerberos Service Ticket Operations auditing is `Success` or `No Auditing`, so 4769 failures are never written. |
+| the DC doesn't have the KB5073381 updates | It has no Kdcsvc event provider, or its Kdcsvc event list has no event 203, so it can't write these events. |
+| couldn't read the Kdcsvc event list | The list came back empty or couldn't be read, so it isn't known whether the DC writes these events. The System log is still read; any event found there counts. |
+| couldn't read the 4768/4769 events | The Security log returned an event that couldn't be parsed. |
+| not logging failures | Kerberos Service Ticket Operations auditing is `Success` or `No Auditing`, so 4769 failures are never written. Only this subcategory is checked here; Kerberos Authentication Service (which writes 4768) is checked by `Test-ADAuditPolicy.ps1`, the investigation's audit gate. |
 | audit policy couldn't be read | `auditpol` needs administrator rights on the DC. |
 
 A DC marked Can't tell is never reported as "none found". The report's **Encryption-type blocks** section lists those DCs first, then the findings, then every event behind a collapsed list. When every DC was checked and nothing was found, it says "None found on the *n* domain controller(s) checked" and the verdict stays exactly as it would be without this check.
 
-When there is a finding or a DC that couldn't be checked, the script also writes `ADLockoutEtype_<user>_<stamp>.csv` beside the report; `Invoke-ADLockoutInvestigation.ps1` lifts it into `SUMMARY.txt` under **ENCRYPTION-TYPE BLOCKS**, straight after the findings.
+When there is a finding or a DC that couldn't be checked, the script also writes `ADLockoutEtype_<user>_<stamp>.csv` beside the report (cells starting with `=`, `+`, `-` or `@` are prefixed with `'` so Excel opens them as text); `Invoke-ADLockoutInvestigation.ps1` lifts the one written during its own run into `SUMMARY.txt` under **ENCRYPTION-TYPE BLOCKS**, straight after the findings.
 
 ### 5. Admin / helpdesk resets — Event 4724 (all DCs)
 Queries event **4724** to show whether someone keeps manually resetting the password — which explains the "forced to reset" perception and distinguishes human resets from automated lockouts.

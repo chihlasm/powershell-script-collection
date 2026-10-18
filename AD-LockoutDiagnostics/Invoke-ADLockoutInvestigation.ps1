@@ -334,6 +334,29 @@ function Invoke-Step {
     return $row
 }
 
+function Find-EtypeFindingsCsv {
+    # The ADLockoutEtype_<sam>_<stamp>.csv Diagnose-ADAccountLockout.ps1 wrote during THIS
+    # run, or $null. Anything older is a previous run's result and must not reach this
+    # run's SUMMARY.txt. The file is named after the resolved sAMAccountName while
+    # -Identity may be DOMAIN\sam or sam@domain, so the bare name is preferred when a file
+    # carries it; otherwise the newest file from this run is used (step 4 runs once, for
+    # this account).
+    param([string]$CaseFolder, [datetime]$Since, [string]$Identity)
+
+    $fresh = @(Get-ChildItem -Path $CaseFolder -Filter 'ADLockoutEtype_*.csv' -Recurse -File -ErrorAction SilentlyContinue |
+               Where-Object { $_.LastWriteTime -ge $Since } | Sort-Object LastWriteTime -Descending)
+    if ($fresh.Count -eq 0) { return $null }
+
+    $bare = ([string]$Identity).Trim()
+    if ($bare -match '\\') { $bare = $bare.Substring($bare.LastIndexOf('\') + 1) }
+    if ($bare -match '@')  { $bare = $bare.Substring(0, $bare.IndexOf('@')) }
+    if ($bare) {
+        $named = @($fresh | Where-Object { $_.Name -like "ADLockoutEtype_$($bare)_*" })
+        if ($named.Count -gt 0) { return $named[0] }
+    }
+    return $fresh[0]
+}
+
 function Import-EtypeFindingsCsv {
     # Reads the ADLockoutEtype_<sam>_<stamp>.csv that Diagnose-ADAccountLockout.ps1 writes
     # (Kind, Account, ClientAddress, DC, Sentence, NextStep, Reason) and splits it into the
@@ -612,7 +635,9 @@ Write-Status INFO "Account: $(if ($Identity) { $Identity } else { '(domain-wide 
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
     $OutputPath = Join-Path $scriptRoot 'Account Lockout Diagnostics'
 }
-$stamp = Get-Date -Format 'yyyy-MM-dd_HHmmss'
+# Run start: output files older than this belong to an earlier run.
+$runStart = Get-Date
+$stamp = $runStart.ToString('yyyy-MM-dd_HHmmss')
 $slug  = if ($Identity) { ($Identity -replace '[^a-zA-Z0-9._-]', '_') } else { 'survey' }
 $caseFolder = Join-Path $OutputPath "Case_${slug}_$stamp"
 try {
@@ -953,8 +978,7 @@ if ($timelineCsv) {
 # Step 4 (Diagnose-ADAccountLockout.ps1) writes this only when it found a block or could
 # not check a DC, so a missing file is the normal clean case.
 $etypeSummary = [PSCustomObject]@{ Findings = @(); CantTell = @() }
-$etypeCsv = Get-ChildItem -Path $caseFolder -Filter 'ADLockoutEtype_*.csv' -Recurse -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+$etypeCsv = Find-EtypeFindingsCsv -CaseFolder $caseFolder -Since $runStart -Identity $Identity
 if ($etypeCsv) { $etypeSummary = Import-EtypeFindingsCsv -Path $etypeCsv.FullName }
 
 # --- Summary ---

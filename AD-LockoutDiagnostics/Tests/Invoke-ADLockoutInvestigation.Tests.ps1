@@ -459,4 +459,26 @@ Describe 'SQ-006 encryption-type block in SUMMARY.txt (D-023)' {
         $r.CantTell[0].DC     | Should -Be 'DC02'
         $r.CantTell[0].Reason | Should -Be "couldn't reach DC02: RPC server is unavailable"
     }
+
+    It 'AC23_OnlyAnEtypeCsvWrittenDuringThisRunIsUsed' {
+        # A CSV left from an earlier run (or for another account) must not put old findings
+        # into this run's SUMMARY.txt.
+        $case = Join-Path $TestDrive 'Case_jdoe'
+        $sub  = Join-Path $case '3 - Why This Account'
+        New-Item -ItemType Directory -Path $sub -Force | Out-Null
+        $runStart = Get-Date
+        $old   = Join-Path $sub 'ADLockoutEtype_jdoe_2026-10-01_090000.csv'
+        $other = Join-Path $case 'ADLockoutEtype_asmith_2026-10-18_100001.csv'
+        $new   = Join-Path $case 'ADLockoutEtype_jdoe_2026-10-18_100000.csv'
+        foreach ($p in $old, $other, $new) { 'Kind' | Set-Content -LiteralPath $p }
+        (Get-Item -LiteralPath $old).LastWriteTime = $runStart.AddDays(-17)
+        (Get-Item -LiteralPath $other).LastWriteTime = $runStart.AddMinutes(2)
+        (Get-Item -LiteralPath $new).LastWriteTime = $runStart.AddMinutes(1)
+
+        $pick = Find-EtypeFindingsCsv -CaseFolder $case -Since $runStart -Identity 'CONTOSO\jdoe'
+        $pick.FullName | Should -Be $new
+
+        Remove-Item -LiteralPath $new, $other
+        Find-EtypeFindingsCsv -CaseFolder $case -Since $runStart -Identity 'jdoe' | Should -BeNullOrEmpty
+    }
 }
