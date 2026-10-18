@@ -23,10 +23,10 @@ why it matters, and anything you already know (screens, edge cases, examples).
 ---
 
 ## SQ-001 · Ticket note from every quick check (kit, joiner, AD-UserQuickCheck)
-- status: ready
+- status: review
 - priority: P1
 - type: feature
-- branch: squad/SQ-001-ticket-note
+- branch: squad/SQ-001-clipboard-history
 - spec: squad/specs/SQ-001.md (Part A, AC1-AC26)
 - idea: squad/ideas/sessions/2026-10-16/cards/I-03-ticket-note.md
 
