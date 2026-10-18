@@ -1136,3 +1136,340 @@ public static extern uint GetShortPathNameW(string lpszLongPath, System.Text.Str
         }
     }
 }
+
+# --- Fix round 2 (SQ-014 review 2026-10-18, D-036) --------------------------------------------
+#
+# Pinned for the implementer:
+#   Links inside the tree: after Save-OwnerSnapshot and before takeown, every junction or symbolic
+#          link the snapshot found (LinkPaths) goes through Get-TreeOwnershipTargetRefusal. One
+#          that leads into a protected folder, or whose destination cannot be found out, refuses
+#          the whole tree: the row is Failed, names the link, ends "Nothing was changed.", keeps
+#          the snapshot and names it (BackupFile). The top-level check runs again right before
+#          takeown. -AllowSystemFolder skips both.
+#   Server-side links: a reparse point on the path (or above it) whose final form does not differ
+#          from the path as given is refused ("where it leads could not be found out").
+#   Only name-surrogate reparse points count as links (Test-LinkReparsePoint): Data Deduplication
+#          and cloud placeholders do not; a tag that cannot be read counts as a link.
+#   System shares: \\host\SYSVOL, \\host\NETLOGON and \\host\PRINT$ (and under them) are refused.
+#   Short names: an existing path with a '~<digit>' segment whose real path cannot be read at
+#          all is refused ("could not check the real path").
+#   An unopened folder whose owner cannot be read afterwards "could not be checked", never
+#          "left alone". When _NotOpened.txt cannot be written, the message and Detail say the
+#          full list could not be saved.
+Describe 'Fix round 2 (review 2026-10-18): links inside the tree, server-side junctions, system shares' {
+    BeforeAll {
+        function Invoke-WithEnv {
+            param([hashtable]$Values, [scriptblock]$Do)
+            $old = @{}
+            foreach ($k in $Values.Keys) {
+                $old[$k] = [Environment]::GetEnvironmentVariable($k, 'Process')
+                [Environment]::SetEnvironmentVariable($k, $Values[$k], 'Process')
+            }
+            try { & $Do } finally { foreach ($k in $old.Keys) { [Environment]::SetEnvironmentVariable($k, $old[$k], 'Process') } }
+        }
+        function New-TestJunction {
+            param([string]$Link, [string]$Target)
+            try { New-Item -ItemType Junction -Path $Link -Target $Target -ErrorAction Stop | Out-Null } catch { return $null }
+            if (Test-Path -LiteralPath $Link) { $Link } else { $null }
+        }
+    }
+    BeforeEach {
+        $script:Log = Join-Path $TestDrive ('logs-' + [guid]::NewGuid().ToString('N'))
+        $script:ToolCalls = [System.Collections.Generic.List[object]]::new()
+        $script:ToolResult = @{
+            takeown = [PSCustomObject]@{ ExitCode = 0; Output = '' }
+            icacls  = [PSCustomObject]@{ ExitCode = 0; Output = '' }
+        }
+        Mock Set-Acl { }
+        Mock takeown { }
+        Mock icacls { }
+        Mock Invoke-AclTool {
+            $script:ToolCalls.Add([PSCustomObject]@{ Tool = $Tool; Arguments = @($Arguments) })
+            $script:ToolResult[$Tool]
+        }
+        $script:Base = Join-Path $TestDrive ('ProtectedFolderForTests-' + [guid]::NewGuid().ToString('N'))
+        $script:Protected = Join-Path $script:Base 'ContosoApplication'
+        New-Item -ItemType Directory -Path (Join-Path $script:Protected 'sub') -Force | Out-Null
+    }
+
+    Context 'A junction or symbolic link inside the tree' {
+        It 'AC16d_JunctionInsideTheTreeToAProtectedFolder_RefusesTheWholeTreeKeepsTheSnapshotAndCallsNoTool' {
+            $dir = New-TestTree ('fr2-inner-' + [guid]::NewGuid().ToString('N'))
+            $link = New-TestJunction -Link (Join-Path $dir 'sub\app') -Target $script:Protected
+            if (-not $link) { Set-ItResult -Skipped -Because 'a junction could not be created here'; return }
+            $script:Dir = $dir
+
+            $rows = @(Invoke-WithEnv -Values @{ ProgramData = $script:Base } -Do {
+                Set-ItemOwnerToCurrentUser -Path $script:Dir -Recurse -LogFolder $script:Log
+            })
+
+            $rows.Count | Should -Be 1
+            $rows[0].Result | Should -Be 'Failed'
+            $rows[0].Error | Should -Match ([regex]::Escape($link))
+            $rows[0].Error | Should -Match 'Nothing was changed\.$'
+            Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+            $rows[0].BackupFile | Should -Not -BeNullOrEmpty
+            Test-Path -LiteralPath $rows[0].BackupFile | Should -BeTrue -Because 'the snapshot is kept'
+            $rows[0].Error | Should -Match ([regex]::Escape($rows[0].BackupFile))
+            (Get-FailedChangeState $rows[0]) | Should -Be 'Unchanged'
+            $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
+            $message | Should -Match ([regex]::Escape($link))
+            $message | Should -Match 'Nothing was changed'
+            $message | Should -Not -Match 'Some items may still have changed'
+        }
+
+        It 'AC16d_LinkInsideTheTreeWhoseDestinationCannotBeFoundOut_RefusesTheWholeTree' {
+            $plain = Join-Path $TestDrive ('fr2-plain-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $plain | Out-Null
+            $dir = New-TestTree ('fr2-unknown-' + [guid]::NewGuid().ToString('N'))
+            $link = New-TestJunction -Link (Join-Path $dir 'elsewhere') -Target $plain
+            if (-not $link) { Set-ItResult -Skipped -Because 'a junction could not be created here'; return }
+            $script:Link = $link
+            Mock Get-Win32PathName { $null } -ParameterFilter { $Path -eq $script:Link }
+
+            $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+            $rows[0].Result | Should -Be 'Failed'
+            $rows[0].Error | Should -Match ([regex]::Escape($link))
+            $rows[0].Error | Should -Match 'where it leads could not be found out'
+            $rows[0].Error | Should -Match 'Nothing was changed\.$'
+            Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        }
+
+        It 'AC16d_JunctionInsideTheTreeToAnOrdinaryFolder_StillTakesOwnership' {
+            $plain = Join-Path $TestDrive ('fr2-plain-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $plain | Out-Null
+            $dir = New-TestTree ('fr2-ok-' + [guid]::NewGuid().ToString('N'))
+            $link = New-TestJunction -Link (Join-Path $dir 'elsewhere') -Target $plain
+            if (-not $link) { Set-ItResult -Skipped -Because 'a junction could not be created here'; return }
+            $script:Dir = $dir
+
+            $rows = @(Invoke-WithEnv -Values @{ ProgramData = $script:Base } -Do {
+                Set-ItemOwnerToCurrentUser -Path $script:Dir -Recurse -LogFolder $script:Log
+            })
+
+            $rows[0].Result | Should -Not -Be 'Failed'
+            Should -Invoke Invoke-AclTool -Times 1 -Exactly -Scope It -ParameterFilter { $Tool -eq 'takeown' }
+        }
+
+        It 'AC16d_AllowSystemFolder_AlsoAllowsAJunctionInsideTheTreeToAProtectedFolder' {
+            $dir = New-TestTree ('fr2-allow-' + [guid]::NewGuid().ToString('N'))
+            $link = New-TestJunction -Link (Join-Path $dir 'app') -Target $script:Protected
+            if (-not $link) { Set-ItResult -Skipped -Because 'a junction could not be created here'; return }
+            $script:Dir = $dir
+
+            $null = @(Invoke-WithEnv -Values @{ ProgramData = $script:Base } -Do {
+                Set-ItemOwnerToCurrentUser -Path $script:Dir -Recurse -AllowSystemFolder -LogFolder $script:Log
+            })
+
+            Should -Invoke Invoke-AclTool -Times 1 -Exactly -Scope It -ParameterFilter { $Tool -eq 'takeown' }
+        }
+
+        It 'AC16d_TopLevelCheckRunsAgainRightBeforeTakeown' {
+            $dir = New-TestTree ('fr2-toctou-' + [guid]::NewGuid().ToString('N'))
+            $script:Dir = $dir
+            $script:Checks = 0
+            Mock Get-TreeOwnershipTargetRefusal {
+                if ($Path -ne $script:Dir) { return $null }
+                $script:Checks++
+                if ($script:Checks -ge 2) { return "$Path now leads into a Windows system folder (test)." }
+                $null
+            }
+
+            $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+            $script:Checks | Should -Be 2
+            $rows[0].Result | Should -Be 'Failed'
+            $rows[0].Error | Should -Match 'now leads into a Windows system folder \(test\)'
+            $rows[0].Error | Should -Match 'Nothing was changed\.$'
+            Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        }
+    }
+
+    Context 'Get-TreeOwnershipTargetRefusal: what the disk check cannot see' {
+        It 'AC16d_ReparsePointThatResolvesToItself_IsRefusedAsUnknownDestination' {
+            # On a share, the server follows its own junctions: the final path the client gets
+            # back is the path as given, so where the junction leads cannot be seen.
+            $script:Unc = '\\fs01\share\HR'
+            Mock Test-Path { $true } -ParameterFilter { $LiteralPath -eq $script:Unc }
+            Mock Get-Win32PathName { $Path }
+            Mock Get-ReparsePointTag { $null }
+            Mock Get-Item {
+                if ($LiteralPath -eq $script:Unc) { return [PSCustomObject]@{ FullName = $LiteralPath; Attributes = [System.IO.FileAttributes]'Directory, ReparsePoint' } }
+                [PSCustomObject]@{ FullName = $LiteralPath; Attributes = [System.IO.FileAttributes]::Directory }
+            } -ParameterFilter { "$LiteralPath" -like '\\fs01\*' }
+
+            $text = Get-TreeOwnershipTargetRefusal -Path $script:Unc
+
+            $text | Should -Not -BeNullOrEmpty
+            $text | Should -Match ([regex]::Escape($script:Unc))
+            $text | Should -Match 'where it leads could not be found out'
+        }
+
+        It 'AC16d_FolderWithBracketsInsideAJunction_IsStillFound' {
+            $target = Join-Path $TestDrive ('fr2-target-' + [guid]::NewGuid().ToString('N'))
+            [System.IO.Directory]::CreateDirectory((Join-Path $target 'in[2]')) | Out-Null
+            $link = New-TestJunction -Link (Join-Path $TestDrive ('fr2-jn-' + [guid]::NewGuid().ToString('N'))) -Target $target
+            if (-not $link) { Set-ItResult -Skipped -Because 'a junction could not be created here'; return }
+            $script:Inside = Join-Path $link 'in[2]'
+            Mock Get-Win32PathName { $null }
+
+            Test-PathThroughLink -Path $script:Inside | Should -BeTrue
+            Get-TreeOwnershipTargetRefusal -Path $script:Inside | Should -Match 'where it leads could not be found out'
+            Test-PathThroughLink -Path (Join-Path $target 'in[2]') | Should -BeFalse
+        }
+
+        It 'AC16d_ShortNameSpellingWhoseRealPathCannotBeRead_IsRefused' {
+            $dir = Join-Path $TestDrive ('fr2-short-' + [guid]::NewGuid().ToString('N'))
+            $script:Short = Join-Path $dir 'CONTOS~1\sub'
+            New-Item -ItemType Directory -Path $script:Short -Force | Out-Null
+            Mock Get-Win32PathName { $null }
+
+            $text = Get-TreeOwnershipTargetRefusal -Path $script:Short
+
+            $text | Should -Match ([regex]::Escape($script:Short))
+            $text | Should -Match 'could not check the real path'
+        }
+
+        It 'AC16d_OrdinaryFolderWhoseRealPathCannotBeRead_IsAllowed' {
+            $dir = Join-Path $TestDrive ('fr2-long-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $dir | Out-Null
+            Mock Get-Win32PathName { $null }
+
+            Get-TreeOwnershipTargetRefusal -Path $dir | Should -BeNullOrEmpty
+        }
+
+        It 'AC16d_OnlyNameSurrogateReparsePointsCountAsLinks_<Name>' -ForEach @(
+            @{ Name = 'junction'; Tag = [uint32]'0xA0000003'; Expected = $true }
+            @{ Name = 'symbolic link'; Tag = [uint32]'0xA000000C'; Expected = $true }
+            @{ Name = 'deduplicated file'; Tag = [uint32]'0x80000013'; Expected = $false }
+            @{ Name = 'cloud placeholder'; Tag = [uint32]'0x9000001A'; Expected = $false }
+            @{ Name = 'tag that cannot be read'; Tag = $null; Expected = $true }
+        ) {
+            # https://learn.microsoft.com/windows/win32/fileio/reparse-point-tags
+            $script:Tag = $Tag
+            Mock Get-ReparsePointTag { $script:Tag }
+            $item = [PSCustomObject]@{ FullName = 'D:\Data\x'; Attributes = [System.IO.FileAttributes]'Directory, ReparsePoint' }
+
+            Test-LinkReparsePoint -Item $item | Should -Be $Expected
+        }
+
+        It 'AC16d_ItemWithoutReparsePointIsNeverALink' {
+            Mock Get-ReparsePointTag { throw 'must not be read (test)' }
+            Test-LinkReparsePoint -Item ([PSCustomObject]@{ FullName = 'D:\Data'; Attributes = [System.IO.FileAttributes]::Directory }) | Should -BeFalse
+        }
+
+        It 'AC16d_RealJunctionTagIsRead' {
+            $plain = Join-Path $TestDrive ('fr2-plain-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $plain | Out-Null
+            $link = New-TestJunction -Link (Join-Path $TestDrive ('fr2-jn-' + [guid]::NewGuid().ToString('N'))) -Target $plain
+            if (-not $link) { Set-ItResult -Skipped -Because 'a junction could not be created here'; return }
+
+            Get-ReparsePointTag -Path $link | Should -Be ([uint32]'0xA0000003')
+            Get-ReparsePointTag -Path $plain | Should -BeNullOrEmpty
+        }
+    }
+
+    Context 'Get-TreeOwnershipRefusal: system shares' {
+        It 'AC16d_Refuses_<Path>' -ForEach @(
+            @{ Path = '\\dc01\SYSVOL' }
+            @{ Path = '\\dc01\sysvol\contoso.com\Policies' }
+            @{ Path = '\\dc01.contoso.com\SysVol\' }
+            @{ Path = '\\dc01\NETLOGON' }
+            @{ Path = '\\dc01\netlogon\scripts' }
+            @{ Path = '\\ps01\PRINT$' }
+            @{ Path = '\\ps01\print$\x64' }
+            @{ Path = '\\?\UNC\dc01\SYSVOL\contoso.com' }
+        ) {
+            $text = Get-TreeOwnershipRefusal -Path $Path
+
+            $text | Should -Not -BeNullOrEmpty
+            $text | Should -Match ([regex]::Escape($Path))
+        }
+
+        It 'AC16d_Allows_<Path>' -ForEach @(
+            @{ Path = '\\fs01\Users$' }
+            @{ Path = '\\fs01\HR$\2024' }
+            @{ Path = '\\fs01\SYSVOLBackup' }
+            @{ Path = '\\fs01\share\SYSVOL' }
+            @{ Path = '\\fs01\share\NETLOGON' }
+            @{ Path = '\\fs01\PRINT' }
+        ) {
+            Get-TreeOwnershipRefusal -Path $Path | Should -BeNullOrEmpty
+        }
+    }
+
+    Context 'D-034 wording' {
+        It 'AC16c_UnopenedFolderWhoseOwnerCannotBeReadAfterwards_SaysCouldNotBeCheckedNotLeftAlone' {
+            $dir = New-TestTree ('fr2-unchecked-' + [guid]::NewGuid().ToString('N'))
+            $script:Locked = Join-Path $dir 'sub'
+            Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $LiteralPath -eq $script:Locked }
+            Mock Get-ItemOwner {
+                if ($Path -eq $script:Locked) {
+                    if ($script:ToolCalls.Count -gt 0) { return [PSCustomObject]@{ Owner = 'Could not read'; OwnerSid = '' } }
+                    return [PSCustomObject]@{ Owner = 'CONTOSO\old.owner'; OwnerSid = 'S-1-5-21-1-2-3-1105' }
+                }
+                & $script:RealGetItemOwner -Path $Path
+            }
+
+            $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+            $rows[0].Result | Should -Be 'Partly done'
+            @($rows[0].TreeCounts.UnlistedUncheckedFolders) | Should -Be @($script:Locked)
+            $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
+            $message | Should -Not -Match 'left alone'
+            $message | Should -Match 'could not be checked'
+            $message | Should -Match ([regex]::Escape($script:Locked))
+            $listed = @(Get-Content -LiteralPath $rows[0].TreeCounts.NotOpenedFile)
+            @($listed | Where-Object { $_ -like "$($script:Locked)*could not be checked*" }).Count | Should -Be 1
+        }
+
+        It 'AC16c_NotOpenedListCannotBeWritten_MessageAndDetailSayTheFullListCouldNotBeSaved' {
+            $dir = New-TestTree ('fr2-nolist-' + [guid]::NewGuid().ToString('N'))
+            $script:LockedSet = @(1..25 | ForEach-Object {
+                $p = Join-Path $dir ('locked{0:00}' -f $_)
+                New-Item -ItemType Directory -Path $p | Out-Null
+                $p
+            })
+            Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $script:LockedSet -contains $LiteralPath }
+            Mock Set-Content { throw 'The disk is full. (test)' } -ParameterFilter { "$LiteralPath" -like '*_NotOpened*' }
+
+            $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+            $rows[0].TreeCounts.NotOpenedFile | Should -BeNullOrEmpty
+            $rows[0].Detail | Should -Match 'and 5 more \(the full list could not be saved'
+            $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
+            $message | Should -Match 'and 22 more\.'
+            $message | Should -Match ([regex]::Escape('The full list could not be saved'))
+        }
+    }
+
+    Context 'Owner snapshot clean-up' {
+        It 'AC16_SnapshotCannotBeWritten_EmptyBackupsFolderIsRemovedWithoutRemoveItem' {
+            $dir = New-TestTree ('fr2-cleanup-' + [guid]::NewGuid().ToString('N'))
+            # The Backups folder is created as usual, but the snapshot goes to a folder that does
+            # not exist, so Export-Csv fails.
+            Mock New-BackupFilePath {
+                $folder = Join-Path $LogFolder 'Backups'
+                New-Item -ItemType Directory -Path $folder -Force | Out-Null
+                Join-Path $folder 'no-such-folder\x_TakeOwnership.csv'
+            }
+            Mock Remove-Item { throw 'Remove-Item must not be used here (test)' }
+
+            { Save-OwnerSnapshot -Path $dir -LogFolder $script:Log } | Should -Throw
+
+            Test-Path -LiteralPath (Join-Path $script:Log 'Backups') | Should -BeFalse
+            Should -Invoke Remove-Item -Times 0 -Exactly -Scope It
+        }
+    }
+}
+
+Describe 'README after fix round 2' {
+    It 'AC16d_ReadmeSaysLinksInsideTheFolderAndSystemSharesAreRefused' {
+        $readme = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\README.md') -Raw -Encoding UTF8
+        $readme | Should -Match '(?i)junction or symbolic link inside the folder'
+        $readme | Should -Match 'SYSVOL'
+        $readme | Should -Match 'NETLOGON'
+        $readme | Should -Match ([regex]::Escape('PRINT$'))
+    }
+}

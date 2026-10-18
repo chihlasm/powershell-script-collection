@@ -438,6 +438,38 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         Test-Path -LiteralPath (Join-Path $script:Log 'Backups') | Should -BeFalse
     }
 
+    # --- Fix round 2 (SQ-014 review 2026-10-18) ------------------------------------------------
+    # Pinned: a junction or symbolic link inside the folder that leads into a protected folder
+    # (or somewhere that cannot be checked) refuses the whole folder with one [FAIL] line naming
+    # the link and -AllowSystemFolder, before anything is asked or saved.
+
+    It 'AC16d_Cli_JunctionInsideTheFolderToAProtectedFolder_IsRefusedWithAFailLine' {
+        $base = Join-Path $TestDrive ('cli-protected-' + [guid]::NewGuid().ToString('N'))
+        $target = Join-Path $base 'Contoso'
+        New-Item -ItemType Directory -Path (Join-Path $target 'sub') -Force | Out-Null
+        $link = Join-Path $script:Dir 'sub1\app'
+        try { New-Item -ItemType Junction -Path $link -Target $target -ErrorAction Stop | Out-Null } catch { }
+        if (-not (Test-Path -LiteralPath $link)) { Set-ItResult -Skipped -Because 'a junction could not be created here'; return }
+        $old = [Environment]::GetEnvironmentVariable('ProgramData', 'Process')
+        [Environment]::SetEnvironmentVariable('ProgramData', $base, 'Process')
+        try {
+            $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log -Force
+        } finally {
+            [Environment]::SetEnvironmentVariable('ProgramData', $old, 'Process')
+        }
+
+        $code | Should -Be 1
+        $fail = @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' })
+        $fail.Count | Should -Be 1
+        $fail[0] | Should -Match ([regex]::Escape($link))
+        $fail[0] | Should -Match '-AllowSystemFolder'
+        $fail[0] | Should -Match 'Nothing was changed\.'
+        @($script:Lines | Where-Object { $_ -like '`[WARN`] Taking ownership makes *' }).Count | Should -Be 0
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
+        Test-Path -LiteralPath (Join-Path $script:Log 'Backups') | Should -BeFalse
+    }
+
     It 'AC16c_Cli_PrintsEveryFolderThatCouldNotBeOpened' {
         $script:LockedSet = @(1..5 | ForEach-Object {
             $p = Join-Path $script:Dir ('locked{0}' -f $_)

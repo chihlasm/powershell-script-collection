@@ -15,8 +15,10 @@
        that file cannot be written, nothing is changed. A folder that cannot be opened is
        skipped and its permissions are left as they were; the result is Partly done, names it
        so it can be escalated, and lists every such folder (also saved to
-       <LogFolder>\Backups\<yyyy-MM-dd_HHmmss>_NotOpened.txt). The root of a drive and the
-       Windows system folders are refused unless -AllowSystemFolder is given.
+       <LogFolder>\Backups\<yyyy-MM-dd_HHmmss>_NotOpened.txt). The root of a drive, the
+       Windows system folders, the SYSVOL, NETLOGON and PRINT$ shares, and a folder with a
+       junction or symbolic link inside that leads into one are refused unless
+       -AllowSystemFolder is given.
     2. Shows the top folder's owner and permissions, and the owner of each subfolder.
     3. Copies the top folder's permissions to every subfolder: entries a subfolder does not
        already have are added, nothing is removed. The permissions of every subfolder are
@@ -58,7 +60,9 @@
     Take ownership even when the folder is the root of a drive (D:\) or is in %SystemRoot%,
     %ProgramFiles%, %ProgramFiles(x86)% or %ProgramData%, or is another server's ADMIN$ or
     drive share (\\fs01\D$, \\fs01\C$\Windows), also when the folder leads there through a
-    junction, a symbolic link or a short name. Without it such a folder is refused and nothing
+    junction, a symbolic link or a short name, or is on a SYSVOL, NETLOGON or PRINT$ share, or
+    has a junction or symbolic link inside it that leads into one of these (or somewhere that
+    cannot be checked). Without it such a folder is refused and nothing
     is changed, because changing every owner in it can stop Windows or installed programs from
     working. The root of an ordinary share (\\fs01\share) is never refused.
 
@@ -252,6 +256,14 @@ function Invoke-FolderPermissionCli {
     # so the scope is shown before asking; the core lists it again for the snapshot.
     Write-Host "[INFO] Counting the folders and files in $Path..." -ForegroundColor Cyan
     $tree = Get-OwnerTreeItem -Path $Path
+    # D-036 for the links inside the folder: one that leads into a protected folder, or
+    # somewhere that cannot be checked, refuses the whole folder before anything is asked or
+    # saved (the core checks again after its snapshot).
+    $linkRefusal = if ($AllowSystemFolder) { $null } else { Get-TreeLinkRefusal -Path $Path -LinkPaths @($tree.Links) }
+    if ($linkRefusal) {
+        Write-Host "[FAIL] $linkRefusal If you are sure, run the script again with -AllowSystemFolder. Nothing was changed." -ForegroundColor Red
+        return 1
+    }
     $scope = "$(@($tree.Items).Count) item(s): $Path and every subfolder and file under it"
     $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
     $warning = "[WARN] Taking ownership makes $me the owner of $scope. The current owners are saved to a backup first."

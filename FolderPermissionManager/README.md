@@ -117,7 +117,13 @@ changing anything and says why. The same goes for the 64-bit Program Files folde
 `C:\Windows.`, a short name such as `C:\PROGRA~1`) or reached through a junction or symbolic
 link; and for another server's administrative shares: `ADMIN$`, a drive share such as
 `\\fs01\D$`, and `Windows`, `Program Files`, `Program Files (x86)` and `ProgramData` on one
-(`\\fs01\C$\Windows`). The root of an ordinary share (`\\fs01\share`) is allowed. The GUI has no
+(`\\fs01\C$\Windows`); and for the domain controller and print server shares `SYSVOL`,
+`NETLOGON` and `PRINT$` (`\\dc01\SYSVOL\contoso.com\Policies`), which hold Group Policy, logon
+scripts and printer drivers for every computer that uses them. The root of an ordinary share
+(`\\fs01\share`, or a hidden one such as `\\fs01\Users$`) is allowed. A folder that is, or is
+inside, a junction or symbolic link is refused when the tool cannot see where it leads: on a
+share the server follows its own junctions, so the tool only sees the path you typed. A path
+with a short name (`~1`) is refused when Windows cannot tell its full name. The GUI has no
 way around this; the command-line script takes `-AllowSystemFolder` for the rare case where it
 is really needed.
 
@@ -125,8 +131,15 @@ Junctions and symbolic links inside the folder are listed in the snapshot but no
 because they can point outside the folder. Microsoft's documentation does not say whether
 `takeown /R` and `icacls /T` go into them, and `icacls` changes what a symbolic link points to
 unless `/L` is given ([icacls](https://learn.microsoft.com/windows-server/administration/windows-commands/icacls)),
-so a folder containing any is never reported as a plain success: the result says how many
-there are and names them. Check them, and what they point to, after the change.
+so each one is checked like the folder itself. **A junction or symbolic link inside the folder
+that leads into one of the folders above, or somewhere the tool cannot check, refuses the whole
+folder**: the result is `Failed`, names the link, and nothing is changed. The command-line
+script says so before asking anything; the GUI finds out while saving the owner snapshot, and
+keeps that snapshot (the change log row names it, and nothing needs to be put back from it).
+Take ownership of the folders beside the link instead. Other links do not stop the change, but
+a folder containing any is never reported as a plain success: the result says how many there
+are and names them. Check them, and what they point to, after the change. Deduplicated files
+and OneDrive placeholders are not links and are changed like any other item.
 
 `Could not read` means the tool could not read the item's permissions (or, in an owner
 snapshot, its owner) before the change. Add permission, Remove permission and Copy permissions
@@ -284,7 +297,7 @@ as in the GUI (owner snapshot before taking ownership, SDDL backup before copyin
 | `-Path` | asks | The top folder |
 | `-LogFolder` | `Logs` next to the script | Where backups and the change log go (same rules as the GUI) |
 | `-Force` | — | Do not ask before taking ownership or copying permissions |
-| `-AllowSystemFolder` | — | Take ownership even of a drive root or a folder in `%SystemRoot%`, `%ProgramFiles%`, `%ProgramFiles(x86)%` or `%ProgramData%`, which is refused otherwise (see above) |
+| `-AllowSystemFolder` | — | Take ownership even of a drive root or a folder in `%SystemRoot%`, `%ProgramFiles%`, `%ProgramFiles(x86)%` or `%ProgramData%`, on `SYSVOL`, `NETLOGON` or `PRINT$`, or with a junction or symbolic link inside that leads into one, which is refused otherwise (see above) |
 | `-WhatIf` | — | Show what would be changed and change nothing |
 
 Before each step it prints what will change with `[WARN]` (for ownership, how many items:
@@ -296,7 +309,9 @@ does not depend on ownership. Run it in an elevated window: it stops with `[FAIL
 
 A drive root or a Windows folder is refused straight away, before any question, with one
 `[FAIL]` line that names the folder and `-AllowSystemFolder`, and exit code `1`. Nothing is
-counted, saved or changed.
+counted, saved or changed. A junction or symbolic link inside the folder that leads into one is
+refused the same way once the folder has been counted, before any question: the `[FAIL]` line
+names the link, and nothing is saved or changed.
 
 The script exits with `1` when a step `Failed` or was only `Partly done`, when taking ownership
 could not be checked everywhere (folders it could not open, owners it could not read back, or
