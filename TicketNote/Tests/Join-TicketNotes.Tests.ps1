@@ -2,7 +2,9 @@
     Tests for TicketNote\Join-TicketNotes.ps1 (Pester 5, run under pwsh). SQ-001 AC15-AC17, AC26.
 
     The joiner runs in-process (`exit` in a script file only leaves that script). The clipboard
-    is never touched: Set-Clipboard is mocked, or -NoClipboard is passed. Read-Host is mocked.
+    is never touched: Set-Clipboard is mocked, the kit's Invoke-WinFormsClipboard (tried first,
+    D-033) is shadowed by a global alias to a fake that records the text, or -NoClipboard is
+    passed. Read-Host is mocked.
     Every folder lives under $TestDrive, and -OutputPath is always given so the real profile
     folder is never used.
 
@@ -29,7 +31,22 @@ BeforeAll {
 }
 
 Describe 'Join-TicketNotes' {
-    BeforeEach { $global:LASTEXITCODE = 0 }
+    BeforeAll {
+        # The joiner dot-sources the kit into its own scope, and a function defined there would
+        # outrank a Pester mock; a global alias outranks the function.
+        function global:JtnFake-Clipboard { param($Text) $global:JtnClipboard.Add($Text) }
+    }
+    BeforeEach {
+        $global:LASTEXITCODE = 0
+        $global:JtnClipboard = New-Object System.Collections.Generic.List[string]
+        Set-Alias -Name Invoke-WinFormsClipboard -Value JtnFake-Clipboard -Scope Global
+    }
+    AfterEach { Remove-Item -LiteralPath Alias:\Invoke-WinFormsClipboard -Force -ErrorAction SilentlyContinue }
+    AfterAll {
+        Remove-Item -LiteralPath Alias:\Invoke-WinFormsClipboard -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath Function:\JtnFake-Clipboard -ErrorAction SilentlyContinue
+        Remove-Variable -Name JtnClipboard -Scope Global -ErrorAction SilentlyContinue
+    }
 
     It 'AC15_JoinerCombines: writes one combined note, in timestamp order, and copies it once' {
         Mock Set-Clipboard { }
@@ -54,7 +71,10 @@ Describe 'Join-TicketNotes' {
         @($lines | Where-Object { $_ -eq '-----' }).Count | Should -BeGreaterOrEqual 2
         $text | Should -Not -Match 'OLD-COMBINED-BODY'
 
-        Should -Invoke Set-Clipboard -Times 1 -Exactly
+        $global:JtnClipboard.Count | Should -Be 1
+        $global:JtnClipboard[0] | Should -Match 'Ticket 482113 - 3 notes'
+        $global:JtnClipboard[0] | Should -Match 'NOTE-THREE-BODY'
+        Should -Invoke Set-Clipboard -Times 0 -Exactly -Because 'the WinForms clipboard comes first (D-033)'
     }
 
     It 'AC16_JoinerPromptsAndAllowsBlank: omitted answers are asked for, and blank means (not given)' {

@@ -51,9 +51,10 @@
     joins every tool's note in that folder into one. A number that does not fit is refused
     with a [FAIL] line and exit code 3, before anything is checked.
 .PARAMETER NoClipboard
-    Do not copy the ticket note to the clipboard. Without it the note goes to the clipboard,
-    where it can enter clipboard history (Win+V) or the cloud clipboard on Windows PowerShell
-    5.0 and later, and travels over RDP clipboard redirection.
+    Do not copy the ticket note to the clipboard. Without it the note goes to the clipboard
+    marked to stay out of clipboard history (Win+V) and the cloud clipboard; only when that
+    fails (e.g. an MTA host) is Set-Clipboard used, which cannot opt out. Either way it
+    travels over RDP clipboard redirection.
 .PARAMETER FullDetail
     Keep IP addresses and share paths in the ticket note. By default the note is paste-safe:
     they are replaced by [IP removed] / [share path removed]. The question at the top is
@@ -118,8 +119,8 @@
       Get-Service has no -ComputerName in PowerShell 6+, so services are read with Win32_Service
         https://learn.microsoft.com/powershell/scripting/whats-new/differences-from-windows-powershell
         https://learn.microsoft.com/windows/win32/cimwin32prov/win32-service
-      Ticket note clipboard (in CaseKit.ps1): Set-Clipboard is 5.0, so it is used behind a
-      Get-Command check with a WinForms fallback; STA is the default since 3.0; never clip.exe,
+      Ticket note clipboard (in CaseKit.ps1): the WinForms clipboard first; Set-Clipboard is
+      5.0, so the fallback is behind a Get-Command check; STA is the default since 3.0; never clip.exe,
       because $OutputEncoding is ASCII in 5.1 and would mangle non-ASCII names
         https://learn.microsoft.com/powershell/scripting/whats-new/what-s-new-in-windows-powershell-50
         https://learn.microsoft.com/powershell/module/microsoft.powershell.management/set-clipboard?view=powershell-5.1

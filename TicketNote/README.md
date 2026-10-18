@@ -70,8 +70,8 @@ These folders hold client user names and findings. They stay on your machine; no
 
 The note (and the combined note) is copied to the clipboard, which is not private:
 
-- On Windows PowerShell 5.0 and later it is copied with `Set-Clipboard`, so it can land in **clipboard history** (Win+V) and, if the user turned it on, the **cloud clipboard** that syncs to their other devices.
-- On 3.0 and 4.0 (or when `Set-Clipboard` fails) the Windows Forms clipboard is used, and the note is marked to stay out of clipboard history and the cloud clipboard (the `CanIncludeInClipboardHistory` and `CanUploadToCloudClipboard` formats, [Microsoft Learn](https://learn.microsoft.com/windows/win32/dataxchg/clipboard-formats)).
+- It is copied with the Windows Forms clipboard on every PowerShell version, and marked to stay out of **clipboard history** (Win+V) and the **cloud clipboard** that syncs to the user's other devices (the `CanIncludeInClipboardHistory` and `CanUploadToCloudClipboard` formats, [Microsoft Learn](https://learn.microsoft.com/windows/win32/dataxchg/clipboard-formats)).
+- Only if that fails (the Windows Forms clipboard needs PowerShell's default single-threaded apartment, so a window started with `-Mta` cannot use it) is `Set-Clipboard` used instead, on Windows PowerShell 5.0 and later. `Set-Clipboard` cannot opt out, so on that fallback the note can land in clipboard history and the cloud clipboard.
 - Either way, in a Remote Desktop session the clipboard is shared with the PC you connected from (**RDP clipboard redirection**).
 
 The note is paste-safe by default (no IP addresses or share paths), but it still names the user. Add `-NoClipboard` to keep it off the clipboard entirely; the file in the ticket folder is still written.
@@ -83,7 +83,7 @@ The note is paste-safe by default (no IP addresses or share paths), but it still
 - **This folder holds the master copy.** Each tool that writes a note keeps an identical copy in its own folder, so every folder still runs on its own. After changing `CaseKit.ps1` here, copy it to `AD-UserQuickCheck`, `Network-QuickCheck`, `Citrix-FSLogix-Triage` and `M365-UserQuickCheck`. `Tests\CaseKitParity.Tests.ps1` fails if a copy drifts.
 - **"Ruled out" needs proof.** A check is only ruled out when the tool says it really looked (`New-TicketNoteItem -Kind Clear -CouldLook $true`). Without that it goes under "Could not check".
 - **Paste-safe.** IP addresses and share paths become `[IP removed]` / `[share path removed]` unless the tool is run with `-FullDetail`. Evidence shows file names only.
-- **Clipboard.** `Set-Clipboard` where it exists (Windows PowerShell 5.0 and later), the Windows Forms clipboard on 3.0 and 4.0, marked to stay out of clipboard history (see [The clipboard](#the-clipboard)). Never `clip.exe`, which mangles names like Müller on Windows PowerShell 5.1. If there is no clipboard (a server with no desktop), the note is saved or printed instead.
+- **Clipboard.** The Windows Forms clipboard first, marked to stay out of clipboard history; `Set-Clipboard` (Windows PowerShell 5.0 and later) only when that fails (see [The clipboard](#the-clipboard)). Never `clip.exe`, which mangles names like Müller on Windows PowerShell 5.1. If there is no clipboard (a server with no desktop), the note is saved or printed instead.
 
 ## Tests
 

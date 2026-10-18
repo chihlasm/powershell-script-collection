@@ -37,8 +37,9 @@
     What you already tried by hand. Asked for when omitted.
 .PARAMETER NoClipboard
     Leave the clipboard alone; only write the file. Without it the combined note goes to the
-    clipboard, where it can enter clipboard history (Win+V) or the cloud clipboard on Windows
-    PowerShell 5.0 and later, and travels over RDP clipboard redirection.
+    clipboard marked to stay out of clipboard history (Win+V) and the cloud clipboard; only
+    when that fails (e.g. an MTA host) is Set-Clipboard used, which cannot opt out. Either
+    way it travels over RDP clipboard redirection.
 .PARAMETER FullDetail
     Keep IP addresses and share paths in the combined note. By default they are removed
     (paste-safe) from the two answers and from every joined line, including notes a tool saved
@@ -60,7 +61,7 @@
     Needs CaseKit.ps1 in this folder (it ships with it).
 
     REFERENCES
-      Set-Clipboard is 5.0; the kit falls back to the WinForms clipboard on 3.0 / 4.0
+      The kit uses the WinForms clipboard first; Set-Clipboard (5.0) is only its fallback
         https://learn.microsoft.com/powershell/scripting/whats-new/what-s-new-in-windows-powershell-50
         https://learn.microsoft.com/powershell/module/microsoft.powershell.management/set-clipboard?view=powershell-5.1
       STA is the default apartment since 3.0 (the WinForms clipboard needs it)

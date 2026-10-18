@@ -4,7 +4,8 @@
 
     The script is RUN (never loaded) with Microsoft Graph and the clipboard faked:
       Connect-MgGraph, Get-MgContext, Disconnect-MgGraph, Invoke-MgGraphRequest, Import-Module,
-      Set-Clipboard, Write-Host are mocked. Invoke-MgGraphRequest dispatches on -Uri to the
+      Set-Clipboard, Invoke-WinFormsClipboard (the kit's default clipboard, D-033), Write-Host
+      are mocked. Invoke-MgGraphRequest dispatches on -Uri to the
       synthetic scenario in $script:Scn. Nothing connects to Graph or AD; the real clipboard and
       the user profile are never touched (-NoClipboard, -OutputPath under $TestDrive).
       Synthetic data only (contoso.com, jdoe, 203.0.113.x).
@@ -46,6 +47,8 @@ BeforeAll {
             $StatusCodeVariable, [switch]$SkipHttpErrorCheck, $GraphRequestSession, $UserAgent, $OutputType)
     }
     function Set-Clipboard { [CmdletBinding()] param([Parameter(ValueFromPipeline = $true)][AllowEmptyString()][string[]]$Value, [switch]$Append, [switch]$AsHtml) }
+    # The kit (CaseKit.ps1) defines this only once the script runs; the stub lets it be mocked.
+    function Invoke-WinFormsClipboard { param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text) }
 
     $script:TenantId = '11111111-2222-3333-4444-555555555555'
     $script:UserId = 'aaaaaaaa-0000-0000-0000-000000000001'
@@ -158,6 +161,7 @@ Describe 'running the check' {
         Mock Get-MgContext { [PSCustomObject]@{ Account = $script:Scn.Me; TenantId = $script:TenantId; Scopes = @('Directory.Read.All'); AuthType = 'Delegated'; ContextScope = 'Process' } }
         Mock Disconnect-MgGraph { $script:Events.Add('DISCONNECT') }
         Mock Set-Clipboard { }
+        Mock Invoke-WinFormsClipboard { }
         Mock Write-Host { $script:Events.Add('HOST:' + ($Object -join ' ')) }
         Mock Invoke-MgGraphRequest -MockWith $script:FakeGraph
     }
@@ -499,6 +503,7 @@ Describe 'older Microsoft.Graph.Authentication modules' {
             Mock Get-MgContext { [PSCustomObject]@{ Account = $script:Scn.Me; TenantId = $script:TenantId; ContextScope = 'Process' } }
             Mock Disconnect-MgGraph { $script:Events.Add('DISCONNECT') }
             Mock Set-Clipboard { }
+            Mock Invoke-WinFormsClipboard { }
             Mock Write-Host { $script:Events.Add('HOST:' + ($Object -join ' ')) }
             Mock Invoke-MgGraphRequest -MockWith $script:FakeGraph
         }
@@ -525,6 +530,7 @@ Describe 'older Microsoft.Graph.Authentication modules' {
             Mock Get-MgContext { [PSCustomObject]@{ Account = $script:Scn.Me; TenantId = $script:TenantId; ContextScope = 'Process' } }
             Mock Disconnect-MgGraph { $script:Events.Add('DISCONNECT') }
             Mock Set-Clipboard { }
+            Mock Invoke-WinFormsClipboard { }
             Mock Write-Host { $script:Events.Add('HOST:' + ($Object -join ' ')) }
             Mock Invoke-MgGraphRequest -MockWith $script:FakeGraph
         }

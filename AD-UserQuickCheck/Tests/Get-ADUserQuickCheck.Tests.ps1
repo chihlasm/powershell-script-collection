@@ -459,7 +459,9 @@ Describe 'the script end to end (child process, fake ActiveDirectory module)' {
 # The script is expected to dot-source its own CaseKit.ps1 (copy of TicketNote\CaseKit.ps1)
 # and to expose the adapter ConvertTo-UserQuickCheckTicketNote -Result -EvidencePaths
 # [-Credential], which maps the result to kit items (the gate decisions live there).
-# The clipboard is never touched for real: Set-Clipboard is mocked, or -NoClipboard is used.
+# The clipboard is never touched for real: Set-Clipboard is mocked, the kit's
+# Invoke-WinFormsClipboard (tried first, D-033) is shadowed by a global alias to a fake that
+# records the text, or -NoClipboard is used.
 # =============================================================================
 
 Describe 'ticket note' {
@@ -621,11 +623,26 @@ exit 0
 
     It 'AC25_NoClipboardSwitches: -NoClipboard and -Quiet skip the clipboard; the default copies exactly once' {
         Mock Set-Clipboard { }
-        $null = Invoke-ScriptInProcess @{ Identity = 'jdoe'; NoClipboard = $true }
-        Should -Invoke Set-Clipboard -Times 0 -Exactly
-        $null = Invoke-ScriptInProcess @{ Identity = 'jdoe'; Quiet = $true }
-        Should -Invoke Set-Clipboard -Times 0 -Exactly
-        $null = Invoke-ScriptInProcess @{ Identity = 'jdoe' }
-        Should -Invoke Set-Clipboard -Times 1 -Exactly
+        # The script dot-sources the kit into its own scope, and a function defined there would
+        # outrank a Pester mock; a global alias outranks the function.
+        $global:AdqcClipboard = New-Object System.Collections.Generic.List[string]
+        function global:AdqcFake-Clipboard { param($Text) $global:AdqcClipboard.Add($Text) }
+        Set-Alias -Name Invoke-WinFormsClipboard -Value AdqcFake-Clipboard -Scope Global
+        try {
+            $null = Invoke-ScriptInProcess @{ Identity = 'jdoe'; NoClipboard = $true }
+            $global:AdqcClipboard.Count | Should -Be 0
+            Should -Invoke Set-Clipboard -Times 0 -Exactly
+            $null = Invoke-ScriptInProcess @{ Identity = 'jdoe'; Quiet = $true }
+            $global:AdqcClipboard.Count | Should -Be 0
+            Should -Invoke Set-Clipboard -Times 0 -Exactly
+            $null = Invoke-ScriptInProcess @{ Identity = 'jdoe' }
+            $global:AdqcClipboard.Count | Should -Be 1
+            $global:AdqcClipboard[0] | Should -Match '\[Ticket note\] AD-UserQuickCheck'
+            Should -Invoke Set-Clipboard -Times 0 -Exactly -Because 'the WinForms clipboard comes first (D-033)'
+        } finally {
+            Remove-Item -LiteralPath Alias:\Invoke-WinFormsClipboard -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath Function:\AdqcFake-Clipboard -ErrorAction SilentlyContinue
+            Remove-Variable -Name AdqcClipboard -Scope Global -ErrorAction SilentlyContinue
+        }
     }
 }
