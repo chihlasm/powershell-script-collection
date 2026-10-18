@@ -120,6 +120,39 @@ turns inherited rules into explicit ones, and handlers use `-Path`, which breaks
 `[ ]`. Copy becomes add-only with the checkbox dropped: one `Set-Acl` on the target, locked
 subfolders untouched (D-031). Fix with a regression test for each. Builds after SQ-014 (D-011).
 
+## SQ-017 · FolderPermissionManager as a WPF app (replace the browser GUI)
+- status: new
+- priority: P1
+- type: feature
+- branch:
+- spec:
+
+Rewrite FolderPermissionManager-GUI.ps1 as a WPF window in the style of
+RobocopyMigration-GUI.ps1, replacing the HttpListener web server and browser page. Why (owner,
+2026-10-18): performance and a cleaner tool. The current server handles one request at a time, so
+a slow permission read, a whole-tree action or a robocopy run freezes everything; and it listens on
+`http://localhost:<port>/` with no origin check or token on endpoints that change permissions.
+
+Must:
+- Reuse `FolderPermissions.Core.ps1` and its tests unchanged (backups, change log, take ownership,
+  copy, D-027/D-030/D-031/D-034/D-035/D-036). Only the UI layer changes.
+- Keep the window responsive: slow work (folder/permission reads on shares, whole-tree actions)
+  runs in the background (runspace pool, as RobocopyMigration does) with progress and a clear
+  busy state; one change at a time.
+- Keep every current single-item and whole-tree action, the confirmations, the result messages
+  (backup and log paths, "Partly done", "Could not read"), plain-English labels, paths always
+  visible, dark default with light toggle (root CLAUDE.md design context).
+- No network listener of any kind.
+- Admin check / elevation offer and single-instance like RobocopyMigration; `#Requires -Version 5.1`.
+- Safety first: the destructive-operations checklist applies in full; the old browser GUI stays
+  in the folder until the WPF version passes the owner's lab tests, then is removed in a
+  follow-up.
+
+Proposed by the squad lead (inferred, confirm in /squad:plan): drop the Robocopy tab and
+"Copy Files To..." from the new app and point to RobocopyMigration instead (its robocopy handling is
+far safer); moving the file-list copy, /SECFIX and type-MIRROR confirmation into RobocopyMigration
+would be a separate item. Builds after SQ-014 and SQ-015 (same core and GUI file).
+
 ## SQ-010 · Ticket note in Network-QuickCheck and Citrix-FSLogix-Triage
 - status: done
 - priority: P2
