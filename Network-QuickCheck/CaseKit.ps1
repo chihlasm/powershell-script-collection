@@ -260,16 +260,20 @@ function Protect-TicketNoteText {
     # Share paths: \\host\share, //host/share and file://host/share (or file:\\host\share).
     # The // form needs a non-word, non-colon character before it, so http:// is left alone.
     # A quoted path may contain spaces and apostrophes (\\FS01\HR\Joe's Reviews: an apostrophe
-    # is a legal character in a share or folder name, MS-DTYP 2.2.57), so it ends at the
-    # matching quote followed by whitespace, punctuation or the end of the line, not at the
-    # first apostrophe. In an unquoted path a folder name may contain spaces when another
+    # is a legal character in a share or folder name, MS-DTYP 2.2.57), even one followed by a
+    # space (\\FS01\Staff\Teachers' Resources\jdoe). So a quoted path runs to the LAST matching
+    # quote on the line that is followed by whitespace, punctuation or the end of the line. It
+    # never runs into the next quoted share path ('\\fs01\a' and '\\fs02\b' stay two: a path
+    # can not contain a quote followed by \\ or //), but ordinary quoted text after it goes
+    # with it: "Path '\\fs01\a', then 'b'." becomes "Path '[share path removed]'.".
+    # In an unquoted path a folder name may contain spaces when another
     # folder follows it (\\fs01\FSLogix Profiles\jdoe); the last part ends at whitespace, so
     # the sentence after the path is kept. When in doubt this removes more, never less.
     # Trailing sentence punctuation is kept outside the redaction.
     #   https://learn.microsoft.com/openspecs/windows_protocols/ms-dtyp/62e862f4-2a51-452e-8eeb-dc4ff5ee33cc
     $sharePrefix = '(?:(?i:file:)(?://|\\\\)|\\\\|(?<![\w:/\\])//)'
     $quoteEnd = '\k<q>(?=[\s.,;:!?)\]]|$)'
-    $text = [regex]::Replace($text, '(?<q>["''])' + $sharePrefix + '(?:(?!' + $quoteEnd + ')[^\r\n])+' + $quoteEnd, { param($m) $m.Groups['q'].Value + '[share path removed]' + $m.Groups['q'].Value })
+    $text = [regex]::Replace($text, '(?<q>["''])' + $sharePrefix + '(?:(?!\k<q>' + $sharePrefix + ')[^\r\n])+' + $quoteEnd, { param($m) $m.Groups['q'].Value + '[share path removed]' + $m.Groups['q'].Value })
     $text = [regex]::Replace($text, $sharePrefix + '[^\\/\s"''<>|]+(?:[\\/][^\\/\r\n"<>|,;()]+(?=[\\/](?![\\/])))*(?:[\\/][^\s"<>|]*)?', {
             param($m)
             $v = $m.Value
@@ -280,8 +284,9 @@ function Protect-TicketNoteText {
 
     # IPv6 literal host names: the address with hyphens for colons, plus ".ipv6-literal.net"
     # (2001-DB8-D87-FFFF-CCAA-132B-1-221B.ipv6-literal.net), MS-DTYP 2.2.57 (link above). An
-    # "s<zone>" suffix stands for %<zone>. Confirmed by parsing the address back.
-    $text = [regex]::Replace($text, '(?<![\w.-])(?<a>[0-9A-Fa-f-]*-[0-9A-Fa-f-]*)(?:s(?<z>[0-9A-Za-z]+))?\.(?i:ipv6-literal\.net)(?![\w-]|\.\w)', {
+    # "s<zone>" suffix stands for %<zone>; host names are case-insensitive, so "S<zone>" too.
+    # Confirmed by parsing the address back.
+    $text = [regex]::Replace($text, '(?<![\w.-])(?<a>[0-9A-Fa-f-]*-[0-9A-Fa-f-]*)(?:[sS](?<z>[0-9A-Za-z]+))?\.(?i:ipv6-literal\.net)(?![\w-]|\.\w)', {
             param($m)
             $candidate = $m.Groups['a'].Value.Replace('-', ':')
             if ($m.Groups['z'].Success) { $candidate += '%' + $m.Groups['z'].Value }

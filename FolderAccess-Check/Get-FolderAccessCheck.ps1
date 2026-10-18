@@ -129,7 +129,9 @@
     The helpers Get-PrivilegedGroupDefinition, Get-NameOnlyPrivilegedGroup and
     Find-PrivilegedGroupBySid are copied verbatim from
     Find-PrivilegedAccessPaths\Find-PrivilegedAccessPaths.ps1 (for the privileged-group warning);
-    Tests\Get-FolderAccessCheck.Tests.ps1 fails if they drift.
+    Tests\Get-FolderAccessCheck.Tests.ps1 fails if they drift. What this tool adds to those lists
+    (Enterprise Read-only Domain Controllers, the Exchange groups) is in its own wrappers,
+    Get-FolderAccessPrivilegedGroupDefinition and Get-FolderAccessNameOnlyPrivilegedGroup.
 
     REFERENCES
       How DACLs control access to an object (stored order; a Deny of any requested, not yet
@@ -187,11 +189,25 @@
         https://learn.microsoft.com/troubleshoot/windows-server/networking/remove-administrative-shares
       DFS Namespaces (a domain-based namespace path begins with the domain name, \\Contoso\Public)
         https://learn.microsoft.com/windows-server/storage/dfs-namespaces/dfs-overview
-      Get-ADUser, Get-ADGroup, Get-ADDomain, Get-ADDomainController (-Filter *)
+      Get-ADUser, Get-ADGroup, Get-ADDomain, Get-ADDomainController (-Filter *), Get-ADForest
+      (Domains), Get-ADTrust (-Filter *)
         https://learn.microsoft.com/powershell/module/activedirectory/get-aduser
         https://learn.microsoft.com/powershell/module/activedirectory/get-adgroup
         https://learn.microsoft.com/powershell/module/activedirectory/get-addomain
         https://learn.microsoft.com/powershell/module/activedirectory/get-addomaincontroller
+        https://learn.microsoft.com/powershell/module/activedirectory/get-adforest
+        https://learn.microsoft.com/powershell/module/activedirectory/get-adtrust
+      memberOf (a back link; direct groups only), group scopes (a global group can be in domain
+      local groups of any domain in the forest or a trusting domain; domain local groups hold
+      members from other forests), the global catalog (a partial copy of other domains)
+        https://learn.microsoft.com/windows/win32/ad/linked-attributes
+        https://learn.microsoft.com/windows/win32/ad/group-objects
+        https://learn.microsoft.com/windows/win32/ad/global-catalog
+        https://learn.microsoft.com/windows-server/identity/ad-ds/manage/understand-security-groups
+      Enterprise Read-only Domain Controllers (S-1-5-21-<root domain>-498)
+        https://learn.microsoft.com/windows-server/identity/ad-ds/manage/understand-security-groups
+      Exchange Trusted Subsystem, Exchange Windows Permissions, Organization Management
+        https://learn.microsoft.com/exchange/permissions/split-permissions/split-permissions
       Get-ADReplicationAttributeMetadata: -Object, -Properties, -Server (mandatory; a domain name
       or a directory server), -ShowAllLinkedValues ("returns all linked values if the attribute
       returned is multi-valued"); output ADReplicationAttributeMetadata
@@ -495,6 +511,46 @@ function Find-PrivilegedGroupBySid {
     return $null
 }
 #endregion
+
+function Get-FolderAccessPrivilegedGroupDefinition {
+    <#
+        Get-PrivilegedGroupDefinition (the shared copy, left as it is) plus what this tool also
+        treats as privileged when it decides which group to recommend:
+        - 498 Enterprise Read-only Domain Controllers, S-1-5-21-<root domain>-498, a universal
+          group of the forest root domain whose members are the forest's RODCs.
+          https://learn.microsoft.com/windows-server/identity/ad-ds/manage/understand-security-groups
+        Find-PrivilegedGroupBySid -AnyDomain matches on the RID, so one entry under the
+        domain SID also finds the forest root's group.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$DomainSid,
+        [string]$RootDomainSid
+    )
+    $defs = New-Object System.Collections.Generic.List[object]
+    foreach ($d in @(Get-PrivilegedGroupDefinition -DomainSid $DomainSid -RootDomainSid $RootDomainSid)) { $defs.Add($d) }
+    foreach ($sidBase in @($DomainSid, $RootDomainSid | Where-Object { $_ } | Select-Object -Unique)) {
+        $defs.Add([PSCustomObject]@{ Sid = "$sidBase-498"; Rid = 498; Scope = 'Domain'; Name = 'Enterprise Read-only Domain Controllers'; Risk = 'HIGH'; Note = 'Read-only domain controller computer accounts of the forest'; AdminSdHolder = $false })
+    }
+    return $defs.ToArray()
+}
+
+function Get-FolderAccessNameOnlyPrivilegedGroup {
+    <#
+        Get-NameOnlyPrivilegedGroup (the shared copy, left as it is: DnsAdmins, DHCP
+        Administrators) plus the Exchange groups that can change Active Directory itself. They
+        are created by Exchange setup with ordinary RIDs, so they are found by name only.
+        Exchange Trusted Subsystem "is a highly privileged universal security group ... a member
+        of the Administrators local security group and the Exchange Windows Permissions USG,
+        which enables Exchange to create and manage Active Directory objects"; Organization
+        Management can create security principals and manage security group memberships.
+        https://learn.microsoft.com/exchange/permissions/split-permissions/split-permissions
+    #>
+    return @(Get-NameOnlyPrivilegedGroup) + @(
+        [PSCustomObject]@{ Name = 'Exchange Windows Permissions'; Risk = 'CRITICAL'; Note = 'Exchange servers manage AD objects through it - a known path to domain admin' }
+        [PSCustomObject]@{ Name = 'Exchange Trusted Subsystem';   Risk = 'CRITICAL'; Note = 'Read/write to every Exchange object; member of Exchange Windows Permissions' }
+        [PSCustomObject]@{ Name = 'Organization Management';      Risk = 'HIGH';     Note = 'Exchange role group that can create users and manage security group membership' }
+    )
+}
 
 # =============================================================================
 # Pure interpretation (no AD, CIM or file system calls - unit tested directly)
@@ -823,7 +879,7 @@ function Invoke-DaclWalk {
 
 function Find-FolderAccessPrivilegedSid {
     <#
-        The well-known privileged group this SID is (Get-PrivilegedGroupDefinition), or $null.
+        The well-known privileged group this SID is (Get-FolderAccessPrivilegedGroupDefinition), or $null.
         Matched with Find-PrivilegedGroupBySid -AnyDomain, so a domain-relative group of any
         domain counts (Enterprise Admins of the forest root as well as this domain's Domain
         Admins); BUILTIN groups match on their S-1-5-32 SID. Protected Users is left out, as in
@@ -831,7 +887,7 @@ function Find-FolderAccessPrivilegedSid {
     #>
     param([string]$Sid)
     if ($Sid -notmatch '^S-1-5-(?:21-\d+-\d+-\d+|32)-\d+$') { return $null }
-    $defs = @(Get-PrivilegedGroupDefinition -DomainSid ($Sid -replace '-\d+$', '') | Where-Object { $_.Risk -ne 'INFO' })
+    $defs = @(Get-FolderAccessPrivilegedGroupDefinition -DomainSid ($Sid -replace '-\d+$', '') | Where-Object { $_.Risk -ne 'INFO' })
     return (Find-PrivilegedGroupBySid -Sid $Sid -Definitions $defs -AnyDomain)
 }
 
@@ -876,7 +932,8 @@ function Get-FolderAccessCandidateWarning {
         https://learn.microsoft.com/windows/win32/adschema/a-admincount
         https://learn.microsoft.com/windows-server/identity/ad-ds/plan/security-best-practices/appendix-c--protected-accounts-and-groups-in-active-directory
         Incomplete: the upward walk could not be finished (a parent group could not be read, the
-        nesting limit was reached), so the candidate may be in a privileged group: fail closed.
+        nesting limit was reached, or the forest has more than one domain or a trust, so memberOf
+        can't show every group), so the candidate may be in a privileged group: fail closed.
     #>
     param([object]$Candidate, [string]$UserName)
     $name = [string]$Candidate.Name
@@ -947,11 +1004,12 @@ function Select-FolderAccessNarrowestGroup {
         $rank = if ($privileged) { 2 } elseif ([bool]$c.Incomplete) { 1 } else { 0 }
         $passing.Add([PSCustomObject]@{
             Name = [string]$c.Name; Sid = [string]$c.Sid; MemberCount = [int]$c.MemberCount; Warning = $warning; Rank = $rank
+            Incomplete = [bool]$c.Incomplete
         })
     }
     if ($passing.Count -eq 0) { return $null }
     $best = @($passing.ToArray() | Sort-Object -Property @{ Expression = { $_.Rank } }, @{ Expression = { $_.MemberCount } }, @{ Expression = { $_.Name } })[0]
-    return [PSCustomObject]@{ Name = $best.Name; Sid = $best.Sid; MemberCount = $best.MemberCount; Warning = $best.Warning }
+    return [PSCustomObject]@{ Name = $best.Name; Sid = $best.Sid; MemberCount = $best.MemberCount; Warning = $best.Warning; Incomplete = $best.Incomplete }
 }
 
 function Get-FolderAccessPrivilegedGrant {
@@ -1209,6 +1267,10 @@ function Get-FolderAccessAssessment {
                 # the warning that explains it follows as its own step.
                 Add-Step ("{0}{1} ({2}). Get senior approval first, then add {3} to {1} in Active Directory if the folder's owner agrees, and have them sign out and back in." -f $script:NarrowestStepPrefix, $recommendation.Name, $members, $UserName)
                 Add-Step $recommendation.Warning
+                if ($recommendation.Incomplete) {
+                    # The groups the walk could not see may hold a Deny as well as a privilege.
+                    Add-Step ("Not every group {0} is in could be checked, so it may also not work if a group it belongs to is denied: after adding {1}, confirm with Effective Access." -f $recommendation.Name, $UserName)
+                }
             } else {
                 Add-Step ("{0}{1} ({2}). If the folder's owner agrees, add {3} to it in Active Directory, then have them sign out and back in." -f $script:NarrowestStepPrefix, $recommendation.Name, $members, $UserName)
             }
@@ -1251,6 +1313,7 @@ function Get-FolderAccessAssessment {
         Headline = ('Can {0} {1} {2}?  {3}' -f $who, $doing, $Path, $verdictText)
         Access = $Access; FolderState = $folderState; ShareState = $shareState
         Recommendation = $recommendation; StaleToken = $staleToken
+        FolderError = $FolderError; ShareError = $ShareError
     }
 }
 
@@ -1441,8 +1504,9 @@ function Get-FolderAccessCandidateGroup {
         MemberCount is the number of direct `member` values (cheap and deterministic; a
         recursive count is expensive on DCs). PrivilegedVia: the candidate, and every group it is
         nested in (memberOf walked upward, cycle-safe, up to MaxNestingDepth), matched by SID
-        against Get-PrivilegedGroupDefinition with Find-PrivilegedGroupBySid -AnyDomain (so a
-        forest-root Enterprise Admins matches too), plus the name-only groups (DnsAdmins...).
+        against Get-FolderAccessPrivilegedGroupDefinition with Find-PrivilegedGroupBySid -AnyDomain
+        (so a forest-root Enterprise Admins matches too), plus the name-only groups (DnsAdmins,
+        DHCP Administrators, the Exchange groups: Get-FolderAccessNameOnlyPrivilegedGroup).
         Protected Users is left out: "not a privilege". A principal that isn't a group (a user
         account), a distribution group, or one that can't be read is not a candidate.
         ParentSids: the SIDs of every group the walk reached above the candidate.
@@ -1452,17 +1516,20 @@ function Get-FolderAccessCandidateGroup {
         "not privileged" was never confirmed. That is a parent group that could not be read, or
         the MaxNestingDepth limit reached with parents left unread. A parent in another domain
         of the forest (its DN's DC= parts differ) is read from that domain with -Server <its DNS
-        name>; when that fails too, the candidate is Incomplete.
+        name>; when that fails too, the candidate is Incomplete. Every candidate is Incomplete
+        too unless the forest has one domain and no trusts (Test-FolderAccessMemberOfComplete):
+        otherwise memberOf can leave out the very groups that make it privileged.
         https://learn.microsoft.com/powershell/module/activedirectory/get-adgroup#-server
     #>
     param([object[]]$FolderAces, [string]$DomainSid, [hashtable]$AdSplat = @{}, [int]$MaxNestingDepth = 10)
 
-    $defs = @(Get-PrivilegedGroupDefinition -DomainSid $DomainSid | Where-Object { $_.Risk -ne 'INFO' })
-    $nameOnly = @(Get-NameOnlyPrivilegedGroup | ForEach-Object { $_.Name })
+    $defs = @(Get-FolderAccessPrivilegedGroupDefinition -DomainSid $DomainSid | Where-Object { $_.Risk -ne 'INFO' })
+    $nameOnly = @(Get-FolderAccessNameOnlyPrivilegedGroup | ForEach-Object { $_.Name })
     $cache = @{}
     $out = New-Object System.Collections.Generic.List[object]
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase)
     $pattern = '^' + [regex]::Escape($DomainSid) + '-\d+$'
+    $memberOfComplete = $null   # read once, when the first candidate is found
 
     foreach ($ace in @($FolderAces)) {
         if ($null -eq $ace -or $ace.Type -ne 'Allow' -or [bool]$ace.InheritOnly -or [bool]$ace.Unresolved) { continue }
@@ -1475,6 +1542,7 @@ function Get-FolderAccessCandidateGroup {
             continue
         }
         if ([string]$g.GroupCategory -eq 'Distribution') { continue }
+        if ($null -eq $memberOfComplete) { $memberOfComplete = Test-FolderAccessMemberOfComplete -AdSplat $AdSplat }
 
         # Upward walk for "privileged elsewhere".
         $via = New-Object System.Collections.Generic.List[string]
@@ -1521,10 +1589,61 @@ function Get-FolderAccessCandidateGroup {
         $out.Add([PSCustomObject]@{
             Sid = $sid; Name = [string]$g.Name; ObjectClass = 'group'; MemberCount = @($g.member | Where-Object { $_ }).Count
             AdminCount = $(if ($null -ne $g.adminCount) { [int]$g.adminCount } else { 0 }); PrivilegedVia = $via.ToArray()
-            ParentSids = $parentSids.ToArray(); Incomplete = $incomplete
+            ParentSids = $parentSids.ToArray(); Incomplete = ($incomplete -or -not $memberOfComplete)
         })
     }
     return $out.ToArray()
+}
+
+function Test-FolderAccessMemberOfComplete {
+    <#
+    .SYNOPSIS
+        Can the memberOf values read from the user's domain be taken as every group a candidate
+        is in? Only when the forest has a single domain and the domain has no trusts. $false
+        when either can't be read: the privilege check fails closed.
+    .DESCRIPTION
+        memberOf is a back link: the directory works it out from the member values of the groups
+        it holds; it lists the groups the object is directly in.
+          https://learn.microsoft.com/windows/win32/ad/linked-attributes
+          https://learn.microsoft.com/windows/win32/ad/group-objects
+        A domain controller holds a full copy of its own domain only (a global catalog holds a
+        partial copy of the others), so memberOf read there leaves out groups held elsewhere.
+          https://learn.microsoft.com/windows/win32/ad/global-catalog
+        And a global group can be a member of "domain local groups from any domain in the same
+        forest, or from any trusting domain", and of universal groups of any domain in the
+        forest; a domain local group can hold accounts and groups "from other forests and from
+        external domains" (through foreign security principals). So in a forest with more than
+        one domain, or with any trust, an empty memberOf does not show that a group is not in,
+        say, the forest root's BUILTIN\Administrators.
+          https://learn.microsoft.com/windows-server/identity/ad-ds/manage/understand-security-groups
+        Get-ADForest lists the forest's domains (Domains); Get-ADTrust -Filter * lists the
+        trusted domain objects. Both are reads.
+          https://learn.microsoft.com/powershell/module/activedirectory/get-adforest
+          https://learn.microsoft.com/powershell/module/activedirectory/get-adtrust
+    #>
+    param([hashtable]$AdSplat = @{})
+    try {
+        $forest = Get-ADForest @AdSplat -ErrorAction Stop
+    } catch {
+        Write-Verbose "Could not read the forest, so no group's privilege check can be confirmed: $($_.Exception.Message)"
+        return $false
+    }
+    $domains = @(@($forest.Domains) | Where-Object { $_ })
+    if ($domains.Count -ne 1) {
+        Write-Verbose "The forest has $($domains.Count) domains: memberOf can't show every group, so no group's privilege check can be confirmed."
+        return $false
+    }
+    try {
+        $trusts = @(Get-ADTrust -Filter * @AdSplat -ErrorAction Stop)
+    } catch {
+        Write-Verbose "Could not read the domain's trusts, so no group's privilege check can be confirmed: $($_.Exception.Message)"
+        return $false
+    }
+    if ($trusts.Count -gt 0) {
+        Write-Verbose "The domain has $($trusts.Count) trust(s): memberOf can't show groups in other forests, so no group's privilege check can be confirmed."
+        return $false
+    }
+    return $true
 }
 
 function ConvertFrom-FolderAccessFileTime {
@@ -2259,6 +2378,32 @@ function Export-FolderAccessReport {
 # Ticket note (CaseKit.ps1)
 # =============================================================================
 
+function Protect-FolderAccessKnownPath {
+    <#
+    .SYNOPSIS
+        Paste-safe (D-009): the paths this check knows, and the share's name, become
+        [share path removed] in one text (an error message).
+    .DESCRIPTION
+        A literal, case-insensitive match of what was typed, the folder that was read and
+        \server\share, each also with forward slashes, longest first; then the share name on its
+        own. So an error quoting "\FS01\Staff\Teachers' Resources\jdoe" loses all of it without
+        anyone having to work out where an apostrophe ends a folder name. The kit's filter
+        (Protect-TicketNoteText) still runs over the whole note afterwards. The server name stays:
+        the note names the server elsewhere too.
+    #>
+    param([string]$Text, [string[]]$Path, [string]$Share)
+    if ([string]::IsNullOrEmpty($Text)) { return $Text }
+    $known = @(@($Path) | Where-Object { $_ } | ForEach-Object {
+            $p = ([string]$_).Trim()
+            $p; $p.TrimEnd('\'); $p.Replace('\', '/'); $p.TrimEnd('\').Replace('\', '/')
+        } | Where-Object { $_.Length -gt 2 } | Select-Object -Unique | Sort-Object -Property Length -Descending)
+    foreach ($k in $known) { $Text = [regex]::Replace($Text, [regex]::Escape($k), '[share path removed]', 'IgnoreCase') }
+    if (-not [string]::IsNullOrEmpty($Share)) {
+        $Text = [regex]::Replace($Text, '(?<![\w$-])' + [regex]::Escape($Share) + '(?![\w$-])', '[share path removed]', 'IgnoreCase')
+    }
+    return $Text
+}
+
 function ConvertTo-FolderAccessTicketNote {
     <#
     .SYNOPSIS
@@ -2274,9 +2419,10 @@ function ConvertTo-FolderAccessTicketNote {
 
         The headline says "the folder". The path is in the scope line only with -FullDetail;
         without it (paste-safe, D-009) the scope line leaves the path out entirely rather than
-        relying on the kit's filter to find where a folder name ends. Any other path (an error
-        message) is still removed by the kit's paste-safe filter. -Credential only contributes
-        its user name.
+        relying on the kit's filter to find where a folder name ends, and the error texts (folder,
+        share, directory) have the paths this check knows replaced first
+        (Protect-FolderAccessKnownPath). Any other path is still removed by the kit's paste-safe
+        filter. -Credential only contributes its user name.
     #>
     param(
         [Parameter(Mandatory = $true)][object]$Result,
@@ -2288,6 +2434,27 @@ function ConvertTo-FolderAccessTicketNote {
     $next = New-Object System.Collections.Generic.List[string]
     $id = [string]$Result.Identity
     $domain = [string]$Result.Domain
+
+    # Paste-safe: each error text is swapped for a copy without this check's own paths, wherever
+    # the assessment quoted it (reasons, Couldn't-check lines).
+    $knownPaths = @([string]$Result.Path)
+    $knownShare = ''
+    if ($Result.PathInfo) {
+        $knownPaths += [string]$Result.PathInfo.Folder
+        if ($Result.PathInfo.Server -and $Result.PathInfo.Share) { $knownPaths += ('\{0}\{1}' -f $Result.PathInfo.Server, $Result.PathInfo.Share) }
+        $knownShare = [string]$Result.PathInfo.Share
+    }
+    $errorSwaps = @()
+    if (-not $FullDetail -and $Result.Assessment) {
+        foreach ($e in @($Result.Assessment.FolderError, $Result.Assessment.ShareError)) {
+            if ([string]::IsNullOrEmpty($e)) { continue }
+            $errorSwaps += , @([string]$e, (Protect-FolderAccessKnownPath -Text $e -Path $knownPaths -Share $knownShare))
+        }
+    }
+    function Hide-KnownPath([string]$Text) {
+        foreach ($swap in $errorSwaps) { $Text = $Text.Replace($swap[0], $swap[1]) }
+        return $Text
+    }
 
     if ($Result.Status -eq 'Ok') {
         $a = $Result.Assessment; $u = $Result.User
@@ -2302,10 +2469,10 @@ function ConvertTo-FolderAccessTicketNote {
         if ($a.LimitedBy) { $items.Add((New-TicketNoteItem -Kind $kind -Text "Limited by: $($a.LimitedBy).")) }
         foreach ($r in @($a.Reasons)) {
             $k = if ($a.StaleToken -and $r -match 'after their last sign-in') { 'Warning' } else { $kind }
-            $items.Add((New-TicketNoteItem -Kind $k -Text $r))
+            $items.Add((New-TicketNoteItem -Kind $k -Text (Hide-KnownPath $r)))
         }
         if ($a.Recommendation -and $a.Recommendation.Warning) { $items.Add((New-TicketNoteItem -Kind Warning -Text $a.Recommendation.Warning)) }
-        foreach ($n in @($a.CouldNotCheck)) { $items.Add((New-TicketNoteItem -Kind NotChecked -Text $n)) }
+        foreach ($n in @($a.CouldNotCheck)) { $items.Add((New-TicketNoteItem -Kind NotChecked -Text (Hide-KnownPath $n))) }
 
         if ($a.Verdict -eq 'PROBABLY YES' -or $a.Verdict -eq 'PROBABLY NO') {
             $sam = [string]$u.SamAccountName
@@ -2320,7 +2487,7 @@ function ConvertTo-FolderAccessTicketNote {
                 $items.Add((New-TicketNoteItem -Kind Clear -Text "Deny entries: none in the folder permissions blocks $sam." -CouldLook $true))
             }
         }
-        foreach ($s in @($a.NextSteps)) { $next.Add($s) }
+        foreach ($s in @($a.NextSteps)) { $next.Add((Hide-KnownPath $s)) }
     } else {
         $notRun = 'The share and folder permissions were not read.'
         switch ($Result.Status) {
@@ -2345,7 +2512,10 @@ function ConvertTo-FolderAccessTicketNote {
             }
             default {
                 $headline = "Folder access check for '$id' did not run - could not read Active Directory"
-                if ($Result.Message) { $items.Add((New-TicketNoteItem -Kind Problem -Text $Result.Message)) }
+                if ($Result.Message) {
+                    $msg = if ($FullDetail) { [string]$Result.Message } else { Protect-FolderAccessKnownPath -Text $Result.Message -Path $knownPaths -Share $knownShare }
+                    $items.Add((New-TicketNoteItem -Kind Problem -Text $msg))
+                }
                 $next.Add('Check that this PC can reach a domain controller (and that -Server / -Credential are right), then run the check again.')
             }
         }

@@ -7,6 +7,8 @@
 #                                     "lastLogon": "<FILETIME>", "lastLogonDC02": "<FILETIME>" } }
 #                 lastLogon is per DC and not replicated: DC01 answers "lastLogon", DC02 answers
 #                 "lastLogonDC02". Both default to 0 (never signed in).
+#   FAC_FOREST    JSON array of the forest's domain names (default ["contoso.com"]), or 'throw'
+#   FAC_TRUSTS    JSON array of trust partner names (default none), or 'throw'
 #
 # Directory (domain SID S-1-5-21-1111111111-2222222222-3333333333):
 #   groups  Domain Users (513), FIN-Staff (1105, member of FIN-All), FIN-All (1106),
@@ -164,4 +166,24 @@ function Get-ADDomain {
     }
 }
 
-Export-ModuleMember -Function Get-ADUser, Get-ADGroup, Get-ADDomain, Get-ADDomainController
+function Get-ADForest {
+    # Real parameter names: https://learn.microsoft.com/powershell/module/activedirectory/get-adforest
+    [CmdletBinding()]
+    param($Identity, $Current, $Server, $Credential, $AuthType)
+    Test-FakeDown
+    if ($env:FAC_FOREST -eq 'throw') { throw 'Unable to find a default server with Active Directory Web Services running.' }
+    $domains = if ($env:FAC_FOREST) { @($env:FAC_FOREST | ConvertFrom-Json) } else { @('contoso.com') }
+    [PSCustomObject]@{ Name = 'contoso.com'; RootDomain = 'contoso.com'; Domains = $domains }
+}
+
+function Get-ADTrust {
+    # Real parameter names: https://learn.microsoft.com/powershell/module/activedirectory/get-adtrust
+    [CmdletBinding()]
+    param($Filter, $LDAPFilter, $Identity, $InputObject, $Properties, $Server, $Credential, $AuthType)
+    Test-FakeDown
+    if ($env:FAC_TRUSTS -eq 'throw') { throw 'The server has rejected the client credentials.' }
+    if (-not $env:FAC_TRUSTS) { return }
+    foreach ($t in @($env:FAC_TRUSTS | ConvertFrom-Json)) { [PSCustomObject]@{ Name = $t; Target = $t; Direction = 'BiDirectional' } }
+}
+
+Export-ModuleMember -Function Get-ADUser, Get-ADGroup, Get-ADDomain, Get-ADDomainController, Get-ADForest, Get-ADTrust

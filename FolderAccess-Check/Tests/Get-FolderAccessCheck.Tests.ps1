@@ -120,7 +120,7 @@ BeforeAll {
             LocalGroups = @{ $script:Sid.BuiltinAdmins = @{ Name = 'Administrators'; Members = @(@{ Name = 'Domain Admins'; Domain = 'CONTOSO'; SID = "$($script:Dom)-512" }) } }
             LocalUsers = @{}
         }
-        $env:FAC_OVERRIDE = ''; $env:FAC_DOWN = ''
+        $env:FAC_OVERRIDE = ''; $env:FAC_DOWN = ''; $env:FAC_FOREST = ''; $env:FAC_TRUSTS = ''
     }
     Reset-World
 
@@ -180,7 +180,7 @@ BeforeAll {
 }
 
 AfterAll {
-    Remove-Item Env:\FAC_OVERRIDE, Env:\FAC_DOWN -ErrorAction SilentlyContinue
+    Remove-Item Env:\FAC_OVERRIDE, Env:\FAC_DOWN, Env:\FAC_FOREST, Env:\FAC_TRUSTS -ErrorAction SilentlyContinue
     # Leave the session as it was: the throwing stubs and the fake module would otherwise
     # shadow the real cmdlets for whatever runs next in this PowerShell process.
     foreach ($name in $script:GlobalStubs) { Remove-Item -Path "function:global:$name" -ErrorAction SilentlyContinue }
@@ -613,6 +613,9 @@ Describe 'verdict wording, exit codes, read-only, report (AC21-AC24)' {
                 'ForEach-Object', 'Where-Object', 'Select-Object', 'New-Object', 'Write-Host', 'Write-Verbose',
                 # SQ-013: read-only AD reads for the stale-token check, and ranking.
                 'Get-ADDomainController', 'Get-ADReplicationAttributeMetadata', 'Sort-Object',
+                # SQ-013: read-only forest and trust reads, so the privilege check fails closed
+                # where memberOf can't show every group (another domain or forest).
+                'Get-ADForest', 'Get-ADTrust',
                 # SQ-013: the ticket-note kit (CaseKit.ps1, dot-sourced; its writes are the note file in
                 # the ticket folder and the clipboard, covered by TicketNote\Tests\CaseKit.Tests.ps1).
                 'New-TicketNoteItem', 'New-TicketNoteStamp', 'New-TicketNote', 'Test-TicketNumber', 'Get-TicketNoteDefaultRoot',
@@ -709,6 +712,17 @@ Describe 'verdict wording, exit codes, read-only, report (AC21-AC24)' {
             $io = @($script:KitMemberAsts | Where-Object { $_.Expression.Extent.Text -match '(?i)IO\.(File|Directory)\]$' })
             $io.Count | Should -BeGreaterThan 0
             foreach ($m in $io) { $m.Member.Extent.Text | Should -Be 'WriteAllLines' -Because "$($m.Extent.Text) is a file-system call" }
+        }
+        It 'loads only framework assemblies with Add-Type -AssemblyName, never compiles code' {
+            $adds = @($script:KitCommandAsts | Where-Object { $_.GetCommandName() -eq 'Add-Type' })
+            $adds.Count | Should -BeGreaterThan 0
+            foreach ($a in $adds) {
+                $params = @($a.CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] } | ForEach-Object { $_.ParameterName })
+                $params | Should -Contain 'AssemblyName' -Because "$($a.Extent.Text) must load an assembly by name"
+                foreach ($p in $params) { @('AssemblyName', 'ErrorAction') | Should -Contain $p -Because "$($a.Extent.Text) may only name an assembly (no -TypeDefinition, -MemberDefinition, -Path or -LiteralPath)" }
+                $positional = @($a.CommandElements | Select-Object -Skip 1 | Where-Object { $_ -isnot [System.Management.Automation.Language.CommandParameterAst] })
+                $positional.Count | Should -Be $params.Count -Because "$($a.Extent.Text) passes nothing positionally (a bare string would be -TypeDefinition)"
+            }
         }
         It 'creates only allowlisted .NET types' {
             $allowed = @('System.Collections.Generic.List[string]', 'System.IO.MemoryStream', 'System.Text.UTF8Encoding', 'System.Windows.Forms.DataObject')
@@ -1004,16 +1018,16 @@ Describe 'parameter names match the real ActiveDirectory module (SQUAD.md: mocks
         # drive is not created (ADPS_LoadDefaultDrive=0), so nothing connects to the domain.
         # If RSAT is not installed the child prints nothing and the checks are skipped.
         $cmd = '$env:ADPS_LoadDefaultDrive = 0; Import-Module ActiveDirectory -ErrorAction Stop; ' +
-            'foreach ($c in "Get-ADUser","Get-ADGroup","Get-ADDomain") { "$c|" + ((Get-Command $c).Parameters.Keys -join ",") }'
+            'foreach ($c in "Get-ADUser","Get-ADGroup","Get-ADDomain","Get-ADForest","Get-ADTrust") { "$c|" + ((Get-Command $c).Parameters.Keys -join ",") }'
         $lines = @(& pwsh -NoProfile -Command $cmd 2>$null)
         $script:RealParams = @{}
         foreach ($l in $lines) { if ($l -match '^(Get-AD\w+)\|(.*)$') { $script:RealParams[$Matches[1]] = @($Matches[2] -split ',') } }
         $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:ScriptPath, [ref]$null, [ref]$null)
-        $script:AdCalls = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and @('Get-ADUser', 'Get-ADGroup', 'Get-ADDomain') -contains $n.GetCommandName() }, $true))
+        $script:AdCalls = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and @('Get-ADUser', 'Get-ADGroup', 'Get-ADDomain', 'Get-ADForest', 'Get-ADTrust') -contains $n.GetCommandName() }, $true))
     }
     It 'the fake module only declares parameters the real cmdlets have' {
         if (-not $script:RealParams -or $script:RealParams.Count -eq 0) { Set-ItResult -Skipped -Because 'ActiveDirectory (RSAT) is not installed'; return }
-        foreach ($name in 'Get-ADUser', 'Get-ADGroup', 'Get-ADDomain') {
+        foreach ($name in 'Get-ADUser', 'Get-ADGroup', 'Get-ADDomain', 'Get-ADForest', 'Get-ADTrust') {
             $fake = @((Get-Command -Module ActiveDirectory -Name $name).Parameters.Keys | Where-Object { [System.Management.Automation.PSCmdlet]::CommonParameters -notcontains $_ })
             foreach ($p in $fake) { $script:RealParams[$name] | Should -Contain $p }
         }
@@ -1149,6 +1163,15 @@ Describe 'narrowest group (AC28-AC32)' {
         @($r.NextSteps | Where-Object { $_ -like "$($script:EscalateStep)*" }).Count | Should -Be 1
         $r.NextSteps | Should -Not -Contain $script:NoGroupStep
         @($r.NextSteps)[-1] | Should -Be $script:EffectiveStep
+    }
+
+    It 'D017_EnterpriseReadOnlyDomainControllers_RID498_IsPrivileged_AndNeverRecommended' {
+        # S-1-5-21-<root domain>-498, a universal group of the forest root domain.
+        (Find-FolderAccessPrivilegedSid -Sid 'S-1-5-21-4444444444-5555555555-6666666666-498').Name | Should -Be 'Enterprise Read-only Domain Controllers'
+        $sid = "$($script:Dom)-498"
+        $r = Invoke-Assess @{ FolderAces = @(New-Ace $sid 'Enterprise Read-only Domain Controllers' $script:Mask.Read); CandidateGroups = @(New-Cand $sid 'Enterprise Read-only Domain Controllers' 2) }
+        $r.Recommendation | Should -BeNullOrEmpty
+        @($r.NextSteps | Where-Object { $_ -like "$($script:EscalateStep)*" }).Count | Should -Be 1
     }
 
     It 'D017_DomainAdminsTheOnlyAllow_TypicalHomeFolder_EscalateNamingTheGroup' {
@@ -1441,6 +1464,62 @@ Describe 'narrowest group (AC28-AC32)' {
             Mock Get-ADGroup { throw 'A referral was returned from the server.' } -ParameterFilter { "$Identity" -eq $eaDn -and $Server -eq 'fabrikam.com' }
             $c2 = @(Get-FolderAccessCandidateGroup -FolderAces @($ace) -DomainSid $script:Dom)[0]
             $c2.Incomplete | Should -BeTrue
+        }
+        It 'FailClosed_MultiDomainForest_EmptyMemberOfCanNotBeTrusted_CouldNotConfirm_ApprovalFirst' {
+            # memberOf read from a DC of the user's domain leaves out domain-local groups of other
+            # domains (the forest root's BUILTIN\Administrators) and other forests (through FSPs).
+            $env:FAC_FOREST = '["contoso.com","emea.contoso.com"]'
+            $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:Sid.FinMgr; M = $script:Mask.Read; F = '' })
+            $script:World.ShareSd = New-ShareSd @(New-ShareAce 'S-1-5-11' 'Authenticated Users' $script:Mask.Change)
+            $r = Invoke-Check
+            $r.Assessment.Verdict | Should -Be 'PROBABLY NO'
+            $r.Assessment.Recommendation.Name | Should -Be 'FIN-Managers'
+            $warn = "Couldn't confirm FIN-Managers is not in a privileged group. Get senior approval first."
+            $r.Assessment.Recommendation.Warning | Should -Be $warn
+            $r.Assessment.NextSteps | Should -Contain $warn
+            Assert-ApprovalInsideAddStep (@($r.Assessment.NextSteps) -join "`n") 'FIN-Managers'
+        }
+        It 'FailClosed_ATrustOrAnUnreadableForestOrTrustList_MeansCouldNotConfirm: <Case>' -ForEach @(
+            @{ Case = 'a trust to another forest'; Forest = ''; Trusts = '["fabrikam.com"]' }
+            @{ Case = 'the forest could not be read'; Forest = 'throw'; Trusts = '' }
+            @{ Case = 'the trusts could not be read'; Forest = ''; Trusts = 'throw' }
+        ) {
+            $env:FAC_FOREST = $Forest; $env:FAC_TRUSTS = $Trusts
+            $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:Sid.FinMgr; M = $script:Mask.Read; F = '' })
+            $script:World.ShareSd = New-ShareSd @(New-ShareAce 'S-1-5-11' 'Authenticated Users' $script:Mask.Change)
+            $r = Invoke-Check
+            $r.Assessment.Recommendation.Name | Should -Be 'FIN-Managers'
+            $r.Assessment.Recommendation.Warning | Should -Be "Couldn't confirm FIN-Managers is not in a privileged group. Get senior approval first."
+            Assert-ApprovalInsideAddStep (@($r.Assessment.NextSteps) -join "`n") 'FIN-Managers'
+        }
+        It 'FailClosed_SingleDomainForestWithNoTrusts_TheEmptyMemberOfIsTrusted' {
+            $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:Sid.FinMgr; M = $script:Mask.Read; F = '' })
+            $script:World.ShareSd = New-ShareSd @(New-ShareAce 'S-1-5-11' 'Authenticated Users' $script:Mask.Change)
+            $r = Invoke-Check
+            $r.Assessment.Recommendation.Name | Should -Be 'FIN-Managers'
+            $r.Assessment.Recommendation.Warning | Should -BeNullOrEmpty
+        }
+        It 'FailClosed_AnUncheckedCandidate_AlsoSaysADeniedParentGroupMayStopIt' {
+            $env:FAC_FOREST = '["contoso.com","emea.contoso.com"]'
+            $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:Sid.FinMgr; M = $script:Mask.Read; F = '' })
+            $script:World.ShareSd = New-ShareSd @(New-ShareAce 'S-1-5-11' 'Authenticated Users' $script:Mask.Change)
+            $r = Invoke-Check
+            $steps = @($r.Assessment.NextSteps) -join "`n"
+            $steps | Should -Match ([regex]::Escape('it may also not work if a group it belongs to is denied'))
+        }
+        It 'PrivilegedByName_ExchangeGroupsAreFoundByTheWalk: <_>' -ForEach @('Exchange Windows Permissions', 'Organization Management', 'Exchange Trusted Subsystem', 'DHCP Administrators') {
+            $name = $_
+            $sid = "$($script:Dom)-1160"
+            $parentDn = "CN=$name,OU=Microsoft Exchange Security Groups,DC=contoso,DC=com"
+            Mock Get-ADGroup {
+                [PSCustomObject]@{ Name = 'FIN-Mail'; DistinguishedName = 'CN=FIN-Mail,OU=Groups,DC=contoso,DC=com'; SID = $sid; GroupCategory = 'Security'
+                    MemberOf = @($parentDn); member = @('CN=a,DC=contoso,DC=com'); adminCount = $null }
+            } -ParameterFilter { "$Identity" -eq $sid }
+            Mock Get-ADGroup {
+                [PSCustomObject]@{ Name = $name; DistinguishedName = $parentDn; SID = "$($script:Dom)-1161"; MemberOf = @() }
+            } -ParameterFilter { "$Identity" -eq $parentDn }
+            $c = @(Get-FolderAccessCandidateGroup -FolderAces @(New-Ace $sid 'FIN-Mail' $script:Mask.Read) -DomainSid $script:Dom)[0]
+            $c.PrivilegedVia | Should -Contain $name
         }
         It 'AC32_EndToEnd_AdminCountIsReadFromTheGroup' {
             $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:OpsSid; M = $script:Mask.Read; F = '' })
@@ -1756,6 +1835,33 @@ Describe 'ticket note (AC36)' {
         $null = Invoke-ScriptInProcess @{ Identity = 'jdoe'; Path = $path; TicketNumber = '5'; OutputPath = $root; NoClipboard = $true; FullDetail = $true; PassThru = $true }
         $full = [System.IO.File]::ReadAllText((@(Get-ChildItem -LiteralPath (Join-Path $root 'Ticket_5') -Filter 'Note_*_FolderAccess-Check.txt'))[0].FullName)
         $full | Should -Match ([regex]::Escape($path))
+    }
+
+    It 'AC36_PasteSafe_AGetAclErrorQuotingAPossessiveFolderName_LeavesNothingBehind' {
+        # "Teachers' Resources": the apostrophe before a space looks like the closing quote.
+        $path = "\\FS01\Staff\Teachers' Resources\jdoe"
+        $script:World.FolderThrow = "Cannot find path '$path' because it does not exist."
+        $root = Join-Path $TestDrive 'ac36possessive'
+        $null = New-Item -ItemType Directory -Path $root
+        $null = Invoke-ScriptInProcess @{ Identity = 'jdoe'; Path = $path; TicketNumber = '7'; OutputPath = $root; NoClipboard = $true; PassThru = $true }
+        $safe = [System.IO.File]::ReadAllText((@(Get-ChildItem -LiteralPath (Join-Path $root 'Ticket_7') -Filter 'Note_*_FolderAccess-Check.txt'))[0].FullName)
+        $safe | Should -Match 'not read'
+        $safe | Should -Not -Match 'Teachers|Resources|Staff|\\\\FS01'
+    }
+
+    It 'AC36_PasteSafe_TheToolRemovesItsOwnPathsFromErrorText_WithoutRelyingOnTheKitFilter' {
+        # The note's own lines, before the kit's paste-safe filter runs, already hold no known path.
+        $path = "\\FS01\Teachers' Resources\jdoe"
+        $script:World.FolderThrow = "Cannot find path '$path' because it does not exist."
+        Mock Get-ShareSecurity { [PSCustomObject]@{ DaclState = 'Present'; Aces = @(); Error = "there is no share named 'Teachers' Resources' on FS01" } }
+        $r = Invoke-Check -Path $path
+        $lines = (Get-NoteFor $r).Lines -join "`n"
+        $lines | Should -Match 'not read'
+        $lines | Should -Not -Match 'Teachers|Resources'
+        # -FullDetail keeps the error text as it was.
+        $full = @(ConvertTo-TicketNoteText -Note (ConvertTo-FolderAccessTicketNote -Result $r -EvidencePaths @() -FullDetail)) -join "`n"
+        $full | Should -Match ([regex]::Escape("Cannot find path '$path'"))
+        $full | Should -Match ([regex]::Escape("there is no share named 'Teachers' Resources' on FS01"))
     }
 
     It 'AC36_Quiet_TheNoteIsOnTheResultEvenWhenSavingItFails_AndTheFailureIsRecorded' {
