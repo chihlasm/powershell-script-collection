@@ -1083,9 +1083,10 @@ function ConvertFrom-KdcsvcEvent {
     # the rendered message is supplied, then position in the documented message order
     # whenever none of the known element names is present (an unknown layout).
     #
-    # A block event whose account and service can't be read is still returned, flagged
-    # AccountNotRecorded: it may well be this account's, and dropping it would turn "a
-    # block was logged, check it" into a clean result.
+    # A block event whose account can't be read is still returned, flagged
+    # AccountNotRecorded, whatever else it names: a readable service or address doesn't say
+    # who asked for the ticket, so it may well be this account's, and dropping it would turn
+    # "a block was logged, check it" into a clean result.
     param([string]$EventXml, [int]$EventId, [string]$DcName, [string]$Message)
 
     $info = Get-EtypeEventInfo -EventId $EventId
@@ -1143,7 +1144,7 @@ function ConvertFrom-KdcsvcEvent {
         Who           = $info.Who
         NextStep      = $info.NextStep
         Message       = $Message
-        AccountNotRecorded = ($accounts.Count -eq 0)
+        AccountNotRecorded = ([string]::IsNullOrWhiteSpace($account) -or $account -eq '-')
     }
 }
 
@@ -1154,11 +1155,12 @@ function Select-EtypeEvidenceForAccount {
     # so all three forms match, case-insensitively. A block event whose account couldn't
     # be read (AccountNotRecorded) is always kept: it can't be ruled out, and the report
     # and verdict tell the tech to open the event instead of treating it as this account's.
+    # If such a row still names this account (as the service), it does concern it, so a
+    # copy is returned with the flag cleared and it becomes a normal finding.
     param([object[]]$Rows, [string]$SamAccountName)
 
     if ([string]::IsNullOrWhiteSpace($SamAccountName)) { return @() }
     $kept = foreach ($r in @($Rows | Where-Object { $_ })) {
-        if ($r.AccountNotRecorded) { $r; continue }
         $names = @(@($r.Account, $r.Service) + @($r.Accounts) | Where-Object { $_ })
         $hit = $false
         foreach ($n in $names) {
@@ -1167,7 +1169,11 @@ function Select-EtypeEvidenceForAccount {
             if ($bare -match '@')  { $bare = $bare.Substring(0, $bare.IndexOf('@')) }
             if ($bare -ieq $SamAccountName) { $hit = $true; break }
         }
-        if ($hit) { $r }
+        if ($hit -and $r.AccountNotRecorded) {
+            $copy = $r.PSObject.Copy()
+            $copy.AccountNotRecorded = $false
+            $copy
+        } elseif ($hit -or $r.AccountNotRecorded) { $r }
     }
     return @($kept)
 }
@@ -1342,17 +1348,24 @@ function Get-EtypeEvidence {
             }
             # "No events" is a reachable DC with nothing to report, not a gap.
         }
-        # A malformed event costs this DC's 4768/4769 evidence ("Can't tell" with the
-        # reason), never the sweep. Rows already read from it are kept.
+        # A malformed event is skipped and counted: the DC's 4768/4769 column becomes
+        # "Can't tell" (an unread event could be a block), but every event that could be
+        # read is kept and the sweep carries on.
         $dcRows = 0
         $ticketError = $null
-        try {
-            foreach ($e in $events) {
+        $badEvents = 0
+        $firstError = $null
+        foreach ($e in $events) {
+            try {
                 $r = ConvertFrom-EtypeFailureEvent -EventXml $e.ToXml() -EventId $e.Id -DcName $dc
                 if ($r) { $rows.Add($r); $dcRows++ }
+            } catch {
+                $badEvents++
+                if (-not $firstError) { $firstError = $_.Exception.Message }
             }
-        } catch {
-            $ticketError = "couldn't read the 4768/4769 events on ${dc}: $($_.Exception.Message)"
+        }
+        if ($badEvents -gt 0) {
+            $ticketError = "couldn't read the 4768/4769 events on ${dc}: $badEvents event(s) couldn't be read (first error: $firstError)"
         }
 
         # (b) Does this DC's Kdcsvc provider define the block events? This only explains
@@ -1372,6 +1385,7 @@ function Get-EtypeEvidence {
         # (c) Kdcsvc block events in the System log - always read, whatever (b) said.
         $kdcSeen = 0
         $kdcError = $null
+        $sys = @()
         try {
             $sys = @(Get-WinEvent -ComputerName $dc -FilterHashtable @{
                     LogName      = $ref.KdcLogName
@@ -1379,15 +1393,26 @@ function Get-EtypeEvidence {
                     Id           = $kdcIds
                     StartTime    = $start
                 } -ErrorAction Stop)
-            foreach ($e in $sys) {
+        } catch {
+            if ($_.Exception.Message -match $providerNotRegistered) { $providerMissing = $true }
+            elseif ($_.Exception.Message -notmatch 'No events were found') { $kdcError = $_.Exception.Message }
+        }
+        # Same rule as the 4768/4769 loop: skip and count a malformed event, keep the rest.
+        $badEvents = 0
+        $firstError = $null
+        foreach ($e in $sys) {
+            try {
                 $msg = $null
                 try { $msg = $e.Message } catch { $msg = $null }
                 $r = ConvertFrom-KdcsvcEvent -EventXml $e.ToXml() -EventId $e.Id -DcName $dc -Message $msg
                 if ($r) { $rows.Add($r); $dcRows++; $kdcSeen++ }
+            } catch {
+                $badEvents++
+                if (-not $firstError) { $firstError = $_.Exception.Message }
             }
-        } catch {
-            if ($_.Exception.Message -match $providerNotRegistered) { $providerMissing = $true }
-            elseif ($_.Exception.Message -notmatch 'No events were found') { $kdcError = $_.Exception.Message }
+        }
+        if ($badEvents -gt 0) {
+            $kdcError = "$badEvents event(s) couldn't be read (first error: $firstError)"
         }
 
         # (d) Kerberos Service Ticket Operations audit setting. auditpol reports the

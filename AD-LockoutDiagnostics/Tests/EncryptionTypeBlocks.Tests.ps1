@@ -211,6 +211,48 @@ Describe 'Parsing' {
         $text | Should -Not -Match 'Not a password problem'
     }
 
+    It 'AC7_KdcsvcBlockWithOnlyAnotherServiceReadableIsKeptAndFlagged' {
+        # The account is unreadable but the service names someone else: that service could
+        # still be one this account uses, so the row is kept and flagged, never dropped.
+        $xml = "<Event xmlns=`"http://schemas.microsoft.com/win/2004/08/events/event`"><System><Provider Name=`"Kdcsvc`"/><EventID>204</EventID><TimeCreated SystemTime=`"2026-10-17T09:31:00.000Z`"/></System><EventData><Data Name=`"ServiceName`">svc-other</Data></EventData></Event>"
+        $rows = @(ConvertFrom-KdcsvcEvent -EventXml $xml -EventId 204 -DcName 'DC02' -Message '')
+        $rows.Count | Should -Be 1
+        $rows[0].AccountNotRecorded | Should -BeTrue
+        @($rows[0].Accounts) | Should -Contain 'svc-other'
+
+        $kept = @(Select-EtypeEvidenceForAccount -Rows $rows -SamAccountName 'jdoe')
+        $kept.Count | Should -Be 1
+        $kept[0].AccountNotRecorded | Should -BeTrue
+        @(Get-EtypeFindings -Rows $kept)[0].Kind | Should -Be 'NotRecorded'
+    }
+
+    It 'AC7_KdcsvcBlockWithOnlyAClientAddressIsKeptAndFlagged' {
+        $xml = "<Event xmlns=`"http://schemas.microsoft.com/win/2004/08/events/event`"><System><Provider Name=`"Kdcsvc`"/><EventID>208</EventID><TimeCreated SystemTime=`"2026-10-17T09:31:00.000Z`"/></System><EventData><Data Name=`"ClientAddress`">192.0.2.55</Data></EventData></Event>"
+        $rows = @(ConvertFrom-KdcsvcEvent -EventXml $xml -EventId 208 -DcName 'DC02' -Message '')
+        $rows.Count | Should -Be 1
+        $rows[0].AccountNotRecorded | Should -BeTrue
+        $rows[0].ClientAddress | Should -Be '192.0.2.55'
+
+        $kept = @(Select-EtypeEvidenceForAccount -Rows $rows -SamAccountName 'jdoe')
+        $kept.Count | Should -Be 1
+        $kept[0].AccountNotRecorded | Should -BeTrue
+    }
+
+    It 'AC7_KdcsvcBlockNamingTheAccountAsServiceIsANormalFinding' {
+        # No readable account, but the service IS the investigated account: that positively
+        # concerns it, so it is a normal finding, not "possibly related".
+        $xml = "<Event xmlns=`"http://schemas.microsoft.com/win/2004/08/events/event`"><System><Provider Name=`"Kdcsvc`"/><EventID>204</EventID><TimeCreated SystemTime=`"2026-10-17T09:31:00.000Z`"/></System><EventData><Data Name=`"AccountName`">-</Data><Data Name=`"ServiceName`">jdoe</Data></EventData></Event>"
+        $rows = @(ConvertFrom-KdcsvcEvent -EventXml $xml -EventId 204 -DcName 'DC02' -Message '')
+        $rows[0].AccountNotRecorded | Should -BeTrue
+
+        $kept = @(Select-EtypeEvidenceForAccount -Rows $rows -SamAccountName 'jdoe')
+        $kept.Count | Should -Be 1
+        $kept[0].AccountNotRecorded | Should -BeFalse
+        $f = @(Get-EtypeFindings -Rows $kept)
+        $f[0].Kind    | Should -Be 'Account'
+        $f[0].Account | Should -Be 'jdoe'
+    }
+
     It 'AC17_UnreadableKdcsvcBlockShowsTheEventMessageInTheReport' {
         $row = [pscustomobject]@{ Time = [datetime]'2026-10-17T09:31:00Z'; EventId = 204; Account = ''; Service = ''
                                   Accounts = @(); ClientAddress = ''; Status = ''; DC = 'DC02'; Who = 'Account'
@@ -538,6 +580,49 @@ Describe 'Collection' {
         $g1.TicketReason   | Should -Match "couldn't read the 4768/4769 events on DC01"
         @($r.Rows | Where-Object { $_.DC -eq 'DC03' }).Count | Should -Be 1
         @($r.Gate | Where-Object { $_.DC -eq 'DC03' })[0].TicketFailures | Should -Be 'Checked'
+    }
+
+    It 'AC20_OneMalformedSecurityEventKeepsTheGoodRowsAroundIt' {
+        Mock Get-WinEvent {
+            if ($ListProvider) {
+                return [pscustomobject]@{ Name = 'Kdcsvc'; Events = @(203, 204, 208, 209 | ForEach-Object { [pscustomobject]@{ Id = $_ } }) }
+            }
+            if ($FilterHashtable.LogName -eq 'Security') {
+                return @(
+                    (New-FakeEvent -Id 4769 -Xml (New-KerbXml -EventId 4769 -Status '0xe' -Service 'svc-first')),
+                    (New-FakeEvent -Id 4769 -Xml '<Event><broken'),
+                    (New-FakeEvent -Id 4769 -Xml (New-KerbXml -EventId 4769 -Status '0xe' -Service 'svc-last'))
+                )
+            }
+            throw $script:NoEventsMessage
+        }
+        $r = Get-EtypeEvidence -DomainControllers @('DC01') -SamAccountName 'jdoe' -DaysBack 7
+        @($r.Rows | ForEach-Object { $_.Service } | Sort-Object) | Should -Be @('svc-first', 'svc-last')
+        $g = @($r.Gate)[0]
+        $g.TicketFailures | Should -Be "Can't tell"
+        $g.TicketReason   | Should -Match "1 event\(s\) couldn't be read"
+    }
+
+    It 'AC20_OneMalformedKdcsvcEventKeepsTheGoodRowsAroundIt' {
+        Mock Get-WinEvent {
+            if ($ListProvider) {
+                return [pscustomobject]@{ Name = 'Kdcsvc'; Events = @(203, 204, 208, 209 | ForEach-Object { [pscustomobject]@{ Id = $_ } }) }
+            }
+            if ($FilterHashtable.LogName -eq 'System') {
+                return @(
+                    (New-FakeEvent -Id 204 -Xml (New-KdcsvcXml -EventId 204)),
+                    (New-FakeEvent -Id 204 -Xml '<Event><broken'),
+                    (New-FakeEvent -Id 209 -Xml (New-KdcsvcXml -EventId 209))
+                )
+            }
+            throw $script:NoEventsMessage
+        }
+        $r = Get-EtypeEvidence -DomainControllers @('DC01') -SamAccountName 'jdoe' -DaysBack 7
+        @($r.Rows | ForEach-Object { $_.EventId } | Sort-Object) | Should -Be @(204, 209)
+        $g = @($r.Gate)[0]
+        $g.KdcEvents | Should -Be "Can't tell"
+        $g.KdcReason | Should -Match "1 event\(s\) couldn't be read"
+        $g.TicketFailures | Should -Be 'Checked'
     }
 }
 
