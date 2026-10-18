@@ -32,7 +32,7 @@ handed out, so it always matches this repository.
 | [DC-Diagnostics](DC-Diagnostics/) | Run on a DC: health and events lined up against an outage window |
 | [DHCP-Audit](DHCP-Audit/) | DHCP failover health across every authorized DHCP server |
 | [Search-DNSRecords](Search-DNSRecords/) | Browser GUI to search and audit DNS records |
-| [LocalAdminManager](LocalAdminManager/) | Add or remove domain users/groups in local Administrators |
+| [LocalAdminManager](LocalAdminManager/) | **Changes local Administrators.** Add or remove a domain user/group, locally or over WinRM; every attempt logged with before/after members |
 | [M365-SyncedUserFixes](M365-SyncedUserFixes/) | **Changes AD.** Block Microsoft 365 sign-in or hide someone from the address book when the account is synced from AD, and build the Entra Connect rules both need |
 
 ### Microsoft Entra ID and Microsoft 365
@@ -358,21 +358,26 @@ For a combined performance *and* event view across a fleet, use [Citrix-FSLogix-
 
 ## LocalAdminManager
 
-**Description**: A PowerShell script for managing the local Administrators group on Windows computers by adding or removing domain users and groups.
+**Description**: Adds or removes a domain user or group in the local Administrators group of a computer, locally or on a remote computer through PowerShell remoting (WinRM), and logs every attempt with the member list before and after. Changes anything? Yes.
 
 **Parameters**:
 - `-Action <string>` (Required): Action to perform ('Add' or 'Remove').
 - `-Member <string>` (Required): Domain user or group in 'DOMAIN\Username' format.
-- `-ComputerName <string>` (Optional): Target computer name (defaults to localhost).
+- `-ComputerName <string>` (Optional): Target computer name (defaults to this computer). Remote computers need WinRM enabled.
+- `-LogFolder <string>` (Optional): Folder for the daily change log (defaults to `LocalAdminManager\Logs`).
+- `-Force` (Optional): Make the change without the confirmation prompt (batch files).
+- `-WhatIf` (Optional): Show what would change and change nothing.
 
 **Usage Examples**:
 - Add user locally: `.\LocalAdminManager\LocalAdminManager.ps1 -Action Add -Member "CONTOSO\JohnDoe"`
-- Remove group remotely: `.\LocalAdminManager\LocalAdminManager.ps1 -Action Remove -Member "CONTOSO\DomainAdmins" -ComputerName "RemotePC01"`
+- Remove group remotely: `.\LocalAdminManager\LocalAdminManager.ps1 -Action Remove -Member "CONTOSO\TempAdmins" -ComputerName "RemotePC01"`
+- Dry run: `.\LocalAdminManager\LocalAdminManager.ps1 -Action Add -Member "CONTOSO\ITSupport" -ComputerName "RemotePC01" -WhatIf`
 
 **Notes**:
-- Requires administrator privileges.
-- Supports local and remote computer management.
-- Domain users/groups must exist in Active Directory.
+- Run from an elevated prompt. Works on PowerShell 3.0 and later.
+- Finds the group by its SID, so it also works on non-English Windows ("Administratoren").
+- Every attempt is a row in `Logs\Changes_<yyyy-MM-dd>.csv`. The log holds client account names and is gitignored. If the log cannot be written, nothing is changed.
+- Exit code 1 when the change failed, so batch files can detect it.
 
 ## DriveMap-Diagnostics
 
