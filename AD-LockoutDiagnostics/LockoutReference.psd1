@@ -25,7 +25,7 @@
 # the URL, confirm, and update the VerifiedOn date.
 #
 @{
-    VerifiedOn = '2026-08-12'
+    VerifiedOn = '2026-10-18'
 
     # -------------------------------------------------------------------------
     # Shared report stylesheet.
@@ -308,6 +308,7 @@
         '0x0'        = 'Success (KDC_ERR_NONE)'
         '0x6'        = 'Username does not exist (KDC_ERR_C_PRINCIPAL_UNKNOWN)'
         '0xC'        = 'KDC policy rejects request (KDC_ERR_POLICY) - e.g. logon hours or workstation restriction'
+        '0xE'        = 'KDC has no support for the encryption type (KDC_ERR_ETYPE_NOTSUPP) - the account or device cannot use an encryption type the DC allows, e.g. it only offers RC4'
         '0x10'       = 'KDC has no support for PADATA type (KDC_ERR_PADATA_TYPE_NOSUPP) - usually a smart-card/certificate problem'
         '0x12'       = 'Client credentials revoked (KDC_ERR_CLIENT_REVOKED) - account disabled, expired, or LOCKED OUT'
         '0x17'       = 'Password has expired (KDC_ERR_KEY_EXPIRED)'
@@ -336,6 +337,103 @@
 
     # Status values meaning "no error", in every form the logs render them.
     SuccessStatusCodes = @('0x0', '0x00000000', '0', '')
+
+    # -------------------------------------------------------------------------
+    # Kerberos encryption-type blocks (RC4 enforcement, CVE-2026-20833 / KB5073381).
+    #
+    # Since the 2026 KDC changes a sign-in can fail with nothing wrong with the password:
+    # the DC refuses the ticket because the account or the device cannot use an
+    # encryption type it still allows. Two kinds of evidence, both read per DC:
+    #
+    #   * Security log 4768 (Kerberos Authentication Service) and 4769 (Kerberos Service
+    #     Ticket Operations), both written for success AND failure. Only Status 0xE
+    #     (KDC_ERR_ETYPE_NOTSUPP) counts here. Field names TargetUserName, ServiceName,
+    #     IpAddress, Status.
+    #       https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4768
+    #       https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4769
+    #   * System log, source Kdcsvc, the four documented ERROR events 203/204/208/209,
+    #     added by the January 13, 2026 and later updates on Windows Server 2012 and
+    #     later DCs. The warnings 201/202/206/207 ("will break when enforced") and 205
+    #     (insecure DefaultDomainSupportedEncTypes) are deliberately not listed: they are
+    #     not a block. The KB prints the Event Type of every one of them as "Warning"
+    #     although its own comments call 203/204/208/209 "Error event"; the IDs are what
+    #     this tool relies on.
+    #       https://support.microsoft.com/topic/1ebcda33-720a-4da8-93c1-b0496e1910dc
+    #
+    # Who = which side needs fixing, from the KB's event text:
+    #   Account - the service account's keys (it has no AES keys); a password change
+    #             generates them ("Changing the account password generates these keys",
+    #             Detect and remediate RC4 usage in Kerberos).
+    #   Client  - the device only advertises RC4.
+    #   https://learn.microsoft.com/windows-server/security/kerberos/detect-remediate-rc4-kerberos
+    #
+    # NOT VERIFIED: the KB documents only the rendered message of the Kdcsvc events, not
+    # their EventData element names, so the parser reads them tolerantly (known names,
+    # then the documented message labels, then position).
+    # -------------------------------------------------------------------------
+    EncryptionTypeBlocks = @{
+        StatusCode    = '0xE'
+        StatusName    = 'KDC_ERR_ETYPE_NOTSUPP'
+        FailureEvents = @(4768, 4769)
+
+        # StandardEventKeywords.AuditFailure - lets Get-WinEvent filter failures on a
+        # system field instead of an EventData XPath, which forces a full log scan.
+        # https://learn.microsoft.com/dotnet/api/system.diagnostics.eventing.reader.standardeventkeywords
+        AuditFailureKeyword = 4503599627370496
+
+        # Next step for a 4768/4769 0xE row. Those events do not say which side is at
+        # fault, so both checks are named; the Kdcsvc events on the same DC, when present,
+        # say which one it is.
+        FailureNextStep = "Check the KDC events (203/204/208/209) on the same domain controller to see which side to fix. If the account's password was last set years ago, reset it so the account gets AES keys; if the device at the client address only offers RC4, update or replace it."
+
+        KdcProvider = 'Kdcsvc'
+        KdcLogName  = 'System'
+        # The event a patched DC's Kdcsvc provider must define. Its absence means the DC
+        # does not have the January 2026 or later update that writes these events.
+        KdcCapabilityEventId = 203
+        KdcUpdateKb          = 'KB5073381'
+
+        KdcsvcEvents = @{
+            203 = @{
+                Who       = 'Client'
+                Meaning   = 'the device only offers RC4 and the service has no encryption types set (msDS-SupportedEncryptionTypes)'
+                NextStep  = 'The device at the client address only offers RC4: update or replace it so it supports AES.'
+                Reference = 'https://support.microsoft.com/topic/1ebcda33-720a-4da8-93c1-b0496e1910dc'
+            }
+            204 = @{
+                Who       = 'Account'
+                Meaning   = 'the service account only has RC4 keys'
+                NextStep  = "Reset the account's password so Active Directory generates AES keys for it, then update that password wherever the service uses it."
+                Reference = 'https://support.microsoft.com/topic/1ebcda33-720a-4da8-93c1-b0496e1910dc'
+            }
+            208 = @{
+                Who       = 'Client'
+                Meaning   = 'the service only accepts AES but the device does not offer AES'
+                NextStep  = 'The device at the client address only offers RC4: update or replace it so it supports AES.'
+                Reference = 'https://support.microsoft.com/topic/1ebcda33-720a-4da8-93c1-b0496e1910dc'
+            }
+            209 = @{
+                Who       = 'Account'
+                Meaning   = 'the service only accepts AES but the service account has no AES keys'
+                NextStep  = "Reset the account's password so Active Directory generates AES keys for it, then update that password wherever the service uses it."
+                Reference = 'https://support.microsoft.com/topic/1ebcda33-720a-4da8-93c1-b0496e1910dc'
+            }
+        }
+
+        # Owner decision D-024: Microsoft's per-account RC4 exception is offered only as a
+        # LAST RESORT after "update or replace the device", labelled as keeping RC4 on and
+        # needing senior or security sign-off. The KB: "On the affected service account,
+        # explicitly define msDS-SupportedEncryptionTypes to include RC4 with AES session
+        # keys (0x24)" ... "this configuration is insecure".
+        Rc4Exception          = "Last resort, only if the device cannot be updated or replaced: Microsoft documents allowing RC4 on the one service account it connects to (msDS-SupportedEncryptionTypes 0x24, RC4 with AES session keys). This keeps RC4 on for that account and leaves it exposed to CVE-2026-20833, so it needs senior or security sign-off before anyone sets it."
+        Rc4ExceptionReference = 'https://support.microsoft.com/topic/1ebcda33-720a-4da8-93c1-b0496e1910dc'
+
+        # Kerberos Service Ticket Operations (4769) - Audit_AccountLogon_Kerberos. Kept here
+        # rather than in AuditSubcategories so the investigation's audit gate is unchanged.
+        # https://learn.microsoft.com/windows/win32/secauthz/auditing-constants
+        AuditSubcategoryName = 'Kerberos Service Ticket Operations'
+        AuditSubcategoryGuid = '{0CCE9240-69AE-11D9-BED3-505054503030}'
+    }
 
     # -------------------------------------------------------------------------
     # Logon types (4625 'LogonType'). These identify WHAT KIND of stale credential is
