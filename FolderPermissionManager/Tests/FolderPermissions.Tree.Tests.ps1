@@ -19,7 +19,7 @@
         OwnerSid, one row for the target and every folder/file under it, read with
         Get-Acl -LiteralPath; unreadable -> Owner 'Could not read'.
       Native calls (arguments as the GUI used, plus the full account name):
-        Invoke-AclTool -Tool takeown -Arguments '/F', <dir>, '/R', '/A', '/D', 'Y'
+        Invoke-AclTool -Tool takeown -Arguments '/F', <dir>, '/R', '/A', '/D', 'N'   (D-034; was /D Y)
         Invoke-AclTool -Tool icacls  -Arguments <dir>, '/setowner', <WindowsIdentity name>, '/T', '/C', '/Q'
 
     Run:  Invoke-Pester .\FolderPermissionManager\Tests
@@ -93,7 +93,7 @@ Describe 'Recursive take ownership' {
 
         $takeown = @($script:ToolCalls | Where-Object { $_.Tool -eq 'takeown' })
         $takeown.Count | Should -Be 1
-        $takeown[0].Arguments | Should -Be @('/F', $dir, '/R', '/A', '/D', 'Y')
+        $takeown[0].Arguments | Should -Be @('/F', $dir, '/R', '/A', '/D', 'N')   # D-034 (was /D Y)
         # Every native call happened after the snapshot existed.
         foreach ($c in $script:ToolCalls) { $c.BackupFiles.Count | Should -Be 1 -Because 'the owner snapshot must exist before any native call' }
         $snapshot = $takeown[0].BackupFiles[0]
@@ -311,7 +311,7 @@ Describe 'Recursive take ownership' {
         ($script:ToolCalls | Where-Object { $_.Tool -eq 'takeown' }).Arguments[1] | Should -Be $dir
         ($script:ToolCalls | Where-Object { $_.Tool -eq 'icacls' }).Arguments[0] | Should -Be $dir
         (Import-Csv -LiteralPath $rows[0].BackupFile)[0].Path | Should -Be $dir
-        $rows[0].Detail | Should -BeLike "*Ran: takeown /F ""$dir"" /R /A /D Y; icacls ""$dir"" /setowner *"
+        $rows[0].Detail | Should -BeLike "*Ran: takeown /F ""$dir"" /R /A /D N; icacls ""$dir"" /setowner *"
     }
 
     It 'AC16_JunctionInTheTree_IsListedButNotGoneInto' {
@@ -361,34 +361,31 @@ Describe 'Recursive take ownership' {
 
     # --- Fix round 2 (SQ-014 review) ---------------------------------------------------------
 
-    It 'AC18_FolderThatCannotBeListed_ItsPermissionsAreSavedBeforeTakeownReplacesThem' {
-        # takeown /D Y replaces the permissions of a folder the account cannot list with full
-        # control for the user only (takeown page on Learn), so they are saved first.
+    # Fix round 2 pinned /D Y here: the permissions of a folder that could not be listed were
+    # saved to *_TakeOwnership_Permissions.csv because takeown replaced them. D-034 superseded
+    # that: takeown /D N skips such a folder, so its permissions are never changed or saved.
+    It 'AC18_FolderThatCannotBeListed_IsSkippedByTakeownAndItsPermissionsAreNotSavedBecauseTheyNeverChange' {
         $dir = New-TestTree 'ac18-perm'
         $locked = Join-Path $dir 'sub'
-        $sddl = (& $script:RealGetAcl -LiteralPath $locked).Sddl
         Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $LiteralPath -eq $locked }
 
         $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
 
-        $permissionsFile = $rows[0].TreeCounts.PermissionsFile
-        $permissionsFile | Should -Be ($rows[0].BackupFile -replace '\.csv$', '_Permissions.csv')
+        $takeown = @($script:ToolCalls | Where-Object { $_.Tool -eq 'takeown' })
+        $takeown[0].Arguments | Should -Be @('/F', $dir, '/R', '/A', '/D', 'N')
         foreach ($c in $script:ToolCalls) {
-            $c.BackupFiles | Should -Contain $permissionsFile -Because 'the permissions must be saved before any native call'
+            @($c.BackupFiles) | Should -Be @($rows[0].BackupFile) -Because 'the owner snapshot is the only backup'
         }
-        $saved = @(Import-Csv -LiteralPath $permissionsFile)
-        $saved.Count | Should -Be 1
-        $saved[0].PSObject.Properties.Name | Should -Be @('Path', 'ItemType', 'Sddl')
-        $saved[0].Path | Should -Be $locked
-        $saved[0].Sddl | Should -Be $sddl
-        $rows[0].TreeCounts.PermissionsUnsaved | Should -Be 0
-        $rows[0].Detail | Should -BeLike "*replaces the permissions of those folders with full control*1 of 1 were saved to $permissionsFile*"
+        $rows[0].TreeCounts.PSObject.Properties.Name | Should -Not -Contain 'PermissionsFile'
+        $rows[0].Detail | Should -BeLike "*1 folder(s) could not be opened, so takeown /D N skipped them*$locked*"
+        $rows[0].Detail | Should -Not -Match 'full control'
 
         $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
-        $message | Should -BeLike "*takeown replaces the permissions of a folder it cannot open with full control for you only; the permissions those folders had were backed up to $permissionsFile first.*"
+        $message | Should -BeLike '*Escalate: 1 folder(s) could not be opened, so they were left alone.*'
+        $message | Should -Not -Match 'full control'
     }
 
-    It 'AC18_FolderThatCannotBeListedOrRead_IsCountedAndNamedAsNotBackedUp' {
+    It 'AC18_FolderThatCannotBeListedOrRead_IsCountedAndNamedForEscalationNotAsLost' {
         $dir = New-TestTree 'ac18-perm-lost'
         $locked = Join-Path $dir 'sub'
         $script:UnreadableLike = $locked
@@ -397,19 +394,18 @@ Describe 'Recursive take ownership' {
         $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
 
         @($script:ToolCalls).Count | Should -Be 2 -Because 'D-027: an unreadable folder does not stop the action'
-        $saved = @(Import-Csv -LiteralPath $rows[0].TreeCounts.PermissionsFile)
-        $saved[0].Sddl | Should -Be 'Could not read'
-        $rows[0].TreeCounts.PermissionsUnsaved | Should -Be 1
-        @($rows[0].TreeCounts.PermissionsUnsavedFolders) | Should -Be @($locked)
+        $rows[0].TreeCounts.Unlisted | Should -Be 1
+        @($rows[0].TreeCounts.UnlistedFolders) | Should -Be @($locked)
         $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
-        $message | Should -BeLike "*full control for you only; 1 could not be read, so their permissions were not backed up and are lost ($locked).*"
+        $message | Should -BeLike "*1 folder(s) could not be opened ($locked)*Escalate: 1 folder(s) could not be opened, so they were left alone.*"
+        $message | Should -Not -Match 'are lost'
     }
 
-    It 'AC18_PermissionsOfUnlistedFoldersCannotBeSaved_NothingIsChanged' {
+    It 'AC18_FolderThatCannotBeListed_OwnerSnapshotCannotBeSaved_NothingIsChanged' {
         $dir = New-TestTree 'ac18-perm-fail'
         $locked = Join-Path $dir 'sub'
         Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $LiteralPath -eq $locked }
-        Mock Export-Csv { throw 'disk full (test)' } -ParameterFilter { $LiteralPath -like '*_Permissions.csv' }
+        Mock Export-Csv { throw 'disk full (test)' }
 
         $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
 
@@ -417,6 +413,7 @@ Describe 'Recursive take ownership' {
         $rows[0].Result | Should -Be 'Failed'
         $rows[0].Error | Should -Match '^Could not save a backup of the current permissions'
         $rows[0].Error | Should -Match 'Nothing was changed\.$'
+        @(Get-ChildItem -LiteralPath (Join-Path $script:Log 'Backups') -Filter '*_Permissions.csv' -ErrorAction SilentlyContinue).Count | Should -Be 0
     }
 
     It 'AC17_NoOwnerCouldBeReadBack_IsPartlyDoneNeverDone' {

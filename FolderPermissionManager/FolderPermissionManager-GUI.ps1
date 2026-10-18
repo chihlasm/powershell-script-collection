@@ -428,7 +428,9 @@ function Invoke-TakeOwnership {
     }
 
     # All subfolders and files: the core saves every item's owner first, then runs takeown /R
-    # and icacls /setowner /T, and logs one row for the whole folder.
+    # and icacls /setowner /T, and logs one row for the whole folder. The root of a drive and
+    # the Windows system folders are refused by the core with a plain message (D-036); the GUI
+    # has no override, so nothing from the request can turn that check off.
     Send-SingleChangeResult $Response { Set-ItemOwnerToCurrentUser -Path $folderPath -Recurse -LogFolder $script:ChangeLogFolder }
 }
 
@@ -2024,11 +2026,12 @@ function takeOwnership(recursive) {
         setStatus('Still working on the previous change. Wait for it to finish, then try again.', 'warning');
         return;
     }
-    // takeown /D Y replaces the permissions of a folder it cannot open with full control for
-    // the user only (takeown page on Microsoft Learn); the server backs those up first.
+    // takeown /D N skips a folder it cannot open, so that folder keeps its permissions (D-034;
+    // takeown page on Microsoft Learn). The root of a drive and the Windows system folders are
+    // refused by the server (D-036).
     var msg = recursive
         ? 'This will change ownership on ALL files and subfolders under:\n\n' + currentFolder + '\n\nYou become the owner. The current owners will be saved to a backup first.\n\n' +
-          'Any folder in it that cannot be opened also has its permissions replaced with full control for you only. Those permissions are backed up first where they can be read; the result says how many folders that was and whether any could not be backed up.\n\nContinue?'
+          'Any folder in it that cannot be opened is skipped and left alone; the result names those folders so you can escalate them.\n\nContinue?'
         : 'Take ownership of:\n\n' + currentFolder + '?';
     if (!confirm(msg)) return;
     ownershipBusy = true;

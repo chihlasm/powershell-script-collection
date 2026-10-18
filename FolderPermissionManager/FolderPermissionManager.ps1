@@ -10,9 +10,11 @@
     browser. In order, after asking each time:
 
     1. Takes ownership of the folder and all its subfolders and files for the account running
-       the script (takeown /R /A, then icacls /setowner /T). The current owner of every item
-       is saved to <LogFolder>\Backups\<yyyy-MM-dd_HHmmss>_TakeOwnership.csv first; if that
-       file cannot be written, nothing is changed.
+       the script (takeown /R /A /D N, then icacls /setowner /T). The current owner of every
+       item is saved to <LogFolder>\Backups\<yyyy-MM-dd_HHmmss>_TakeOwnership.csv first; if
+       that file cannot be written, nothing is changed. A folder that cannot be opened is
+       skipped and left as it was; the result names it so it can be escalated. The root of a
+       drive and the Windows system folders are refused unless -AllowSystemFolder is given.
     2. Shows the top folder's owner and permissions, and the owner of each subfolder.
     3. Copies the top folder's permissions to every subfolder: entries a subfolder does not
        already have are added, nothing is removed. The permissions of every subfolder are
@@ -50,6 +52,12 @@
 .PARAMETER Force
     Do not ask before taking ownership or copying permissions.
 
+.PARAMETER AllowSystemFolder
+    Take ownership even when the folder is the root of a drive (D:\) or is in %SystemRoot%,
+    %ProgramFiles%, %ProgramFiles(x86)% or %ProgramData%. Without it such a folder is refused
+    and nothing is changed, because changing every owner in it can stop Windows or installed
+    programs from working. The root of a share (\\fs01\share) is never refused.
+
 .PARAMETER LoadFunctionsOnly
     Define the functions and return without doing anything (used by the tests).
 
@@ -78,8 +86,11 @@
     loading at all in a normal window, so elevation is checked at run time instead.
 
     REFERENCES
-    - See FolderPermissions.Core.ps1 for takeown /R /A /D, icacls /setowner /T /C /Q,
-      Get-Acl, Set-Acl and GetOwner.
+    - See FolderPermissions.Core.ps1 for icacls /setowner /T /C /Q, Get-Acl, Set-Acl and
+      GetOwner.
+    - takeown /R /A /D N: /D N skips a folder the account has no List Folder and Read
+      permission on (/D Y would replace its permissions with full control for the user only):
+      https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
     - #Requires and its PowerShell versions:
       https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_requires
     - WindowsPrincipal.IsInRole(WindowsBuiltInRole.Administrator) is true only in an elevated
@@ -97,6 +108,9 @@ param(
 
     [Parameter()]
     [switch]$Force,
+
+    [Parameter()]
+    [switch]$AllowSystemFolder,
 
     [Parameter()]
     [switch]$LoadFunctionsOnly
@@ -204,6 +218,13 @@ function Invoke-FolderPermissionCli {
         Write-Host "[FAIL] The folder '$Path' does not exist or is not a folder. Nothing was changed." -ForegroundColor Red
         return 1
     }
+    # D-036: a drive root or a Windows system folder is refused before anything is asked,
+    # counted or saved.
+    $refusal = if ($AllowSystemFolder) { $null } else { Get-TreeOwnershipRefusal -Path $Path }
+    if ($refusal) {
+        Write-Host "[FAIL] $refusal If you are sure, run the script again with -AllowSystemFolder. Nothing was changed." -ForegroundColor Red
+        return 1
+    }
 
     $defaultLogFolder = Join-Path $PSScriptRoot 'Logs'
     if ($whatIf) {
@@ -227,23 +248,13 @@ function Invoke-FolderPermissionCli {
     Write-Host "[INFO] Counting the folders and files in $Path..." -ForegroundColor Cyan
     $tree = Get-OwnerTreeItem -Path $Path
     $scope = "$(@($tree.Items).Count) item(s): $Path and every subfolder and file under it"
-    $unlisted = @($tree.Unlisted)
-    if ($unlisted.Count -gt 0) {
-        $scope += ", plus whatever is inside $($unlisted.Count) folder(s) that could not be opened (their owners cannot be saved first)"
-    }
     $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
     $warning = "[WARN] Taking ownership makes $me the owner of $scope. The current owners are saved to a backup first."
+    $unlisted = @($tree.Unlisted)
     if ($unlisted.Count -gt 0) {
-        # takeown /D Y replaces the permissions of a folder the account cannot list with full
-        # control for the user only; checked here (read only) which of them can be backed up.
+        # takeown /D N skips a folder the account cannot list, so it keeps its permissions (D-034).
         # https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
-        $unreadable = @($unlisted | Where-Object { (Get-ItemSddl -Path $_) -eq 'Could not read' })
-        $warning += " The permissions of the $($unlisted.Count) folder(s) that could not be opened are replaced with full control for you ($me) only."
-        if ($unreadable.Count -eq 0) {
-            $warning += ' Their current permissions are backed up first.'
-        } else {
-            $warning += " $($unlisted.Count - $unreadable.Count) of them are backed up first; $($unreadable.Count) cannot be read, so their current permissions cannot be backed up and are lost: $($unreadable -join '; ')."
-        }
+        $warning += " $($unlisted.Count) folder(s) cannot be opened, so they are skipped and left alone: $($unlisted -join '; ')."
     }
     $links = @($tree.Links)
     if ($links.Count -gt 0) {
@@ -254,7 +265,7 @@ function Invoke-FolderPermissionCli {
     $ownershipTaken = $false
     if ($takeOwnership) {
         if ($whatIf) {
-            $rows = @(Set-ItemOwnerToCurrentUser -Path $Path -Recurse -LogFolder $logFolderUsed -WhatIf)
+            $rows = @(Set-ItemOwnerToCurrentUser -Path $Path -Recurse -AllowSystemFolder:$AllowSystemFolder -LogFolder $logFolderUsed -WhatIf)
             $null = Write-CliChangeResult -Entries $rows -LogFolder $logFolderUsed
             $ownershipTaken = $true
         } else {
@@ -263,7 +274,7 @@ function Invoke-FolderPermissionCli {
             # (D-030), so there is no "started" row. An interrupted run is known by its backup.
             Write-Host "[INFO] If this is interrupted, the owners from before are in $(Join-Path $logFolderUsed 'Backups') (<date_time>_TakeOwnership.csv) with no matching row in the change log. See ""Undo a change"" in README.md to put them back." -ForegroundColor Cyan
             $result = Invoke-LoggedPermissionChange -LogFolder $logFolderUsed -Change {
-                Set-ItemOwnerToCurrentUser -Path $Path -Recurse -LogFolder $logFolderUsed -WhatIf:$false
+                Set-ItemOwnerToCurrentUser -Path $Path -Recurse -AllowSystemFolder:$AllowSystemFolder -LogFolder $logFolderUsed -WhatIf:$false
             }
             if (Write-CliChangeResult -Entries $result.Entries -LogPath $result.LogPath -LogFolder $logFolderUsed) { $exitCode = 1 }
             $ownershipTaken = @($result.Entries | Where-Object { $_.Result -eq 'Done' -or $_.Result -eq 'Partly done' }).Count -gt 0
@@ -340,4 +351,4 @@ if (-not $isAdmin -and -not $WhatIfPreference) {
     exit 1
 }
 
-exit (Invoke-FolderPermissionCli -Path $Path -LogFolder $LogFolder -Force:$Force)
+exit (Invoke-FolderPermissionCli -Path $Path -LogFolder $LogFolder -Force:$Force -AllowSystemFolder:$AllowSystemFolder)

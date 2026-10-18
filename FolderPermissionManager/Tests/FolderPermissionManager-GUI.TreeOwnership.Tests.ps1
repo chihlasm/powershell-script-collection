@@ -158,17 +158,18 @@ Describe 'GUI recursive take ownership' {
 
     # --- Fix round 2 (SQ-014 review) ---------------------------------------------------------
 
-    It 'AC16_GuiRecursiveConfirmText_SaysFoldersThatCannotBeOpenedGetFullControlAndAreBackedUp' {
-        # takeown /D Y replaces such a folder's permissions with full control for the user only.
+    # Fix round 2 pinned /D Y here (permissions replaced with full control and backed up);
+    # D-034 superseded that: takeown /D N skips such folders and leaves them alone.
+    It 'AC16_GuiRecursiveConfirmText_SaysFoldersThatCannotBeOpenedAreSkippedAndNamedForEscalation' {
         $raw = Get-Content -LiteralPath $script:GuiPath -Raw
         $m = [regex]::Match($raw, '(?s)This will change ownership on ALL files and subfolders under:.*?Continue\?')
         $m.Success | Should -BeTrue
-        $m.Value | Should -Match 'Any folder in it that cannot be opened also has its permissions replaced with full control for you only'
-        $m.Value | Should -Match 'Those permissions are backed up first where they can be read'
-        $m.Value | Should -Match 'whether any could not be backed up'
+        $m.Value | Should -Match 'Any folder in it that cannot be opened is skipped and left alone'
+        $m.Value | Should -Match 'the result names those folders so you can escalate them'
+        $m.Value | Should -Not -Match 'backed up first where they can be read'
     }
 
-    It 'AC18_GuiRecursiveTakeOwnership_FolderThatCannotBeListed_MessageSaysPermissionsWereReplacedAndBackedUp' {
+    It 'AC18_GuiRecursiveTakeOwnership_FolderThatCannotBeListed_MessageSaysToEscalateAndNothingIsBackedUpForIt' {
         $locked = Join-Path $script:Dir 'sub'
         Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $LiteralPath -eq $locked }
         $script:Body = [PSCustomObject]@{ path = $script:Dir; recursive = $true }
@@ -177,8 +178,9 @@ Describe 'GUI recursive take ownership' {
         Invoke-TakeOwnership $null $response
 
         $script:Sent.status | Should -Be 'partial'
-        $script:Sent.message | Should -BeLike '*takeown replaces the permissions of a folder it cannot open with full control for you only; the permissions those folders had were backed up to *_TakeOwnership_Permissions.csv first.*'
-        @(Get-ChildItem -LiteralPath (Join-Path $script:ChangeLogFolder 'Backups') -Filter '*_TakeOwnership_Permissions.csv').Count | Should -Be 1
+        $script:Sent.message | Should -BeLike '*Escalate: 1 folder(s) could not be opened, so they were left alone.*'
+        $script:Sent.message | Should -Not -Match 'full control'
+        @(Get-ChildItem -LiteralPath (Join-Path $script:ChangeLogFolder 'Backups') -Filter '*_TakeOwnership_Permissions.csv').Count | Should -Be 0
     }
 
     It 'AC16_GuiRecursiveTakeOwnership_JunctionMakesTheResultAWarningAndIsCounted' {

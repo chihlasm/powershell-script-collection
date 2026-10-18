@@ -207,7 +207,9 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
 
     # --- Fix round 2 (SQ-014 review) ---------------------------------------------------------
 
-    It 'AC18_Cli_FolderThatCannotBeListed_WarnsItsPermissionsAreReplacedAndBackedUp_AndExitsOne' {
+    # Fix round 2 pinned /D Y here (permissions replaced with full control, saved to
+    # *_TakeOwnership_Permissions.csv); D-034 superseded that: such folders are skipped.
+    It 'AC18_Cli_FolderThatCannotBeListed_WarnsItIsSkippedAndLeftAlone_AndExitsOne' {
         $locked = Join-Path $script:Dir 'sub1'
         Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $LiteralPath -eq $locked }
 
@@ -215,12 +217,13 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
 
         $scope = @($script:Lines | Where-Object { $_ -like '`[WARN`] Taking ownership makes *' })
         $scope.Count | Should -Be 1
-        $scope[0] | Should -BeLike '*The permissions of the 1 folder(s) that could not be opened are replaced with full control for you (*) only. Their current permissions are backed up first.*'
+        $scope[0] | Should -BeLike "*1 folder(s) cannot be opened, so they are skipped and left alone: $locked.*"
+        $scope[0] | Should -Not -Match 'full control'
         $code | Should -Be 1 -Because 'a folder that could not be opened leaves the result incomplete'
-        @(Get-ChildItem -LiteralPath (Join-Path $script:Log 'Backups') -Filter '*_TakeOwnership_Permissions.csv').Count | Should -Be 1
+        @(Get-ChildItem -LiteralPath (Join-Path $script:Log 'Backups') -Filter '*_TakeOwnership_Permissions.csv').Count | Should -Be 0
     }
 
-    It 'AC18_Cli_FolderThatCannotBeListedOrRead_WarnsItsPermissionsAreLost' {
+    It 'AC18_Cli_FolderThatCannotBeListedOrRead_WarnsItIsSkippedNotThatItsPermissionsAreLost' {
         $locked = Join-Path $script:Dir 'sub1'
         Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $LiteralPath -eq $locked }
         Mock Get-Acl { throw 'Attempted to perform an unauthorized operation. (test)' } -ParameterFilter { $LiteralPath -eq $locked }
@@ -228,7 +231,8 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         $null = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log -WhatIf
 
         $scope = @($script:Lines | Where-Object { $_ -like '`[WARN`] Taking ownership makes *' })
-        $scope[0] | Should -BeLike "*replaced with full control for you (*) only. 0 of them are backed up first; 1 cannot be read, so their current permissions cannot be backed up and are lost: $locked.*"
+        $scope[0] | Should -BeLike "*1 folder(s) cannot be opened, so they are skipped and left alone: $locked.*"
+        $scope[0] | Should -Not -Match 'lost'
     }
 
     It 'AC17_Cli_ExitCodeIsOneWhenOwnersCouldNotBeReadBack' {

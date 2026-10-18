@@ -24,11 +24,11 @@
     Taking ownership of a folder and all its subfolders and files (Set-ItemOwnerToCurrentUser
     -Recurse) first saves the owner of every item to
     <LogFolder>\Backups\<yyyy-MM-dd_HHmmss>_TakeOwnership.csv (Path, ItemType, Owner,
-    OwnerSid), because icacls /save does not store owners. Folders that cannot be opened also
-    have their permissions saved to ..._TakeOwnership_Permissions.csv (Path, ItemType, Sddl),
-    because takeown /D Y replaces them with full control for the user. Afterwards it reads every owner
-    back. It logs one row for the whole folder (ItemType 'Folder tree', Result Done, Partly
-    done or Failed).
+    OwnerSid), because icacls /save does not store owners. Folders that cannot be opened are
+    skipped (takeown /D N) and keep their permissions; the result names them so they can be
+    escalated. Afterwards it reads every owner back. It logs one row for the whole folder
+    (ItemType 'Folder tree', Result Done, Partly done or Failed). The root of a drive and the
+    Windows system folders are refused unless the caller passes -AllowSystemFolder.
 
     The change-log columns are shared with other tools that change things (LocalAdminManager):
     Time, Technician, Computer, Action, Target, ItemType, Detail, OldValue, NewValue, Result,
@@ -62,13 +62,13 @@
     - RemoveAccessRuleAll removes every rule for the rule's account, whatever its rights:
       https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.filesystemsecurity.removeaccessruleall
       https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.commonobjectsecurity.removeaccessruleall
-    - takeown /F /R /A /D Y (/R recursive over all files in the directory and subdirectories;
-      /A gives ownership to the Administrators group; /D Y answers "take ownership" for
-      folders the account has no List Folder and Read permission on, and is documented for use
-      with /R; for such a folder "the directory permissions are replaced with permission
-      granting the user full control only", so their SDDL is saved first
-      (Save-UnlistedFolderPermission); the page lists no exit codes, so anything but 0 is
-      treated as a failure; it says nothing about junctions or symbolic links):
+    - takeown /F /R /A /D N (/R recursive over all files in the directory and subdirectories;
+      /A gives ownership to the Administrators group instead of the current user; /D answers
+      the prompt for a folder the account has no List Folder and Read permission on and must
+      be used with /R: N is "Skip the directory", while Y means "the directory permissions are
+      replaced with permission granting the user full control only", so N is used and such
+      folders are left as they were (D-034); the page lists no exit codes, so anything but 0
+      is treated as a failure; it says nothing about junctions or symbolic links):
       https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
     - SeRestorePrivilege is what lets an account set any user or group as the owner:
       https://learn.microsoft.com/windows/win32/secauthz/privilege-constants
@@ -421,8 +421,7 @@ function Export-SddlBackupFile {
         Writes Path, ItemType, Sddl rows to a new CSV file (never over an existing one) and reads
         it back to check it. Throws when the file cannot be written or does not hold the rows.
     .DESCRIPTION
-        Shared by Save-AclBackup and Save-UnlistedFolderPermission, so every SDDL backup has the
-        same columns, the same Excel-formula escaping (ConvertTo-CsvSafeText) and the same check.
+        Used by Save-AclBackup, so every SDDL backup has the same columns, the same Excel-formula escaping (ConvertTo-CsvSafeText) and the same check.
         https://learn.microsoft.com/powershell/module/microsoft.powershell.utility/export-csv
     #>
     param(
@@ -583,48 +582,6 @@ function Save-OwnerSnapshot {
     }
 }
 
-function Get-UnlistedPermissionFilePath {
-    # The companion of an owner snapshot that holds the permissions of the folders that could
-    # not be opened: ..._TakeOwnership.csv -> ..._TakeOwnership_Permissions.csv, so the two
-    # files of one run sort together and are easy to match.
-    param([Parameter(Mandatory)][string]$SnapshotFile)
-    $SnapshotFile -replace '\.csv$', '_Permissions.csv'
-}
-
-function Save-UnlistedFolderPermission {
-    <#
-    .SYNOPSIS
-        Before taking ownership of a tree, saves the SDDL of every folder that could not be
-        opened to the owner snapshot's companion file <snapshot>_Permissions.csv (Path, ItemType,
-        Sddl), reads it back to check it, and returns File, Saved, Unsaved and UnsavedFolders.
-        Throws when the file cannot be written or checked; callers must then change nothing.
-    .DESCRIPTION
-        takeown /D Y takes ownership of a folder the account has no List Folder and Read
-        permission on, and REPLACES that folder's permissions with full control for the user
-        only. The owner snapshot does not hold permissions, so without this file they would be
-        lost. A folder whose permissions cannot be read either is listed with Sddl
-        'Could not read' (D-027) and counted in Unsaved.
-        https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
-
-        Restore: the same steps as any SDDL backup ("Undo a change" in the README).
-    #>
-    param(
-        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Path,
-        [Parameter(Mandatory)][string]$SnapshotFile
-    )
-
-    $rows = @(foreach ($p in $Path) { [PSCustomObject][ordered]@{ Path = $p; ItemType = 'Folder'; Sddl = (Get-ItemSddl -Path $p) } })
-    $file = Get-UnlistedPermissionFilePath -SnapshotFile $SnapshotFile
-    Export-SddlBackupFile -Rows $rows -File $file
-    $unsaved = @($rows | Where-Object { $_.Sddl -eq 'Could not read' } | ForEach-Object { $_.Path })
-    [PSCustomObject]@{
-        File           = $file
-        Saved          = $rows.Count - $unsaved.Count
-        Unsaved        = $unsaved.Count
-        UnsavedFolders = $unsaved
-    }
-}
-
 function Get-OwnerReadBack {
     <#
     .SYNOPSIS
@@ -657,9 +614,36 @@ function Get-OwnerReadBack {
 }
 
 function Get-TreeOwnershipRefusal {
-    # STUB (SQ-014 D-036): returns $null when allowed, else the refusal text.
+    <#
+    .SYNOPSIS
+        Why taking ownership of everything under -Path is refused, or $null when it is allowed
+        (D-036). Refused: the root of a drive (D:\) and %SystemRoot%, %ProgramFiles%,
+        %ProgramFiles(x86)% and %ProgramData%, the folders themselves and anything under them.
+        The root of a share (\\fs01\share) is allowed.
+    .DESCRIPTION
+        Text only, nothing is read from disk: -Path should already be a full path
+        (Resolve-AclTargetPath). Compared case-insensitively on whole path segments, so
+        C:\Windows\System32 is refused and C:\WindowsOld is not. The variables are read when
+        called, not when the file is loaded. The text names the path and does not say what to do
+        about it: each caller adds its own next step (the command line has -AllowSystemFolder,
+        the GUI has no override).
+    #>
     param([Parameter(Mandatory)][string]$Path)
-    throw 'not implemented'
+
+    $normalized = $Path.Trim().Replace('/', '\')
+    if ($normalized -match '^[A-Za-z]:\\*$') {
+        return "$Path is the root of a drive. Taking ownership of a whole drive also changes the owner of Windows and program files on it, which cannot easily be undone. Choose the folder that needs fixing instead."
+    }
+    $normalized = $normalized.TrimEnd('\')
+    foreach ($name in @('SystemRoot', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramData')) {
+        $protected = "$([Environment]::GetEnvironmentVariable($name))".Trim().Replace('/', '\').TrimEnd('\')
+        if (-not $protected) { continue }
+        if ($normalized.Equals($protected, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $normalized.StartsWith("$protected\", [System.StringComparison]::OrdinalIgnoreCase)) {
+            return "$Path is in a Windows system folder (%$name%, $protected). Changing the owner of everything in it can stop Windows or installed programs from working, and cannot easily be undone. Choose the folder that needs fixing instead."
+        }
+    }
+    $null
 }
 
 function Test-AclToolErrorLine {
@@ -894,10 +878,15 @@ function Set-ItemOwnerToCurrentUser {
 
         -Recurse (one row per folder, see Invoke-TreeOwnershipChange): the owner of every item
         is saved to an owner snapshot first, then takeown /R and icacls /setowner /T change the
-        whole tree.
+        whole tree. The root of a drive and the Windows system folders are refused
+        (Get-TreeOwnershipRefusal) unless -AllowSystemFolder is given.
         https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
     .PARAMETER Recurse
         Take ownership of each folder and of all its subfolders and files.
+    .PARAMETER AllowSystemFolder
+        With -Recurse: also take ownership of the root of a drive or of a folder in
+        %SystemRoot%, %ProgramFiles%, %ProgramFiles(x86)% or %ProgramData%, which is refused
+        otherwise (D-036). Only the command line offers this; the GUI never passes it.
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param(
@@ -908,7 +897,7 @@ function Set-ItemOwnerToCurrentUser {
     )
 
     if ($Recurse) {
-        foreach ($p in $Path) { Invoke-TreeOwnershipChange -Cmdlet $PSCmdlet -Path $p -LogFolder $LogFolder }
+        foreach ($p in $Path) { Invoke-TreeOwnershipChange -Cmdlet $PSCmdlet -Path $p -LogFolder $LogFolder -AllowSystemFolder:$AllowSystemFolder }
         return
     }
     $me = [System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -1029,9 +1018,11 @@ function Test-TreeEntryIncomplete {
 }
 
 function Format-AclToolCommand {
-    # The command line as it could be pasted into a console, for the change log.
+    # The command line as it could be pasted into a console, for the change log. Paths (D:\...,
+    # \\server\...) are always quoted, so the folder reads the same in every row; other
+    # arguments only when they contain a space.
     param([Parameter(Mandatory)][string]$Tool, [Parameter(Mandatory)][string[]]$Arguments)
-    $quoted = @($Arguments | ForEach-Object { if ($_ -match '\s') { '"{0}"' -f $_ } else { $_ } })
+    $quoted = @($Arguments | ForEach-Object { if ($_ -match '\s' -or $_ -match '^(?:[A-Za-z]:\\|\\\\)') { '"{0}"' -f $_ } else { $_ } })
     "$Tool $($quoted -join ' ')"
 }
 
@@ -1042,18 +1033,20 @@ function Invoke-TreeOwnershipChange {
         after saving every item's owner. Returns one row for the whole folder and never throws.
     .DESCRIPTION
         1. The path is made a full path once (Resolve-AclTargetPath) and used for everything.
-        2. ShouldProcess once for the folder (-WhatIf: nothing is read, written or changed).
-        3. Save-OwnerSnapshot, and when some folders could not be opened,
-           Save-UnlistedFolderPermission (their SDDL, see 4): if either cannot be written and
-           checked, nothing is changed.
-        4. takeown /F <dir> /R /A /D Y gives every item to Administrators, so an administrator
-           can open items they are locked out of. For a folder the account cannot list, /D Y
-           also REPLACES the folder's permissions with full control for the user only (takeown
-           page on Learn), which is why step 3 saves those permissions.
-        5. icacls <dir> /setowner <DOMAIN\user> /T /C /Q makes the current account the owner.
+        2. The root of a drive and the Windows system folders are refused
+           (Get-TreeOwnershipRefusal, D-036) unless -AllowSystemFolder: nothing is read,
+           written or changed.
+        3. ShouldProcess once for the folder (-WhatIf: nothing is read, written or changed).
+        4. Save-OwnerSnapshot: if it cannot be written and checked, nothing is changed.
+        5. takeown /F <dir> /R /A /D N gives every item to Administrators, so an administrator
+           can open items they are locked out of. A folder the account cannot list (no List
+           Folder and Read permission) is skipped by /D N and keeps its permissions (D-034);
+           /D Y would replace them with full control for the user only. The read-back then
+           shows it is not owned, and the message tells the technician to escalate it.
+        6. icacls <dir> /setowner <DOMAIN\user> /T /C /Q makes the current account the owner.
            The full name from WindowsIdentity, not $env:USERNAME, which has no domain and is
            wrong under SYSTEM and service accounts.
-        6. The owner of every item in the snapshot is read again (Get-OwnerReadBack).
+        7. The owner of every item in the snapshot is read again (Get-OwnerReadBack).
         Both tools run even if takeown reports errors (as the GUI always did): icacls is what
         sets the final owner.
 
@@ -1067,9 +1060,8 @@ function Invoke-TreeOwnershipChange {
 
         The row also carries, in its TreeCounts member set (Add-TreeEntryCount), for the messages
         and not for the log file: ItemCount, Unreadable (no readable owner before), Unlisted and
-        UnlistedFolders (folders that could not be opened), PermissionsFile, PermissionsUnsaved
-        and PermissionsUnsavedFolders (their saved permissions, and the ones that could not be
-        read), Links and LinkPaths (junctions and symbolic links, listed but not gone into),
+        UnlistedFolders (folders that could not be opened, which takeown skipped), Links and
+        LinkPaths (junctions and symbolic links, listed but not gone into),
         Unchecked (no readable owner afterwards), NotOwned (still not owned by the current
         account) and Changed (owner differs from the snapshot).
     #>
@@ -1077,7 +1069,8 @@ function Invoke-TreeOwnershipChange {
     param(
         [Parameter(Mandatory)][System.Management.Automation.PSCmdlet]$Cmdlet,
         [Parameter(Mandatory)][AllowEmptyString()][string]$Path,
-        [Parameter(Mandatory)][string]$LogFolder
+        [Parameter(Mandatory)][string]$LogFolder,
+        [switch]$AllowSystemFolder
     )
 
     $action = 'Take ownership (all subfolders and files)'
@@ -1100,29 +1093,34 @@ function Invoke-TreeOwnershipChange {
         return New-PermissionChangeEntry -Action $action -Target $Path -ItemType 'File' -Detail $detail -Result 'Failed' `
             -ErrorText "$Path is a file, not a folder: take ownership of this item only instead. Nothing was changed."
     }
+    if (-not $AllowSystemFolder) {
+        $refusal = Get-TreeOwnershipRefusal -Path $Path
+        if ($refusal) {
+            return New-PermissionChangeEntry -Action $action -Target $Path -ItemType 'Folder tree' -Detail $detail -Result 'Failed' `
+                -ErrorText "$refusal Nothing was changed."
+        }
+    }
     if (-not $Cmdlet.ShouldProcess($Path, "$action ($detail)")) {
         return New-PermissionChangeEntry -Action $action -Target $Path -ItemType 'Folder tree' -Detail $detail -Result 'Skipped (WhatIf)'
     }
 
     try {
         $snapshot = Save-OwnerSnapshot -Path $Path -LogFolder $LogFolder
-        # takeown /D Y replaces the permissions of a folder it cannot list with full control for
-        # the user only, so save the permissions of the folders that could not be opened first.
-        # https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
-        $unlistedBackup = $null
-        if ($snapshot.Unlisted -gt 0) {
-            $unlistedBackup = Save-UnlistedFolderPermission -Path @($snapshot.UnlistedFolders) -SnapshotFile $snapshot.File
-        }
     } catch {
         return New-PermissionChangeEntry -Action $action -Target $Path -ItemType 'Folder tree' -Detail $detail -Result 'Failed' `
             -ErrorText (Get-BackupFailureText -LogFolder $LogFolder -Reason $_.Exception.Message)
     }
 
-    # takeown: /R recursive, /A owner = Administrators, /D Y answers "yes" for folders the
-    # account cannot list (documented for use with /R). Learn lists no exit codes for takeown,
-    # so anything but 0 is treated as "not every item" (NOT VERIFIED beyond that).
+    # takeown: /R "performs a recursive operation on all files in the specified directory and
+    # subdirectories"; /A "gives ownership to the Administrators group instead of the current
+    # user"; /D answers the prompt shown "when the current user does not have the List Folder
+    # and Read permissions on a specified directory" and must be used with /R. N is "Skip the
+    # directory"; Y would take it and replace its permissions "with permission granting the
+    # user full control only", so N leaves such a folder as it was (D-034).
+    # Learn lists no exit codes for takeown, so anything but 0 is treated as "not every item"
+    # (NOT VERIFIED beyond that).
     # https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
-    $takeownArgs = @('/F', $Path, '/R', '/A', '/D', 'Y')
+    $takeownArgs = @('/F', $Path, '/R', '/A', '/D', 'N')
     # icacls: /setowner changes the owner of all matching files, /T includes subfolders and
     # files, /C continues after file errors (still shown), /Q hides success messages.
     # https://learn.microsoft.com/windows-server/administration/windows-commands/icacls
@@ -1132,8 +1130,7 @@ function Invoke-TreeOwnershipChange {
     $notes = @(
         "$detail."
         $(if ($snapshot.Unreadable -gt 0) { "$($snapshot.Unreadable) item(s) had no readable owner before the change." })
-        $(if ($snapshot.Unlisted -gt 0) { "$($snapshot.Unlisted) folder(s) could not be opened, so the owners inside them are not in the backup: $(@($snapshot.UnlistedFolders) -join '; ')." })
-        $(if ($unlistedBackup) { "takeown /D Y replaces the permissions of those folders with full control for the technician only; $($unlistedBackup.Saved) of $($snapshot.Unlisted) were saved to $($unlistedBackup.File) first.$(if ($unlistedBackup.Unsaved -gt 0) { " Could not read (not saved): $(@($unlistedBackup.UnsavedFolders) -join '; ')." })" })
+        $(if ($snapshot.Unlisted -gt 0) { "$($snapshot.Unlisted) folder(s) could not be opened, so takeown /D N skipped them and the owners inside them are not in the backup: $(@($snapshot.UnlistedFolders) -join '; ')." })
         $(if ($snapshot.Links -gt 0) { "$($snapshot.Links) junction(s) or symbolic link(s) were listed but not gone into: $(@($snapshot.LinkPaths) -join '; ')." })
         "Ran: $(Format-AclToolCommand -Tool takeown -Arguments $takeownArgs); $(Format-AclToolCommand -Tool icacls -Arguments $icaclsArgs)"
     ) | Where-Object { $_ }
@@ -1182,9 +1179,6 @@ function Invoke-TreeOwnershipChange {
         Unreadable      = $snapshot.Unreadable
         Unlisted        = $snapshot.Unlisted
         UnlistedFolders = @($snapshot.UnlistedFolders)
-        PermissionsFile = $(if ($unlistedBackup) { $unlistedBackup.File } else { '' })
-        PermissionsUnsaved        = $(if ($unlistedBackup) { $unlistedBackup.Unsaved } else { 0 })
-        PermissionsUnsavedFolders = $(if ($unlistedBackup) { @($unlistedBackup.UnsavedFolders) } else { @() })
         Links           = $snapshot.Links
         LinkPaths       = @($snapshot.LinkPaths)
         Unchecked       = $check.Unchecked
@@ -1396,25 +1390,10 @@ function Get-TreeChangeResultMessage {
             $names = @($e.TreeCounts.UnlistedFolders | Select-Object -First 3)
             $more = if ($unlisted -gt $names.Count) { " and $($unlisted - $names.Count) more" } else { '' }
             $parts.Add("$unlisted folder(s) could not be opened ($($names -join '; ')$more), so the owners of what is inside them were not saved and cannot be restored from this backup.")
-            # takeown /D Y replaced the permissions of those folders with full control for the
-            # technician only. https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
-            $permissionsFile = "$($e.TreeCounts.PermissionsFile)"
-            $unsaved = Get-TreeEntryCount $e 'PermissionsUnsaved'
-            $replaced = "takeown replaces the permissions of a folder it cannot open with full control for you only"
-            if ($permissionsFile -and $unsaved -eq 0) {
-                $parts.Add("$replaced; the permissions those folders had were backed up to $permissionsFile first.")
-            } elseif ($permissionsFile) {
-                $lost = @($e.TreeCounts.PermissionsUnsavedFolders | Select-Object -First 3)
-                $lostMore = if ($unsaved -gt $lost.Count) { " and $($unsaved - $lost.Count) more" } else { '' }
-                $lostText = "$unsaved could not be read, so their permissions were not backed up and are lost ($($lost -join '; ')$lostMore)"
-                if ($unsaved -ge $unlisted) {
-                    $parts.Add("$replaced; $lostText.")
-                } else {
-                    $parts.Add("$replaced; the permissions of $($unlisted - $unsaved) of those folders were backed up to $permissionsFile first, but $lostText.")
-                }
-            } else {
-                $parts.Add("$replaced; their permissions were not backed up.")
-            }
+            # takeown /D N skips a folder it cannot open (D-034): its permissions are as they
+            # were, and the next step is to escalate it.
+            # https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
+            $parts.Add("Escalate: $unlisted folder(s) could not be opened, so they were left alone.")
         }
         $links = Get-TreeEntryCount $e 'Links'
         if ($links -gt 0) {

@@ -58,7 +58,6 @@ The console shows the log folder at startup.
 | `Logs\Changes_<yyyy-MM-dd>.csv` | One row per folder or file changed: `Time`, `Technician`, `Computer`, `Action`, `Target`, `ItemType`, `Detail`, `OldValue`, `NewValue`, `Result`, `Error`, `BackupFile`. `OldValue` and `NewValue` are the permissions before and after, as SDDL text. |
 | `Logs\Backups\<yyyy-MM-dd_HHmmss>_<Action>.csv` | The permissions as they were just before one action: `Path`, `ItemType`, `Sddl`. |
 | `Logs\Backups\<yyyy-MM-dd_HHmmss>_TakeOwnership.csv` (whole folder) | The owner snapshot written before taking ownership of a folder and everything under it: `Path`, `ItemType`, `Owner`, `OwnerSid`, one row for the folder and every subfolder and file under it (hidden ones too). |
-| `Logs\Backups\<yyyy-MM-dd_HHmmss>_TakeOwnership_Permissions.csv` (whole folder, only when some folders could not be opened) | The permissions of the folders the tool could not open, saved before taking ownership because `takeown` replaces them (see below): `Path`, `ItemType`, `Sddl`, same format as the other permission backups. |
 
 `Result` is one of `Done`, `Partly done`, `Failed`, `Skipped (not found)` or `Skipped (WhatIf)`. A `Failed`
 row whose `NewValue` differs from its `OldValue` was **partly changed** (for example, takeown
@@ -73,8 +72,8 @@ have changed. The snapshot still holds the owners from before, so the restore st
 for it. (The command-line script says this before it starts.)
 
 Taking ownership of a whole folder logs **one row for the folder** (`ItemType` = `Folder tree`):
-`OldValue` is `Saved in <owner snapshot>`. It runs `takeown /F <folder> /R /A /D Y` (gives every
-item to Administrators, so locked-out items can be opened) and then
+`OldValue` is `Saved in <owner snapshot>`. It runs `takeown /F <folder> /R /A /D N` (gives every
+item to Administrators, so locked-out items can be opened, and skips folders it cannot open) and then
 `icacls <folder> /setowner <DOMAIN\you> /T /C /Q` (makes you the owner); `Detail` ends with the
 two commands exactly as run. A relative path or a trailing backslash is turned into one full
 path first, and that path is used for the snapshot, both tools and the log.
@@ -92,16 +91,24 @@ Items under a folder the tool could not open are not in the snapshot, so their o
 be put back from it. The result is then never shown as a plain success: the status bar (or the
 console, with `[WARN]`) says how many folders that was and names them.
 
-**Taking ownership replaces the permissions of a folder you cannot open.** For a folder the
-account has no "List folder" and "Read" permission on, `takeown /D Y` takes ownership and
-replaces the folder's permissions with full control for you only
-([takeown](https://learn.microsoft.com/windows-server/administration/windows-commands/takeown)).
-So before running it, the tool saves the permissions of every folder it could not open to
-`..._TakeOwnership_Permissions.csv` next to the owner snapshot; if that file cannot be written
-and read back, nothing is changed. A folder whose permissions cannot be read either is listed
-there as `Could not read`: its permissions are lost. The console `[WARN]` line before the
-change and the result afterwards say how many folders that was and name them; the GUI's
-confirm dialog warns that it can happen.
+**A folder that cannot be opened is skipped and left alone.** For a folder the account has no
+"List folder" and "Read" permission on, `takeown /R /A /D N` skips the folder instead of taking
+it ([takeown](https://learn.microsoft.com/windows-server/administration/windows-commands/takeown):
+answering `Y` instead would take it and replace its permissions with permission granting only
+you full control, so the tool never does that on a whole folder). Its permissions are not changed, so
+there is nothing extra to back up. Reading the owners back then shows it is not yours, the
+result is `Partly done`, and the status bar (or the console, with `[WARN]`) names it with the
+next step: `Escalate: 1 folder(s) could not be opened, so they were left alone.` Hand the ticket
+to someone who can get into that folder. The console `[WARN]` line before the change and the
+GUI's confirm dialog say that such folders are skipped.
+
+**The root of a drive and the Windows folders are refused.** Taking ownership of a whole drive
+root (`C:\`, `D:\`), or of anything in `%SystemRoot%` (`C:\Windows`), `%ProgramFiles%`,
+`%ProgramFiles(x86)%` or `%ProgramData%` (the folders themselves too), would change the owner
+of Windows and program files and is very hard to undo, so the tool stops before saving or
+changing anything and says why. The root of a share (`\\fs01\share`) is allowed. The GUI has no
+way around this; the command-line script takes `-AllowSystemFolder` for the rare case where it
+is really needed.
 
 Junctions and symbolic links inside the folder are listed in the snapshot but not gone into,
 because they can point outside the folder. Microsoft's documentation does not say whether
@@ -217,14 +224,8 @@ account as the owner needs the "Restore files and directories" right (`SeRestore
 which administrators have in an elevated window. Rows with `Could not read` have no saved owner
 and are skipped with a warning.
 
-**Then put back the permissions of the folders that could not be opened.** Taking ownership
-leaves the permissions of every folder it could open alone, but for a folder it could not open
-`takeown` replaced them with full control for you (see above). If there is a
-`..._TakeOwnership_Permissions.csv` with the same date and time as the snapshot, restore it
-with the permission restore steps at the top of this section (set `$backup` to that file). Do
-this **after** the owners: the saved permissions also hold each folder's owner (the `O:` part),
-so they put back owner and permissions together. Rows with `Could not read` have nothing saved;
-set those folders' permissions by hand.
+Taking ownership of a whole folder does not change any permissions, and folders it could not
+open were skipped, so putting the owners back is all there is to undo.
 
 Alternative, if `icacls` is not available: replace the `icacls` line with
 `$acl = Get-Acl -LiteralPath $path; $acl.SetOwner((New-Object System.Security.Principal.SecurityIdentifier -ArgumentList $row.OwnerSid)); Set-Acl -LiteralPath $path -AclObject $acl`.
@@ -270,6 +271,7 @@ as in the GUI (owner snapshot before taking ownership, SDDL backup before copyin
 | `-Path` | asks | The top folder |
 | `-LogFolder` | `Logs` next to the script | Where backups and the change log go (same rules as the GUI) |
 | `-Force` | — | Do not ask before taking ownership or copying permissions |
+| `-AllowSystemFolder` | — | Take ownership even of a drive root or a folder in `%SystemRoot%`, `%ProgramFiles%`, `%ProgramFiles(x86)%` or `%ProgramData%`, which is refused otherwise (see above) |
 | `-WhatIf` | — | Show what would be changed and change nothing |
 
 Before each step it prints what will change with `[WARN]` (for ownership, how many items:
@@ -278,6 +280,10 @@ the folder is counted first, read only, and `-WhatIf` shows the count too), then
 Declining ownership, or ownership failing, still shows the permissions and offers the copy: it
 does not depend on ownership. Run it in an elevated window: it stops with `[FAIL]` otherwise
 (except with `-WhatIf`). See "Undo a change" above to put owners or permissions back.
+
+A drive root or a Windows folder is refused straight away, before any question, with one
+`[FAIL]` line that names the folder and `-AllowSystemFolder`, and exit code `1`. Nothing is
+counted, saved or changed.
 
 The script exits with `1` when a step `Failed` or was only `Partly done`, when taking ownership
 could not be checked everywhere (folders it could not open, owners it could not read back, or
