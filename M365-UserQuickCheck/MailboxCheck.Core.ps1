@@ -16,17 +16,28 @@
     that could not be read is not a clean inbox-rule list, so "No takeover signs found" is only
     ever written when every section was read (Get-MailboxCheckAssessment).
 
-    TAKEOVER SIGNS. Mail forwarded outside the tenant (mailbox forwarding or an inbox rule that
-    forwards, forwards as an attachment, or redirects), a rule that deletes mail, a rule that
-    hides mail (moves it to RSS Feeds, RSS Subscriptions, Conversation History, Deleted Items,
-    Junk Email or Archive, or moves it and marks it read), and a hidden rule other than the
-    built-in junk-mail rule. "Outside" means the address's domain is neither an accepted domain
-    of the tenant nor a subdomain of one. The tool does not score the risk: CIPP's BEC report
-    does that (owner decision D-003), so every sign leads to the same next step.
+    TAKEOVER SIGNS. Mail forwarded outside the tenant (the mailbox's ForwardingSmtpAddress, a
+    ForwardingAddress recipient such as a mail contact that points outside, or an inbox rule
+    that forwards, forwards as an attachment, or redirects), a rule that forwards to a recipient
+    the tool cannot classify, a rule that deletes mail, a rule that hides mail (moves it to RSS
+    Feeds, RSS Subscriptions, Conversation History, Deleted Items, Junk Email or Archive, or
+    moves it and marks it read), and a hidden rule other than the built-in junk-mail rule. The
+    tool does not score the risk: CIPP's BEC report does that (owner decision D-003), so every
+    sign leads to the same next step.
+
+    INSIDE, OUTSIDE OR UNKNOWN (Get-MailboxAddressScope). An address is Internal only when it is
+    positively inside: its domain is an accepted domain of the tenant (or a subdomain of one), or
+    it is an Exchange object reference (EX:/o=... legacy DN). An SMTP address in any other domain
+    is External. Anything else (a bare display name, an address that does not parse) is Unknown,
+    and Unknown is never treated as inside: for a rule it is a sign, for mailbox forwarding the
+    section is Could not check.
 
     PERSONAL DATA (D-025). Rule conditions (Description), full forwarding addresses and the
     message trace (with subjects) go only into the local HTML and CSV. Sign messages name the
     rule and the outside DOMAIN, never the full address, because they go into the ticket note.
+    Raw Exchange error text stays in the console and the HTML too: the note gives each section
+    a fixed reason (NoteReason). Rule names are written by whoever controls the mailbox, so
+    control characters are removed and they are cut to 100 characters before they are shown.
 .NOTES
     REFERENCES
       Get-InboxRule: -Mailbox, -IncludeHidden ("whether to include hidden Inbox rules in the
@@ -43,6 +54,19 @@
       (RecipientTypeDetails, PrimarySmtpAddress, EmailAddresses); Get-EXOMailboxStatistics
       Minimum (TotalItemSize, ItemCount)
         https://learn.microsoft.com/powershell/exchange/cmdlet-property-sets
+      Mailbox forwarding: ForwardingAddress is a recipient in the organization (any value that
+      identifies it: name, alias, DN, email address, GUID); when both it and
+      ForwardingSmtpAddress are set, ForwardingSmtpAddress is ignored
+        https://learn.microsoft.com/powershell/module/exchangepowershell/set-mailbox
+      Get-EXORecipient -Identity -Properties: the recipient's RecipientTypeDetails and
+      PrimarySmtpAddress (and, by name, ExternalEmailAddress: where a mail contact or mail user
+      sends the mail)
+        https://learn.microsoft.com/powershell/module/exchangepowershell/get-exorecipient
+        https://learn.microsoft.com/powershell/exchange/cmdlet-property-sets
+      Accepted domain types: Authoritative, InternalRelay, ExternalRelay ("relayed to an external
+      email system that's completely outside of your control"); ExternalRelay domains are not
+      treated as inside
+        https://learn.microsoft.com/powershell/module/exchangepowershell/set-accepteddomain
       Get-EXOMailboxPermission output: User, AccessRights, IsInherited, Deny; FullAccess and
       ReadPermission are directly assigned to NT AUTHORITY\SELF by default
         https://learn.microsoft.com/powershell/module/exchangepowershell/get-exomailboxpermission
@@ -73,8 +97,15 @@
         MoveToFolder only as MailboxID:\ParentFolder[\SubFolder], with no folder type, so a
         mailbox with localized folder names is not matched (the rule is still listed).
       - SoftDeleteMessage: Learn's description is a placeholder. Treated as "deletes mail".
-      - Get-AcceptedDomain output properties (DomainName, InitialDomain) are not listed on its
-        Learn page; the names used are the ones the cmdlet returns.
+      - Get-AcceptedDomain output properties (DomainName, InitialDomain, DomainType) are not
+        listed on its Learn page; the names used are the ones the cmdlet returns.
+      - Get-EXORecipient -Properties ExternalEmailAddress: ExternalEmailAddress is in none of the
+        Get-EXORecipient property sets (it is a Get-Recipient property of mail contacts and mail
+        users). -Properties takes any property name, so it is asked for by name. A recipient that
+        comes back without a usable address leaves Mailbox forwarding at Could not check.
+      - The junk-mail rule exemption also needs the rule to have none of the actions this check
+        reads (forward, redirect, delete, move, mark as read). If the real built-in rule ever
+        shows one of them, it is reported as a hidden rule: a false alarm, never a missed one.
 #>
 
 # =============================================================================
@@ -105,12 +136,23 @@ $script:MailboxTraceMaxResults = 5000
 $script:MailboxRecipientRoles = 'the Recipient Management or Organization Management role group (View-Only Organization Management can view it)'
 $script:MailboxSectionRoles = @{
     'Inbox rules'      = 'the Recipient Management or Organization Management role group; Global Reader and View-Only Organization Management cannot read inbox rules'
+    'Hidden inbox rules' = 'the Recipient Management or Organization Management role group; Global Reader and View-Only Organization Management cannot read inbox rules'
     'Message trace'    = 'the Organization Management, Compliance Management or Help Desk role group, or Exchange Administrator in Entra ID'
     'Accepted domains' = 'the Organization Management role group (View-Only Organization Management can view it)'
 }
 
 # Errors that mean "the signed-in account may not do this". Exchange Online only offers the
 # cmdlets a role allows, so a cmdlet that "is not recognized" also means a missing role.
+# The ticket note's reason for a section that failed without a role error. The raw error stays
+# in the console and the HTML: it can carry addresses and tenant details.
+$script:MailboxNoteReasonDefault = 'could not be read (see the report)'
+
+# Fixed headline of a PARTLY CHECKED ticket note (the reasons are under Could not check).
+$script:MailboxPartlyNoteHeadline = 'PARTLY CHECKED - see Could not check'
+
+# Rule names are shown at most this long (console, signs, note).
+$script:MailboxRuleNameMaxLength = 100
+
 $script:MailboxAccessErrorPattern = "(?i)access is denied|isn't assigned to any management roles|not assigned to any management role|not allowed|insufficient|unauthori[sz]ed|forbidden|does not allow|is not recognized|isn't recognized"
 
 # =============================================================================
@@ -141,18 +183,39 @@ function Test-MailboxCheckValue {
     return $true
 }
 
+function ConvertTo-MailboxSafeText {
+    <#
+    .SYNOPSIS
+        Text written by whoever controls the mailbox (rule names, folders), made safe to show:
+        every run of control characters becomes one space, and with -MaxLength the text is cut
+        (ending in '...').
+    .DESCRIPTION
+        A line break in a rule name would forge a line (or a whole section) of the ticket note;
+        an ESC sequence would rewrite the console.
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$Text, [int]$MaxLength = 0)
+    $t = ([regex]::Replace([string]$Text, '\p{Cc}+', ' ')).Trim()
+    if ($MaxLength -gt 3 -and $t.Length -gt $MaxLength) { $t = $t.Substring(0, $MaxLength - 3).TrimEnd() + '...' }
+    return $t
+}
+
 function Get-MailboxAddressFromText {
     <#
     .SYNOPSIS
         The SMTP address in an Exchange recipient string, or ''.
     .DESCRIPTION
         Accepts 'x@gmail.com', 'smtp:x@gmail.com', 'SMTP:x@gmail.com' and the inbox-rule form
-        '"Name" [SMTP:x@gmail.com]'. A recipient without an SMTP address (an internal object
-        such as '"Jane Doe" [EX:/o=...]') returns ''.
+        '"Name" [SMTP:x@gmail.com]'. The [SMTP:...] part wins over a display name that looks
+        like an address ('"boss@contoso.com" [SMTP:x@gmail.com]' is x@gmail.com). A recipient
+        without an SMTP address (an internal object such as '"Jane Doe" [EX:/o=...]') returns ''.
     #>
     param([AllowEmptyString()][AllowNull()][string]$Text)
     if ([string]::IsNullOrWhiteSpace($Text)) { return '' }
-    $m = [regex]::Match($Text, '(?i)(?:smtp:)?(?<a>[^\s\[\]"<>:;,()]+@[^\s\[\]"<>:;,()]+)')
+    $bracket = [regex]::Match($Text, '(?i)\[smtp:(?<a>[^\s\[\]"<>:;,()]+@[^\s\[\]"<>:;,()]+)\]')
+    if ($bracket.Success) { return $bracket.Groups['a'].Value.TrimEnd('.') }
+    # An object reference: the quoted part is a display name, not an address.
+    if ($Text -match '(?i)\[(EX|X500):') { return '' }
+    $m =[regex]::Match($Text, '(?i)(?:smtp:)?(?<a>[^\s\[\]"<>:;,()]+@[^\s\[\]"<>:;,()]+)')
     if (-not $m.Success) { return '' }
     return $m.Groups['a'].Value.TrimEnd('.')
 }
@@ -165,34 +228,52 @@ function Get-MailboxAddressDomain {
     return $a.Substring($a.LastIndexOf('@') + 1).ToLowerInvariant()
 }
 
-function Test-ExternalAddress {
+function Get-MailboxAddressScope {
     <#
     .SYNOPSIS
-        True when the address is outside the tenant: its domain is neither an accepted domain
-        nor a subdomain of one. Case-insensitive; a leading '*.' on an accepted domain is
-        ignored. A value without an SMTP address (a recipient object) is not external.
+        'Internal', 'External' or 'Unknown' for an Exchange recipient string.
     .DESCRIPTION
+        Internal: the SMTP domain is an accepted domain or a subdomain of one (case-insensitive;
+        a leading '*.' on an accepted domain is ignored), or the value is an Exchange object
+        reference ('"Jane Doe" [EX:/o=...]', '/o=...'). External: an SMTP address in any other
+        domain. Unknown: anything else, such as a bare display name or an address that does not
+        parse. Unknown is never inside: callers raise a sign or mark the section Could not check.
         'evilcontoso.com' is not a subdomain of 'contoso.com': only a whole label before the
         accepted domain counts ('mail.contoso.com').
     #>
     param([AllowEmptyString()][AllowNull()][string]$Address, [AllowEmptyCollection()][string[]]$AcceptedDomain = @())
+    if ([string]::IsNullOrWhiteSpace($Address)) { return 'Unknown' }
     $domain = Get-MailboxAddressDomain -Address $Address
-    if (-not $domain) { return $false }
+    if (-not $domain) {
+        if ($Address -match '(?i)\[EX:/o=' -or $Address.Trim() -match '(?i)^(EX:)?/o=') { return 'Internal' }
+        return 'Unknown'
+    }
     foreach ($accepted in @($AcceptedDomain)) {
         if ([string]::IsNullOrWhiteSpace($accepted)) { continue }
         $a = $accepted.Trim().ToLowerInvariant()
         if ($a.StartsWith('*.')) { $a = $a.Substring(2) }
         $a = $a.Trim('.')
         if (-not $a) { continue }
-        if ($domain -eq $a -or $domain.EndsWith('.' + $a)) { return $false }
+        if ($domain -eq $a -or $domain.EndsWith('.' + $a)) { return 'Internal' }
     }
-    return $true
+    return 'External'
+}
+
+function Test-ExternalAddress {
+    <#
+    .SYNOPSIS
+        True when Get-MailboxAddressScope says External. False for Internal AND for Unknown, so
+        never use this to decide that something is inside: the check itself uses
+        Get-MailboxAddressScope.
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$Address, [AllowEmptyCollection()][string[]]$AcceptedDomain = @())
+    return ((Get-MailboxAddressScope -Address $Address -AcceptedDomain $AcceptedDomain) -eq 'External')
 }
 
 function New-MailboxSign {
     # One takeover sign. Message is plain English and names only the rule and the outside domain.
     param(
-        [Parameter(Mandatory = $true)][ValidateSet('ExternalForwarding', 'ExternalRuleForward', 'RuleDeletesMail', 'RuleHidesMail', 'HiddenRule')][string]$Kind,
+        [Parameter(Mandatory = $true)][ValidateSet('ExternalForwarding', 'ExternalRuleForward', 'UnclassifiedRuleForward', 'RuleDeletesMail', 'RuleHidesMail', 'HiddenRule')][string]$Kind,
         [Parameter(Mandatory = $true)][string]$Message,
         [string]$Domain = '',
         [string]$RuleName = '',
@@ -207,14 +288,17 @@ function New-MailboxGate {
         One section of the check and whether this run could read it.
     .DESCRIPTION
         Sources: 'Accepted domains', 'Mailbox forwarding', 'Mailbox size', 'Archive size',
-        'Full Access', 'Send As', 'Inbox rules', 'Message trace'.
+        'Full Access', 'Send As', 'Inbox rules', 'Hidden inbox rules', 'Message trace'.
+        Reason is for the console and the HTML (it may hold the raw error). NoteReason is the
+        fixed plain-English reason for the ticket note; it never carries Exchange text.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Source,
         [Parameter(Mandatory = $true)][ValidateSet('Checked', 'CouldNotCheck')][string]$State,
-        [string]$Reason = ''
+        [string]$Reason = '',
+        [string]$NoteReason = ''
     )
-    return [PSCustomObject]@{ Source = $Source; State = $State; Reason = $Reason }
+    return [PSCustomObject]@{ Source = $Source; State = $State; Reason = $Reason; NoteReason = $NoteReason }
 }
 
 function Get-MailboxErrorSummary {
@@ -236,11 +320,13 @@ function Get-MailboxGateFromError {
     param([Parameter(Mandatory = $true)][string]$Source, [AllowEmptyString()][AllowNull()][string]$Message)
     $summary = Get-MailboxErrorSummary -Message $Message
     $reason = $summary
+    $noteReason = $script:MailboxNoteReasonDefault
     if ([string]$Message -match $script:MailboxAccessErrorPattern) {
         $roles = if ($script:MailboxSectionRoles.ContainsKey($Source)) { $script:MailboxSectionRoles[$Source] } else { $script:MailboxRecipientRoles }
         $reason = '{0}. Reading this needs {1}.' -f $summary.TrimEnd('.'), $roles
+        $noteReason = 'the signed-in account may not read this. Reading it needs {0}.' -f $roles
     }
-    return (New-MailboxGate -Source $Source -State CouldNotCheck -Reason $reason)
+    return (New-MailboxGate -Source $Source -State CouldNotCheck -Reason $reason -NoteReason $noteReason)
 }
 
 # =============================================================================
@@ -297,22 +383,109 @@ function Format-MailboxDelegateList {
 # Forwarding and inbox-rule signs (pure)
 # =============================================================================
 
+function Get-ForwardingRecipientAddress {
+    <#
+    .SYNOPSIS
+        Where a ForwardingAddress recipient (from Get-EXORecipient) sends the mail: its
+        ExternalEmailAddress when it has one (a mail contact or mail user), else its
+        PrimarySmtpAddress. '' when it has neither.
+    #>
+    param([object]$Recipient)
+    foreach ($n in 'ExternalEmailAddress', 'PrimarySmtpAddress') {
+        $v = [string](Get-MailboxCheckValue $Recipient $n)
+        if (-not [string]::IsNullOrWhiteSpace($v)) { return $v.Trim() }
+    }
+    return ''
+}
+
+function Get-ForwardingRecipientTypeText {
+    # The recipient's type in plain words. Its name can be client data, so signs name the type only.
+    param([object]$Recipient)
+    switch ([string](Get-MailboxCheckValue $Recipient 'RecipientTypeDetails')) {
+        'MailContact' { return 'a mail contact' }
+        'MailUser' { return 'a mail user' }
+        'GuestMailUser' { return 'a guest mail user' }
+        default { return 'a recipient' }
+    }
+}
+
 function Get-ForwardingSigns {
     <#
     .SYNOPSIS
-        An ExternalForwarding sign when the mailbox's own forwarding (ForwardingSmtpAddress)
-        sends mail outside the tenant, naming the domain and whether a copy is kept.
+        ExternalForwarding signs when the mailbox's own forwarding sends mail outside the
+        tenant, naming the domain and whether a copy is kept.
     .DESCRIPTION
-        ForwardingAddress is a recipient object in the tenant, so it is a fact, not a sign
-        (Get-MailboxFactRows shows it).
+        ForwardingSmtpAddress is judged directly. ForwardingAddress is a recipient object; it is
+        judged by where that recipient sends the mail (-ForwardingRecipient, the Get-EXORecipient
+        result), so a mail contact pointing at gmail.com is a sign. Whether every target could be
+        judged is Get-MailboxForwardingGate's job: this function only raises signs.
     #>
-    param([object]$Mailbox, [AllowEmptyCollection()][string[]]$AcceptedDomain = @())
-    $smtp = [string](Get-MailboxCheckValue $Mailbox 'ForwardingSmtpAddress')
-    if (-not (Test-ExternalAddress -Address $smtp -AcceptedDomain $AcceptedDomain)) { return @() }
-    $domain = Get-MailboxAddressDomain -Address $smtp
+    param([object]$Mailbox, [object]$ForwardingRecipient, [AllowEmptyCollection()][string[]]$AcceptedDomain = @())
+    $signs = New-Object System.Collections.Generic.List[object]
     $keeps = ((Get-MailboxCheckValue $Mailbox 'DeliverToMailboxAndForward') -eq $true)
     $copy = if ($keeps) { 'a copy is kept in the mailbox' } else { 'no copy is kept in the mailbox, so the user never sees it' }
-    return @(New-MailboxSign -Kind ExternalForwarding -Domain $domain -KeepsCopy $keeps -Message ('Mail is forwarded to an outside address at {0} ({1}).' -f $domain, $copy))
+
+    $smtp = [string](Get-MailboxCheckValue $Mailbox 'ForwardingSmtpAddress')
+    if ((Get-MailboxAddressScope -Address $smtp -AcceptedDomain $AcceptedDomain) -eq 'External') {
+        $domain = Get-MailboxAddressDomain -Address $smtp
+        $signs.Add((New-MailboxSign -Kind ExternalForwarding -Domain $domain -KeepsCopy $keeps -Message ('Mail is forwarded to an outside address at {0} ({1}).' -f $domain, $copy)))
+    }
+
+    if ((Test-MailboxCheckValue (Get-MailboxCheckValue $Mailbox 'ForwardingAddress')) -and $null -ne $ForwardingRecipient) {
+        $target = Get-ForwardingRecipientAddress -Recipient $ForwardingRecipient
+        if ((Get-MailboxAddressScope -Address $target -AcceptedDomain $AcceptedDomain) -eq 'External') {
+            $domain = Get-MailboxAddressDomain -Address $target
+            $type = Get-ForwardingRecipientTypeText -Recipient $ForwardingRecipient
+            $signs.Add((New-MailboxSign -Kind ExternalForwarding -Domain $domain -KeepsCopy $keeps -Message ('Mail is forwarded to {0} in this tenant that sends it to an outside address at {1} ({2}).' -f $type, $domain, $copy)))
+        }
+    }
+    return $signs.ToArray()
+}
+
+function Get-MailboxForwardingGate {
+    <#
+    .SYNOPSIS
+        The 'Mailbox forwarding' gate: Checked only when every forwarding target could be
+        judged inside or outside.
+    .DESCRIPTION
+        CouldNotCheck when ForwardingSmtpAddress is set but is not an address the tool can
+        judge, or when ForwardingAddress is set and its recipient could not be looked up
+        (-LookupError), was not found (no -ForwardingRecipient), or has no address the tool can
+        judge. An unjudged forward is never reported as "nothing is forwarded outside".
+    #>
+    param(
+        [object]$Mailbox,
+        [object]$ForwardingRecipient,
+        [AllowEmptyString()][AllowNull()][string]$LookupError = '',
+        [AllowEmptyCollection()][string[]]$AcceptedDomain = @()
+    )
+    $source = 'Mailbox forwarding'
+    $reasons = New-Object System.Collections.Generic.List[string]
+    $noteReasons = New-Object System.Collections.Generic.List[string]
+
+    $smtp = [string](Get-MailboxCheckValue $Mailbox 'ForwardingSmtpAddress')
+    if ((Test-MailboxCheckValue $smtp) -and (Get-MailboxAddressScope -Address $smtp -AcceptedDomain $AcceptedDomain) -eq 'Unknown') {
+        $reasons.Add(("The forwarding address '{0}' is not an email address this tool can judge; look at the mailbox's forwarding in the Exchange admin center" -f $smtp))
+        $noteReasons.Add('the forwarding address could not be judged (see the report)')
+    }
+
+    $fwd = [string](Get-MailboxCheckValue $Mailbox 'ForwardingAddress')
+    if (Test-MailboxCheckValue $fwd) {
+        if (-not [string]::IsNullOrWhiteSpace($LookupError)) {
+            $g = Get-MailboxGateFromError -Source $source -Message $LookupError
+            $reasons.Add(("Could not look up the forwarding recipient '{0}': {1}" -f $fwd, $g.Reason.TrimEnd('.')))
+            $noteReasons.Add(('the forwarding recipient could not be looked up: {0}' -f $g.NoteReason.TrimEnd('.')))
+        } elseif ($null -eq $ForwardingRecipient) {
+            $reasons.Add(("The forwarding recipient '{0}' was not found, so where the mail goes is not known" -f $fwd))
+            $noteReasons.Add('the forwarding recipient was not found (see the report)')
+        } elseif ((Get-MailboxAddressScope -Address (Get-ForwardingRecipientAddress -Recipient $ForwardingRecipient) -AcceptedDomain $AcceptedDomain) -eq 'Unknown') {
+            $reasons.Add(("The forwarding recipient '{0}' has no email address this tool can judge; look at it in the Exchange admin center" -f $fwd))
+            $noteReasons.Add('the forwarding recipient could not be judged (see the report)')
+        }
+    }
+
+    if ($reasons.Count -eq 0) { return (New-MailboxGate -Source $source -State Checked) }
+    return (New-MailboxGate -Source $source -State CouldNotCheck -Reason (($reasons -join '; ') + '.') -NoteReason (($noteReasons -join '; ') + '.'))
 }
 
 function Get-InboxRuleFolderName {
@@ -332,25 +505,35 @@ function Get-InboxRuleSigns {
         RuleHidesMail and HiddenRule.
     .DESCRIPTION
         One ExternalRuleForward per rule and action (ForwardTo, ForwardAsAttachmentTo,
-        RedirectTo) with an outside address. RuleHidesMail for a move to one of
-        $script:MailboxHidingFolders, or any move plus mark as read. HiddenRule for a rule with
-        IsHidden $true other than the built-in junk-mail rule. A rule that is turned off still
-        raises its signs, marked as turned off: someone created it.
+        RedirectTo) with an outside address, and one UnclassifiedRuleForward per rule and action
+        with a recipient Get-MailboxAddressScope calls Unknown. RuleHidesMail for a move to one
+        of $script:MailboxHidingFolders, or any move plus mark as read. HiddenRule for a rule
+        with IsHidden $true, or with IdentityMissing $true (its hidden state could not be told,
+        see ConvertTo-MailboxRuleList), other than the built-in junk-mail rule; that rule is
+        exempt only while it has none of the actions this check reads. A rule that is turned
+        off still raises its signs, marked as turned off: someone created it. Rule names lose
+        control characters and are cut to 100 characters (ConvertTo-MailboxSafeText).
     #>
     param([AllowEmptyCollection()][object[]]$Rule = @(), [AllowEmptyCollection()][string[]]$AcceptedDomain = @())
     $signs = New-Object System.Collections.Generic.List[object]
     $forwardActions = [ordered]@{ ForwardTo = 'forwards mail'; ForwardAsAttachmentTo = 'forwards mail as an attachment'; RedirectTo = 'redirects mail' }
     foreach ($r in @($Rule)) {
         if ($null -eq $r) { continue }
-        $name = [string](Get-MailboxCheckValue $r 'Name')
+        $name = ConvertTo-MailboxSafeText -Text ([string](Get-MailboxCheckValue $r 'Name')) -MaxLength $script:MailboxRuleNameMaxLength
         $off = if ((Get-MailboxCheckValue $r 'Enabled') -eq $false) { ' (the rule is turned off)' } else { '' }
 
         foreach ($prop in $forwardActions.Keys) {
-            $domains = @(@(Get-MailboxCheckValue $r $prop) | Where-Object { Test-ExternalAddress -Address ([string]$_) -AcceptedDomain $AcceptedDomain } |
-                    ForEach-Object { Get-MailboxAddressDomain -Address ([string]$_) } | Select-Object -Unique)
-            if ($domains.Count -eq 0) { continue }
-            $where = if ($domains.Count -eq 1) { 'an outside address at ' + $domains[0] } else { 'outside addresses at ' + ($domains -join ', ') }
-            $signs.Add((New-MailboxSign -Kind ExternalRuleForward -RuleName $name -Domain ($domains -join ', ') -Message ("Inbox rule '{0}' {1} to {2}{3}." -f $name, $forwardActions[$prop], $where, $off)))
+            $targets = @(@(Get-MailboxCheckValue $r $prop) | Where-Object { Test-MailboxCheckValue $_ } | ForEach-Object { [string]$_ })
+            $scopes = @($targets | ForEach-Object { [PSCustomObject]@{ Address = $_; Scope = (Get-MailboxAddressScope -Address $_ -AcceptedDomain $AcceptedDomain) } })
+            $domains = @($scopes | Where-Object { $_.Scope -eq 'External' } | ForEach-Object { Get-MailboxAddressDomain -Address $_.Address } | Select-Object -Unique)
+            if ($domains.Count -gt 0) {
+                $where = if ($domains.Count -eq 1) { 'an outside address at ' + $domains[0] } else { 'outside addresses at ' + ($domains -join ', ') }
+                $signs.Add((New-MailboxSign -Kind ExternalRuleForward -RuleName $name -Domain ($domains -join ', ') -Message ("Inbox rule '{0}' {1} to {2}{3}." -f $name, $forwardActions[$prop], $where, $off)))
+            }
+            if (@($scopes | Where-Object { $_.Scope -eq 'Unknown' }).Count -gt 0) {
+                # Not judged inside. The recipient text is not repeated: it can be client data.
+                $signs.Add((New-MailboxSign -Kind UnclassifiedRuleForward -RuleName $name -Message ("Inbox rule '{0}' {1} to a recipient this tool could not classify as inside or outside the tenant (see the report){2}." -f $name, $forwardActions[$prop], $off)))
+            }
         }
 
         if ((Get-MailboxCheckValue $r 'DeleteMessage') -eq $true) {
@@ -369,41 +552,77 @@ function Get-InboxRuleSigns {
             $signs.Add((New-MailboxSign -Kind RuleHidesMail -RuleName $name -Message ("Inbox rule '{0}' moves mail to another folder and marks it read{1}." -f $name, $off)))
         }
 
-        if ((Get-MailboxCheckValue $r 'IsHidden') -eq $true -and $name -ne $script:MailboxJunkRuleName) {
-            $signs.Add((New-MailboxSign -Kind HiddenRule -RuleName $name -Message ("Inbox rule '{0}' is hidden: Exchange only lists it when asked for hidden rules{1}." -f $name, $off)))
+        # The built-in junk-mail rule is exempt only while it does none of the things this check
+        # looks at: a rule named like it that forwards, deletes, moves or marks mail is not it.
+        $exempt = ($name -eq $script:MailboxJunkRuleName -and -not (Test-InboxRuleHasAction -Rule $r))
+        if (-not $exempt) {
+            if ((Get-MailboxCheckValue $r 'IsHidden') -eq $true) {
+                $signs.Add((New-MailboxSign -Kind HiddenRule -RuleName $name -Message ("Inbox rule '{0}' is hidden: Exchange only lists it when asked for hidden rules{1}." -f $name, $off)))
+            } elseif ((Get-MailboxCheckValue $r 'IdentityMissing') -eq $true) {
+                $signs.Add((New-MailboxSign -Kind HiddenRule -RuleName $name -Message ("Inbox rule '{0}' may be hidden: Exchange returned it without an identity, so the tool could not tell if it is hidden{1}." -f $name, $off)))
+            }
         }
     }
     return $signs.ToArray()
+}
+
+function Test-InboxRuleHasAction {
+    # True when the rule forwards, redirects, deletes, moves or marks mail read.
+    param([Parameter(Mandatory = $true)][object]$Rule)
+    foreach ($n in 'ForwardTo', 'ForwardAsAttachmentTo', 'RedirectTo', 'MoveToFolder') {
+        if (Test-MailboxCheckValue (Get-MailboxCheckValue $Rule $n)) { return $true }
+    }
+    foreach ($n in 'DeleteMessage', 'SoftDeleteMessage', 'MarkAsRead') {
+        if ((Get-MailboxCheckValue $Rule $n) -eq $true) { return $true }
+    }
+    return $false
 }
 
 function ConvertTo-MailboxRuleList {
     <#
     .SYNOPSIS
         The rule list for the report: every rule from Get-InboxRule -IncludeHidden, each with
-        IsHidden $true when the plain Get-InboxRule (without -IncludeHidden) did not return it.
+        HiddenState 'Hidden' when the plain Get-InboxRule (without -IncludeHidden) did not
+        return it, 'Visible' when it did, and 'Unknown' when that could not be told.
     .DESCRIPTION
-        Rules are matched on RuleIdentity, then Identity, then Name. Only the properties the
-        check and the report use are kept.
+        Rules are matched on RuleIdentity, then Identity; never on the name, which anyone can
+        copy. A rule with neither is Unknown and IdentityMissing (Get-InboxRuleSigns raises a
+        HiddenRule sign for it). -VisibleRuleUnavailable (the plain call failed) makes every rule
+        Unknown without IdentityMissing; the entry script records that as a Could not check
+        section instead. IsHidden is $true only for 'Hidden'. Names lose control characters and
+        are cut to 100 characters. Only the properties the check and the report use are kept.
     #>
-    param([AllowEmptyCollection()][object[]]$Rule = @(), [AllowEmptyCollection()][object[]]$VisibleRule = @())
+    param(
+        [AllowEmptyCollection()][object[]]$Rule = @(),
+        [AllowEmptyCollection()][object[]]$VisibleRule = @(),
+        [switch]$VisibleRuleUnavailable
+    )
     $key = {
         param($r)
-        foreach ($n in 'RuleIdentity', 'Identity', 'Name') {
+        foreach ($n in 'RuleIdentity', 'Identity') {
             $v = [string](Get-MailboxCheckValue $r $n)
             if ($v) { return "$n=$v" }
         }
         return ''
     }
     $visible = @{}
-    foreach ($v in @($VisibleRule)) { if ($null -ne $v) { $visible[(& $key $v)] = $true } }
+    foreach ($v in @($VisibleRule)) {
+        if ($null -eq $v) { continue }
+        $k = & $key $v
+        if ($k) { $visible[$k] = $true }
+    }
     $out = foreach ($r in @($Rule)) {
         if ($null -eq $r) { continue }
+        $k = & $key $r
+        $state = if (-not $k -or $VisibleRuleUnavailable) { 'Unknown' } elseif ($visible.ContainsKey($k)) { 'Visible' } else { 'Hidden' }
         [PSCustomObject]@{
-            Name = [string](Get-MailboxCheckValue $r 'Name')
+            Name = ConvertTo-MailboxSafeText -Text ([string](Get-MailboxCheckValue $r 'Name')) -MaxLength $script:MailboxRuleNameMaxLength
             Enabled = Get-MailboxCheckValue $r 'Enabled'
             Priority = Get-MailboxCheckValue $r 'Priority'
             Identity = [string](Get-MailboxCheckValue $r 'Identity')
-            IsHidden = (-not $visible.ContainsKey((& $key $r)))
+            IsHidden = ($state -eq 'Hidden')
+            HiddenState = $state
+            IdentityMissing = (-not $k)
             ForwardTo = @(Get-MailboxCheckValue $r 'ForwardTo' | Where-Object { $_ })
             ForwardAsAttachmentTo = @(Get-MailboxCheckValue $r 'ForwardAsAttachmentTo' | Where-Object { $_ })
             RedirectTo = @(Get-MailboxCheckValue $r 'RedirectTo' | Where-Object { $_ })
@@ -431,7 +650,8 @@ function Get-InboxRuleActionText {
     if ($move) { $parts.Add("Moves to: $move") }
     if ((Get-MailboxCheckValue $Rule 'MarkAsRead') -eq $true) { $parts.Add('Marks as read') }
     if ($parts.Count -eq 0) { return 'none of the actions this check looks at (forward, redirect, delete, move, mark as read)' }
-    return ($parts -join '; ')
+    # Addresses and folder names come from the mailbox: no control characters on the console.
+    return (ConvertTo-MailboxSafeText -Text ($parts -join '; '))
 }
 
 # =============================================================================
@@ -479,12 +699,20 @@ function Get-MailboxTypeText {
 
 function Get-MailboxForwardingText {
     # The mailbox's own forwarding as a fact (full address: local report and console only).
-    param([object]$Mailbox)
+    param([object]$Mailbox, [object]$ForwardingRecipient)
     $parts = New-Object System.Collections.Generic.List[string]
-    $smtp = Get-MailboxAddressFromText -Text ([string](Get-MailboxCheckValue $Mailbox 'ForwardingSmtpAddress'))
-    if ($smtp) { $parts.Add("to $smtp") }
+    $rawSmtp = [string](Get-MailboxCheckValue $Mailbox 'ForwardingSmtpAddress')
+    $smtp = Get-MailboxAddressFromText -Text $rawSmtp
+    if ($smtp) { $parts.Add("to $smtp") } elseif (Test-MailboxCheckValue $rawSmtp) { $parts.Add("to '$rawSmtp' (not an address this tool can judge)") }
     $recipient = [string](Get-MailboxCheckValue $Mailbox 'ForwardingAddress')
-    if ($recipient) { $parts.Add("to the recipient '$recipient' in this tenant (if it is a mail contact, the mail still leaves the tenant)") }
+    if ($recipient) {
+        if ($null -ne $ForwardingRecipient) {
+            $target = Get-MailboxAddressFromText -Text (Get-ForwardingRecipientAddress -Recipient $ForwardingRecipient)
+            $parts.Add(("to the recipient '{0}' ({1}), which delivers to {2}" -f $recipient, (Get-ForwardingRecipientTypeText -Recipient $ForwardingRecipient), $(if ($target) { $target } else { 'an address this tool could not read' })))
+        } else {
+            $parts.Add("to the recipient '$recipient' (not looked up: if it is a mail contact, the mail leaves the tenant)")
+        }
+    }
     if ($parts.Count -eq 0) { return 'None' }
     $copy = if ((Get-MailboxCheckValue $Mailbox 'DeliverToMailboxAndForward') -eq $true) { 'a copy is kept in the mailbox' } else { 'no copy is kept in the mailbox' }
     return ('Forwarded {0}; {1}' -f ($parts -join ' and '), $copy)
@@ -496,13 +724,13 @@ function Get-MailboxFactRows {
         Item/Value rows: mailbox type, forwarding, size, quota, archive, holds. A value that is
         missing reads 'not available' (never 0 or blank); no archive reads 'No archive'.
     #>
-    param([object]$Mailbox, [object]$Statistics, [object]$ArchiveStatistics)
+    param([object]$Mailbox, [object]$Statistics, [object]$ArchiveStatistics, [object]$ForwardingRecipient)
     $na = 'not available'
     $rows = New-Object System.Collections.Generic.List[object]
     $add = { param($Item, $Value) $rows.Add([PSCustomObject]@{ Item = $Item; Value = $(if (Test-MailboxCheckValue $Value) { [string]$Value } else { $na }) }) }
 
     & $add 'Mailbox type' (Get-MailboxTypeText -RecipientTypeDetails ([string](Get-MailboxCheckValue $Mailbox 'RecipientTypeDetails')))
-    & $add 'Mail forwarding' (Get-MailboxForwardingText -Mailbox $Mailbox)
+    & $add 'Mail forwarding' (Get-MailboxForwardingText -Mailbox $Mailbox -ForwardingRecipient $ForwardingRecipient)
     $size = [string](Get-MailboxCheckValue $Statistics 'TotalItemSize')
     $count = Get-MailboxCheckValue $Statistics 'ItemCount'
     if ($size -and $null -ne $count) { $size = '{0}, {1} items' -f $size, $count }
@@ -575,7 +803,7 @@ function Get-MailboxCheckAssessment {
     #>
     param([AllowEmptyCollection()][object[]]$Signs = @(), [AllowEmptyCollection()][object[]]$Gate = @())
     $signList = @($Signs | Where-Object { $null -ne $_ })
-    $couldNot = @($Gate | Where-Object { $null -ne $_ -and $_.State -ne 'Checked' } | ForEach-Object { [PSCustomObject]@{ Source = [string]$_.Source; Reason = [string]$_.Reason } })
+    $couldNot = @($Gate | Where-Object { $null -ne $_ -and $_.State -ne 'Checked' } | ForEach-Object { [PSCustomObject]@{ Source = [string]$_.Source; Reason = [string]$_.Reason; NoteReason = [string](Get-MailboxCheckValue $_ 'NoteReason') } })
     $lines = New-Object System.Collections.Generic.List[string]
 
     if ($signList.Count -gt 0) {
@@ -665,7 +893,7 @@ function ConvertTo-MailboxCheckHtml {
         [void]$sb.AppendLine('<table><tr><th>Name</th><th>On</th><th>Hidden</th><th>What it does</th><th>Conditions (Exchange description)</th></tr>')
         foreach ($r in $rules) {
             $on = if ($r.Enabled -eq $false) { 'Off' } else { 'On' }
-            $hidden = if ($r.IsHidden) { 'Hidden' } else { '' }
+            $hidden = if ($r.IsHidden) { 'Hidden' } elseif ($r.HiddenState -eq 'Unknown') { 'Unknown' } else { '' }
             [void]$sb.AppendLine("<tr><td>$(Enc $r.Name)</td><td>$(Enc $on)</td><td>$(Enc $hidden)</td><td>$(Enc (Get-InboxRuleActionText -Rule $r))</td><td>$(Enc $r.Description)</td></tr>")
         }
         [void]$sb.AppendLine('</table>')
@@ -704,12 +932,14 @@ function Get-MailboxCheckNote {
     .SYNOPSIS
         Maps a check result to a CaseKit ticket note.
     .DESCRIPTION
-        Paste-safe by construction (D-025 and the squad's paste-safe assumption): sign kinds,
-        rule names and outside DOMAINS only. No rule conditions, no full forwarding addresses,
-        no delegate names and no message-trace rows; those stay in the local HTML and CSV.
-        Every section that could not be read goes under Could not check, never Ruled out; a
-        check is ruled out only when its sections (and the accepted domains it is judged
-        against) were read.
+        Paste-safe by construction (D-025 and the squad's paste-safe assumption): the checked
+        mailbox, sign kinds, rule names and outside DOMAINS only. The note names the checked
+        mailbox, but never a forwarding, delegate or message-trace address, and carries no rule
+        conditions and no raw Exchange error text: a section that could not be read gets its
+        fixed NoteReason (the raw reason stays in the console and the HTML), and the headline is
+        fixed text for every verdict. Every section that could not be read goes under Could not
+        check, never Ruled out; a check is ruled out only when its sections (and the accepted
+        domains it is judged against) were read.
     #>
     param([Parameter(Mandatory = $true)][object]$Result, [string[]]$EvidencePaths = @())
     $items = New-Object System.Collections.Generic.List[object]
@@ -719,12 +949,20 @@ function Get-MailboxCheckNote {
 
     if ($Result.Status -eq 'Ok') {
         $a = $Result.Assessment; $f = $Result.Facts
-        $headline = @($a.Lines)[0]
+        # Fixed text: the PARTLY CHECKED verdict line carries the raw reasons (console and HTML).
+        $headline = switch ($a.Verdict) {
+            'TakeoverSigns' { $script:MailboxTakeoverLine }
+            'AllChecked' { $script:MailboxCleanLine }
+            default { $script:MailboxPartlyNoteHeadline }
+        }
         $traceText = if ($f.Trace) { ', message trace for the last {0} days' -f $f.Trace.Days } else { '' }
         $scopeLine = 'Mailbox {0} in {1}: delegates, forwarding, inbox rules (hidden ones included), size, archive and holds{2}.' -f $Result.Identity, $tenantName, $traceText
 
         foreach ($s in @($a.Signs)) { $items.Add((New-TicketNoteItem -Kind Problem -Text ('{0}: {1}' -f $s.Kind, $s.Message))) }
-        foreach ($c in @($a.CouldNotCheck)) { $items.Add((New-TicketNoteItem -Kind NotChecked -Text ('{0}: {1}' -f $c.Source, $c.Reason))) }
+        foreach ($c in @($a.CouldNotCheck)) {
+            $why = if ($c.NoteReason) { [string]$c.NoteReason } else { $script:MailboxNoteReasonDefault }
+            $items.Add((New-TicketNoteItem -Kind NotChecked -Text ('{0}: {1}' -f $c.Source, $why)))
+        }
         $items.Add((New-TicketNoteItem -Kind NotChecked -Text $script:MailboxRecentChangesLine))
 
         $checked = @{}
@@ -733,10 +971,11 @@ function Get-MailboxCheckNote {
         if ($checked['Mailbox forwarding'] -and $checked['Accepted domains'] -and $kinds -notcontains 'ExternalForwarding') {
             $items.Add((New-TicketNoteItem -Kind Clear -CouldLook $true -Text 'Mailbox forwarding: nothing is forwarded outside the tenant.'))
         }
-        $ruleKinds = @('ExternalRuleForward', 'RuleDeletesMail', 'RuleHidesMail', 'HiddenRule')
-        if ($checked['Inbox rules'] -and $checked['Accepted domains'] -and @($kinds | Where-Object { $ruleKinds -contains $_ }).Count -eq 0) {
+        $ruleKinds = @('ExternalRuleForward', 'UnclassifiedRuleForward', 'RuleDeletesMail', 'RuleHidesMail', 'HiddenRule')
+        # 'Hidden inbox rules' is a gate only when telling hidden rules apart failed.
+        if ($checked['Inbox rules'] -and $checked['Accepted domains'] -and $checked['Hidden inbox rules'] -ne $false -and @($kinds | Where-Object { $ruleKinds -contains $_ }).Count -eq 0) {
             $n = @($f.Rules).Count
-            $items.Add((New-TicketNoteItem -Kind Clear -CouldLook $true -Text ('Inbox rules: {0} rule(s), hidden ones included; none forwards outside, deletes or hides mail.' -f $n)))
+            $items.Add((New-TicketNoteItem -Kind Clear -CouldLook $true -Text ('Inbox rules: {0} rule(s), hidden ones included; no rule matched the checks this tool runs (English folder names).' -f $n)))
         }
         $counts = foreach ($d in @(@('Full Access', $f.FullAccess), @('Send As', $f.SendAs))) {
             if ($checked[$d[0]]) { '{0}: {1}' -f $d[0], @($d[1]).Count }
@@ -753,7 +992,8 @@ function Get-MailboxCheckNote {
             $next.Add('Check the spelling and that you signed in to the right tenant (see the stamp), then run the check again.')
         } else {
             $headline = "Mailbox check for '$($Result.Identity)' did not run - could not read Exchange Online"
-            if ($Result.Message) { $items.Add((New-TicketNoteItem -Kind Problem -Text $Result.Message)) }
+            # Fixed text: the error itself can carry addresses, so it stays in the console.
+            $items.Add((New-TicketNoteItem -Kind Problem -Text 'The check could not read Exchange Online; the error is in the console.'))
             $next.Add('Check the sign-in, the ExchangeOnlineManagement module and your Exchange role, then run the check again.')
         }
         $scopeLine = "Looked up the mailbox '$($Result.Identity)' in $tenantName."

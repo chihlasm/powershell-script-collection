@@ -173,7 +173,8 @@ named with the role it needs): nothing there is ruled out.
 
 Add `-OutputPath C:\Temp` for the HTML report and CSVs (rule conditions and message subjects
 are only in those) and `-TicketNumber 482113` for the ticket note. The note never contains
-rule conditions, full addresses or message subjects.
+rule conditions, full addresses or message subjects: it names the checked mailbox, but never a
+forwarding, delegate or message-trace address.
 
 ---
 

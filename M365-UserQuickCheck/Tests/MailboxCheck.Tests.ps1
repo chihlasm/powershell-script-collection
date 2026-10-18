@@ -78,6 +78,8 @@ BeforeAll {
         'Get-ConnectionInformation'    = @{ Params = @('ConnectionId', 'ModulePrefix'); Switches = @() }
         'Get-EXOMailbox'               = @{ Params = @('Identity', 'Properties', 'PropertySets', 'ResultSize', 'RecipientTypeDetails'); Switches = @() }
         'Get-EXOMailboxStatistics'     = @{ Params = @('Identity', 'Properties'); Switches = @('Archive') }
+        # https://learn.microsoft.com/powershell/module/exchangepowershell/get-exorecipient
+        'Get-EXORecipient'             = @{ Params = @('Identity', 'Properties', 'PropertySets', 'ResultSize', 'RecipientTypeDetails'); Switches = @() }
         'Get-EXOMailboxPermission'     = @{ Params = @('Identity', 'User', 'ResultSize'); Switches = @() }
         'Get-EXORecipientPermission'   = @{ Params = @('Identity', 'Trustee', 'AccessRights', 'ResultSize'); Switches = @() }
         'Get-InboxRule'                = @{ Params = @('Identity', 'Mailbox', 'ResultSize'); Switches = @('IncludeHidden') }
@@ -142,6 +144,7 @@ BeforeAll {
                 [PSCustomObject]@{ DomainName = 'contoso.com'; Name = 'contoso.com'; InitialDomain = $false; Default = $true; DomainType = 'Authoritative' },
                 [PSCustomObject]@{ DomainName = 'contoso.onmicrosoft.com'; Name = 'contoso.onmicrosoft.com'; InitialDomain = $true; Default = $false; DomainType = 'Authoritative' })
             Mailbox = (New-Mbx); MailboxThrow = $null
+            Recipient = $null; RecipientThrow = $null
             MbxPerms = @(
                 [PSCustomObject]@{ User = 'NT AUTHORITY\SELF'; AccessRights = @('FullAccess'); IsInherited = $false; Deny = $false },
                 [PSCustomObject]@{ User = 'jdoe@contoso.com'; AccessRights = @('FullAccess'); IsInherited = $false; Deny = $false })
@@ -197,6 +200,7 @@ Describe 'running the check' {
             $script:Scn.Mailbox
         }
         Mock Get-EXOMailboxStatistics { if ($Archive) { $script:Scn.ArchiveStats } else { $script:Scn.Stats } }
+        Mock Get-EXORecipient { if ($script:Scn.RecipientThrow) { throw $script:Scn.RecipientThrow }; $script:Scn.Recipient }
         Mock Get-EXOMailboxPermission { if ($script:Scn.PermsThrow) { throw $script:Scn.PermsThrow }; $script:Scn.MbxPerms }
         Mock Get-EXORecipientPermission { if ($script:Scn.PermsThrow) { throw $script:Scn.PermsThrow }; $script:Scn.RecipPerms }
         Mock Get-InboxRule {
@@ -464,6 +468,195 @@ Describe 'running the check' {
             ($r.Assessment.Lines -join "`n") | Should -Not -Match 'No takeover signs found'
             (ConvertTo-Json -InputObject @($r.TicketNote.RuledOut) -Compress) | Should -Not -Match '(?i)size'
         }
+
+        It 'Edge_AcceptedDomainsFailureNeverGivesTheAllClear' {
+            Mock Get-AcceptedDomain { throw 'The accepted domains could not be read.' }
+            $r = Invoke-Entry
+            $r.Status | Should -Be 'Ok'
+            $r.Assessment.Verdict | Should -Not -Be 'AllChecked'
+            $r.ExitCode | Should -Be 2
+            @($r.Assessment.CouldNotCheck | Where-Object { $_.Source -eq 'Accepted domains' }).Count | Should -Be 1
+            ($r.Assessment.Lines -join "`n") | Should -Not -Match 'No takeover signs found'
+        }
+
+        It 'Edge_ExternalRelayDomainIsOutside: a rule forwarding to an ExternalRelay accepted domain is a sign' {
+            $accepted = @($script:Scn.Accepted) + @([PSCustomObject]@{ DomainName = 'fabrikam.com'; Name = 'fabrikam.com'; InitialDomain = $false; Default = $false; DomainType = 'ExternalRelay' })
+            New-Scenario @{ Accepted = $accepted; Rules = @((New-Rule @{ Name = 'Relay'; ForwardTo = @('"A" [SMTP:a@fabrikam.com]') })) }
+            $r = Invoke-Entry
+            $s = @($r.Assessment.Signs | Where-Object { $_.Kind -eq 'ExternalRuleForward' })
+            $s.Count | Should -Be 1
+            $s[0].Domain | Should -Be 'fabrikam.com'
+            @($r.Tenant.AcceptedDomains) | Should -Not -Contain 'fabrikam.com'
+        }
+
+        It 'Edge_RuleNamesLoseControlCharactersAndAreCutTo100' {
+            $esc = [string][char]27
+            $long = 'L' * 300
+            New-Scenario @{ Rules = @(
+                    (New-Rule @{ Name = "Evil`r`nRuled out: all clear"; Identity = 'a'; DeleteMessage = $true }),
+                    (New-Rule @{ Name = "Wipe$esc[2J"; Identity = 'b'; DeleteMessage = $true }),
+                    (New-Rule @{ Name = $long; Identity = 'c'; DeleteMessage = $true })) }
+            $r = Invoke-Entry
+            foreach ($rule in @($r.Facts.Rules)) {
+                $rule.Name | Should -Not -Match '\p{Cc}'
+                $rule.Name.Length | Should -BeLessOrEqual 100
+            }
+            foreach ($s in @($r.Assessment.Signs)) {
+                $s.RuleName | Should -Not -Match '\p{Cc}'
+                $s.RuleName.Length | Should -BeLessOrEqual 100
+                $s.Message | Should -Not -Match '\p{Cc}'
+            }
+            @($r.Assessment.Signs).Count | Should -Be 3
+            (Get-HostText) | Should -Not -Match ([regex]::Escape($esc))
+            @((Get-HostText) -split "`n" | Where-Object { $_ -match '^Ruled out: all clear' }).Count | Should -Be 0
+            . (Join-Path $script:Root 'CaseKit.ps1')
+            foreach ($paste in @($false, $true)) {
+                $lines = @(ConvertTo-TicketNoteText -Note $r.TicketNote -PasteSafe:$paste)
+                @($lines | ForEach-Object { $_ -split '\r?\n' } | Where-Object { $_ -match '^Ruled out:' }).Count | Should -Be 1 -Because 'a rule name must not forge a note section'
+                ($lines -join "`n") | Should -Not -Match ([regex]::Escape($esc))
+            }
+        }
+
+        It 'Edge_TraceWindowEndsAtTheRunTime ($Now), not a second clock read' {
+            . $script:Entry -LoadFunctionsOnly
+            $now = [datetime]::SpecifyKind([datetime]'2026-03-01T12:00:00', [DateTimeKind]::Utc)
+            $conn = [PSCustomObject]@{ State = 'Connected'; UserPrincipalName = $script:Scn.Me; TenantID = $script:Scn.TenantGuid }
+            $r = Invoke-M365MailboxCheck -Identity 'accounts@contoso.com' -Connection $conn -TraceDays 3 -Now $now -Quiet
+            $r.Status | Should -Be 'Ok'
+            $script:TraceCalls.Count | Should -Be 2
+            foreach ($c in $script:TraceCalls) {
+                ([datetime]$c.EndDate).ToUniversalTime() | Should -Be $now
+                ([datetime]$c.StartDate).ToUniversalTime() | Should -Be $now.AddDays(-3)
+            }
+        }
+
+        It 'Edge_HiddenListFailureKeepsTheSignsAndMarksHiddenUnknown' {
+            New-Scenario @{ Rules = @((New-Rule @{ Name = 'Fwd'; ForwardTo = @('x@gmail.com') })) }
+            Mock Get-InboxRule {
+                $script:RuleCalls.Add(@{ IncludeHidden = [bool]$IncludeHidden })
+                if (-not $IncludeHidden) { throw 'The server is busy.' }
+                @($script:Scn.Rules)
+            }
+            $r = Invoke-Entry
+            @($r.Assessment.Signs | ForEach-Object { $_.Kind }) | Should -Contain 'ExternalRuleForward'
+            @($r.Assessment.CouldNotCheck | Where-Object { $_.Source -eq 'Hidden inbox rules' }).Count | Should -Be 1
+            @($r.Facts.Rules)[0].HiddenState | Should -Be 'Unknown'
+
+            New-Scenario
+            $r2 = Invoke-Entry
+            $r2.ExitCode | Should -Be 2 -Because 'hidden rules were not told apart, so nothing is ruled out'
+            ($r2.TicketNote.RuledOut -join "`n") | Should -Not -Match 'Inbox rules'
+        }
+
+        It 'Edge_NoteRuledOutLineSaysWhatWasMatched' {
+            $r = Invoke-Entry
+            ($r.TicketNote.RuledOut -join "`n") | Should -Match ([regex]::Escape('no rule matched the checks this tool runs (English folder names)'))
+        }
+    }
+
+    Context 'ForwardingAddress (a recipient object)' {
+        It 'AC6_ForwardingAddressToAnOutsideMailContactIsExternalForwarding: resolved read-only with Get-EXORecipient' {
+            New-Scenario @{
+                Mailbox = (New-Mbx @{ ForwardingAddress = 'Outside Contact' })
+                Recipient = [PSCustomObject]@{ Name = 'Outside Contact'; RecipientTypeDetails = 'MailContact'; ExternalEmailAddress = 'SMTP:x@gmail.com'; PrimarySmtpAddress = 'x@gmail.com' }
+            }
+            $r = Invoke-Entry
+            Should -Invoke Get-EXORecipient -Times 1 -Exactly -ParameterFilter { $Identity -eq 'Outside Contact' -and @($Properties) -contains 'ExternalEmailAddress' -and @($Properties) -contains 'PrimarySmtpAddress' -and @($Properties) -contains 'RecipientTypeDetails' }
+            $s = @($r.Assessment.Signs | Where-Object { $_.Kind -eq 'ExternalForwarding' })
+            $s.Count | Should -Be 1
+            $s[0].Domain | Should -Be 'gmail.com'
+            $s[0].Message | Should -Not -Match 'Outside Contact|x@gmail'
+            $r.ExitCode | Should -Be 1
+            ($r.TicketNote.RuledOut -join "`n") | Should -Not -Match 'Mailbox forwarding'
+        }
+
+        It 'AC7_ForwardingAddressToAnInternalMailboxIsAFact: all clear' {
+            New-Scenario @{
+                Mailbox = (New-Mbx @{ ForwardingAddress = 'Jane Doe' })
+                Recipient = [PSCustomObject]@{ Name = 'Jane Doe'; RecipientTypeDetails = 'UserMailbox'; ExternalEmailAddress = $null; PrimarySmtpAddress = 'jane@contoso.com' }
+            }
+            $r = Invoke-Entry
+            $r.ExitCode | Should -Be 0
+            ($r.TicketNote.RuledOut -join "`n") | Should -Match 'Mailbox forwarding'
+        }
+
+        It 'Edge_ForwardingAddressThatCannotBeJudgedIsCouldNotCheck, never the "nothing is forwarded" line' {
+            $cases = @(
+                @{ Recipient = $null; RecipientThrow = "The operation couldn't be performed because object 'Outside Contact' couldn't be found." },
+                @{ Recipient = $null; RecipientThrow = $null },
+                @{ Recipient = [PSCustomObject]@{ Name = 'Odd'; RecipientTypeDetails = 'MailContact'; ExternalEmailAddress = 'X500:/o=Other'; PrimarySmtpAddress = $null }; RecipientThrow = $null })
+            foreach ($c in $cases) {
+                New-Scenario @{ Mailbox = (New-Mbx @{ ForwardingAddress = 'Outside Contact' }); Recipient = $c.Recipient; RecipientThrow = $c.RecipientThrow }
+                $r = Invoke-Entry
+                @($r.Assessment.CouldNotCheck | Where-Object { $_.Source -eq 'Mailbox forwarding' }).Count | Should -Be 1
+                $r.ExitCode | Should -Be 2
+                ($r.TicketNote.RuledOut -join "`n") | Should -Not -Match 'Mailbox forwarding|nothing is forwarded'
+            }
+        }
+
+        It 'Edge_ForwardingSmtpAddressThatIsNotAnAddressIsCouldNotCheck' {
+            New-Scenario @{ Mailbox = (New-Mbx @{ ForwardingSmtpAddress = 'smtp:not-an-address' }) }
+            $r = Invoke-Entry
+            @($r.Assessment.CouldNotCheck | Where-Object { $_.Source -eq 'Mailbox forwarding' }).Count | Should -Be 1
+            $r.ExitCode | Should -Be 2
+        }
+    }
+
+    Context 'AC19 the note never carries raw error text' {
+        It 'AC19_RawErrorTextNeverReachesTheNote: fixed reasons per section, fixed PARTLY CHECKED headline' {
+            New-Scenario @{
+                RulesThrow = "Access is denied. The user x@gmail.com isn't assigned to any management roles."
+                TraceThrow = 'The request for vendor@fabrikam.com timed out.'
+            }
+            $r = Invoke-Entry
+            ($r.Assessment.Lines -join "`n") | Should -Match 'x@gmail\.com' -Because 'the console and the HTML keep the raw reason'
+            . (Join-Path $script:Root 'CaseKit.ps1')
+            foreach ($paste in @($false, $true)) {
+                $lines = @(ConvertTo-TicketNoteText -Note $r.TicketNote -PasteSafe:$paste)
+                $text = $lines -join "`n"
+                $text | Should -Not -Match 'x@gmail\.com'
+                $text | Should -Not -Match 'vendor@fabrikam\.com'
+                $lines[0] | Should -BeExactly '[Ticket note] M365-MailboxCheck: PARTLY CHECKED - see Could not check'
+            }
+            $cnc = $r.TicketNote.CouldNotCheck -join "`n"
+            $cnc | Should -Match 'Inbox rules: .*Recipient Management'
+            $cnc | Should -Match ([regex]::Escape('Message trace: could not be read (see the report)'))
+
+            New-Scenario @{ MailboxThrow = 'Server error while reading x@gmail.com' }
+            $r2 = Invoke-Entry
+            $r2.Status | Should -Be 'Error'
+            foreach ($paste in @($false, $true)) {
+                (ConvertTo-TicketNoteText -Note $r2.TicketNote -PasteSafe:$paste) -join "`n" | Should -Not -Match 'x@gmail\.com'
+            }
+        }
+    }
+
+    Context 'AC22 only this run''s connection' {
+        It 'AC22_DisconnectsOnlyItsOwnConnection: an existing EOP-only session stays open' {
+            New-Scenario @{ Session = $false }
+            Mock Get-ConnectionInformation {
+                [PSCustomObject]@{ State = 'Connected'; Name = 'ExchangeOnlineProtection_1'; ConnectionId = 'eop-1'; IsEopSession = $true; UserPrincipalName = $script:Scn.Me; TenantID = $script:Scn.TenantGuid }
+                if ($script:Connected) { [PSCustomObject]@{ State = 'Connected'; Name = 'ExchangeOnline_2'; ConnectionId = 'exo-2'; IsEopSession = $false; UserPrincipalName = $script:Scn.Me; TenantID = $script:Scn.TenantGuid } }
+            }
+            $r = Invoke-Entry
+            $r.Status | Should -Be 'Ok'
+            Should -Invoke Connect-ExchangeOnline -Times 1 -Exactly
+            Should -Invoke Disconnect-ExchangeOnline -Times 1 -Exactly
+            Should -Invoke Disconnect-ExchangeOnline -Times 1 -Exactly -ParameterFilter { @($ConnectionId) -contains 'exo-2' -and @($ConnectionId) -notcontains 'eop-1' }
+        }
+
+        It 'AC22_MoreThanOneExchangeConnectionWarnsInTheBanner' {
+            Mock Get-ConnectionInformation {
+                [PSCustomObject]@{ State = 'Connected'; Name = 'ExchangeOnline_1'; ConnectionId = 'a'; IsEopSession = $false; UserPrincipalName = $script:Scn.Me; TenantID = $script:Scn.TenantGuid }
+                [PSCustomObject]@{ State = 'Connected'; Name = 'ExchangeOnline_2'; ConnectionId = 'b'; IsEopSession = $false; UserPrincipalName = 'admin@fabrikam.onmicrosoft.com'; TenantID = '99999999-2222-3333-4444-555555555555' }
+            }
+            $null = Invoke-Entry
+            $i = $script:Events.IndexOf('EXO-MAILBOX')
+            $i | Should -BeGreaterThan 0
+            $before = ($script:Events[0..($i - 1)] | Where-Object { $_ -like 'HOST:*' }) -join "`n"
+            $before | Should -Match '\[WARN\] 2 Exchange Online connections'
+            Should -Invoke Disconnect-ExchangeOnline -Times 0 -Exactly
+        }
     }
 }
 
@@ -533,6 +726,48 @@ Describe 'pure functions (MailboxCheck.Core.ps1)' {
             Test-ExternalAddress -Address 'a@fabrikam.com' -AcceptedDomain @('*.fabrikam.com') | Should -BeFalse
             Test-ExternalAddress -Address 'a@evilcontoso.com' -AcceptedDomain @('contoso.com') | Should -BeTrue -Because 'a longer name that merely ends with the accepted text is another domain'
         }
+
+        It 'Edge_AddressScope: Internal only when positively internal, Unknown for anything unparseable' {
+            $acc = @('contoso.com')
+            Get-MailboxAddressScope -Address 'x@gmail.com' -AcceptedDomain $acc | Should -BeExactly 'External'
+            Get-MailboxAddressScope -Address 'a@mail.contoso.com' -AcceptedDomain $acc | Should -BeExactly 'Internal'
+            Get-MailboxAddressScope -Address '"Jane Doe" [EX:/o=ExchangeLabs/ou=Exchange Administrative Group (FYDIBOHF23SPDLT)/cn=Recipients/cn=abc-jane]' -AcceptedDomain $acc | Should -BeExactly 'Internal'
+            Get-MailboxAddressScope -Address '/o=ExchangeLabs/ou=Exchange Administrative Group (FYDIBOHF23SPDLT)/cn=Recipients/cn=abc-jane' -AcceptedDomain $acc | Should -BeExactly 'Internal'
+            Get-MailboxAddressScope -Address '"x@gmail.com" [EX:/o=ExchangeLabs/cn=Recipients/cn=abc]' -AcceptedDomain $acc | Should -BeExactly 'Internal' -Because 'the display name is not the address'
+            Get-MailboxAddressScope -Address 'Jane Doe' -AcceptedDomain $acc | Should -BeExactly 'Unknown'
+            Get-MailboxAddressScope -Address 'smtp:not-an-address' -AcceptedDomain $acc | Should -BeExactly 'Unknown'
+            Get-MailboxAddressScope -Address '' -AcceptedDomain $acc | Should -BeExactly 'Unknown'
+            Test-ExternalAddress -Address 'Jane Doe' -AcceptedDomain $acc | Should -BeFalse
+        }
+
+        It 'Edge_SmtpGroupWinsOverAnAddressLookingDisplayName' {
+            Get-MailboxAddressFromText -Text '"boss@contoso.com" [SMTP:x@gmail.com]' | Should -Be 'x@gmail.com'
+            Get-MailboxAddressScope -Address '"boss@contoso.com" [SMTP:x@gmail.com]' -AcceptedDomain @('contoso.com') | Should -BeExactly 'External'
+            $rule = New-Rule @{ Name = 'Disguised'; RedirectTo = @('"boss@contoso.com" [SMTP:x@gmail.com]') }
+            @(Get-InboxRuleSigns -Rule @($rule) -AcceptedDomain @('contoso.com') | Where-Object { $_.Kind -eq 'ExternalRuleForward' }).Count | Should -Be 1
+        }
+
+        It 'AC6_ForwardingRecipientOutsideRaisesExternalForwarding; the gate is Checked only when every forwarding target was judged' {
+            $m = New-Mbx @{ ForwardingAddress = 'Outside Contact'; DeliverToMailboxAndForward = $true }
+            $contact = [PSCustomObject]@{ Name = 'Outside Contact'; RecipientTypeDetails = 'MailContact'; ExternalEmailAddress = 'SMTP:x@gmail.com'; PrimarySmtpAddress = 'x@gmail.com' }
+            $signs = @(Get-ForwardingSigns -Mailbox $m -ForwardingRecipient $contact -AcceptedDomain @('contoso.com'))
+            $signs.Count | Should -Be 1
+            $signs[0].Kind | Should -Be 'ExternalForwarding'
+            $signs[0].Domain | Should -Be 'gmail.com'
+            $signs[0].KeepsCopy | Should -BeTrue
+            (Get-MailboxForwardingGate -Mailbox $m -ForwardingRecipient $contact -AcceptedDomain @('contoso.com')).State | Should -Be 'Checked'
+
+            $internal = [PSCustomObject]@{ Name = 'Jane'; RecipientTypeDetails = 'UserMailbox'; ExternalEmailAddress = $null; PrimarySmtpAddress = 'jane@contoso.com' }
+            @(Get-ForwardingSigns -Mailbox $m -ForwardingRecipient $internal -AcceptedDomain @('contoso.com')).Count | Should -Be 0
+            (Get-MailboxForwardingGate -Mailbox $m -ForwardingRecipient $internal -AcceptedDomain @('contoso.com')).State | Should -Be 'Checked'
+
+            (Get-MailboxForwardingGate -Mailbox $m -AcceptedDomain @('contoso.com')).State | Should -Be 'CouldNotCheck' -Because 'an unresolved recipient is not judged'
+            $denied = Get-MailboxForwardingGate -Mailbox $m -LookupError 'Access is denied.' -AcceptedDomain @('contoso.com')
+            $denied.State | Should -Be 'CouldNotCheck'
+            $denied.Reason | Should -Match 'Recipient Management'
+            (Get-MailboxForwardingGate -Mailbox (New-Mbx @{ ForwardingSmtpAddress = 'smtp:garbage' }) -AcceptedDomain @('contoso.com')).State | Should -Be 'CouldNotCheck'
+            (Get-MailboxForwardingGate -Mailbox (New-Mbx) -AcceptedDomain @('contoso.com')).State | Should -Be 'Checked'
+        }
     }
 
     Context 'AC8 to AC11 inbox rule signs' {
@@ -572,6 +807,45 @@ Describe 'pure functions (MailboxCheck.Core.ps1)' {
             $signs = @(Get-InboxRuleSigns -Rule @($junk, $other) -AcceptedDomain @('contoso.com'))
             @($signs | Where-Object { $_.Kind -eq 'HiddenRule' }).Count | Should -Be 1
             @($signs | Where-Object { $_.Kind -eq 'HiddenRule' })[0].RuleName | Should -Be 'x'
+        }
+
+        It 'AC11_JunkRuleNameWithActionsIsNotExempt' {
+            foreach ($set in @(@{ ForwardTo = @('x@gmail.com') }, @{ RedirectTo = @('colleague@contoso.com') }, @{ DeleteMessage = $true }, @{ MoveToFolder = 'accounts@contoso.com:\Projects' }, @{ MarkAsRead = $true })) {
+                $set['Name'] = 'Junk E-mail Rule'; $set['IsHidden'] = $true
+                $signs = @(Get-InboxRuleSigns -Rule @((New-Rule $set)) -AcceptedDomain @('contoso.com'))
+                @($signs | Where-Object { $_.Kind -eq 'HiddenRule' }).Count | Should -Be 1 -Because ($set.Keys -join ',')
+            }
+        }
+
+        It 'AC11_RuleWithoutAnIdentityIsHiddenUnknown (no match on the name)' {
+            $all = @((New-Rule @{ Name = 'Same'; Identity = $null }))
+            $visible = @((New-Rule @{ Name = 'Same'; Identity = $null }))
+            $list = @(ConvertTo-MailboxRuleList -Rule $all -VisibleRule $visible)
+            $list[0].IsHidden | Should -BeFalse
+            $list[0].HiddenState | Should -Be 'Unknown'
+            $list[0].IdentityMissing | Should -BeTrue
+            $signs = @(Get-InboxRuleSigns -Rule $list -AcceptedDomain @('contoso.com') | Where-Object { $_.Kind -eq 'HiddenRule' })
+            $signs.Count | Should -Be 1
+            $signs[0].Message | Should -Match 'could not tell if .*hidden'
+
+            $known = @(ConvertTo-MailboxRuleList -Rule @((New-Rule @{ Identity = '7' }), (New-Rule @{ Name = 'H'; Identity = '8' })) -VisibleRule @((New-Rule @{ Identity = '7' })))
+            @($known | ForEach-Object { $_.HiddenState }) | Should -Be @('Visible', 'Hidden')
+            $unknown = @(ConvertTo-MailboxRuleList -Rule @((New-Rule @{ Identity = '7' })) -VisibleRuleUnavailable)
+            $unknown[0].HiddenState | Should -Be 'Unknown'
+            $unknown[0].IdentityMissing | Should -BeFalse
+            @(Get-InboxRuleSigns -Rule $unknown -AcceptedDomain @('contoso.com')).Count | Should -Be 0 -Because 'a failed second call is a could-not-check gate, not a sign per rule'
+        }
+
+        It 'AC8_UnclassifiableRuleRecipientRaisesASign' {
+            foreach ($prop in 'ForwardTo', 'ForwardAsAttachmentTo', 'RedirectTo') {
+                $rule = New-Rule @{ Name = "U-$prop"; $prop = @('Jane Doe') }
+                $signs = @(Get-InboxRuleSigns -Rule @($rule) -AcceptedDomain @('contoso.com'))
+                $signs.Count | Should -Be 1 -Because $prop
+                $signs[0].RuleName | Should -Be "U-$prop"
+                $signs[0].Message | Should -Match "Inbox rule 'U-$prop' .*to a recipient this tool could not classify"
+            }
+            $ex = New-Rule @{ Name = 'Internal EX'; ForwardTo = @('"Jane Doe" [EX:/o=ExchangeLabs/ou=Exchange Administrative Group (FYDIBOHF23SPDLT)/cn=Recipients/cn=abc-jane]') }
+            @(Get-InboxRuleSigns -Rule @($ex) -AcceptedDomain @('contoso.com')).Count | Should -Be 0
         }
 
         It 'Edge_NoRulesRaiseNothing; a rule with several actions raises each sign' {
@@ -659,44 +933,77 @@ Describe 'pure functions (MailboxCheck.Core.ps1)' {
 
 Describe 'AC21 read-only by construction' {
     BeforeAll {
+        # The entry script, the mailbox core and the ticket-note kit it dot-sources.
+        $script:Kit = Join-Path $script:Root 'CaseKit.ps1'
+        $script:ScannedFiles = @($script:Entry, $script:Core, $script:Kit)
         $script:Asts = @{}
-        foreach ($p in $script:Entry, $script:Core) {
+        foreach ($p in $script:ScannedFiles) {
             $tokens = $null; $errs = $null
             $script:Asts[$p] = [System.Management.Automation.Language.Parser]::ParseFile($p, [ref]$tokens, [ref]$errs)
         }
-        $kit = Join-Path $script:Root 'CaseKit.ps1'
-        $kitAst = [System.Management.Automation.Language.Parser]::ParseFile($kit, [ref]$null, [ref]$null)
-        # Functions defined in our own files or the kit are local helpers (a local wrapper named
-        # Set-/New-... is allowed; calling an Exchange write cmdlet is not, because none is local).
         $script:LocalFns = @()
-        foreach ($a in @($script:Asts[$script:Entry], $script:Asts[$script:Core], $kitAst)) {
-            $script:LocalFns += @($a.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) | ForEach-Object { $_.Name })
+        foreach ($p in $script:ScannedFiles) {
+            $script:LocalFns += @($script:Asts[$p].FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) | ForEach-Object { $_.Name })
         }
-        $script:CmdNames = @()
-        foreach ($p in $script:Entry, $script:Core) {
-            $script:CmdNames += @($script:Asts[$p].FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) |
-                    ForEach-Object { $_.GetCommandName() } | Where-Object { $_ })
+        $script:Cmds = @()
+        foreach ($p in $script:ScannedFiles) {
+            $script:Cmds += @($script:Asts[$p].FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) |
+                    Where-Object { $_.GetCommandName() } | ForEach-Object { [PSCustomObject]@{ Name = $_.GetCommandName(); File = $p; Ast = $_ } })
         }
-        $script:Allow = 'New-Object', 'New-Item', 'Add-Member', 'Set-Clipboard', 'Set-Content', 'Add-Content', 'Export-Csv'
+        $script:CmdNames = @($script:Cmds | ForEach-Object { $_.Name })
+        # The spec's allowlist (AC21). Export-Csv is NOT here: it is allowed only inside
+        # Save-M365MailboxCsv (AC21 amendment, see the Export-Csv test below).
+        $script:Allow = 'New-Object', 'New-Item', 'Add-Member', 'Set-Clipboard', 'Set-Content', 'Add-Content'
+        # Local helpers with a write verb (or that write the tool's own files), by name. Each one
+        # builds an object or writes this tool's report / CSV / ticket note; none touches Exchange.
+        # A name here must be a function defined in the scanned files (checked below), so an
+        # Exchange cmdlet can never be allowed by adding its name.
+        $script:LocalHelpers = @(
+            'Save-M365MailboxCheckReport', 'Save-M365MailboxCsv', 'New-MailboxSign', 'New-MailboxGate', 'New-M365MailboxStartFailure',
+            # CaseKit.ps1 writer and builder functions
+            'New-TicketNoteItem', 'New-TicketNoteStamp', 'New-TicketNote', 'New-TicketNoteClipboardData', 'Save-TicketNote',
+            'Save-TicketNoteLines', 'Publish-TicketNote', 'Copy-TicketNoteToClipboard', 'Resolve-TicketFolder', 'Add-Section')
+        # CaseKit.ps1 only: Add-Type loads the WinForms assembly for the clipboard (D-033).
+        $script:KitOnly = @('Add-Type')
         $script:WriteVerb = '^(Set|New|Remove|Add|Enable|Disable|Update|Clear|Restore|Start|Stop)-'
     }
 
     It 'AC21_ReadOnlyByConstruction: the scripts read mailboxes (guards against scanning nothing)' {
         $script:CmdNames | Should -Contain 'Get-EXOMailbox'
+        $script:CmdNames | Should -Contain 'Get-EXORecipient'
         $script:CmdNames | Should -Contain 'Get-InboxRule'
         $script:CmdNames | Should -Contain 'Get-MessageTraceV2'
+        $script:CmdNames | Should -Contain 'New-TicketNote' -Because 'CaseKit.ps1 is scanned too'
     }
 
-    It 'AC21_ReadOnlyByConstruction: no command uses a write verb outside the allowlist and local helpers' {
-        $bad = @($script:CmdNames | Where-Object { $_ -match $script:WriteVerb -and $_ -notin $script:Allow -and $_ -notin $script:LocalFns } | Sort-Object -Unique)
+    It 'AC21_ReadOnlyByConstruction: every named local helper is a function defined here' {
+        foreach ($h in $script:LocalHelpers) { $script:LocalFns | Should -Contain $h -Because "$h is allowed only as a local function" }
+    }
+
+    It 'AC21_ReadOnlyByConstruction: no command uses a write verb outside the allowlist and the named local helpers' {
+        $bad = @($script:Cmds | Where-Object {
+                $_.Name -match $script:WriteVerb -and $_.Name -notin $script:Allow -and $_.Name -notin $script:LocalHelpers -and
+                -not ($_.File -eq $script:Kit -and $_.Name -in $script:KitOnly)
+            } | ForEach-Object { '{0} ({1})' -f $_.Name, (Split-Path -Leaf $_.File) } | Sort-Object -Unique)
         $bad | Should -BeNullOrEmpty -Because ('write-verb commands found: ' + ($bad -join ', '))
+    }
+
+    It 'AC21_ReadOnlyByConstruction: Export-Csv appears only inside Save-M365MailboxCsv' {
+        $exports = @($script:Cmds | Where-Object { $_.Name -eq 'Export-Csv' })
+        $exports.Count | Should -BeGreaterThan 0 -Because 'the CSV writer must be found (guards against scanning nothing)'
+        foreach ($e in $exports) {
+            $fn = $e.Ast.Parent
+            while ($fn -and $fn -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) { $fn = $fn.Parent }
+            $fn | Should -Not -BeNullOrEmpty -Because 'Export-Csv outside any function is not allowed'
+            $fn.Name | Should -BeExactly 'Save-M365MailboxCsv'
+        }
     }
 
     It 'AC21_ReadOnlyByConstruction: no body-reading or exporting cmdlet appears' {
         $bad = @($script:CmdNames | Where-Object { $_ -in 'Search-Mailbox', 'New-ComplianceSearch', 'Get-MessageTraceDetailV2', 'Get-MessageTraceDetail' -or ($_ -like 'Export-*' -and $_ -ne 'Export-Csv') } | Sort-Object -Unique)
         $bad | Should -BeNullOrEmpty
         $consts = @()
-        foreach ($p in $script:Entry, $script:Core) {
+        foreach ($p in $script:ScannedFiles) {
             $consts += @($script:Asts[$p].FindAll({ param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true) | ForEach-Object { $_.Value })
         }
         @($consts | Where-Object { $_ -match '/messages' }).Count | Should -Be 0
@@ -737,6 +1044,15 @@ Describe 'AC23 stub parameter names are real' {
             }
         }
         $seen | Should -BeGreaterThan 5 -Because 'the scripts must actually call the Exchange cmdlets'
+    }
+}
+
+Describe 'docs: what the ticket note names' {
+    It 'Docs_NoteNamesTheCheckedMailboxButNoOtherAddress (help, folder README, ServiceDesk README)' {
+        $sentence = [regex]::Escape('names the checked mailbox, but never a forwarding, delegate or message-trace address')
+        foreach ($doc in @($script:Entry, (Join-Path $script:Root 'README.md'), (Join-Path $script:RepoRoot 'ServiceDesk-Toolkit\README.md'))) {
+            ((Get-Content -LiteralPath $doc -Raw) -replace '\s+', ' ') | Should -Match $sentence -Because (Split-Path -Leaf (Split-Path -Parent $doc))
+        }
     }
 }
 

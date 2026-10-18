@@ -174,7 +174,7 @@ Version 3.7.0 or later is needed for the message trace (`Update-Module ExchangeO
 
 A sign-in window opens: **sign in with an account in the client's tenant.** The check uses Exchange Online PowerShell only, so there is no Microsoft Graph permissions prompt. If a Microsoft prompt ever asks for consent, consent for yourself only and leave **"Consent on behalf of your organization"** unticked (owner decision D-007).
 
-If an Exchange Online session is already open in the window, the tool uses it and leaves it open. Otherwise it signs in and signs out again when it finishes.
+If an Exchange Online session is already open in the window, the tool uses it and leaves it open. Otherwise it signs in and, when it finishes, closes only the connection it opened (a Security & Compliance session you had open stays open). If more than one Exchange Online connection is open, the banner warns you: close the others or use a new window.
 
 | Option | What it does |
 |---|---|
@@ -199,10 +199,11 @@ Then the verdict, in one of three forms:
 
 The takeover signs are:
 
-- **Mail forwarded outside the tenant**, by the mailbox's own forwarding or by an inbox rule (forward, forward as attachment, redirect). "Outside" means the address is not in one of the tenant's accepted domains (or a subdomain of one). The sign names the domain and whether a copy stays in the mailbox.
+- **Mail forwarded outside the tenant**, by the mailbox's own forwarding or by an inbox rule (forward, forward as attachment, redirect). "Outside" means the address is not in one of the tenant's accepted domains (or a subdomain of one); an accepted domain of type ExternalRelay counts as outside. When the mailbox forwards to a recipient in the tenant (for example a mail contact), the tool looks up where that recipient delivers, so a contact pointing at gmail.com is a sign. The sign names the domain and whether a copy stays in the mailbox. If that recipient cannot be looked up, forwarding is listed under **Could not check**.
+- **An inbox rule that forwards to a recipient the tool cannot classify** as inside or outside (for example a bare name). It is a sign until someone looks at it.
 - **An inbox rule that deletes mail.**
 - **An inbox rule that hides mail**: it moves mail to RSS Feeds, RSS Subscriptions, Conversation History, Deleted Items, Junk Email or Archive, or moves it anywhere and marks it read.
-- **A hidden inbox rule** (one Exchange only lists when asked for hidden rules). The built-in junk-mail rule is hidden too; it is listed but is not a sign.
+- **A hidden inbox rule** (one Exchange only lists when asked for hidden rules). The built-in junk-mail rule is hidden too; it is listed but is not a sign, as long as it does none of the things above (a rule with that name that forwards, deletes or moves mail is a sign). A rule Exchange returns without an identity is a sign too, because the tool cannot tell whether it is hidden.
 
 A rule that is turned off still counts (someone made it); the sign says it is off.
 
@@ -227,7 +228,7 @@ A section your role cannot read shows up under **Could not check** with the role
 
 ### Ticket note
 
-Same four-part note as the sign-in check, written to the clipboard (and to the ticket folder with `-TicketNumber`). It carries the verdict, the sign kinds (for example `ExternalRuleForward`), rule names and the **outside domain only** (`gmail.com`, never the full address). Rule conditions, delegate names and message-trace rows never go into the note (owner decision D-025); they stay in the local HTML and CSV. A section that could not be read is listed under **Could not check**, never under **Ruled out**.
+Same four-part note as the sign-in check, written to the clipboard (and to the ticket folder with `-TicketNumber`). It carries the verdict, the sign kinds (for example `ExternalRuleForward`), rule names and the **outside domain only** (`gmail.com`, never the full address). The note names the checked mailbox, but never a forwarding, delegate or message-trace address. Rule conditions, delegate names and message-trace rows never go into the note (owner decision D-025); they stay in the local HTML and CSV. A section that could not be read is listed under **Could not check**, never under **Ruled out**, with a fixed reason (the role it needs, or "see the report"): the Exchange error text itself stays in the console and the HTML report. Rule names have line breaks and other control characters removed and are cut to 100 characters.
 
 ### Exit codes
 
