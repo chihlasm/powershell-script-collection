@@ -229,6 +229,37 @@ Describe 'clipboard' {
         Should -Invoke Set-Clipboard -Times 0 -Exactly
     }
 
+    # D-033: WinForms first, so the note opts out of clipboard history and the cloud clipboard on the default path.
+    It 'AC9b_WinFormsFirst: Set-Clipboard is available -> the WinForms wrapper is still used, Set-Clipboard is not' {
+        Mock Set-Clipboard { }
+        Mock Invoke-WinFormsClipboard { }
+        $result = Copy-TicketNoteToClipboard -Text 'the whole note'
+        $result | Should -BeTrue
+        Should -Invoke Invoke-WinFormsClipboard -Times 1 -Exactly -ParameterFilter { $Text -eq 'the whole note' }
+        Should -Invoke Set-Clipboard -Times 0 -Exactly
+    }
+
+    It 'AC9b_WinFormsFirst: WinForms throws -> falls back to Set-Clipboard once with the text and returns $true' {
+        Mock Set-Clipboard { }
+        Mock Invoke-WinFormsClipboard { throw 'no desktop' }
+        $script:result = $null
+        { $script:result = Copy-TicketNoteToClipboard -Text 'the whole note' } | Should -Not -Throw
+        $script:result | Should -BeTrue
+        Should -Invoke Invoke-WinFormsClipboard -Times 1 -Exactly
+        Should -Invoke Set-Clipboard -Times 1 -Exactly -ParameterFilter { $Value -eq 'the whole note' }
+    }
+
+    It 'AC9b_WinFormsFirst: WinForms throws and Set-Clipboard does not exist -> $false, never throws, Set-Clipboard not called' {
+        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Set-Clipboard' }
+        Mock Set-Clipboard { }
+        Mock Invoke-WinFormsClipboard { throw 'no desktop' }
+        $script:result = $null
+        { $script:result = Copy-TicketNoteToClipboard -Text 'x' } | Should -Not -Throw
+        $script:result | Should -BeFalse
+        $script:result | Should -Not -BeNullOrEmpty -Because 'it must return $false, not nothing'
+        Should -Invoke Set-Clipboard -Times 0 -Exactly
+    }
+
     It 'AC10_ClipboardFailureIsNotFatal: both clipboards throw -> returns $false, does not throw' {
         Mock Set-Clipboard { throw 'no clipboard' }
         Mock Invoke-WinFormsClipboard { throw 'no desktop' }
