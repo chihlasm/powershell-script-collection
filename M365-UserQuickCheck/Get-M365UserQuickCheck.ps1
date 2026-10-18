@@ -548,7 +548,8 @@ function Write-M365UserCheckConsole {
     Write-Host ''
     Write-Host 'What this run could see:' -ForegroundColor White
     foreach ($g in (Get-M365SourceGates -Facts $f)) {
-        Write-Host ('  ' + (Format-M365SourceLine -Gate $g)) -ForegroundColor $(if ($g.State -eq 'Available') { 'Gray' } else { 'Yellow' })
+        # A gate's reason can name the -Server given (an IP address): same filter as below.
+        Write-Host ('  ' + (& $safe (Format-M365SourceLine -Gate $g))) -ForegroundColor $(if ($g.State -eq 'Available') { 'Gray' } else { 'Yellow' })
     }
 
     $color = switch ($a.Verdict) { 'YES' { 'Green' } 'NO' { 'Red' } default { 'Yellow' } }

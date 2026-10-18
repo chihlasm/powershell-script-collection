@@ -751,6 +751,37 @@ Describe 'SQ-011 on-premises comparison, pure assessment' {
         (Get-Reason (Get-M365UserAssessment -Facts (New-HybridFacts)) 'AddressHeld') | Should -BeNullOrEmpty
     }
 
+    It 'AC22_AddressHeldByAnotherObject: the next step escalates and never tells tier 1 to remove or delete anything (D-017)' {
+        foreach ($type in 'user', 'group', 'contact') {
+            $c = [PSCustomObject]@{ Type = $type; DisplayName = 'Holder'; Address = 'jdoe@contoso.com'; Id = 'eeeeeeee-0000-0000-0000-000000000001'; Synced = $false }
+            $r = Get-Reason (Get-M365UserAssessment -Facts (New-HybridFacts @{ AddressConflicts = @($c) })) 'AddressHeld'
+            $r.Action | Should -Match ([regex]::Escape("Escalate to a senior engineer before removing the address or deleting anything (deleted groups and contacts can't be restored)"))
+            $r.Action | Should -Not -Match '(?i)remove the address from it|delete it'
+        }
+    }
+
+    It 'AC22_AddressHeldByAnotherObject: a user holding the address is labelled by its real sync state, not always "cloud-only"' {
+        $synced = [PSCustomObject]@{ Type = 'user'; DisplayName = 'Jane Doe (old)'; Address = 'jdoe@contoso.com'; Id = 'eeeeeeee-0000-0000-0000-000000000002'; Synced = $true }
+        $r = Get-Reason (Get-M365UserAssessment -Facts (New-HybridFacts @{ AddressConflicts = @($synced) })) 'AddressHeld'
+        $r.Message | Should -Match 'a synced user'
+        $r.Message | Should -Not -Match 'cloud-only'
+        $cloud = [PSCustomObject]@{ Type = 'user'; DisplayName = 'Jane Doe (copy)'; Address = 'jdoe@contoso.com'; Id = 'eeeeeeee-0000-0000-0000-000000000003'; Synced = $false }
+        (Get-Reason (Get-M365UserAssessment -Facts (New-HybridFacts @{ AddressConflicts = @($cloud) })) 'AddressHeld').Message | Should -Match 'a cloud-only user'
+    }
+
+    It 'AC22_AddressHeldByAnotherObject: a conflict found AND a failed lookup -> NO (the found Blocker decides) and "Address conflicts" under Could not check' {
+        $c = [PSCustomObject]@{ Type = 'user'; DisplayName = 'Jane Doe (cloud copy)'; Address = 'jdoe@contoso.com'; Id = 'eeeeeeee-0000-0000-0000-000000000002'; Synced = $false }
+        $a = Get-M365UserAssessment -Facts (New-HybridFacts @{ AddressConflicts = @($c); AddressCheckError = 'groups by mail: Insufficient privileges to complete the operation' })
+        $a.Verdict | Should -Be 'NO'
+        (Get-Reason $a 'AddressHeld').Message | Should -Match 'Jane Doe \(cloud copy\)'
+        @($a.CouldNotCheck | Where-Object { $_.Source -eq 'Address conflicts' }).Count | Should -Be 1
+    }
+
+    It 'AC25b_SidMismatchWarns: fires only when the AD account was matched by sign-in name, not for any other AdMatchedBy value' {
+        $a = Get-M365UserAssessment -Facts (New-HybridFacts @{ AdMatchedBy = '' })
+        Get-Reason $a 'SidMismatch' | Should -BeNullOrEmpty
+    }
+
     It 'AC23_EnabledMismatch: AD enabled + cloud blocked + marker -> Info "on purpose", blocker next step says remove the marker with M365-SyncedUserFixes' {
         $ad = New-AdUser @{ Enabled = $true; 'msDS-cloudExtensionAttribute10' = 'BlockCloudSignIn' }
         $a = Get-M365UserAssessment -Facts (New-HybridFacts @{ AdUser = $ad } @{ accountEnabled = $false })
@@ -1107,6 +1138,47 @@ Describe 'SQ-011 Get-M365OnPremisesFacts (AD and Graph faked)' {
         $r.AdUser | Should -Not -BeNullOrEmpty
         $facts = New-Facts @{ User = (New-User @{ onPremisesSyncEnabled = $true; onPremisesSecurityIdentifier = $script:Sid }); OnPremisesGate = $r.Gate; AdUser = $r.AdUser; AdMatchedBy = $r.AdMatchedBy }
         (Get-Reason (Get-M365UserAssessment -Facts $facts) 'SidMismatch').Level | Should -Be 'Warning'
+    }
+
+    It 'AC22_AddressHeldByAnotherObject: /users finds another user holding the AD sign-in name, then /groups is refused (403) -> the conflict is kept AND the failed lookups are recorded; the assessment says NO' {
+        $script:ConflictUsers = @(@{ id = 'eeeeeeee-0000-0000-0000-000000000002'; displayName = 'Jane Doe (cloud copy)'; onPremisesSyncEnabled = $null })
+        Mock Invoke-MgGraphRequest {
+            $u = [uri]::UnescapeDataString([string]$Uri)
+            $script:GraphUris.Add("$Method $u")
+            if ($u -match '/groups') { throw $script:ForbiddenMessage }
+            if ($u -match '/users') { return @{ value = @($script:ConflictUsers) } }
+            return @{ value = @() }
+        }
+        $r = Get-M365OnPremisesFacts -User (New-User @{ onPremisesSyncEnabled = $true; onPremisesSecurityIdentifier = $script:Sid }) -UserPrincipalName 'jdoe@contoso.com'
+        $r.Gate.State | Should -Be 'Available'
+        @($r.AddressConflicts | Where-Object { $_.DisplayName -eq 'Jane Doe (cloud copy)' }).Count | Should -Be 1 -Because 'a conflict already found must not be thrown away by a later failed lookup'
+        $r.AddressCheckError | Should -Match 'groups'
+        $r.AddressCheckError | Should -Match 'Insufficient privileges'
+        $r.AddressCheckError | Should -Not -Match 'users|contacts' -Because 'only the lookups that failed are named'
+        @($script:GraphUris | Where-Object { $_ -match '/contacts' }).Count | Should -BeGreaterThan 0 -Because 'the lookups after the failed one still run'
+        $facts = New-Facts @{ User = (New-User @{ onPremisesSyncEnabled = $true; onPremisesSecurityIdentifier = $script:Sid }); OnPremisesGate = $r.Gate; AdUser = $r.AdUser; AdMatchedBy = $r.AdMatchedBy
+            AddressConflicts = @($r.AddressConflicts); AddressCheckError = $r.AddressCheckError }
+        $a = Get-M365UserAssessment -Facts $facts
+        $a.Verdict | Should -Be 'NO'
+        (@($a.Reasons | Where-Object { $_.Code -eq 'AddressHeld' })[0]).Message | Should -Match 'Jane Doe \(cloud copy\)'
+        @($a.CouldNotCheck | Where-Object { $_.Source -eq 'Address conflicts' }).Count | Should -Be 1
+    }
+
+    It 'AC22_AddressHeldByAnotherObject: the user lookups select onPremisesSyncEnabled, and the conflict carries the holder''s sync state' {
+        $script:ConflictUsers = @(@{ id = 'eeeeeeee-0000-0000-0000-000000000002'; displayName = 'Jane Doe (old)'; onPremisesSyncEnabled = $true })
+        $r = Get-M365OnPremisesFacts -User (New-User @{ onPremisesSyncEnabled = $true; onPremisesSecurityIdentifier = $script:Sid }) -UserPrincipalName 'jdoe@contoso.com'
+        foreach ($u in @($script:GraphUris | Where-Object { $_ -match '/users\?' })) { $u | Should -Match 'select=id,displayName,onPremisesSyncEnabled' }
+        $c = @($r.AddressConflicts | Where-Object { $_.Type -eq 'user' })
+        $c.Count | Should -Be 1
+        $c[0].Synced | Should -BeTrue
+    }
+
+    It 'AC20b_NeverSyncedChecksSid: the AD account came back without a SID -> CloudSidCheckError says so (never an unhedged NO), no SID search sent' {
+        $script:AdByFilter = @((New-AdUserObj))
+        $r = Get-M365OnPremisesFacts -User $null -UserPrincipalName 'jdoe@contoso.com'
+        $r.Gate.State | Should -Be 'Available'
+        $r.CloudSidCheckError | Should -Match ([regex]::Escape("the AD account's SID was not returned"))
+        @($script:GraphUris | Where-Object { $_ -match 'onPremisesSecurityIdentifier' }).Count | Should -Be 0
     }
 
     It 'AC22c_AddressCheckFailedIsCouldNotCheck: a failing Graph lookup sets AddressCheckError and the assessment lists Address conflicts under Could not check' {
