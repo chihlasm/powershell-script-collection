@@ -126,32 +126,34 @@ BeforeAll {
 
     # Default mocks for everything external. CIM cmdlets keep their real parameters, so the
     # CimSession / CimInstance parameter types are removed (the mocks hand back plain objects).
+    # The mocks read $World unqualified: while the script runs in-process (AC36) it has its own
+    # script: scope, where $script:World would be empty; the unqualified name still finds it.
     Mock Get-Acl {
-        if ($script:World.FolderThrow) { throw $script:World.FolderThrow }
-        [PSCustomObject]@{ Sddl = $script:World.FolderSddl; Path = $LiteralPath }
+        if ($World.FolderThrow) { throw $World.FolderThrow }
+        [PSCustomObject]@{ Sddl = $World.FolderSddl; Path = $LiteralPath }
     }
     Mock New-CimSession {
         $dcom = ($SessionOption -and $SessionOption.GetType().Name -match 'DCom')
-        if ($dcom -and $script:World.DcomFail) { throw $script:World.DcomFail }
-        if (-not $dcom -and $script:World.WsmanFail) { throw $script:World.WsmanFail }
+        if ($dcom -and $World.DcomFail) { throw $World.DcomFail }
+        if (-not $dcom -and $World.WsmanFail) { throw $World.WsmanFail }
         [PSCustomObject]@{ ComputerName = $ComputerName; Protocol = $(if ($dcom) { 'Dcom' } else { 'Wsman' }) }
     }
     Mock Remove-CimSession {} -RemoveParameterType 'CimSession'
     Mock Get-CimInstance {
         switch ($ClassName) {
             'Win32_ComputerSystem' {
-                if ($script:World.RoleThrow) { throw $script:World.RoleThrow }
-                [PSCustomObject]@{ DomainRole = $script:World.DomainRole; Name = 'FS01' }
+                if ($World.RoleThrow) { throw $World.RoleThrow }
+                [PSCustomObject]@{ DomainRole = $World.DomainRole; Name = 'FS01' }
             }
             'Win32_UserAccount' {
-                if ($Filter -match "SID\s*=\s*'([^']+)'" -and $script:World.LocalUsers.ContainsKey($Matches[1])) {
-                    [PSCustomObject]@{ Name = $script:World.LocalUsers[$Matches[1]]; Domain = 'FS01'; SID = $Matches[1]; LocalAccount = $true }
+                if ($Filter -match "SID\s*=\s*'([^']+)'" -and $World.LocalUsers.ContainsKey($Matches[1])) {
+                    [PSCustomObject]@{ Name = $World.LocalUsers[$Matches[1]]; Domain = 'FS01'; SID = $Matches[1]; LocalAccount = $true }
                 }
             }
             'Win32_LogicalShareSecuritySetting' { [PSCustomObject]@{ Name = 'Finance' } }
             'Win32_Group' {
-                if ($Filter -match "SID\s*=\s*'([^']+)'" -and $script:World.LocalGroups.ContainsKey($Matches[1])) {
-                    [PSCustomObject]@{ Name = $script:World.LocalGroups[$Matches[1]].Name; Domain = 'FS01'; SID = $Matches[1] }
+                if ($Filter -match "SID\s*=\s*'([^']+)'" -and $World.LocalGroups.ContainsKey($Matches[1])) {
+                    [PSCustomObject]@{ Name = $World.LocalGroups[$Matches[1]].Name; Domain = 'FS01'; SID = $Matches[1] }
                 }
             }
             default { throw "Unexpected Get-CimInstance class $ClassName" }
@@ -159,10 +161,10 @@ BeforeAll {
     } -RemoveParameterType 'CimSession'
     Mock Invoke-CimMethod {
         if ($MethodName -ne 'GetSecurityDescriptor') { throw "Unexpected CIM method $MethodName" }
-        $script:World.ShareSd
+        $World.ShareSd
     } -RemoveParameterType 'CimSession', 'InputObject'
     Mock Get-CimAssociatedInstance {
-        @($script:World.LocalGroups[$InputObject.SID].Members | ForEach-Object { [PSCustomObject]$_ })
+        @($World.LocalGroups[$InputObject.SID].Members | ForEach-Object { [PSCustomObject]$_ })
     } -RemoveParameterType 'CimSession', 'InputObject'
 
     function Invoke-Check {
@@ -608,14 +610,22 @@ Describe 'verdict wording, exit codes, read-only, report (AC21-AC24)' {
                 'Get-ADUser', 'Get-ADGroup', 'Get-ADDomain', 'Import-Module',
                 'Get-Acl', 'New-CimSession', 'New-CimSessionOption', 'Get-CimInstance', 'Get-CimAssociatedInstance', 'Invoke-CimMethod', 'Remove-CimSession',
                 'Export-Csv', 'New-Item', 'Test-Path', 'Join-Path', 'Get-Date',
-                'ForEach-Object', 'Where-Object', 'Select-Object', 'New-Object', 'Write-Host', 'Write-Verbose'
+                'ForEach-Object', 'Where-Object', 'Select-Object', 'New-Object', 'Write-Host', 'Write-Verbose',
+                # SQ-013: read-only AD reads for the stale-token check, and ranking.
+                'Get-ADDomainController', 'Get-ADReplicationAttributeMetadata', 'Sort-Object',
+                # SQ-013: the ticket-note kit (CaseKit.ps1, dot-sourced; its writes are the note file in
+                # the ticket folder and the clipboard, covered by TicketNote\Tests\CaseKit.Tests.ps1).
+                'New-TicketNoteItem', 'New-TicketNoteStamp', 'New-TicketNote', 'Test-TicketNumber', 'Get-TicketNoteDefaultRoot',
+                'Resolve-TicketFolder', 'Save-TicketNote', 'Publish-TicketNote'
             )
             foreach ($c in $script:ExternalCommands) { $allowed | Should -Contain $c -Because "$c is not on the read-only allowlist" }
         }
         It 'calls only allowlisted .NET methods (no SetAccessControl, Delete, Put, ...)' {
             $allowed = @(
                 'Add', 'AppendLine', 'Contains', 'ContainsKey', 'Dequeue', 'Enqueue', 'Escape', 'GetType', 'HtmlEncode',
-                'IsNullOrEmpty', 'IsNullOrWhiteSpace', 'Replace', 'ToArray', 'ToString', 'Trim', 'TrimEnd', 'WriteAllText'
+                'IsNullOrEmpty', 'IsNullOrWhiteSpace', 'Replace', 'ToArray', 'ToString', 'Trim', 'TrimEnd', 'WriteAllText',
+                # SQ-013: lastLogon FILETIME conversion, and the ticket note's domain fallback.
+                'FromFileTime', 'ToLower'
             )
             foreach ($m in $script:Methods) { $allowed | Should -Contain $m -Because ".$m() is not on the read-only allowlist" }
             foreach ($bad in 'SetAccessControl', 'Delete', 'Put', 'Create', 'Remove', 'SetSecurityDescriptor', 'MoveTo', 'CopyTo') { $script:Methods | Should -Not -Contain $bad }
@@ -1338,6 +1348,27 @@ Describe 'stale token: added to a group after the last sign-in (AC33-AC35)' {
             $r = Invoke-Check
             $r.Assessment.VerdictText | Should -Be 'PROBABLY YES'
             (@($r.Assessment.CouldNotCheck) -join "`n") | Should -Match ([regex]::Escape('when jdoe was added to the group'))
+        }
+        It 'AC34_EndToEnd_AnOlderRouteIntoTheGrantingGroup_IsNotStale' {
+            # FIN-All grants. jdoe was added to FIN-All directly on 10-15 (after her 10-10 sign-in),
+            # but she has held it through FIN-Staff since 2021: her token already has FIN-All.
+            # Several member rows per group, as the real cmdlet returns with -ShowAllLinkedValues.
+            $allDn = 'CN=FIN-All,OU=Groups,DC=contoso,DC=com'
+            $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:Sid.FinAll; M = $script:Mask.Read; F = '' })
+            $env:FAC_OVERRIDE = '{"jdoe":{"memberOf":["FIN-Staff","FIN-All"],"lastLogon":"' + ([datetime]'2026-10-10T12:00:00').ToUniversalTime().ToFileTimeUtc() + '"}}'
+            $script:Meta.Rows[$script:StaffDn] = @(
+                [PSCustomObject]@{ AttributeName = 'member'; AttributeValue = 'CN=Someone Else,OU=Staff,DC=contoso,DC=com'; FirstOriginatingCreateTime = [datetime]'2019-05-01'; LastOriginatingChangeTime = [datetime]'2019-05-01' }
+                [PSCustomObject]@{ AttributeName = 'member'; AttributeValue = $script:UserDn; FirstOriginatingCreateTime = [datetime]'2020-03-01'; LastOriginatingChangeTime = [datetime]'2020-03-01' }
+            )
+            $script:Meta.Rows[$allDn] = @(
+                [PSCustomObject]@{ AttributeName = 'member'; AttributeValue = $script:StaffDn; FirstOriginatingCreateTime = [datetime]'2021-01-01'; LastOriginatingChangeTime = [datetime]'2021-01-01' }
+                [PSCustomObject]@{ AttributeName = 'member'; AttributeValue = $script:UserDn; FirstOriginatingCreateTime = $script:Added; LastOriginatingChangeTime = $script:Added }
+            )
+            $r = Invoke-Check
+            $r.Assessment.Verdict | Should -Be 'PROBABLY YES'
+            $r.Assessment.VerdictText | Should -Be 'PROBABLY YES'
+            $r.Assessment.StaleToken | Should -BeNullOrEmpty
+            (@($r.Assessment.CouldNotCheck) -join "`n") | Should -Not -Match 'when jdoe was added'
         }
         It 'AC33_EndToEnd_PrimaryGroupUsesThePrimaryGroupIdChangeTime' {
             $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:Sid.DomUsers; M = $script:Mask.Read; F = '' })

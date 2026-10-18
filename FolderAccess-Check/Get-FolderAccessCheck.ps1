@@ -37,6 +37,21 @@
 
     By default the check is "open the folder and list it" (Read). -Access Modify checks
     "change files in it" instead.
+
+    WHAT TO DO ABOUT IT
+      PROBABLY NO   names the narrowest existing group that would let them in (fewest direct
+                    members, non-privileged first), never Everyone, Authenticated Users, Domain
+                    Users, Domain Computers, a BUILTIN or server-local group, or a user account.
+                    A group that is in Domain Admins (or another privileged group), or has
+                    adminCount = 1, carries a warning. With no such group it points to
+                    FolderPermissionManager, to add a group rather than the user.
+      PROBABLY YES  if every group that grants it was joined after the user's last sign-in (the
+                    newest lastLogon across all DCs), the answer reads "PROBABLY YES after <user>
+                    signs out and back in". When either time can't be read, that is listed under
+                    "Couldn't check" and no such claim is made.
+
+    Every run ends with a four-part ticket note (Checked, Ruled out, Could not check, Next step)
+    copied to the clipboard, and saved in the ticket folder with -TicketNumber.
 .PARAMETER Identity
     The user: sAMAccountName, UserPrincipalName, DOMAIN\user, DistinguishedName, or (as a
     fallback) a display name. No match, or more than one, lists the candidates and exits 2.
@@ -56,6 +71,25 @@
 .PARAMETER MaxNestingDepth
     How many levels of parent groups the path walk follows upward (1-50, default 10). Matching
     itself uses tokenGroups, which is complete; deeper groups show "nested (path not traced)".
+.PARAMETER TicketNumber
+    Optional ticket number (letters, digits, - or _, up to 32 characters). The HTML, the CSV and
+    the ticket note are saved in <root>\Ticket_<number>, where root is -OutputPath if given,
+    else %USERPROFILE%\Documents\TicketNotes. TicketNote\Join-TicketNotes.ps1 later joins every
+    tool's note in that folder into one. A number that does not fit is refused with a [FAIL]
+    line and exit code 3, before anything is checked.
+.PARAMETER NoClipboard
+    Do not copy the ticket note to the clipboard. Without it the note goes to the clipboard
+    marked to stay out of clipboard history (Win+V) and the cloud clipboard; only when that
+    fails (e.g. an MTA host) is Set-Clipboard used, which cannot opt out.
+.PARAMETER FullDetail
+    Keep the folder path (and any IP address) in the ticket note. By default the note is
+    paste-safe: share paths become [share path removed]. The reports always keep the full path.
+.PARAMETER PassThru
+    Return the result object (Status, ExitCode, Identity, Path, Message, Candidates, User,
+    Groups, Assessment, PathInfo, Files, Now, Domain, TicketNote) instead of setting an exit code.
+.PARAMETER Quiet
+    Do not write the console report. Combine with -PassThru or -OutputPath. Also leaves the
+    clipboard alone, because another script is the caller.
 .PARAMETER LoadFunctionsOnly
     Define the functions and return without running a check (used by the tests).
 .EXAMPLE
@@ -64,14 +98,26 @@
 .EXAMPLE
     .\Get-FolderAccessCheck.ps1 -Identity jdoe -Path '\\FS01\Finance\Budgets 2027' -Access Modify -OutputPath C:\Temp
     Can jdoe change files in it? Also saves an HTML report and a CSV for the ticket.
+.EXAMPLE
+    .\Get-FolderAccessCheck.ps1 -Identity jdoe -Path '\\FS01\Finance\Budgets 2027' -TicketNumber 482113
+    Same answer; the HTML, the CSV and the ticket note go into
+    %USERPROFILE%\Documents\TicketNotes\Ticket_482113, and the note is copied to the clipboard.
 .NOTES
-    Exit codes: 0 = PROBABLY YES, 1 = PROBABLY NO, 2 = bad path, user not found or ambiguous,
-    3 = ActiveDirectory module or connectivity failure, 4 = CAN'T TELL.
+    Exit codes (without -PassThru): 0 = PROBABLY YES (also "after they sign out and back in"),
+    1 = PROBABLY NO, 2 = bad path, user not found or ambiguous, 3 = ActiveDirectory module or
+    connectivity failure, or an unusable -TicketNumber, 4 = CAN'T TELL.
 
-    Read-only by construction: it calls Get-ADUser, Get-ADGroup, Get-ADDomain, Get-Acl,
-    Get-CimInstance, Get-CimAssociatedInstance and Invoke-CimMethod with GetSecurityDescriptor
-    only (Tests\Get-FolderAccessCheck.Tests.ps1 holds an allowlist of every command and .NET
-    method the script calls). Reading the share permissions needs administrator rights on the file server; without
+    Read-only by construction: it calls Get-ADUser, Get-ADGroup, Get-ADDomain,
+    Get-ADDomainController, Get-ADReplicationAttributeMetadata, Get-Acl, Get-CimInstance,
+    Get-CimAssociatedInstance and Invoke-CimMethod with GetSecurityDescriptor only
+    (Tests\Get-FolderAccessCheck.Tests.ps1 holds an allowlist of every command and .NET method
+    the script calls). The only files it writes are the reports and the ticket note.
+
+    TICKET NOTE. A layer is only "Ruled out" when it was really read and the answer is PROBABLY
+    YES or PROBABLY NO: an unreadable folder or share, an administrative share or a DFS path is
+    listed under "Could not check" instead. The note is built by CaseKit.ps1 in this folder (a
+    copy of TicketNote\CaseKit.ps1; Tests\CaseKitParity.Tests.ps1 fails if it drifts). If it is
+    missing the check still runs, without a note. Reading the share permissions needs administrator rights on the file server; without
     them the share layer is CAN'T TELL, never assumed.
 
     Not checked: files and subfolders inside the folder, central access policy (Dynamic Access
@@ -82,8 +128,8 @@
 
     The helpers Get-PrivilegedGroupDefinition, Get-NameOnlyPrivilegedGroup and
     Find-PrivilegedGroupBySid are copied verbatim from
-    Find-PrivilegedAccessPaths\Find-PrivilegedAccessPaths.ps1 (for the SQ-013 privileged-group
-    warning); Tests\Get-FolderAccessCheck.Tests.ps1 fails if they drift.
+    Find-PrivilegedAccessPaths\Find-PrivilegedAccessPaths.ps1 (for the privileged-group warning);
+    Tests\Get-FolderAccessCheck.Tests.ps1 fails if they drift.
 
     REFERENCES
       How DACLs control access to an object (stored order; a Deny of any requested, not yet
@@ -141,10 +187,31 @@
         https://learn.microsoft.com/troubleshoot/windows-server/networking/remove-administrative-shares
       DFS Namespaces (a domain-based namespace path begins with the domain name, \\Contoso\Public)
         https://learn.microsoft.com/windows-server/storage/dfs-namespaces/dfs-overview
-      Get-ADUser, Get-ADGroup, Get-ADDomain
+      Get-ADUser, Get-ADGroup, Get-ADDomain, Get-ADDomainController (-Filter *)
         https://learn.microsoft.com/powershell/module/activedirectory/get-aduser
         https://learn.microsoft.com/powershell/module/activedirectory/get-adgroup
         https://learn.microsoft.com/powershell/module/activedirectory/get-addomain
+        https://learn.microsoft.com/powershell/module/activedirectory/get-addomaincontroller
+      Get-ADReplicationAttributeMetadata: -Object, -Properties, -Server (mandatory; a domain name
+      or a directory server), -ShowAllLinkedValues ("returns all linked values if the attribute
+      returned is multi-valued"); output ADReplicationAttributeMetadata
+        https://learn.microsoft.com/powershell/module/activedirectory/get-adreplicationattributemetadata
+      DS_REPL_VALUE_META_DATA (per linked value: ftimeCreated "the time this attribute was
+      created", ftimeLastOriginatingChange; replication does not change either)
+        https://learn.microsoft.com/windows/win32/api/ntdsapi/ns-ntdsapi-ds_repl_value_meta_data
+      lastLogon - NOT replicated, kept per DC; the largest value across all DCs is the true last logon
+        https://learn.microsoft.com/windows/win32/adschema/a-lastlogon
+      Access tokens (made at sign-in; every process of the session carries a copy, so a group
+      joined later doesn't count until the next sign-in)
+        https://learn.microsoft.com/windows/win32/secauthz/access-tokens
+      adminCount ("ACLs changed to a more secure value by the system because it was a member of
+      one of the administrative groups (directly or transitively)"), AdminSDHolder and SDProp
+        https://learn.microsoft.com/windows/win32/adschema/a-admincount
+        https://learn.microsoft.com/windows-server/identity/ad-ds/plan/security-best-practices/appendix-c--protected-accounts-and-groups-in-active-directory
+      Ticket note clipboard (in CaseKit.ps1): the WinForms clipboard first; Set-Clipboard is
+      5.0, so the fallback is behind a Get-Command check; never clip.exe
+        https://learn.microsoft.com/powershell/scripting/whats-new/what-s-new-in-windows-powershell-50
+        https://learn.microsoft.com/windows/win32/dataxchg/clipboard-formats
       CSV formula injection (cells starting with = + - @ are prefixed with ')
         https://owasp.org/www-community/attacks/CSV_Injection
 
@@ -155,6 +222,10 @@
     NULL. A descriptor with SE_DACL_PRESENT set but a NULL DACL is therefore not guessed at: the
     share layer is "not read" (CAN'T TELL when the folder would allow it). Present bit unset
     (documented: everyone) and present with an empty list (no one) are evaluated.
+    Also not stated on Learn: that the cmdlet's FirstOriginatingCreateTime is the value
+    metadata's ftimeCreated (the names and the DS_REPL_VALUE_META_DATA fields line up), and how a
+    membership older than linked-value replication is returned. A missing or 1601 time is
+    treated as "not dated", so it can only lead to "Couldn't check", never to a claim.
 #>
 [CmdletBinding(DefaultParameterSetName = 'Check')]
 param(
@@ -178,7 +249,8 @@ param(
     [ValidateRange(1, 50)]
     [int]$MaxNestingDepth = 10,
 
-    # SQ-013 stub: not implemented yet (ticket note via CaseKit.ps1).
+    # Checked in the script body (Test-TicketNumber in CaseKit.ps1), not with ValidatePattern,
+    # so a mistyped number gets a plain-English [FAIL] line instead of a parameter-binding error.
     [string]$TicketNumber,
 
     [switch]$NoClipboard,
@@ -252,6 +324,16 @@ $script:AdminShareMessage = "administrative share: run it again with the folder'
 $script:DfsMessage = "this is a DFS path: run it again with the real server path (find it in the folder's Properties > DFS tab)"
 $script:ConditionalMessage = 'this folder uses claims-based conditions; only Effective Access can evaluate them'
 $script:CimTimeoutSeconds = 30
+$script:NoGroupStep = 'No existing group grants this. Ask who owns the folder which group should have access, then add that group (not the user) with FolderPermissionManager, which logs the change.'
+$script:NarrowestStepPrefix = 'Narrowest existing group that grants this: '
+# A new group membership only reaches the user's access token at the next sign-in; locking and
+# unlocking reuses the session's token. https://learn.microsoft.com/windows/win32/secauthz/access-tokens
+$script:SignOutStep = 'Ask them to sign out of Windows and any Citrix/RDS session, then sign in again (locking and unlocking is not enough)'
+# Never recommended as "the group to add them to": Domain Users (513) and Domain Computers (515)
+# are as broad as Everyone in practice. Well-known and BUILTIN SIDs are excluded by shape (only
+# S-1-5-21-<domain>-<RID> groups qualify).
+# https://learn.microsoft.com/windows-server/identity/ad-ds/manage/understand-security-identifiers
+$script:BroadDomainRids = @(513, 515)
 # A standalone DFS namespace path (\\FS01\Public\Link) looks like an ordinary share path, and
 # without the DFSN module the only share this tool can see is the namespace root's share.
 # https://learn.microsoft.com/windows-server/storage/dfs-namespaces/dfs-overview
@@ -736,6 +818,139 @@ function Invoke-DaclWalk {
     }
 }
 
+function Test-FolderAccessCandidateEligible {
+    <#
+        Can this folder-layer principal be recommended as "the group to add them to"? Only a domain
+        security group (S-1-5-21-<domain>-<RID>), never Domain Users / Domain Computers, a
+        well-known or BUILTIN SID (Everyone, Authenticated Users, INTERACTIVE, NETWORK,
+        BUILTIN\Users...), a group local to the file server, a user account or the user.
+    #>
+    param([object]$Candidate, [string]$UserSid, [hashtable]$ServerLocalSids = @{})
+    if ($null -eq $Candidate) { return $false }
+    $sid = [string]$Candidate.Sid
+    if ([string]$Candidate.ObjectClass -ne 'group') { return $false }
+    if (-not $sid -or $sid -eq $UserSid -or $ServerLocalSids.ContainsKey($sid)) { return $false }
+    if ($sid -notmatch '^S-1-5-21-\d+-\d+-\d+-(\d+)$') { return $false }
+    return ($script:BroadDomainRids -notcontains [int]$Matches[1])
+}
+
+function Get-FolderAccessCandidateWarning {
+    <#
+        The privileged-group warning for a recommended group, or $null. PrivilegedVia names the
+        well-known privileged groups the candidate is, or is nested in (Find-PrivilegedGroupBySid).
+        adminCount = 1 "indicates that a given object has had its ACLs changed to a more secure
+        value by the system because it was a member of one of the administrative groups (directly
+        or transitively)"; SDProp keeps such objects in line with AdminSDHolder.
+        https://learn.microsoft.com/windows/win32/adschema/a-admincount
+        https://learn.microsoft.com/windows-server/identity/ad-ds/plan/security-best-practices/appendix-c--protected-accounts-and-groups-in-active-directory
+    #>
+    param([object]$Candidate, [string]$UserName)
+    $name = [string]$Candidate.Name
+    $via = @(@($Candidate.PrivilegedVia) | Where-Object { $_ })
+    if ($via.Count -gt 0) {
+        $others = @($via | Where-Object { $_ -ne $name })
+        if ($others.Count -eq 0) {
+            return ('Warning: {0} is a privileged group. Adding {1} gives them {0} rights. Get senior approval first.' -f $name, $UserName)
+        }
+        $what = if ($others -contains 'Domain Admins') { 'domain admin rights' } else { 'the rights of ' + ($others -join ', ') }
+        return ('Warning: {0} is also in {1}. Adding {2} gives them {3}. Get senior approval first.' -f $name, ($others -join ', '), $UserName, $what)
+    }
+    if ([int]$Candidate.AdminCount -eq 1) {
+        return ('Warning: {0} is protected by AdminSDHolder (adminCount = 1), so it is, or was, in a privileged group. Check what it is nested in before adding {1}. Get senior approval first.' -f $name, $UserName)
+    }
+    return $null
+}
+
+function Select-FolderAccessNarrowestGroup {
+    <#
+    .SYNOPSIS
+        The existing group that would grant the access with the fewest direct members, or $null.
+    .DESCRIPTION
+        Each eligible candidate is tried by walking both layers again with its SID added to the
+        user's: one that is denied at the folder, or that the share would still stop, is skipped.
+        Ranking: non-privileged first (no PrivilegedVia, adminCount not 1), then the fewest direct
+        members (the `member` attribute), then the name.
+    #>
+    param(
+        [object[]]$CandidateGroups, [hashtable]$WalkArgs, [object[]]$FolderAces, [object[]]$ShareAces,
+        [string]$ShareDaclState, [bool]$ShareRead, [string]$UserName, [hashtable]$ServerLocalSids = @{}
+    )
+    $userSid = @($WalkArgs.UserSids)[0]
+    $passing = New-Object System.Collections.Generic.List[object]
+    foreach ($c in @($CandidateGroups)) {
+        if (-not (Test-FolderAccessCandidateEligible -Candidate $c -UserSid $userSid -ServerLocalSids $ServerLocalSids)) { continue }
+        $tryArgs = @{}
+        foreach ($k in $WalkArgs.Keys) { $tryArgs[$k] = $WalkArgs[$k] }
+        $tryArgs['UserSids'] = @($WalkArgs.UserSids) + @([string]$c.Sid)
+        $f = Invoke-DaclWalk -Layer 'Folder' -Aces $FolderAces @tryArgs
+        if ($f.Result -ne 'Granted' -or $f.Uncertain) { continue }
+        # The share: walked again when it was read; a null DACL lets everyone in, an empty one
+        # no one. A share that was not read is already listed under "Couldn't check".
+        if ($ShareRead) {
+            if ($ShareDaclState -eq 'Empty') { continue }
+            if ($ShareDaclState -eq 'Present') {
+                $s = Invoke-DaclWalk -Layer 'Share' -Aces $ShareAces @tryArgs
+                if ($s.Result -ne 'Granted' -or $s.Uncertain) { continue }
+            }
+        }
+        $warning = Get-FolderAccessCandidateWarning -Candidate $c -UserName $UserName
+        $passing.Add([PSCustomObject]@{
+            Name = [string]$c.Name; Sid = [string]$c.Sid; MemberCount = [int]$c.MemberCount; Warning = $warning
+            Privileged = [bool]$warning
+        })
+    }
+    if ($passing.Count -eq 0) { return $null }
+    $best = @($passing.ToArray() | Sort-Object -Property @{ Expression = { $_.Privileged } }, @{ Expression = { $_.MemberCount } }, @{ Expression = { $_.Name } })[0]
+    return [PSCustomObject]@{ Name = $best.Name; Sid = $best.Sid; MemberCount = $best.MemberCount; Warning = $best.Warning }
+}
+
+function Get-FolderAccessStaleToken {
+    <#
+    .SYNOPSIS
+        Was the user added to every group that grants the access after their last sign-in?
+    .DESCRIPTION
+        A user's group memberships are fixed in the access token made at sign-in, so a group they
+        were added to since then does not count until they sign in again.
+        https://learn.microsoft.com/windows/win32/secauthz/access-tokens
+        Granting paths are the folder-layer Allow rows that contributed rights. A path with no
+        entry in MembershipLinks (Everyone, a direct entry for the user) doesn't depend on a
+        recent change, so the token is not stale. Only when EVERY path's newest link is later
+        than the newest lastLogon is it stale; when a time needed for that claim is unknown the
+        result is Unknown (could-not-check), never a claim.
+        Returns State (None / Stale / Unknown), Group, Added, LastLogon and Note.
+    #>
+    param([object[]]$GrantingRows, [hashtable]$MembershipLinks = @{}, [object]$LastLogon, [string]$UserName)
+    $none = [PSCustomObject]@{ State = 'None'; Group = $null; Added = $null; LastLogon = $null; Note = '' }
+    $rows = @($GrantingRows | Where-Object { $_ })
+    if ($rows.Count -eq 0 -or -not $MembershipLinks) { return $none }
+    $links = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $rows) {
+        if (-not $MembershipLinks.ContainsKey([string]$r.SID)) { return $none }
+        $l = $MembershipLinks[[string]$r.SID]
+        $links.Add([PSCustomObject]@{
+            Group = $(if ($l -and $l.Group) { [string]$l.Group } else { [string]$r.Principal })
+            Added = $(if ($l -and $l.Added -is [datetime]) { [datetime]$l.Added } else { $null })
+        })
+    }
+    $logon = if ($LastLogon -is [datetime]) { [datetime]$LastLogon } else { $null }
+    if ($null -ne $logon -and @($links | Where-Object { $null -ne $_.Added -and $_.Added -le $logon }).Count -gt 0) { return $none }
+    if ($null -eq $logon) {
+        return [PSCustomObject]@{ State = 'Unknown'; Group = $null; Added = $null; LastLogon = $null
+            Note = "when $UserName was added to the group, compared with their last sign-in: their last sign-in time couldn't be read from every domain controller" }
+    }
+    $unknown = @($links | Where-Object { $null -eq $_.Added } | ForEach-Object { $_.Group } | Select-Object -Unique)
+    if ($unknown.Count -gt 0) {
+        return [PSCustomObject]@{ State = 'Unknown'; Group = $null; Added = $null; LastLogon = $logon
+            Note = ("when $UserName was added to the group ({0}): the directory's replication data for that membership couldn't be read" -f ($unknown -join ', ')) }
+    }
+    # Every path is newer than the last sign-in: name the earliest, the strongest evidence.
+    $first = @($links.ToArray() | Sort-Object -Property @{ Expression = { $_.Added } })[0]
+    return [PSCustomObject]@{
+        State = 'Stale'; Group = $first.Group; Added = $first.Added; LastLogon = $logon
+        Note = ('added to {0} on {1}, after their last sign-in on {2}: the access they have now was made at that sign-in and does not include the group yet' -f $first.Group, $first.Added.ToString('yyyy-MM-dd'), $logon.ToString('yyyy-MM-dd'))
+    }
+}
+
 function Get-FolderAccessAssessment {
     <#
     .SYNOPSIS
@@ -751,6 +966,16 @@ function Get-FolderAccessAssessment {
         UserSids: the user's own SID first, then tokenGroups and the network-logon SIDs.
         GroupPaths: SID -> "FIN-Staff -> FIN-All". LocalGroupExpansions: SID -> Readable,
         Name, MemberSids, Error for a local group on the file server.
+
+        What to do about it (SQ-013):
+          CandidateGroups: the folder-layer Allow principals looked up in AD (Sid, Name,
+            ObjectClass, MemberCount, AdminCount, PrivilegedVia). On PROBABLY NO the narrowest
+            eligible one becomes the Recommendation (Select-FolderAccessNarrowestGroup).
+          MembershipLinks: granting group SID -> Group, Added (the newest link on the user's path
+            to it, $null when unknown). LastLogon: the newest lastLogon across all DCs, or $null.
+            On PROBABLY YES, a path added after the last sign-in makes VerdictText "PROBABLY YES
+            after <user> signs out and back in" (Get-FolderAccessStaleToken). Verdict and
+            ExitCode never change for it.
     #>
     param(
         [string]$UserName, [string]$DisplayName, [string]$Path, [string]$Server,
@@ -761,8 +986,6 @@ function Get-FolderAccessAssessment {
         [object[]]$FolderAces, [string]$FolderError, [bool]$FolderConditional = $false,
         [object[]]$ShareAces, [ValidateSet('Present', 'Null', 'Empty', 'Unreadable')][string]$ShareDaclState = 'Present', [string]$ShareError,
         [hashtable]$LocalGroupExpansions = @{},
-        # SQ-013 stubs (not implemented yet): narrowest-group candidates, newest membership link per
-        # granting group SID, and the user's newest lastLogon across DCs ($null = unknown).
         [object[]]$CandidateGroups = @(), [hashtable]$MembershipLinks = @{}, [object]$LastLogon
     )
 
@@ -831,6 +1054,7 @@ function Get-FolderAccessAssessment {
     }
 
     $verdict = "CAN'T TELL"; $limitedBy = ''
+    $verdictText = $null; $staleToken = $null
     if ($folderState -eq 'Unreadable') {
         if ($FolderError -match '(?i)unauthori[sz]ed|access (is )?denied') {
             $reasons.Add("your account can't read this folder's permissions ($FolderError)")
@@ -870,7 +1094,34 @@ function Get-FolderAccessAssessment {
         if ($ShareDaclState -eq 'Null') { $reasons.Add('the share has no permission list at all (a null DACL), which lets everyone in') }
         elseif ($share) { $reasons.Add((Get-YesReason $share 'share')) }
         $reasons.Add((Get-YesReason $folder 'folder'))
+        $stale = Get-FolderAccessStaleToken -GrantingRows $folder.AllowRows -MembershipLinks $MembershipLinks -LastLogon $LastLogon -UserName $UserName
+        if ($stale.State -eq 'Stale') {
+            $staleToken = [PSCustomObject]@{ Group = $stale.Group; Added = $stale.Added; LastLogon = $stale.LastLogon }
+            $verdictText = "PROBABLY YES after $UserName signs out and back in"
+            $reasons.Add($stale.Note)
+            Add-Step $script:SignOutStep
+        } elseif ($stale.State -eq 'Unknown') {
+            Add-CouldNot $stale.Note
+        }
         Add-Step "If $UserName still gets 'Access denied', check they are using this exact path."
+    }
+
+    # The narrowest existing group that would let them in (never a broad or per-user entry).
+    $recommendation = $null
+    if ($verdict -eq 'PROBABLY NO') {
+        $serverLocal = @{}
+        foreach ($k in $LocalGroupExpansions.Keys) { $serverLocal[[string]$k] = $true }
+        foreach ($ace in @($FolderAces)) { if ($ace -and [bool]$ace.IsServerLocal) { $serverLocal[[string]$ace.Sid] = $true } }
+        $shareRead = ($shareState -ne 'NotRead')
+        $recommendation = Select-FolderAccessNarrowestGroup -CandidateGroups $CandidateGroups -WalkArgs $walkArgs -FolderAces $FolderAces `
+            -ShareAces $ShareAces -ShareDaclState $ShareDaclState -ShareRead $shareRead -UserName $UserName -ServerLocalSids $serverLocal
+        if ($recommendation) {
+            $members = if ($recommendation.MemberCount -eq 1) { '1 direct member' } else { "$($recommendation.MemberCount) direct members" }
+            Add-Step ("{0}{1} ({2}). If the folder's owner agrees, add {3} to it in Active Directory, then have them sign out and back in." -f $script:NarrowestStepPrefix, $recommendation.Name, $members, $UserName)
+            if ($recommendation.Warning) { Add-Step $recommendation.Warning }
+        } elseif ($folderState -eq 'No') {
+            Add-Step $script:NoGroupStep
+        }
     }
 
     # Next steps for whatever could not be checked, then the share-layer fix, then Effective Access.
@@ -893,11 +1144,13 @@ function Get-FolderAccessAssessment {
     Add-Step "Confirm in the folder's Properties > Security > Advanced > Effective Access for $UserName."
 
     $exit = switch ($verdict) { 'PROBABLY YES' { 0 } 'PROBABLY NO' { 1 } default { 4 } }
+    if (-not $verdictText) { $verdictText = $verdict }
     return [PSCustomObject]@{
-        Verdict = $verdict; LimitedBy = $limitedBy; Reasons = $reasons.ToArray(); CouldNotCheck = $couldNot.ToArray()
+        Verdict = $verdict; VerdictText = $verdictText; LimitedBy = $limitedBy; Reasons = $reasons.ToArray(); CouldNotCheck = $couldNot.ToArray()
         NextSteps = $steps.ToArray(); EvidenceRows = $rows.ToArray(); ExitCode = $exit
-        Headline = ('Can {0} {1} {2}?  {3}' -f $who, $doing, $Path, $verdict)
+        Headline = ('Can {0} {1} {2}?  {3}' -f $who, $doing, $Path, $verdictText)
         Access = $Access; FolderState = $folderState; ShareState = $shareState
+        Recommendation = $recommendation; StaleToken = $staleToken
     }
 }
 
@@ -956,7 +1209,8 @@ function Get-UserGroupPath {
         Adapted from Find-PrivilegedAccessPaths\Find-PrivilegedAccessPaths.ps1 (privileged
         matching removed, AD splat passed in). Walks UP from the user, breadth-first, through
         memberOf and returns one row per group: GroupSid, GroupName, MembershipType (Direct /
-        Primary / Nested), NestingDepth and Via (the whole path, e.g. "FIN-Staff -> FIN-All").
+        Primary / Nested), NestingDepth, Via (the whole path, e.g. "FIN-Staff -> FIN-All"), Dn
+        and ParentDns (its memberOf), which date the membership links (SQ-013).
 
         primaryGroupID is not part of memberOf, so the primary group is added as a separate
         starting point; its own parents are then followed like any other group. A primary group
@@ -986,6 +1240,8 @@ function Get-UserGroupPath {
             MembershipType = $type
             NestingDepth   = $depth
             Via            = $chain
+            Dn             = [string]$g.DistinguishedName
+            ParentDns      = @($g.MemberOf | Where-Object { $_ } | ForEach-Object { [string]$_ })
         })
         $queue.Enqueue(@{ Group = $g; Chain = $chain; Depth = $depth })
     }
@@ -1068,9 +1324,272 @@ function Get-UserSidSet {
 
     return [PSCustomObject]@{
         UserSid = $userSid; DomainSid = $domainSid; Sids = $sids.ToArray(); GroupPaths = $paths; GroupNames = $names
-        Groups = $groups.ToArray(); SamAccountName = [string]$u.SamAccountName
+        Groups = $groups.ToArray(); SamAccountName = [string]$u.SamAccountName; DistinguishedName = [string]$u.DistinguishedName
+        MemberOfDns = @($u.memberOf | Where-Object { $_ } | ForEach-Object { [string]$_ })
+        PrimaryGroupSid = $(if ($u.primaryGroupID) { "$domainSid-$($u.primaryGroupID)" } else { '' })
         DisplayName = $(if ($u.DisplayName) { [string]$u.DisplayName } else { [string]$u.SamAccountName })
     }
+}
+
+function Get-FolderAccessCandidateGroup {
+    <#
+    .SYNOPSIS
+        The folder-layer Allow principals of the user's domain, read from AD as recommendation
+        candidates: Sid, Name, ObjectClass, MemberCount, AdminCount, PrivilegedVia.
+    .DESCRIPTION
+        MemberCount is the number of direct `member` values (cheap and deterministic; a
+        recursive count is expensive on DCs). PrivilegedVia: the candidate, and every group it is
+        nested in (memberOf walked upward, cycle-safe, up to MaxNestingDepth), matched by SID
+        against Get-PrivilegedGroupDefinition with Find-PrivilegedGroupBySid -AnyDomain (so a
+        forest-root Enterprise Admins matches too), plus the name-only groups (DnsAdmins...).
+        Protected Users is left out: "not a privilege". A principal that isn't a group (a user
+        account), a distribution group, or one that can't be read is not a candidate.
+        https://learn.microsoft.com/powershell/module/activedirectory/get-adgroup
+    #>
+    param([object[]]$FolderAces, [string]$DomainSid, [hashtable]$AdSplat = @{}, [int]$MaxNestingDepth = 10)
+
+    $defs = @(Get-PrivilegedGroupDefinition -DomainSid $DomainSid | Where-Object { $_.Risk -ne 'INFO' })
+    $nameOnly = @(Get-NameOnlyPrivilegedGroup | ForEach-Object { $_.Name })
+    $cache = @{}
+    $out = New-Object System.Collections.Generic.List[object]
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase)
+    $pattern = '^' + [regex]::Escape($DomainSid) + '-\d+$'
+
+    foreach ($ace in @($FolderAces)) {
+        if ($null -eq $ace -or $ace.Type -ne 'Allow' -or [bool]$ace.InheritOnly -or [bool]$ace.Unresolved) { continue }
+        $sid = [string]$ace.Sid
+        if ($sid -notmatch $pattern -or -not $seen.Add($sid)) { continue }
+        try {
+            $g = Get-ADGroup -Identity $sid @AdSplat -Properties member, adminCount, memberOf -ErrorAction Stop
+        } catch {
+            Write-Verbose "Not a recommendation candidate (${sid}): $($_.Exception.Message)"
+            continue
+        }
+        if ([string]$g.GroupCategory -eq 'Distribution') { continue }
+
+        # Upward walk for "privileged elsewhere".
+        $via = New-Object System.Collections.Generic.List[string]
+        $visited = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase)
+        $queue = New-Object System.Collections.Queue
+        [void]$visited.Add([string]$g.DistinguishedName)
+        $queue.Enqueue(@{ Group = $g; Depth = 0 })
+        while ($queue.Count -gt 0) {
+            $item = $queue.Dequeue()
+            $cur = $item.Group
+            $def = Find-PrivilegedGroupBySid -Sid (Get-SidText $cur.SID) -Definitions $defs -AnyDomain
+            $hit = if ($def) { [string]$def.Name } elseif ($nameOnly -contains [string]$cur.Name) { [string]$cur.Name } else { $null }
+            if ($hit -and -not $via.Contains($hit)) { $via.Add($hit) }
+            if ($item.Depth -ge $MaxNestingDepth) { continue }
+            foreach ($parentDn in @($cur.MemberOf)) {
+                if (-not $parentDn -or -not $visited.Add([string]$parentDn)) { continue }
+                if (-not $cache.ContainsKey([string]$parentDn)) {
+                    try { $cache[[string]$parentDn] = Get-ADGroup -Identity $parentDn @AdSplat -Properties memberOf -ErrorAction Stop }
+                    catch { Write-Verbose "Could not read group '$parentDn': $($_.Exception.Message)"; $cache[[string]$parentDn] = $null }
+                }
+                if ($cache[[string]$parentDn]) { $queue.Enqueue(@{ Group = $cache[[string]$parentDn]; Depth = $item.Depth + 1 }) }
+            }
+        }
+
+        $out.Add([PSCustomObject]@{
+            Sid = $sid; Name = [string]$g.Name; ObjectClass = 'group'; MemberCount = @($g.member | Where-Object { $_ }).Count
+            AdminCount = $(if ($null -ne $g.adminCount) { [int]$g.adminCount } else { 0 }); PrivilegedVia = $via.ToArray()
+        })
+    }
+    return $out.ToArray()
+}
+
+function ConvertFrom-FolderAccessFileTime {
+    # AD FILETIME -> local DateTime, or $null: 0 means "never" (not 1601-01-01).
+    # https://learn.microsoft.com/windows/win32/adschema/a-lastlogon
+    param([object]$Value)
+    if ($null -eq $Value) { return $null }
+    $n = [int64]0
+    try { $n = [int64]$Value } catch { return $null }
+    if ($n -le 0 -or $n -ge [int64]::MaxValue) { return $null }
+    try { return [datetime]::FromFileTime($n) } catch { return $null }
+}
+
+function Get-UserNewestLastLogon {
+    <#
+    .SYNOPSIS
+        The user's newest lastLogon across every DC of the domain, or $null when unknown.
+    .DESCRIPTION
+        lastLogon "is not replicated and is maintained separately on each domain controller ...
+        The largest value that is retrieved is the true last logon time" (same per-DC pattern as
+        AD-UserQuickCheck). If any DC can't be read the newest value is only a lower bound, which
+        could make a false "added after their last sign-in" claim, so the result is $null.
+        https://learn.microsoft.com/windows/win32/adschema/a-lastlogon
+        https://learn.microsoft.com/powershell/module/activedirectory/get-addomaincontroller
+    #>
+    param([string]$UserDn, [string]$DomainDns, [string]$Server, [System.Management.Automation.PSCredential]$Credential)
+    $ad = Get-AdSplat -Server $(if ($Server) { $Server } else { $DomainDns }) -Credential $Credential
+    try {
+        $dcs = @(Get-ADDomainController -Filter * @ad -ErrorAction Stop | ForEach-Object { [string]$_.HostName } | Where-Object { $_ })
+    } catch {
+        Write-Verbose "Could not list the domain controllers: $($_.Exception.Message)"
+        return $null
+    }
+    if ($dcs.Count -eq 0) { return $null }
+    $newest = $null
+    foreach ($dc in $dcs) {
+        try {
+            $dcAd = Get-AdSplat -Server $dc -Credential $Credential
+            $u = Get-ADUser -Identity $UserDn @dcAd -Properties lastLogon -ErrorAction Stop
+        } catch {
+            Write-Verbose "${dc}: lastLogon not read - $($_.Exception.Message)"
+            return $null
+        }
+        $t = ConvertFrom-FolderAccessFileTime -Value $u.lastLogon
+        if ($null -ne $t -and ($null -eq $newest -or $t -gt $newest)) { $newest = $t }
+    }
+    return $newest
+}
+
+function Get-FolderAccessMembershipLink {
+    <#
+    .SYNOPSIS
+        Since when has the user been in each granting group? Granting group SID -> Group (the
+        group holding the deciding link), Added ($null when it can't be dated).
+    .DESCRIPTION
+        Each link is dated from the replication metadata:
+          - user -> group, and group -> parent group: the `member` value's
+            FirstOriginatingCreateTime (Get-ADReplicationAttributeMetadata -ShowAllLinkedValues
+            returns one row per linked value; the value metadata records when it was created);
+          - the primary group: the user's primaryGroupID LastOriginatingChangeTime (primary group
+            membership is that attribute, not a `member` value).
+        A group reached through a parent is held from the later of "held the child" and "the
+        child was added to it". With several routes into a group (a direct membership and a
+        nested one, say) the earliest route counts, so an old route is never hidden by a new one.
+        Any route that can't be dated makes the group "not dated" rather than risk a false
+        "added after their last sign-in".
+
+        A grant through a local group on the file server is dated through the user's domain
+        groups inside it. Grants through Everyone, Authenticated Users or a direct entry for the
+        user get no link: they don't depend on a recent group change.
+        https://learn.microsoft.com/powershell/module/activedirectory/get-adreplicationattributemetadata
+        https://learn.microsoft.com/windows/win32/api/ntdsapi/ns-ntdsapi-ds_repl_value_meta_data
+        https://learn.microsoft.com/windows/win32/adschema/a-primarygroupid
+    #>
+    param(
+        [object[]]$GrantingRows, [object]$SidSet, [hashtable]$LocalGroupExpansions = @{},
+        [string]$MetadataServer, [System.Management.Automation.PSCredential]$Credential
+    )
+    $userDn = [string]$SidSet.DistinguishedName
+    $groupsByDn = @{}; $groupsBySid = @{}
+    foreach ($g in @($SidSet.Groups)) {
+        if ($g.MembershipType -eq 'Token' -or -not $g.Dn) { continue }
+        $groupsByDn[[string]$g.Dn] = $g
+        $groupsBySid[[string]$g.GroupSid] = $g
+    }
+    $directDns = @($SidSet.MemberOfDns)
+    $meta = @{}
+    $memo = @{}
+    $inProgress = @{}
+
+    function Get-MetaRows([string]$Dn, [string]$Attribute) {
+        $key = "$Dn|$Attribute"
+        if (-not $meta.ContainsKey($key)) {
+            $m = @{ Object = $Dn; Server = $MetadataServer; Properties = $Attribute; ErrorAction = 'Stop' }
+            if ($Credential) { $m['Credential'] = $Credential }
+            try {
+                $meta[$key] = @(if ($Attribute -eq 'member') { Get-ADReplicationAttributeMetadata @m -ShowAllLinkedValues } else { Get-ADReplicationAttributeMetadata @m })
+            } catch {
+                Write-Verbose "Replication metadata not read for ${Dn} ($Attribute): $($_.Exception.Message)"
+                $meta[$key] = @()
+            }
+        }
+        # One row per pipeline object, so callers can filter the rows directly.
+        $meta[$key]
+    }
+    # A replication time of 1601 (FILETIME 0) means "not recorded".
+    function Get-KnownTime($Value) { if ($Value -is [datetime] -and $Value.Year -gt 1601) { return [datetime]$Value } return $null }
+    function Get-MemberLinkTime([string]$GroupDn, [string]$ChildDn) {
+        $hit = @(Get-MetaRows $GroupDn 'member' | Where-Object { [string]$_.AttributeName -eq 'member' -and [string]$_.AttributeValue -eq $ChildDn })
+        if ($hit.Count -eq 0) { return $null }
+        return (Get-KnownTime $hit[0].FirstOriginatingCreateTime)
+    }
+
+    function Get-HeldSince([string]$Dn) {
+        # -> Time (earliest dated route), Group (the group holding that route's newest link),
+        #    Unknown (a route couldn't be dated), Partial (a route was skipped as a cycle).
+        if ($memo.ContainsKey($Dn)) { return $memo[$Dn] }
+        $g = $groupsByDn[$Dn]
+        $name = [string]$g.GroupName
+        $inProgress[$Dn] = $true
+        $routes = New-Object System.Collections.Generic.List[object]
+        $partial = $false
+        if ($directDns -contains $Dn) {
+            $t = Get-MemberLinkTime $Dn $userDn
+            $routes.Add([PSCustomObject]@{ Time = $t; Group = $name })
+        }
+        if ($SidSet.PrimaryGroupSid -and [string]$g.GroupSid -eq [string]$SidSet.PrimaryGroupSid) {
+            $hit = @(Get-MetaRows $userDn 'primaryGroupID' | Where-Object { [string]$_.AttributeName -eq 'primaryGroupID' })
+            $t = if ($hit.Count -gt 0) { Get-KnownTime $hit[0].LastOriginatingChangeTime } else { $null }
+            $routes.Add([PSCustomObject]@{ Time = $t; Group = $name })
+        }
+        foreach ($child in @($groupsByDn.Values)) {
+            if (@($child.ParentDns) -notcontains $Dn) { continue }
+            if ($inProgress[[string]$child.Dn]) { $partial = $true; continue }
+            $held = Get-HeldSince ([string]$child.Dn)
+            if ($held.Partial) { $partial = $true }
+            $link = Get-MemberLinkTime $Dn ([string]$child.Dn)
+            if ($held.Unknown -or $null -eq $held.Time -or $null -eq $link) {
+                $routes.Add([PSCustomObject]@{ Time = $null; Group = $name }); continue
+            }
+            if ($link -ge $held.Time) { $routes.Add([PSCustomObject]@{ Time = $link; Group = $name }) }
+            else { $routes.Add([PSCustomObject]@{ Time = $held.Time; Group = $held.Group }) }
+        }
+        $inProgress[$Dn] = $false
+        $dated = @($routes.ToArray() | Where-Object { $null -ne $_.Time } | Sort-Object -Property @{ Expression = { $_.Time } })
+        $res = [PSCustomObject]@{
+            Time = $(if ($dated.Count -gt 0) { $dated[0].Time } else { $null })
+            Group = $(if ($dated.Count -gt 0) { $dated[0].Group } else { $name })
+            Unknown = ($routes.Count -eq 0 -or $dated.Count -lt $routes.Count)
+            Partial = $partial
+        }
+        # A result that skipped a route because of circular nesting is only complete for the
+        # group the walk started from, so it is not reused.
+        if (-not $partial) { $memo[$Dn] = $res }
+        return $res
+    }
+
+    $links = @{}
+    foreach ($row in @($GrantingRows)) {
+        $sid = [string]$row.SID
+        if (-not $sid -or $links.ContainsKey($sid)) { continue }
+        $starts = @()
+        if ($groupsBySid.ContainsKey($sid)) {
+            $starts = @($groupsBySid[$sid])
+        } elseif ($LocalGroupExpansions.ContainsKey($sid)) {
+            # Held through any of the user's SIDs inside the local group: a well-known SID or the
+            # user's own SID in it means it doesn't depend on a group change at all.
+            $inside = @(@($LocalGroupExpansions[$sid].MemberSids) | Where-Object { $_ -and @($SidSet.Sids) -contains [string]$_ })
+            if (@($inside | Where-Object { -not $groupsBySid.ContainsKey([string]$_) -and ([string]$_ -eq $SidSet.UserSid -or $script:WellKnownSidNames.ContainsKey([string]$_)) }).Count -gt 0) { continue }
+            $starts = @($inside | Where-Object { $groupsBySid.ContainsKey([string]$_) } | ForEach-Object { $groupsBySid[[string]$_] })
+            if ($starts.Count -lt $inside.Count) { $starts += @($null) }   # a token-only SID inside: not dated
+        } elseif ($sid -eq $SidSet.UserSid -or $script:WellKnownSidNames.ContainsKey($sid)) {
+            continue
+        } else {
+            # A tokenGroups SID the walk didn't reach: there is no path to date.
+            $links[$sid] = [PSCustomObject]@{ Group = [string]$row.Principal; Added = $null }
+            continue
+        }
+
+        $best = $null; $unknown = ($starts.Count -eq 0)
+        foreach ($st in $starts) {
+            if ($null -eq $st) { $unknown = $true; continue }
+            $held = Get-HeldSince ([string]$st.Dn)
+            # Partial: circular nesting hid a route, so the time could be too late. Not dated.
+            if ($held.Unknown -or $held.Partial -or $null -eq $held.Time) { $unknown = $true; continue }
+            if ($null -eq $best -or $held.Time -lt $best.Time) { $best = $held }
+        }
+        $links[$sid] = if ($unknown -or $null -eq $best) {
+            [PSCustomObject]@{ Group = [string]$row.Principal; Added = $null }
+        } else {
+            [PSCustomObject]@{ Group = $best.Group; Added = $best.Time }
+        }
+    }
+    return $links
 }
 
 # =============================================================================
@@ -1306,6 +1825,7 @@ function Invoke-FolderAccessCheck {
     $result = [PSCustomObject]@{
         Status = 'Error'; ExitCode = 3; Identity = $Identity; Path = $Path; Access = $Access; Message = ''; Candidates = @(); MatchedBy = ''
         User = $null; Groups = @(); Assessment = $null; PathInfo = $null; Protocol = ''; Files = $null; ReportError = ''; Now = $Now
+        Domain = ''; TicketNote = $null
     }
 
     # 1. The path, before anything is read.
@@ -1344,6 +1864,7 @@ function Invoke-FolderAccessCheck {
     }
     $result.User = $sidSet
     $result.Groups = @($sidSet.Groups)
+    $result.Domain = [string]$domain.DNSRoot
 
     # 3. Path kind now that the domain names are known (domain-based DFS).
     $parsed = Split-FolderAccessPath -Path $Path -DomainName @([string]$domain.DNSRoot, [string]$domain.NetBIOSName)
@@ -1428,11 +1949,30 @@ function Invoke-FolderAccessCheck {
     }
 
     # 6. Verdict.
-    $assessment = Get-FolderAccessAssessment -UserName $sidSet.SamAccountName -DisplayName $sidSet.DisplayName -Path $parsed.Folder `
-        -Server $parsed.Server -PathKind $parsed.Kind -Access $Access -ServerIsDomainController $isDc `
-        -UserSids $sidSet.Sids -GroupPaths $sidSet.GroupPaths `
-        -FolderAces $folderAces -FolderError $folderError -FolderConditional $folderConditional `
-        -ShareAces $shareAces -ShareDaclState $shareState -ShareError $shareError -LocalGroupExpansions $expansions
+    $assessArgs = @{
+        UserName = $sidSet.SamAccountName; DisplayName = $sidSet.DisplayName; Path = $parsed.Folder
+        Server = $parsed.Server; PathKind = $parsed.Kind; Access = $Access; ServerIsDomainController = $isDc
+        UserSids = $sidSet.Sids; GroupPaths = $sidSet.GroupPaths
+        FolderAces = $folderAces; FolderError = $folderError; FolderConditional = $folderConditional
+        ShareAces = $shareAces; ShareDaclState = $shareState; ShareError = $shareError; LocalGroupExpansions = $expansions
+    }
+    $assessment = Get-FolderAccessAssessment @assessArgs
+
+    # 7. What to do about it, read only when it can matter, then assessed again (pure, cheap):
+    #    PROBABLY NO  -> the folder's groups as candidates for the narrowest group;
+    #    PROBABLY YES -> when the granting groups were joined, against the newest sign-in.
+    if ($assessment.Verdict -eq 'PROBABLY NO') {
+        $assessArgs['CandidateGroups'] = @(Get-FolderAccessCandidateGroup -FolderAces $folderAces -DomainSid $sidSet.DomainSid -AdSplat $ad -MaxNestingDepth $MaxNestingDepth)
+        $assessment = Get-FolderAccessAssessment @assessArgs
+    } elseif ($assessment.Verdict -eq 'PROBABLY YES') {
+        $granting = @($assessment.EvidenceRows | Where-Object { $_.Layer -eq 'Folder' -and ($_.Effect -eq 'allows' -or $_.Effect -eq 'allows part of what is needed') })
+        $metaServer = if ($Server) { $Server } else { [string]$domain.DNSRoot }
+        $assessArgs['MembershipLinks'] = Get-FolderAccessMembershipLink -GrantingRows $granting -SidSet $sidSet -LocalGroupExpansions $expansions -MetadataServer $metaServer -Credential $Credential
+        if ($assessArgs['MembershipLinks'].Count -gt 0) {
+            $assessArgs['LastLogon'] = Get-UserNewestLastLogon -UserDn $sidSet.DistinguishedName -DomainDns ([string]$domain.DNSRoot) -Server $Server -Credential $Credential
+        }
+        $assessment = Get-FolderAccessAssessment @assessArgs
+    }
     $result.Status = 'Ok'; $result.ExitCode = $assessment.ExitCode; $result.Assessment = $assessment
 
     if ($OutputPath) {
@@ -1586,11 +2126,113 @@ function Export-FolderAccessReport {
     return [PSCustomObject]@{ Html = $html; Csv = $csv }
 }
 
+# =============================================================================
+# Ticket note (CaseKit.ps1)
+# =============================================================================
+
 function ConvertTo-FolderAccessTicketNote {
-    # SQ-013 stub: not implemented yet.
-    param([Parameter(Mandatory = $true)][object]$Result, [string[]]$EvidencePaths = @(), [System.Management.Automation.PSCredential]$Credential)
-    throw 'ConvertTo-FolderAccessTicketNote is not implemented'
+    <#
+    .SYNOPSIS
+        Maps a folder-access result to a ticket note. The gate decisions for this tool live here.
+    .DESCRIPTION
+        The reasons go under Checked (PROBLEM for PROBABLY NO, WARNING for CAN'T TELL and for
+        "added after their last sign-in", INFO for PROBABLY YES), every Couldn't-check line
+        under Could not check, and the next steps (ending with Effective Access) under Next step.
+
+        Ruled out only holds a layer that was really read and decided: a CAN'T TELL rules
+        nothing out, because whatever couldn't be read may be the cause, and a layer that was not
+        read (an unreadable ACL or share, an administrative share, a DFS path) never appears there.
+
+        The headline says "the folder"; the path is in the scope line, so the kit's paste-safe
+        filter removes it unless -FullDetail (D-009). -Credential only contributes its user name.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][object]$Result,
+        [string[]]$EvidencePaths = @(),
+        [System.Management.Automation.PSCredential]$Credential
+    )
+    $items = New-Object System.Collections.Generic.List[object]
+    $next = New-Object System.Collections.Generic.List[string]
+    $id = [string]$Result.Identity
+    $domain = [string]$Result.Domain
+
+    if ($Result.Status -eq 'Ok') {
+        $a = $Result.Assessment; $u = $Result.User
+        $who = if ($u.DisplayName) { [string]$u.DisplayName } else { [string]$u.SamAccountName }
+        $doing = if ($a.Access -eq 'Modify') { 'change files in' } else { 'open' }
+        $what = if ($a.Access -eq 'Modify') { 'change files in it' } else { 'open and list it' }
+        $headline = 'Can {0} {1} the folder?  {2}' -f $who, $doing, $a.VerdictText
+        $scopeLine = 'Share and folder permissions of "{0}" for {1}, checked for: {2}.' -f [string]$Result.PathInfo.Folder, $u.SamAccountName, $what
+
+        $kind = switch ($a.Verdict) { 'PROBABLY YES' { 'Info' } 'PROBABLY NO' { 'Problem' } default { 'Warning' } }
+        if ($a.LimitedBy) { $items.Add((New-TicketNoteItem -Kind $kind -Text "Limited by: $($a.LimitedBy).")) }
+        foreach ($r in @($a.Reasons)) {
+            $k = if ($a.StaleToken -and $r -match 'after their last sign-in') { 'Warning' } else { $kind }
+            $items.Add((New-TicketNoteItem -Kind $k -Text $r))
+        }
+        if ($a.Recommendation -and $a.Recommendation.Warning) { $items.Add((New-TicketNoteItem -Kind Warning -Text $a.Recommendation.Warning)) }
+        foreach ($n in @($a.CouldNotCheck)) { $items.Add((New-TicketNoteItem -Kind NotChecked -Text $n)) }
+
+        if ($a.Verdict -eq 'PROBABLY YES' -or $a.Verdict -eq 'PROBABLY NO') {
+            $sam = [string]$u.SamAccountName
+            if ($a.ShareState -eq 'Yes' -and $Result.PathInfo.Kind -eq 'Normal') {
+                $items.Add((New-TicketNoteItem -Kind Clear -Text "Share permissions on $($Result.PathInfo.Server): they let $sam in." -CouldLook $true))
+            }
+            if ($a.FolderState -eq 'Yes') {
+                $items.Add((New-TicketNoteItem -Kind Clear -Text "Folder permissions: they let $sam $what." -CouldLook $true))
+            }
+            $applyingDeny = @($a.EvidenceRows | Where-Object { $_.Layer -eq 'Folder' -and $_.Type -eq 'Deny' -and $_.Effect -eq 'applies' })
+            if (($a.FolderState -eq 'Yes' -or $a.FolderState -eq 'No') -and $applyingDeny.Count -eq 0) {
+                $items.Add((New-TicketNoteItem -Kind Clear -Text "Deny entries: none in the folder permissions blocks $sam." -CouldLook $true))
+            }
+        }
+        foreach ($s in @($a.NextSteps)) { $next.Add($s) }
+    } else {
+        $notRun = 'The share and folder permissions were not read.'
+        switch ($Result.Status) {
+            'BadInput' {
+                $headline = 'Folder access check did not run - the path is not a network path'
+                $next.Add($script:BadPathMessage)
+            }
+            'NotFound' {
+                $headline = "Folder access check did not run - no user matched '$id'"
+                $next.Add('Check the spelling, or try their sign-in name (for example jdoe or jdoe@contoso.com), then run the check again.')
+            }
+            'Ambiguous' {
+                $cands = @($Result.Candidates)
+                $headline = "Folder access check did not run - '$id' matches $($cands.Count) people"
+                # Enough to recognise the right person; not a directory dump in the ticket.
+                foreach ($c in @($cands | Select-Object -First 5)) {
+                    $items.Add((New-TicketNoteItem -Kind Info -Text ('Matches {0} ({1}).' -f $c.DisplayName, $c.SamAccountName)))
+                }
+                if ($cands.Count -gt 5) { $items.Add((New-TicketNoteItem -Kind Info -Text "...and $($cands.Count - 5) more (refine the search).")) }
+                if ($cands.Count -gt 0) { $domain = Get-DomainDnsFromDn -DistinguishedName ([string]$cands[0].DistinguishedName) }
+                $next.Add('Run it again with the exact sign-in name of the right person.')
+            }
+            default {
+                $headline = "Folder access check for '$id' did not run - could not read Active Directory"
+                if ($Result.Message) { $items.Add((New-TicketNoteItem -Kind Problem -Text $Result.Message)) }
+                $next.Add('Check that this PC can reach a domain controller (and that -Server / -Credential are right), then run the check again.')
+            }
+        }
+        $scopeLine = "Looked up '$id' in Active Directory."
+        $items.Add((New-TicketNoteItem -Kind NotChecked -Text $notRun))
+    }
+
+    if (-not $domain) { $domain = if ($env:USERDNSDOMAIN) { $env:USERDNSDOMAIN.ToLower() } else { 'not known' } }
+    $stampArgs = @{ ScopeLabel = 'Domain'; Scope = $domain }
+    if ($Result.Now -is [datetime]) { $stampArgs['Now'] = $Result.Now }
+    if ($Credential) { $stampArgs['RunAs'] = $Credential.UserName }
+    $stamp = New-TicketNoteStamp @stampArgs
+
+    return New-TicketNote -Tool 'FolderAccess-Check' -Headline $headline -ScopeLine $scopeLine -Items $items.ToArray() `
+        -NextSteps $next.ToArray() -Stamp $stamp -EvidencePaths $EvidencePaths
 }
+
+# The ticket-note kit ships beside this script (a copy of TicketNote\CaseKit.ps1). Without it
+# the check still runs; only the note is skipped.
+$kit = Join-Path $PSScriptRoot 'CaseKit.ps1'
+if (Test-Path -LiteralPath $kit) { . $kit } else { $script:CaseKitMissing = $true }
 
 if ($LoadFunctionsOnly) { return }
 
@@ -1598,20 +2240,87 @@ if ($LoadFunctionsOnly) { return }
 # Main
 # =============================================================================
 
+# A result for the cases where the check cannot start (-PassThru callers get it instead of an exit code).
+function New-FolderAccessStartFailure([string]$Status, [int]$ExitCode, [string]$Message) {
+    [PSCustomObject]@{
+        Status = $Status; ExitCode = $ExitCode; Identity = $Identity; Path = $Path; Access = $Access; Message = $Message
+        Candidates = @(); MatchedBy = ''; User = $null; Groups = @(); Assessment = $null; PathInfo = $null; Protocol = ''
+        Files = $null; ReportError = ''; Now = (Get-Date); Domain = ''; TicketNote = $null
+    }
+}
+
+if ($TicketNumber -and $script:CaseKitMissing) {
+    if (-not $Quiet) { Write-Status "CaseKit.ps1 is missing from this folder, so -TicketNumber $TicketNumber was ignored: the reports go to -OutputPath (if given) and there is no ticket note this time." 'WARN' }
+    $TicketNumber = ''
+    $script:CaseKitWarned = $true
+}
+if ($TicketNumber -and -not (Test-TicketNumber -TicketNumber $TicketNumber)) {
+    $msg = "'$TicketNumber' is not a usable ticket number. Use letters, digits, - or _ (up to 32 characters, starting with a letter or digit), for example 482113."
+    if (-not $Quiet) { Write-Status $msg 'FAIL' }
+    if ($PassThru) { return (New-FolderAccessStartFailure 'Error' 3 $msg) }
+    exit 3
+}
+
 if (-not (Split-FolderAccessPath -Path $Path).Valid) {
-    Write-Status $script:BadPathMessage 'FAIL'
+    if (-not $Quiet) { Write-Status $script:BadPathMessage 'FAIL' }
+    if ($PassThru) { return (New-FolderAccessStartFailure 'BadInput' 2 $script:BadPathMessage) }
     exit 2
 }
 
 try {
     Import-Module ActiveDirectory -ErrorAction Stop
 } catch {
-    Write-Status "The ActiveDirectory PowerShell module is not available: $($_.Exception.Message)" 'FAIL'
-    Write-Status 'Install the RSAT Active Directory tools, or run this on an admin server that has them.' 'INFO'
+    $msg = "The ActiveDirectory PowerShell module is not available: $($_.Exception.Message)"
+    if (-not $Quiet) {
+        Write-Status $msg 'FAIL'
+        Write-Status 'Install the RSAT Active Directory tools, or run this on an admin server that has them.' 'INFO'
+    }
+    if ($PassThru) { return (New-FolderAccessStartFailure 'Error' 3 $msg) }
     exit 3
 }
 
+# Where the files go: with -TicketNumber, <OutputPath or the default root>\Ticket_<n> (reports
+# and note together, so the note's evidence names sit beside it); with only -OutputPath, that
+# folder; with neither, no files: the note goes to the clipboard, or the console (D-012, D-013).
+$folder = $OutputPath
+if ($TicketNumber) {
+    $root = if ($OutputPath) { $OutputPath } else { Get-TicketNoteDefaultRoot }
+    try {
+        $folder = Resolve-TicketFolder -TicketNumber $TicketNumber -Root $root
+    } catch {
+        if (-not $Quiet) { Write-Status "Could not create the ticket folder under ${root}: $($_.Exception.Message)" 'WARN' }
+    }
+}
+
 $result = Invoke-FolderAccessCheck -Identity $Identity -Path $Path -Access $Access -Server $Server -Credential $Credential `
-    -OutputPath $OutputPath -MaxNestingDepth $MaxNestingDepth
-Write-FolderAccessConsole -Result $result
+    -OutputPath $folder -MaxNestingDepth $MaxNestingDepth
+if (-not $Quiet) { Write-FolderAccessConsole -Result $result }
+
+$evidence = @()
+if ($result.Files) { $evidence = @($result.Files.Html, $result.Files.Csv) }
+
+$note = $null
+if ($script:CaseKitMissing) {
+    if (-not $Quiet -and -not $script:CaseKitWarned) { Write-Status 'CaseKit.ps1 is missing from this folder - no ticket note this time.' 'WARN' }
+} else {
+    # The note is extra: a failure while building or saving it never changes the answer or the
+    # exit code. The check's own result above stands.
+    try {
+        $note = ConvertTo-FolderAccessTicketNote -Result $result -EvidencePaths $evidence -Credential $Credential
+        if ($Quiet) {
+            # Another script is the caller: no console and no clipboard. The note is still saved
+            # when a folder is in play, and it is always on the result object.
+            if ($folder) { $null = Save-TicketNote -Note $note -Folder $folder -PasteSafe:(-not $FullDetail) }
+        } else {
+            Write-Host ''
+            $null = Publish-TicketNote -Note $note -Folder $folder -PasteSafe:(-not $FullDetail) -NoClipboard:$NoClipboard
+        }
+    } catch {
+        if (-not $Quiet) { Write-Status "Could not make the ticket note: $($_.Exception.Message). The check above is still valid." 'WARN' }
+        $note = $null
+    }
+}
+$result.TicketNote = $note
+
+if ($PassThru) { return $result }
 exit $result.ExitCode

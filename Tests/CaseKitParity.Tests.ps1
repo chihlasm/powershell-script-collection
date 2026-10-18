@@ -19,7 +19,7 @@ Describe 'CaseKit.ps1 copies' {
         $copies = @(Get-ChildItem -LiteralPath $script:RepoRoot -Recurse -Filter 'CaseKit.ps1' -File |
             Where-Object { $_.FullName.Substring($script:RepoRoot.Length) -notmatch '(?i)[\\/](dist|work-in-progress|\.worktrees)[\\/]' })
         $relative = @($copies | ForEach-Object { $_.FullName.Substring($script:RepoRoot.Length).TrimStart('\', '/').Replace('/', '\') })
-        foreach ($required in 'TicketNote\CaseKit.ps1', 'AD-UserQuickCheck\CaseKit.ps1', 'Network-QuickCheck\CaseKit.ps1', 'Citrix-FSLogix-Triage\CaseKit.ps1') {
+        foreach ($required in 'TicketNote\CaseKit.ps1', 'AD-UserQuickCheck\CaseKit.ps1', 'Network-QuickCheck\CaseKit.ps1', 'Citrix-FSLogix-Triage\CaseKit.ps1', 'FolderAccess-Check\CaseKit.ps1') {
             $relative | Should -Contain $required
         }
         $want = Get-KitText $script:Canonical
