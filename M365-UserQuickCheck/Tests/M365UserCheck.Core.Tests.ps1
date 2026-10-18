@@ -47,6 +47,15 @@ BeforeAll {
             $StatusCodeVariable, [switch]$SkipHttpErrorCheck, $GraphRequestSession, $UserAgent, $OutputType)
     }
 
+    # SQ-011 review: a file-level Get-ADUser that THROWS. A test that forgets to mock it fails
+    # loudly instead of reaching a domain controller (the Describes below shadow it with their
+    # own stub and Mock). Real parameter names, as in the stubs below.
+    function Get-ADUser {
+        [CmdletBinding()]
+        param($Identity, $LDAPFilter, $Filter, $Server, [pscredential]$Credential, $Properties, $SearchBase, $ResultSetSize)
+        throw 'Get-ADUser was called without a Mock: a test must never reach a real domain controller.'
+    }
+
     if (Test-Path -LiteralPath $script:CorePath) { . $script:CorePath -LoadFunctionsOnly }
 
     $script:Now = New-Object DateTime -ArgumentList 2026, 10, 17, 14, 0, 0, ([DateTimeKind]::Utc)
@@ -814,6 +823,46 @@ Describe 'SQ-011 on-premises comparison, pure assessment' {
         Get-Reason (Get-M365UserAssessment -Facts (New-HybridFacts @{ AdUser = $ad })) 'UpnMismatch' | Should -BeNullOrEmpty
     }
 
+    It 'AC25b_SidMismatchWarns: synced user, AD account found only by sign-in name -> Warning "SID differs", no AdAgrees pass, verdict unchanged' {
+        $a = Get-M365UserAssessment -Facts (New-HybridFacts @{ AdMatchedBy = 'UserPrincipalName' })
+        $r = Get-Reason $a 'SidMismatch'
+        $r.Level | Should -Be 'Warning'
+        $r.Message | Should -Match ([regex]::Escape('AD account found by sign-in name, but its SID differs from the one Microsoft 365 holds (recreated account?)'))
+        @($a.Cleared | Where-Object { $_.Code -eq 'AdAgrees' }).Count | Should -Be 0
+        ($a.Passes -join "`n") | Should -Not -Match 'agrees with Microsoft 365'
+        $a.Verdict | Should -Be 'YES'
+    }
+
+    It 'AC25b_SidMismatchWarns: matched by SID -> no SID warning and the AdAgrees pass stays' {
+        $a = Get-M365UserAssessment -Facts (New-HybridFacts)
+        Get-Reason $a 'SidMismatch' | Should -BeNullOrEmpty
+        @($a.Cleared | Where-Object { $_.Code -eq 'AdAgrees' }).Count | Should -Be 1
+    }
+
+    It 'AC25b_SidMismatchWarns: a synced user with no SID value to compare is not accused of a mismatch' {
+        $u = New-SyncedUser; $u.Remove('onPremisesSecurityIdentifier')
+        $a = Get-M365UserAssessment -Facts (New-HybridFacts @{ User = $u; AdMatchedBy = 'UserPrincipalName' })
+        Get-Reason $a 'SidMismatch' | Should -BeNullOrEmpty
+    }
+
+    It 'AC22c_AddressCheckFailedIsCouldNotCheck: AddressCheckError -> CouldNotCheck lists "Address conflicts" with the error, not only an Info reason' {
+        $a = Get-M365UserAssessment -Facts (New-HybridFacts @{ AddressCheckError = 'Forbidden: Insufficient privileges to complete the operation' })
+        $c = @($a.CouldNotCheck | Where-Object { $_.Source -eq 'Address conflicts' })
+        $c.Count | Should -Be 1
+        $c[0].Reason | Should -Match 'Insufficient privileges'
+        @($a.Reasons | Where-Object { $_.Code -eq 'AddressCheckFailed' -and $_.Level -eq 'Info' }).Count | Should -Be 0 -Because 'it is a Could not check item, not an Info reason'
+    }
+
+    It 'AC22c_AddressCheckFailedIsCouldNotCheck: no error -> no "Address conflicts" entry' {
+        $a = Get-M365UserAssessment -Facts (New-HybridFacts)
+        @($a.CouldNotCheck | Where-Object { $_.Source -eq 'Address conflicts' }).Count | Should -Be 0
+    }
+
+    It 'AC22c_AddressCheckFailedIsCouldNotCheck: the Could not check line reads "Address conflicts: <reason>"' {
+        $line = Format-M365CouldNotCheckLine -Item ([PSCustomObject]@{ Source = 'Address conflicts'; Reason = 'the lookup failed' })
+        $line | Should -Be 'Address conflicts: the lookup failed'
+    }
+
     It 'Edge_HealthyHybridAccount: synced, AD agrees, nothing held, recent sync -> YES with no AD reasons' {
         $a = Get-M365UserAssessment -Facts (New-HybridFacts)
         $a.Verdict | Should -Be 'YES'
@@ -957,6 +1006,63 @@ Describe 'SQ-011 Get-M365OnPremisesFacts (AD and Graph faked)' {
         $null = Get-M365OnPremisesFacts -User (New-User @{ onPremisesSyncEnabled = $true; onPremisesSecurityIdentifier = $script:Sid }) -UserPrincipalName 'jdoe@contoso.com'
         @($script:GraphUris | Where-Object { $_ -match 'alias@contoso\.com' }).Count | Should -Be 0
     }
+
+    It 'AC22b_AddressConflictFieldsMatch: the AD UPN is looked up only as userPrincipalName; the primary SMTP only as mail/proxyAddresses' {
+        # AD UPN differs from the primary SMTP, as in many tenants (jdoe@ vs jane.doe@).
+        $script:AdBySid = @{ Enabled = $true; UserPrincipalName = 'jdoe@contoso.com'; mail = 'jane.doe@contoso.com'; proxyAddresses = @('SMTP:jane.doe@contoso.com'); SamAccountName = 'jdoe'; DistinguishedName = 'CN=Jane Doe,OU=Staff,DC=contoso,DC=com' }
+        $null = Get-M365OnPremisesFacts -User (New-User @{ onPremisesSyncEnabled = $true; onPremisesSecurityIdentifier = $script:Sid }) -UserPrincipalName 'jdoe@contoso.com'
+        $uris = @($script:GraphUris)
+        $upnLookups = @($uris | Where-Object { $_ -match 'jdoe@contoso\.com' })
+        $upnLookups.Count | Should -BeGreaterThan 0
+        foreach ($u in $upnLookups) { $u | Should -Match '/users\?.*userPrincipalName eq ' -Because "the UPN is matched to userPrincipalName only: $u" }
+        $smtpLookups = @($uris | Where-Object { $_ -match 'jane\.doe@contoso\.com' })
+        $smtpLookups.Count | Should -BeGreaterThan 0
+        foreach ($u in $smtpLookups) { $u | Should -Not -Match 'userPrincipalName eq' -Because "the primary SMTP is never matched to a UPN: $u" }
+        @($smtpLookups | Where-Object { $_ -match 'mail eq ' }).Count | Should -BeGreaterThan 0
+        @($smtpLookups | Where-Object { $_ -match 'proxyAddresses' }).Count | Should -BeGreaterThan 0
+        @($uris | Where-Object { $_ -match '/(groups|contacts)' -and $_ -match 'jdoe@contoso\.com' }).Count | Should -Be 0 -Because 'groups and contacts have no sign-in name'
+    }
+
+    It 'AC22b_AddressConflictFieldsMatch: another user whose UPN equals this user''s primary SMTP is not a conflict; one whose mail equals it is' {
+        $script:AdBySid = @{ Enabled = $true; UserPrincipalName = 'jdoe@contoso.com'; mail = 'jane.doe@contoso.com'; proxyAddresses = @('SMTP:jane.doe@contoso.com'); SamAccountName = 'jdoe'; DistinguishedName = 'CN=Jane Doe,OU=Staff,DC=contoso,DC=com' }
+        # A fake that answers by the field in the $filter, as Graph does.
+        Mock Invoke-MgGraphRequest {
+            $u = [uri]::UnescapeDataString([string]$Uri)
+            $script:GraphUris.Add("$Method $u")
+            if ($u -match '/users\?.*userPrincipalName eq ''jane\.doe@contoso\.com''') { return @{ value = @(@{ id = 'eeeeeeee-0000-0000-0000-00000000000a'; displayName = 'Jane Doe (UPN only)' }) } }
+            if ($u -match '/users\?.*mail eq ''jane\.doe@contoso\.com''') { return @{ value = @(@{ id = 'eeeeeeee-0000-0000-0000-00000000000b'; displayName = 'Jane Doe (mail holder)' }) } }
+            return @{ value = @() }
+        }
+        $r = Get-M365OnPremisesFacts -User (New-User @{ onPremisesSyncEnabled = $true; onPremisesSecurityIdentifier = $script:Sid }) -UserPrincipalName 'jdoe@contoso.com'
+        $names = @($r.AddressConflicts | ForEach-Object DisplayName)
+        $names | Should -Not -Contain 'Jane Doe (UPN only)'
+        $names | Should -Contain 'Jane Doe (mail holder)'
+    }
+
+    It 'AC25b_SidMismatchWarns: SID not found, UPN match -> the facts say AdMatchedBy UserPrincipalName, which the assessment warns on' {
+        $script:AdBySid = $null; $script:AdByFilter = @((New-AdUserObj))
+        $r = Get-M365OnPremisesFacts -User (New-User @{ onPremisesSyncEnabled = $true; onPremisesSecurityIdentifier = $script:Sid }) -UserPrincipalName 'jdoe@contoso.com'
+        $r.AdMatchedBy | Should -Be 'UserPrincipalName'
+        $r.AdUser | Should -Not -BeNullOrEmpty
+        $facts = New-Facts @{ User = (New-User @{ onPremisesSyncEnabled = $true; onPremisesSecurityIdentifier = $script:Sid }); OnPremisesGate = $r.Gate; AdUser = $r.AdUser; AdMatchedBy = $r.AdMatchedBy }
+        (Get-Reason (Get-M365UserAssessment -Facts $facts) 'SidMismatch').Level | Should -Be 'Warning'
+    }
+
+    It 'AC22c_AddressCheckFailedIsCouldNotCheck: a failing Graph lookup sets AddressCheckError and the assessment lists Address conflicts under Could not check' {
+        Mock Invoke-MgGraphRequest { throw 'Response status code does not indicate success: Forbidden (Forbidden). {"error":{"code":"Authorization_RequestDenied","message":"Insufficient privileges to complete the operation."}}' }
+        $r = Get-M365OnPremisesFacts -User (New-User @{ onPremisesSyncEnabled = $true; onPremisesSecurityIdentifier = $script:Sid }) -UserPrincipalName 'jdoe@contoso.com'
+        $r.Gate.State | Should -Be 'Available'
+        $r.AddressCheckError | Should -Not -BeNullOrEmpty
+        $facts = New-Facts @{ User = (New-User @{ onPremisesSyncEnabled = $true; onPremisesSecurityIdentifier = $script:Sid }); OnPremisesGate = $r.Gate; AdUser = $r.AdUser; AdMatchedBy = $r.AdMatchedBy; AddressCheckError = $r.AddressCheckError }
+        $a = Get-M365UserAssessment -Facts $facts
+        @($a.CouldNotCheck | Where-Object { $_.Source -eq 'Address conflicts' }).Count | Should -Be 1
+    }
+}
+
+Describe 'SQ-011 test safety (core)' {
+    It 'the file-level Get-ADUser stub throws when a test forgets to mock it' {
+        { Get-ADUser -Identity 'jdoe' } | Should -Throw '*without a Mock*'
+    }
 }
 
 Describe 'SQ-011 mocks cannot lie about Get-ADUser parameter names' {
@@ -964,7 +1070,9 @@ Describe 'SQ-011 mocks cannot lie about Get-ADUser parameter names' {
     # calls against the real Get-ADUser. Run in a child pwsh so this session keeps the stub.
     BeforeAll {
         $script:RealAdParams = @()
+        # ADPS_LoadDefaultDrive = 0 stops the module mapping the AD: drive, which contacts a DC.
         $json = & pwsh -NoProfile -Command @'
+$env:ADPS_LoadDefaultDrive = 0
 $c = Get-Command Get-ADUser -Module ActiveDirectory -ErrorAction SilentlyContinue
 if ($c) { @($c.Parameters.Keys) | ConvertTo-Json -Compress }
 '@
