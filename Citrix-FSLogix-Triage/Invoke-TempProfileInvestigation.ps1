@@ -77,9 +77,10 @@
     %USERPROFILE%\Documents\TicketNotes. A number that does not fit is refused with a [FAIL]
     line and exit code 1, before anything is checked.
 .PARAMETER NoClipboard
-    Do not copy the ticket note to the clipboard. Without it the note goes to the clipboard,
-    where it can enter clipboard history (Win+V) or the cloud clipboard on Windows PowerShell
-    5.0 and later, and travels over RDP clipboard redirection.
+    Do not copy the ticket note to the clipboard. Without it the note goes to the clipboard
+    marked to stay out of clipboard history (Win+V) and the cloud clipboard; only when that
+    fails (e.g. an MTA host) is Set-Clipboard used, which cannot opt out. Either way it
+    travels over RDP clipboard redirection.
 .PARAMETER FullDetail
     Keep file paths, profile disk names and IP addresses in the ticket note. By default the
     note is paste-safe: they are removed, and server and user names stay.
@@ -174,8 +175,8 @@
       (DOMAIN\user), -MaxRecordCount; output DNSName, HostedMachineName (hypervisor name, may
       not match DNS), MachineName, SessionState (Connected, Active, Disconnected, ...)
         https://developer-docs.citrix.com/en-us/citrix-virtual-apps-desktops-sdk/2407/Broker/Get-BrokerSession.html
-      Ticket note clipboard (in CaseKit.ps1): Set-Clipboard is 5.0, so it is used behind a
-      Get-Command check with a WinForms fallback
+      Ticket note clipboard (in CaseKit.ps1): the WinForms clipboard first; Set-Clipboard is
+      5.0, so the fallback is behind a Get-Command check
         https://learn.microsoft.com/powershell/scripting/whats-new/what-s-new-in-windows-powershell-50
       Import-PowerShellDataFile is 5.0; Import-LocalizedData reads the same file on 3.0 / 4.0
         https://learn.microsoft.com/powershell/module/microsoft.powershell.utility/import-localizeddata

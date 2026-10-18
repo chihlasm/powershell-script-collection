@@ -573,6 +573,8 @@ Describe 'ticket note (adapter)' {
 #    are shadowed by GLOBAL ALIASES, because an alias outranks a function, and a function the
 #    script defines in its own scope would otherwise outrank a Pester mock. The aliases are
 #    removed after every test.
+#  - the kit copies with the WinForms clipboard first (D-033), so the fake records each text
+#    in $global:TrgClipboard; Set-Clipboard (the fallback) must stay uncalled.
 #  - Test-Path is only mocked for \\ paths, so the kit and the report writer use the real one
 #    inside $TestDrive (an unfiltered "return true" would make the kit's unique-name loop spin).
 Describe 'ticket note (script, in-process)' {
@@ -591,7 +593,7 @@ Describe 'ticket note (script, in-process)' {
                 [PSCustomObject]@{ Label = 'Policies path (not documented for profile settings)'; Path = 'HKLM:\SOFTWARE\Policies\FSLogix\Profiles'; Found = $false; Error = '' }
             )
         }
-        function global:TrgFake-Clipboard { param($Text) }
+        function global:TrgFake-Clipboard { param($Text) $global:TrgClipboard.Add($Text) }
         function global:TrgFake-DefaultRoot { $global:TrgRoot }
         function global:TrgFake-Throw { throw 'simulated note failure' }
         $script:AliasNames = 'Get-FSLogixRegistrySnapshot', 'Invoke-WinFormsClipboard', 'Get-TicketNoteDefaultRoot', 'ConvertTo-CitrixFSLogixTriageTicketNote'
@@ -618,6 +620,7 @@ Describe 'ticket note (script, in-process)' {
     }
     BeforeEach {
         $global:TrgRoot = Join-Path $TestDrive 'defaultroot'
+        $global:TrgClipboard = New-Object System.Collections.Generic.List[string]
         Set-Alias -Name Get-FSLogixRegistrySnapshot -Value TrgFake-Registry -Scope Global
         Set-Alias -Name Invoke-WinFormsClipboard -Value TrgFake-Clipboard -Scope Global
         Set-Alias -Name Get-TicketNoteDefaultRoot -Value TrgFake-DefaultRoot -Scope Global
@@ -627,7 +630,7 @@ Describe 'ticket note (script, in-process)' {
     AfterAll {
         Clear-TrgAliases
         Remove-Item -LiteralPath Function:\TrgFake-Registry, Function:\TrgFake-RegistryMalformed, Function:\TrgFake-Clipboard, Function:\TrgFake-DefaultRoot, Function:\TrgFake-Throw -ErrorAction SilentlyContinue
-        Remove-Variable -Name TrgRoot -Scope Global -ErrorAction SilentlyContinue
+        Remove-Variable -Name TrgRoot, TrgClipboard -Scope Global -ErrorAction SilentlyContinue
     }
 
     It 'loading the functions also loads the kit (the adapter can call New-TicketNote)' {
@@ -637,11 +640,14 @@ Describe 'ticket note (script, in-process)' {
 
     It 'Wiring_Clipboard: -NoClipboard and -Quiet skip the clipboard; the default copies exactly once' {
         $null = Invoke-Trg @{ ComputerName = 'RDSH01'; NoClipboard = $true }
+        $global:TrgClipboard.Count | Should -Be 0
         Should -Invoke Set-Clipboard -Times 0 -Exactly
         $null = Invoke-Trg @{ ComputerName = 'RDSH01'; Quiet = $true }
+        $global:TrgClipboard.Count | Should -Be 0
         Should -Invoke Set-Clipboard -Times 0 -Exactly
         $null = Invoke-Trg @{ ComputerName = 'RDSH01' }
-        Should -Invoke Set-Clipboard -Times 1 -Exactly
+        $global:TrgClipboard.Count | Should -Be 1
+        Should -Invoke Set-Clipboard -Times 0 -Exactly -Because 'the WinForms clipboard comes first (D-033)'
     }
 
     It 'Wiring_TicketFolder: -TicketNumber puts the reports and the note in Ticket_<n>, and the note names the reports' {
@@ -672,6 +678,7 @@ Describe 'ticket note (script, in-process)' {
         $x.Text | Should -Match ([regex]::Escape("[FAIL] '..\x' is not a usable ticket number"))
         Should -Invoke Test-Connection -Times 0 -Exactly
         Should -Invoke Set-Clipboard -Times 0 -Exactly
+        $global:TrgClipboard.Count | Should -Be 0
     }
 
     It 'Wiring_TicketNumberIsNotValidatePattern: the parameter has no ValidatePattern (the body gives the plain-English message)' {
@@ -698,7 +705,10 @@ Describe 'ticket note (script, in-process)' {
 
     It 'Wiring_ClipboardIsPasteSafe: the clipboard text is redacted by default' {
         $null = Invoke-Trg @{ ComputerName = 'RDSH01' }
-        Should -Invoke Set-Clipboard -Times 1 -Exactly -ParameterFilter { $Value -notmatch 'fs01' -and $Value -match '\[Ticket note\] Citrix-FSLogix-Triage' }
+        $global:TrgClipboard.Count | Should -Be 1
+        $global:TrgClipboard[0] | Should -Not -Match 'fs01'
+        $global:TrgClipboard[0] | Should -Match '\[Ticket note\] Citrix-FSLogix-Triage'
+        Should -Invoke Set-Clipboard -Times 0 -Exactly
     }
 
     It 'Wiring_MalformedCloudCacheStaysOut: a malformed entry never reaches the clipboard, console, reports or either note (regression)' {
@@ -711,8 +721,10 @@ Describe 'ticket note (script, in-process)' {
         $x.ExitCode | Should -Be 2 -Because 'the misspelled entry is a problem'
         $x.Text | Should -Match 'Cloud Cache location spelling'
         $x.Text | Should -Not -Match $leak
-        Should -Invoke Set-Clipboard -Times 1 -Exactly
-        Should -Invoke Set-Clipboard -Times 1 -Exactly -ParameterFilter { $Value -match '\[Ticket note\]' -and $Value -notmatch 'SECRETKEY|AccountKey|AccountName|DefaultEndpointsProtocol' }
+        $global:TrgClipboard.Count | Should -Be 1
+        $global:TrgClipboard[0] | Should -Match '\[Ticket note\]'
+        $global:TrgClipboard[0] | Should -Not -Match $leak
+        Should -Invoke Set-Clipboard -Times 0 -Exactly
 
         $null = Invoke-Trg @{ ComputerName = 'RDSH01'; OutputPath = $full; NoClipboard = $true; FullDetail = $true }
         foreach ($dir in $safe, $full) {
@@ -748,6 +760,7 @@ Describe 'ticket note (script, in-process)' {
         $x.ExitCode | Should -Be 0
         $x.Text | Should -Match '\[WARN\] Could not make the ticket note'
         Should -Invoke Set-Clipboard -Times 0 -Exactly
+        $global:TrgClipboard.Count | Should -Be 0
         Mock Test-Connection { $false }
         (Invoke-Trg @{ ComputerName = 'RDSH01' }).ExitCode | Should -Be 1
     }
@@ -768,6 +781,7 @@ Describe 'ticket note (script, in-process)' {
         $res[0].TicketNote.Tool | Should -Be 'Citrix-FSLogix-Triage'
         @($x.Out | Where-Object { $_ -isnot [pscustomobject] }).Count | Should -Be 0
         Should -Invoke Set-Clipboard -Times 0 -Exactly
+        $global:TrgClipboard.Count | Should -Be 0
     }
 
     It 'Wiring_MissingKit: without CaseKit.ps1 next to it, the tool runs as today and says there is no note' {
@@ -779,5 +793,6 @@ Describe 'ticket note (script, in-process)' {
         $x.ExitCode | Should -Be 0
         $x.Text | Should -Match '\[WARN\] CaseKit\.ps1 is missing from this folder - no ticket note this time\.'
         Should -Invoke Set-Clipboard -Times 0 -Exactly
+        $global:TrgClipboard.Count | Should -Be 0
     }
 }

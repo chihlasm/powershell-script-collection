@@ -290,6 +290,8 @@ Describe 'ticket note (adapter)' {
 #    Invoke-WinFormsClipboard and Get-TicketNoteDefaultRoot) are shadowed by GLOBAL ALIASES,
 #    because an alias outranks a function, and a function the script defines in its own scope
 #    would otherwise outrank a Pester mock. The aliases are removed after every test.
+#  - the kit copies with the WinForms clipboard first (D-033), so the fake records each text
+#    in $global:NqcClipboard; Set-Clipboard (the fallback) must stay uncalled.
 Describe 'ticket note (script, in-process)' {
     BeforeAll {
         function global:NqcFake-TcpPort { param($ComputerName, $Port, $TimeoutMilliseconds)
@@ -297,7 +299,7 @@ Describe 'ticket note (script, in-process)' {
             else { [PSCustomObject]@{ Succeeded = $false; LocalAddress = ''; RemoteAddress = ''; Error = 'No answer within 3000 ms' } }
         }
         function global:NqcFake-Resolve { param($Name) [PSCustomObject]@{ Name = "$Name.contoso.com"; Type = 'A'; IPAddress = '10.0.0.5'; NameHost = '' } }
-        function global:NqcFake-Clipboard { param($Text) }
+        function global:NqcFake-Clipboard { param($Text) $global:NqcClipboard.Add($Text) }
         function global:NqcFake-DefaultRoot { $global:NqcRoot }
         function global:NqcFake-Throw { throw 'simulated note failure' }
         $script:AliasNames = 'Test-TcpPort', 'Resolve-TargetName', 'Invoke-WinFormsClipboard', 'Get-TicketNoteDefaultRoot', 'ConvertTo-NetworkQuickCheckTicketNote'
@@ -311,6 +313,7 @@ Describe 'ticket note (script, in-process)' {
     BeforeEach {
         $global:NqcTcpOk = $true
         $global:NqcRoot = Join-Path $TestDrive 'defaultroot'
+        $global:NqcClipboard = New-Object System.Collections.Generic.List[string]
         Set-Alias -Name Test-TcpPort -Value NqcFake-TcpPort -Scope Global
         Set-Alias -Name Resolve-TargetName -Value NqcFake-Resolve -Scope Global
         Set-Alias -Name Invoke-WinFormsClipboard -Value NqcFake-Clipboard -Scope Global
@@ -323,7 +326,7 @@ Describe 'ticket note (script, in-process)' {
     AfterAll {
         Clear-NqcAliases
         Remove-Item -LiteralPath Function:\NqcFake-TcpPort, Function:\NqcFake-Resolve, Function:\NqcFake-Clipboard, Function:\NqcFake-DefaultRoot, Function:\NqcFake-Throw -ErrorAction SilentlyContinue
-        Remove-Variable -Name NqcTcpOk, NqcRoot -Scope Global -ErrorAction SilentlyContinue
+        Remove-Variable -Name NqcTcpOk, NqcRoot, NqcClipboard -Scope Global -ErrorAction SilentlyContinue
     }
 
     It 'loading the functions also loads the kit (the adapter can call New-TicketNote)' {
@@ -333,11 +336,14 @@ Describe 'ticket note (script, in-process)' {
 
     It 'Wiring_Clipboard: -NoClipboard and -Quiet skip the clipboard; the default copies exactly once' {
         $null = Invoke-Nqc @{ TargetAddress = 'filesrv01'; Port = 445; NoClipboard = $true }
+        $global:NqcClipboard.Count | Should -Be 0
         Should -Invoke Set-Clipboard -Times 0 -Exactly
         $null = Invoke-Nqc @{ TargetAddress = 'filesrv01'; Port = 445; Quiet = $true }
+        $global:NqcClipboard.Count | Should -Be 0
         Should -Invoke Set-Clipboard -Times 0 -Exactly
         $null = Invoke-Nqc @{ TargetAddress = 'filesrv01'; Port = 445 }
-        Should -Invoke Set-Clipboard -Times 1 -Exactly
+        $global:NqcClipboard.Count | Should -Be 1
+        Should -Invoke Set-Clipboard -Times 0 -Exactly -Because 'the WinForms clipboard comes first (D-033)'
     }
 
     It 'Wiring_TicketFolder: -TicketNumber puts the reports and the note in Ticket_<n>, and the note names the reports' {
@@ -368,6 +374,7 @@ Describe 'ticket note (script, in-process)' {
         $x.Text | Should -Match ([regex]::Escape("[FAIL] '..\x' is not a usable ticket number"))
         Should -Invoke Test-Connection -Times 0 -Exactly
         Should -Invoke Set-Clipboard -Times 0 -Exactly
+        $global:NqcClipboard.Count | Should -Be 0
     }
 
     It 'Wiring_TicketNumberIsNotValidatePattern: the parameter has no ValidatePattern (the body gives the plain-English message)' {
@@ -394,7 +401,10 @@ Describe 'ticket note (script, in-process)' {
 
     It 'Wiring_ClipboardIsPasteSafe: the clipboard text is redacted by default' {
         $null = Invoke-Nqc @{ TargetAddress = 'filesrv01'; Port = 445 }
-        Should -Invoke Set-Clipboard -Times 1 -Exactly -ParameterFilter { $Value -notmatch '10\.0\.0\.5' -and $Value -match '\[Ticket note\] Network-QuickCheck' }
+        $global:NqcClipboard.Count | Should -Be 1
+        $global:NqcClipboard[0] | Should -Not -Match '10\.0\.0\.5'
+        $global:NqcClipboard[0] | Should -Match '\[Ticket note\] Network-QuickCheck'
+        Should -Invoke Set-Clipboard -Times 0 -Exactly
     }
 
     It 'Wiring_ExitCodesUnchanged: with the note on, exit is 0 when reachable, 1 on a warning, 2 when the port is closed' {
@@ -411,6 +421,7 @@ Describe 'ticket note (script, in-process)' {
         $x.ExitCode | Should -Be 0
         $x.Text | Should -Match '\[WARN\] Could not make the ticket note'
         Should -Invoke Set-Clipboard -Times 0 -Exactly
+        $global:NqcClipboard.Count | Should -Be 0
         $global:NqcTcpOk = $false
         (Invoke-Nqc @{ TargetAddress = 'filesrv01'; Port = 445 }).ExitCode | Should -Be 2
     }
@@ -431,6 +442,7 @@ Describe 'ticket note (script, in-process)' {
         $res[0].TicketNote.Tool | Should -Be 'Network-QuickCheck'
         @($x.Out | Where-Object { $_ -isnot [pscustomobject] }).Count | Should -Be 0
         Should -Invoke Set-Clipboard -Times 0 -Exactly
+        $global:NqcClipboard.Count | Should -Be 0
     }
 
     It 'Wiring_MissingKit: without CaseKit.ps1 next to it, the tool runs as today and says there is no note' {
@@ -442,5 +454,6 @@ Describe 'ticket note (script, in-process)' {
         $x.ExitCode | Should -Be 0
         $x.Text | Should -Match '\[WARN\] CaseKit\.ps1 is missing from this folder - no ticket note this time\.'
         Should -Invoke Set-Clipboard -Times 0 -Exactly
+        $global:NqcClipboard.Count | Should -Be 0
     }
 }

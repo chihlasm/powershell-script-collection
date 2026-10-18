@@ -26,19 +26,21 @@
     Pure ASCII, no ::new(), no classes: Windows PowerShell 3.0 must be able to read it.
 .NOTES
     REFERENCES
-      Set-Clipboard first shipped in Windows PowerShell 5.0, so it is only used behind a
-      Get-Command check, with a WinForms fallback for 3.0 / 4.0
+      The note goes to the WinForms clipboard first (every version from 3.0). Set-Clipboard is
+      only the fallback when WinForms fails, and it first shipped in Windows PowerShell 5.0, so
+      it is only used behind a Get-Command check
         https://learn.microsoft.com/powershell/scripting/whats-new/what-s-new-in-windows-powershell-50
         https://learn.microsoft.com/powershell/module/microsoft.powershell.management/set-clipboard?view=powershell-5.1
       powershell.exe defaults to a single-threaded apartment (STA) since 3.0; -Mta changes that
         https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_powershell_exe?view=powershell-5.1
-      The WinForms clipboard throws ThreadStateException outside STA (MTA hosts), so the call
-      is wrapped and a failure is reported, not fatal
+      The WinForms clipboard throws ThreadStateException outside STA (MTA hosts), so an MTA
+      host is treated as "WinForms unavailable" and Set-Clipboard is tried instead
         https://learn.microsoft.com/dotnet/api/system.windows.forms.clipboard.setdataobject
       Clipboard history and the cloud clipboard: a DWORD of zero in the registered formats
       CanIncludeInClipboardHistory / CanUploadToCloudClipboard keeps the item out of Win+V
-      history and off the user's other devices. The WinForms path sets both; Set-Clipboard
-      cannot, so on 5.0 and later the note can enter history (-NoClipboard avoids it)
+      history and off the user's other devices. The WinForms path (the default) sets both.
+      Set-Clipboard cannot, so only when it is the fallback (e.g. an MTA host) can the note
+      enter history (-NoClipboard avoids the clipboard entirely)
         https://learn.microsoft.com/windows/win32/dataxchg/clipboard-formats
       Why not clip.exe: piping to a native program encodes with $OutputEncoding, which is
       ASCIIEncoding in Windows PowerShell 5.1, so a name such as Mueller-with-umlaut is mangled
@@ -388,13 +390,17 @@ function New-TicketNoteClipboardData {
 }
 
 function Invoke-WinFormsClipboard {
-    # The clipboard on Windows PowerShell 3.0 / 4.0, which have no Set-Clipboard, and the
-    # fallback when Set-Clipboard fails. Kept apart so tests can mock it. Unlike Set-Clipboard
-    # it marks the note as not for clipboard history or the cloud clipboard (see
-    # New-TicketNoteClipboardData). SetDataObject(..., $true) keeps the data after this
-    # process exits. Throws ThreadStateException in an MTA host (powershell.exe -Mta).
+    # The default clipboard path on every version (D-033). Kept apart so tests can mock it.
+    # Unlike Set-Clipboard it marks the note as not for clipboard history or the cloud
+    # clipboard (see New-TicketNoteClipboardData). SetDataObject(..., $true) keeps the data
+    # after this process exits. The WinForms clipboard needs a single-threaded apartment and
+    # throws ThreadStateException in an MTA host (powershell.exe -Mta); this checks first and
+    # throws a plain message, so the caller falls back to Set-Clipboard either way.
     #   https://learn.microsoft.com/dotnet/api/system.windows.forms.clipboard.setdataobject
     param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
+    if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Threading.ApartmentState]::STA) {
+        throw 'The WinForms clipboard needs a single-threaded apartment (STA); this host is not STA.'
+    }
     $data = New-TicketNoteClipboardData -Text $Text
     [System.Windows.Forms.Clipboard]::SetDataObject($data, $true)
 }
@@ -404,27 +410,31 @@ function Copy-TicketNoteToClipboard {
     .SYNOPSIS
         Puts the text on the clipboard. Returns $true or $false and never throws.
     .DESCRIPTION
-        Set-Clipboard where it exists (5.0 and later), else the WinForms clipboard. If
-        Set-Clipboard fails, the WinForms clipboard is tried too. Never clip.exe: piping to a
-        native program re-encodes the text with $OutputEncoding (ASCII in 5.1).
+        The WinForms clipboard first, on every version (D-033): it opts the note out of
+        clipboard history (Win+V) and the cloud clipboard (see New-TicketNoteClipboardData).
+        Only if that fails (WinForms not loadable, an MTA host) is Set-Clipboard used, where it
+        exists (5.0 and later). Set-Clipboard has no way to opt out, so on that fallback the
+        note can land in history. Never clip.exe: piping to a native program re-encodes the
+        text with $OutputEncoding (ASCII in 5.1).
 
-        Set-Clipboard has no way to opt out of clipboard history (Win+V) or the cloud
-        clipboard, so the note can land there; the WinForms path opts out (see
-        New-TicketNoteClipboardData). Either way the clipboard travels over RDP clipboard
-        redirection. A tool's -NoClipboard switch keeps the note off the clipboard entirely.
+        Either way the clipboard travels over RDP clipboard redirection. A tool's -NoClipboard
+        switch keeps the note off the clipboard entirely.
+          https://learn.microsoft.com/windows/win32/dataxchg/clipboard-formats
     #>
     param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
     try {
-        if (Get-Command -Name Set-Clipboard -ErrorAction SilentlyContinue) {
-            try {
-                Set-Clipboard -Value $Text -ErrorAction Stop
-                return $true
-            } catch {
-                Write-Verbose "Set-Clipboard failed, trying the WinForms clipboard: $($_.Exception.Message)"
-            }
-        }
         Invoke-WinFormsClipboard -Text $Text
         return $true
+    } catch {
+        Write-Verbose "The WinForms clipboard failed, trying Set-Clipboard: $($_.Exception.Message)"
+    }
+    try {
+        if (Get-Command -Name Set-Clipboard -ErrorAction SilentlyContinue) {
+            Set-Clipboard -Value $Text -ErrorAction Stop
+            return $true
+        }
+        Write-Verbose 'Set-Clipboard is not available (it first shipped in Windows PowerShell 5.0).'
+        return $false
     } catch {
         Write-Verbose "The clipboard is not available in this session: $($_.Exception.Message)"
         return $false
