@@ -613,7 +613,7 @@ function Get-M365OnPremisesAssessment {
             $hedge = if ($sidErr) { ' Microsoft 365 could not be searched for its security identifier (SID), so a Microsoft 365 account it syncs to under another name is not ruled out.' } else { '' }
             if ($marker) {
                 Add-Reason $level 'NeverSynced' (("This account exists in AD but not in Microsoft 365: it was removed from Microsoft 365 on purpose by M365-SyncedUserFixes (its AD account carries the block marker {0} = {1})." -f $script:M365BlockMarkerAttribute, $script:M365BlockMarkerValue) + $hedge) `
-                    'If they should have Microsoft 365 again, remove the marker with M365-SyncedUserFixes and wait for the next sync. Their old mailbox and licences may already be gone; check with the senior engineer first.'
+                    'Check with the senior engineer before removing the marker with M365-SyncedUserFixes, even if they should have Microsoft 365 again: their old mailbox and licences may already be gone. After that, wait for the next sync.'
             } else {
                 Add-Reason $level 'NeverSynced' (("This account exists in AD but not in Microsoft 365 (AD sign-in name {0}, in {1}). It has never synced, or it is no longer synced." -f $adUpn, [string](Get-M365Prop -Object $adUser -Name 'DistinguishedName')) + $hedge) `
                     'Check the sync scope: is the account in an OU that Entra Connect synchronizes (OU filtering), and is it excluded by a filtering rule? Then check on the Entra Connect server that sync is running and shows no export error for this account.'
@@ -624,11 +624,14 @@ function Get-M365OnPremisesAssessment {
     # --- Provisioning errors on the cloud user (AC21) -----------------------------------------
     # onPremisesProvisioningError: category (PropertyConflict), propertyCausingError, value.
     # https://learn.microsoft.com/graph/api/resources/onpremisesprovisioningerror?view=graph-rest-1.0
+    # The next step escalates (D-017): fixing it means removing or changing the value on one of
+    # two objects, and which one is wrong is a senior engineer's call.
     foreach ($e in @(@(Get-M365Prop -Object $user -Name 'onPremisesProvisioningErrors') | Where-Object { $null -ne $_ })) {
         $when = ConvertTo-M365UtcTime -Value (Get-M365Prop -Object $e -Name 'occurredDateTime')
+        $value = [string](Get-M365Prop -Object $e -Name 'value')
         Add-Reason 'Blocker' 'ProvisioningError' ("Sync reports an error for this account: {0} on {1}, value '{2}'{3}. Changes from on-premises AD are not reaching Microsoft 365 for it." -f `
-                [string](Get-M365Prop -Object $e -Name 'category'), [string](Get-M365Prop -Object $e -Name 'propertyCausingError'), [string](Get-M365Prop -Object $e -Name 'value'), $(if ($when) { " (since $(Format-M365Time $when))" } else { '' })) `
-            'Another object already uses that value. Find it (Microsoft 365 admin center, or search the address in Exchange), remove or change the value on the wrong object, then wait for the next sync.'
+                [string](Get-M365Prop -Object $e -Name 'category'), [string](Get-M365Prop -Object $e -Name 'propertyCausingError'), $value, $(if ($when) { " (since $(Format-M365Time $when))" } else { '' })) `
+            ("Escalate to a senior engineer: another object already uses '{0}'. Tell them the property and value shown above." -f $value)
     }
 
     # --- Tenant sync freshness (AC24), only where sync is involved -----------------------------
@@ -661,7 +664,7 @@ function Get-M365OnPremisesAssessment {
     # --- Synced user: compare with the AD account ------------------------------------------
     if ($null -eq $adUser) {
         Add-Reason 'Warning' 'AdAccountNotFound' 'This account syncs from on-premises AD, but no AD account with its security identifier (SID) or sign-in name was found in the domain checked.' `
-            'It may be in another domain or forest: run the check again with -Server <domain controller of that domain>. If it was deleted from AD, ask the senior engineer before anything else is changed.'
+            'It may be in another domain or forest: run the check again with -Server <domain controller of that domain>. If it is not found in any domain, ask the senior engineer before anything else is changed.'
         return (New-Result $blockedAction)
     }
 
@@ -671,7 +674,8 @@ function Get-M365OnPremisesAssessment {
         if ($marker) {
             Add-Reason 'Info' 'BlockedOnPurpose' ("Sign-in was blocked on purpose with M365-SyncedUserFixes: the AD account carries the block marker {0} = {1}." -f $script:M365BlockMarkerAttribute, $script:M365BlockMarkerValue) `
                 'Ask who blocked it and why before changing anything (a leaver, a security incident).'
-            $blockedAction = 'It was blocked on purpose with M365-SyncedUserFixes (block marker on the AD account). If that is wrong, remove the marker with M365-SyncedUserFixes, then wait for the next sync.'
+            # D-017: removing the marker undoes a deliberate block, so it is escalated first.
+            $blockedAction = 'Check with the senior engineer who blocked it whether to remove the marker with M365-SyncedUserFixes: it was blocked on purpose (block marker on the AD account). If they agree, wait for the next sync after it is removed.'
         } elseif ($adEnabled -eq $false) {
             $blockedAction = 'The on-premises AD account is disabled, and sync carries that to Microsoft 365. If it should be in use, enable it in AD (AD-UserQuickCheck shows its state), then wait for the next sync.'
         } elseif ($adEnabled -eq $true) {

@@ -760,6 +760,68 @@ Describe 'SQ-011 on-premises comparison, pure assessment' {
         }
     }
 
+    It 'AC21_ProvisioningErrorNamesConflict: the next step escalates with the conflicting value, never "remove or change the value" (D-017)' {
+        $err = @{ category = 'PropertyConflict'; propertyCausingError = 'ProxyAddresses'; value = 'smtp:jdoe@contoso.com'; occurredDateTime = '2026-10-16T09:00:00Z' }
+        $r = Get-Reason (Get-M365UserAssessment -Facts (New-HybridFacts -UserSet @{ onPremisesProvisioningErrors = @($err) })) 'ProvisioningError'
+        $r.Action | Should -BeExactly "Escalate to a senior engineer: another object already uses 'smtp:jdoe@contoso.com'. Tell them the property and value shown above."
+    }
+
+    It 'D017_NoRemovalStepForTier1: every next step that mentions removing or deleting starts with "Escalate" or "Check with the senior engineer", for every reason code the core can produce' {
+        # The reason codes, read from the core itself so a new reason cannot dodge this test:
+        # every literal code passed to Add-Reason, plus the two the sign-in failure picks at run
+        # time ($reasonCode).
+        $tokens = $null; $errs = $null
+        $coreAst = [System.Management.Automation.Language.Parser]::ParseFile($script:CorePath, [ref]$tokens, [ref]$errs)
+        $static = @($coreAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Add-Reason' }, $true) |
+                ForEach-Object { $_.CommandElements[2] } | Where-Object { $_ -is [System.Management.Automation.Language.StringConstantExpressionAst] } | ForEach-Object Value)
+        $allCodes = @($static + 'BlockingSignInFailure', 'LatestSignInFailed' | Sort-Object -Unique)
+        $allCodes.Count | Should -BeGreaterThan 20
+
+        $marker = @{ 'msDS-cloudExtensionAttribute10' = 'BlockCloudSignIn' }
+        $err = @{ category = 'PropertyConflict'; propertyCausingError = 'ProxyAddresses'; value = 'smtp:jdoe@contoso.com'; occurredDateTime = '2026-10-16T09:00:00Z' }
+        $holder = [PSCustomObject]@{ Type = 'group'; DisplayName = 'Sales Team'; Address = 'jdoe@contoso.com'; Id = 'eeeeeeee-0000-0000-0000-000000000001' }
+        $scenarios = New-Object System.Collections.Generic.List[object]
+        # Cloud side.
+        $scenarios.Add((New-Facts @{ User = (New-User @{ accountEnabled = $false }) }))
+        $scenarios.Add((New-Facts @{ User = (New-User @{ accountEnabled = $false; onPremisesSyncEnabled = $true }) }))
+        $scenarios.Add((New-Facts @{ User = (New-User @{ assignedLicenses = @(); licenseAssignmentStates = @() }) }))
+        $scenarios.Add((New-Facts @{ User = (New-User @{ licenseAssignmentStates = @(@{ skuId = 'bbbbbbbb-0000-0000-0000-000000000001'; state = 'Error'; error = 'CountViolation' }) }) }))
+        $scenarios.Add((New-Facts @{ User = (New-User @{ userType = 'Guest' }) }))
+        $scenarios.Add((New-Facts @{ MfaMethods = @(@{ '@odata.type' = '#microsoft.graph.passwordAuthenticationMethod'; id = '28c10230-6103-485e-b985-444c60001490' }) }))
+        $scenarios.Add((New-Facts @{ RiskyUser = @{ riskLevel = 'high'; riskState = 'atRisk' } }))
+        $scenarios.Add((New-Facts @{ SignIns = @() }))
+        $scenarios.Add((New-Facts @{ SignIns = @((New-SignInRow -Ago (New-TimeSpan -Hours 1) -Code 99999), (New-SignInRow -Ago (New-TimeSpan -Hours 2)), (New-SignInRow -Ago (New-TimeSpan -Hours 3) -Code 50126)) }))
+        foreach ($code in 50053, 50055, 50057, 50126, 53003, 530035) {
+            foreach ($sync in $null, $true) {
+                $scenarios.Add((New-Facts @{ User = (New-User @{ onPremisesSyncEnabled = $sync }); SignIns = @((New-SignInRow -Code $code)) }))
+            }
+        }
+        # On-premises side.
+        $scenarios.Add((New-NoCloudUserFacts -AdUser (New-AdUser)))
+        $scenarios.Add((New-NoCloudUserFacts -AdUser (New-AdUser $marker)))
+        $scenarios.Add((New-HybridFacts -UserSet @{ onPremisesProvisioningErrors = @($err) }))
+        $scenarios.Add((New-HybridFacts @{ TenantLastSync = ($script:Now - (New-TimeSpan -Hours 4)).ToString('yyyy-MM-ddTHH:mm:ssZ') }))
+        $scenarios.Add((New-Facts @{ OnPremisesGate = (New-AdGate); AdUser = (New-AdUser); AddressConflicts = @() }))
+        $scenarios.Add((New-HybridFacts @{ AdUser = $null }))
+        $scenarios.Add((New-HybridFacts @{ AdUser = (New-AdUser $marker) } @{ accountEnabled = $false }))
+        $scenarios.Add((New-HybridFacts @{ AdUser = (New-AdUser @{ Enabled = $false }) } @{ accountEnabled = $false }))
+        $scenarios.Add((New-HybridFacts @{} @{ accountEnabled = $false }))
+        $scenarios.Add((New-HybridFacts @{ AdUser = (New-AdUser @{ Enabled = $false }) }))
+        $scenarios.Add((New-HybridFacts @{ AdUser = (New-AdUser @{ UserPrincipalName = 'jane.doe@contoso.com' }) }))
+        $scenarios.Add((New-HybridFacts @{ AdMatchedBy = 'UserPrincipalName' }))
+        $scenarios.Add((New-HybridFacts @{ AddressConflicts = @($holder) }))
+
+        $reasons = @(foreach ($f in $scenarios) { @((Get-M365UserAssessment -Facts $f).Reasons) })
+        $produced = @($reasons | ForEach-Object Code | Sort-Object -Unique)
+        foreach ($c in $allCodes) { $produced | Should -Contain $c -Because "a scenario above must produce reason $c so its next step is checked" }
+
+        # The next steps shown outside a reason (Could not check), too.
+        $actions = @($reasons | ForEach-Object Action) + $script:M365NoSignInHistoryStep + $script:M365AddressCheckStep
+        foreach ($a in @($actions | Where-Object { $_ -match '(?i)\b(remov|delet)' })) {
+            $a | Should -Match '^(Escalate|Check with the senior engineer)' -Because 'D-017: tier 1 never sees a removal or deletion step'
+        }
+    }
+
     It 'AC22_AddressHeldByAnotherObject: a user holding the address is labelled by its real sync state, not always "cloud-only"' {
         $synced = [PSCustomObject]@{ Type = 'user'; DisplayName = 'Jane Doe (old)'; Address = 'jdoe@contoso.com'; Id = 'eeeeeeee-0000-0000-0000-000000000002'; Synced = $true }
         $r = Get-Reason (Get-M365UserAssessment -Facts (New-HybridFacts @{ AddressConflicts = @($synced) })) 'AddressHeld'
@@ -792,6 +854,7 @@ Describe 'SQ-011 on-premises comparison, pure assessment' {
         (Get-Reason $a 'AdEnabledMismatch') | Should -BeNullOrEmpty
         (Get-Reason $a 'SignInBlocked').Action | Should -Match 'remove the marker'
         (Get-Reason $a 'SignInBlocked').Action | Should -Match 'M365-SyncedUserFixes'
+        (Get-Reason $a 'SignInBlocked').Action | Should -Match '^Check with the senior engineer who blocked it' -Because 'D-017: removing the marker is escalated first'
     }
 
     It 'AC23_EnabledMismatch: AD enabled + cloud blocked, no marker -> Probable "disagree" with the tenant last sync time' {
@@ -1203,12 +1266,16 @@ Describe 'SQ-011 mocks cannot lie about Get-ADUser parameter names' {
     # calls against the real Get-ADUser. Run in a child pwsh so this session keeps the stub.
     BeforeAll {
         $script:RealAdParams = @()
+        # No pwsh on PATH: nothing to compare against, so the test below skips rather than throws.
+        $pwsh = Get-Command -Name pwsh -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
         # ADPS_LoadDefaultDrive = 0 stops the module mapping the AD: drive, which contacts a DC.
-        $json = & pwsh -NoProfile -Command @'
+        $json = if ($pwsh) {
+            & $pwsh.Source -NoProfile -Command @'
 $env:ADPS_LoadDefaultDrive = 0
 $c = Get-Command Get-ADUser -Module ActiveDirectory -ErrorAction SilentlyContinue
 if ($c) { @($c.Parameters.Keys) | ConvertTo-Json -Compress }
 '@
+        }
         if ($json) { $script:RealAdParams = @($json | ConvertFrom-Json) }
     }
 

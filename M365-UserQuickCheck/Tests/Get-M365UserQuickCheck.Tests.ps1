@@ -566,34 +566,71 @@ Describe 'AC3 read-only by construction' {
         # SQ-011 review: an ALLOWLIST, compared case-insensitively the way PowerShell resolves
         # commands, so Set-AdUser, set-aduser and ActiveDirectory\Set-ADUser cannot slip past a
         # case-sensitive denylist. Any command whose noun starts with AD must be Get-ADUser; any
-        # whose noun starts with Mg must be one of the Graph session cmdlets below. Nouns that
+        # whose noun starts with Mg must be one of the Graph session cmdlets below; nothing from
+        # the AzureAD, MSOnline or Microsoft.Entra modules (AzureAD*, Msol*, Entra* nouns) is
+        # used at all. Set-MgGraphOption is not allowed either: the script never calls it, and
+        # it persists a client-side setting on the machine (SQ-011 review). Nouns that
         # start with the English word "Address" (the core's Add-AddressConflictReasons) are not
         # AD nouns: no ActiveDirectory cmdlet noun starts with it (checked against the real
         # module in the test below where RSAT is installed).
         $script:AllowedAdCommands = @('Get-ADUser')
-        $script:AllowedMgCommands = @('Connect-MgGraph', 'Disconnect-MgGraph', 'Get-MgContext', 'Invoke-MgGraphRequest', 'Set-MgGraphOption')
+        $script:AllowedMgCommands = @('Connect-MgGraph', 'Disconnect-MgGraph', 'Get-MgContext', 'Invoke-MgGraphRequest')
         function Test-ForbiddenCommand([string]$Name) {
             $bare = $Name -replace '^.*\\', ''
             if ($bare -notmatch '^(?<verb>\w+)-(?<noun>\w+)$') { return $false }
             $noun = $Matches['noun']
             if ($noun -match '^AD' -and $noun -notmatch '^Address') { return ($bare -notin $script:AllowedAdCommands) }
+            if ($noun -match '^(AzureAD|Msol|Entra)') { return $true }
             if ($noun -match '^Mg') { return ($bare -notin $script:AllowedMgCommands) }
             return $false
         }
         # Constructs that would let a script write without a write cmdlet: running built text,
-        # raw HTTP outside Invoke-MgGraphRequest, and ADSI (DirectoryEntry.SetInfo /
-        # CommitChanges write straight to AD).
+        # a command whose name is only known at run time, raw HTTP outside
+        # Invoke-MgGraphRequest, and ADSI (DirectoryEntry.SetInfo / CommitChanges write straight
+        # to AD).
+        #
+        # & or . with no static command name: the guard cannot see what runs, so it is a hit
+        # unless every assignment to the invoked variable in the same file is a script block
+        # literal (its body is scanned with the rest of the file) or, for dot-sourcing only,
+        # Join-Path $PSScriptRoot '<name>.ps1' (a sibling script, scanned too). The production
+        # scripts use exactly these: & $safe and & $getUsers, . $corePath and . $kit.
+        function Test-ScannedInvocationTarget($ast, $command) {
+            $target = $command.CommandElements[0]
+            if ($target -isnot [System.Management.Automation.Language.VariableExpressionAst]) { return $false }
+            $name = $target.VariablePath.UserPath
+            $rhs = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                        $n.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and $n.Left.VariablePath.UserPath -eq $name }, $true) | ForEach-Object Right)
+            if ($rhs.Count -eq 0) { return $false }
+            foreach ($r in $rhs) {
+                if ($r -is [System.Management.Automation.Language.PipelineAst] -and @($r.PipelineElements).Count -eq 1) { $r = $r.PipelineElements[0] }
+                if ($r -is [System.Management.Automation.Language.CommandExpressionAst] -and $r.Expression -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) { continue }
+                $isSiblingScript = ($command.InvocationOperator -eq 'Dot' -and $r -is [System.Management.Automation.Language.CommandAst] -and
+                    $r.GetCommandName() -eq 'Join-Path' -and @($r.CommandElements).Count -eq 3 -and $r.CommandElements[1].Extent.Text -eq '$PSScriptRoot' -and
+                    $r.CommandElements[2] -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $r.CommandElements[2].Value -match '^[\w.-]+\.ps1$')
+                if (-not $isSiblingScript) { return $false }
+            }
+            return $true
+        }
         function Get-UnsafeConstruct($ast) {
             $hits = New-Object System.Collections.Generic.List[string]
             foreach ($c in @(Get-Commands $ast)) {
                 $bare = ([string]$c.GetCommandName()) -replace '^.*\\', ''
                 if ($bare -in 'Invoke-Expression', 'iex', 'Invoke-RestMethod', 'irm', 'Invoke-WebRequest', 'iwr', 'curl', 'wget') { $hits.Add("line $($c.Extent.StartLineNumber): $bare") }
-                if ($bare -eq 'New-Object' -and $c.Extent.Text -match 'DirectoryEntry|DirectorySearcher') { $hits.Add("line $($c.Extent.StartLineNumber): New-Object DirectoryEntry") }
+                if ($bare -eq 'New-Object' -and $c.Extent.Text -match 'DirectoryEntry|DirectorySearcher|Net\.WebClient|Net\.Http\.HttpClient') { $hits.Add("line $($c.Extent.StartLineNumber): $($c.Extent.Text)") }
+                if ($c.InvocationOperator -ne 'Unknown' -and $null -eq $c.GetCommandName() -and -not (Test-ScannedInvocationTarget $ast $c)) {
+                    $hits.Add("line $($c.Extent.StartLineNumber): $($c.InvocationOperator) with no static command name ($($c.CommandElements[0].Extent.Text))")
+                }
             }
             $types = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.TypeExpressionAst] -or $n -is [System.Management.Automation.Language.TypeConstraintAst] }, $true)
             foreach ($t in @($types)) {
                 if ($t.TypeName.FullName -match '^(adsi|adsisearcher|(System\.)?(DirectoryServices\.)?(DirectoryEntry|DirectorySearcher))$') { $hits.Add("line $($t.Extent.StartLineNumber): [$($t.TypeName.FullName)]") }
+                if ($t.TypeName.FullName -match '^(System\.)?Net\.(WebClient|Http\.HttpClient)$') { $hits.Add("line $($t.Extent.StartLineNumber): [$($t.TypeName.FullName)]") }
             }
+            # $ExecutionContext.InvokeCommand runs commands and script text by name.
+            $refs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.MemberExpressionAst] -and
+                    $n.Expression -is [System.Management.Automation.Language.VariableExpressionAst] -and $n.Expression.VariablePath.UserPath -eq 'ExecutionContext' -and
+                    $n.Member.Extent.Text.Trim('"', "'") -eq 'InvokeCommand' }, $true)
+            foreach ($x in @($refs)) { $hits.Add("line $($x.Extent.StartLineNumber): `$ExecutionContext.InvokeCommand") }
             $members = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true)
             foreach ($m in @($members)) {
                 $member = [string]$m.Member.Extent.Text.Trim('"', "'")
@@ -641,7 +678,9 @@ Describe 'AC3 read-only by construction' {
             'Disable-ADAccount', 'Unlock-ADAccount', 'Clear-ADAccountExpiration', 'Reset-ADServiceAccountPassword',
             'Set-AdUser', 'set-aduser', 'ActiveDirectory\Set-ADUser', 'Restore-ADObject', 'Set-ADAccountPassword', 'Set-ADDomain',
             'New-MgUser', 'Update-MgUser', 'Remove-MgUser', 'Invoke-MgDismissRiskyUser', 'Revoke-MgUserSignInSession',
-            'Microsoft.Graph.Users\Update-MgUser', 'update-mguser')
+            'Microsoft.Graph.Users\Update-MgUser', 'update-mguser', 'Set-MgGraphOption',
+            'Set-AzureADUser', 'Remove-AzureADUser', 'Get-AzureADUser', 'Set-MsolUser', 'Set-MsolUserPassword', 'Remove-MsolUser',
+            'Set-EntraUser', 'Remove-EntraUser', 'Microsoft.Entra.Users\Update-EntraUser')
         foreach ($w in $mustCatch) { Test-ForbiddenCommand $w | Should -BeTrue -Because "$w writes and must be caught" }
         foreach ($ok in 'Get-ADUser', 'get-aduser', 'ActiveDirectory\Get-ADUser', 'Add-AddressConflictReasons', 'Add-Reason', 'Invoke-MgGraphRequest',
             'Connect-MgGraph', 'Disconnect-MgGraph', 'Get-MgContext', 'Import-Module', 'Get-M365Prop') {
@@ -650,8 +689,11 @@ Describe 'AC3 read-only by construction' {
     }
 
     It 'AC3_ReadOnlyByConstruction: every real ActiveDirectory cmdlet except Get-ADUser is caught by the allowlist (where RSAT is installed)' {
+        # A child pwsh keeps this session's stubs; with no pwsh on PATH the test skips, not throws.
+        $pwsh = Get-Command -Name pwsh -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $pwsh) { Set-ItResult -Skipped -Because 'pwsh is not on PATH, so the real module cannot be listed in a child session'; return }
         # ADPS_LoadDefaultDrive = 0 stops the module mapping the AD: drive, which contacts a DC.
-        $json = & pwsh -NoProfile -Command @'
+        $json = & $pwsh.Source -NoProfile -Command @'
 $env:ADPS_LoadDefaultDrive = 0
 $c = @(Get-Command -Module ActiveDirectory -ErrorAction SilentlyContinue | ForEach-Object Name)
 if ($c.Count -gt 0) { $c | ConvertTo-Json -Compress }
@@ -662,7 +704,7 @@ if ($c.Count -gt 0) { $c | ConvertTo-Json -Compress }
         Test-ForbiddenCommand 'Get-ADUser' | Should -BeFalse
     }
 
-    It 'AC3_ReadOnlyByConstruction: no Invoke-Expression, [scriptblock]::Create, Invoke-RestMethod/Invoke-WebRequest, ADSI type or SetInfo/CommitChanges call in the production scripts' {
+    It 'AC3_ReadOnlyByConstruction: no Invoke-Expression, [scriptblock]::Create, Invoke-RestMethod/Invoke-WebRequest, WebClient/HttpClient, $ExecutionContext.InvokeCommand, unscanned & / . call, ADSI type or SetInfo/CommitChanges call in the production scripts' {
         $hits = @()
         foreach ($name in $script:Asts.Keys) { $hits += @(Get-UnsafeConstruct $script:Asts[$name] | ForEach-Object { "${name} $_" }) }
         $names = @($script:Asts.Keys)
@@ -684,6 +726,18 @@ if ($c.Count -gt 0) { $c | ConvertTo-Json -Compress }
             'New-Object'          = '$e = New-Object System.DirectoryServices.DirectoryEntry ("LDAP://CN=x")'
             'SetInfo'             = '$e.SetInfo()'
             'CommitChanges'       = '$e.CommitChanges()'
+            'call by built name'  = '& (''Set-'' + ''ADUser'') -Identity jdoe'
+            'call by string var'  = '$cmd = ''Set-ADUser''; & $cmd -Identity jdoe'
+            'var reassigned'      = '$safe = { param($s) $s }; $safe = ''Set-ADUser''; & $safe -Identity jdoe'
+            'call by command obj' = '& (Get-Command Set-ADUser) -Identity jdoe'
+            'dot-source unknown'  = '. $env:TEMP\x.ps1'
+            'dot-source built'    = '$p = Join-Path $env:TEMP ''x.ps1''; . $p'
+            'unassigned variable' = '& $notAssignedHere'
+            'WebClient type'      = '$w = [System.Net.WebClient]::new()'
+            'WebClient short'     = '$w = [Net.WebClient]::new()'
+            'HttpClient type'     = '$h = [System.Net.Http.HttpClient]::new()'
+            'New-Object WebClient' = '$w = New-Object System.Net.WebClient'
+            'InvokeCommand'       = '$ExecutionContext.InvokeCommand.InvokeScript($text)'
         }
         foreach ($k in $samples.Keys) {
             $tokens = $null; $errs = $null
@@ -693,6 +747,10 @@ if ($c.Count -gt 0) { $c | ConvertTo-Json -Compress }
         $tokens = $null; $errs = $null
         $okAst = [System.Management.Automation.Language.Parser]::ParseInput('$r = Invoke-MgGraphRequest -Method GET -Uri $u; $x = [string]$y; $sb.Append("a")', [ref]$tokens, [ref]$errs)
         @(Get-UnsafeConstruct $okAst).Count | Should -Be 0
+        # The shapes the production scripts use: a script block written in the same file, and a
+        # sibling script dot-sourced by literal name.
+        $okInvoke = [System.Management.Automation.Language.Parser]::ParseInput('$safe = { param($s) "$s" }; & $safe "x"; $kit = Join-Path $PSScriptRoot ''CaseKit.ps1''; . $kit', [ref]$tokens, [ref]$errs)
+        @(Get-UnsafeConstruct $okInvoke) | Should -BeNullOrEmpty
     }
 
     It 'AC3_ReadOnlyByConstruction: every requested scope is a .Read / .Read.All scope, and the four expected scopes are requested' {
@@ -724,7 +782,10 @@ if ($c.Count -gt 0) { $c | ConvertTo-Json -Compress }
 Describe 'Mocks cannot lie about parameter names' {
     BeforeAll {
         $script:RealParams = @{}
-        $json = & pwsh -NoProfile -Command @'
+        # No pwsh on PATH: nothing to compare against, so the test below skips rather than throws.
+        $pwsh = Get-Command -Name pwsh -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        $json = if ($pwsh) {
+            & $pwsh.Source -NoProfile -Command @'
 $r = @{}
 foreach ($n in 'Connect-MgGraph','Invoke-MgGraphRequest','Disconnect-MgGraph','Get-MgContext') {
   $c = Get-Command $n -Module Microsoft.Graph.Authentication -ErrorAction SilentlyContinue
@@ -732,6 +793,7 @@ foreach ($n in 'Connect-MgGraph','Invoke-MgGraphRequest','Disconnect-MgGraph','G
 }
 $r | ConvertTo-Json -Compress
 '@
+        }
         if ($json) { $o = $json | ConvertFrom-Json; foreach ($p in $o.PSObject.Properties) { $script:RealParams[$p.Name] = @($p.Value) } }
     }
 
