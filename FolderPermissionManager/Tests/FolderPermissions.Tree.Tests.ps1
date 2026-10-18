@@ -507,3 +507,239 @@ Describe 'Native tool guard and tool output' {
         Resolve-AclTargetPath -Path 'C:\Shares\HR [old]' | Should -Be 'C:\Shares\HR [old]'
     }
 }
+
+# --- Revision (SQ-014 review 2026-10-17): D-034 and D-036 -----------------------------------
+#
+# Pinned for the implementer:
+#   D-034  Recursive take ownership runs takeown /F <dir> /R /A /D N (never /D Y). A folder
+#          takeown cannot open is skipped and keeps its permissions: no
+#          *_TakeOwnership_Permissions.csv is written, Set-Acl is not used on it, the read-back
+#          marks it not owned, the row is Partly done, and the message says
+#          "Escalate: <n> folder(s) could not be opened, so they were left alone."
+#   D-036  Get-TreeOwnershipRefusal -Path <string> (pure, no file system access) returns $null
+#          when whole-tree take ownership is allowed, else the plain-English refusal text
+#          (contains the path). Refused: a volume root (C:\, D:\) and anything under
+#          %SystemRoot%, %ProgramFiles%, %ProgramFiles(x86)%, %ProgramData% (the folders
+#          themselves included), compared case-insensitively on whole path segments and read
+#          from the environment at call time. A share root (\\fs01\share) is allowed.
+#          Set-ItemOwnerToCurrentUser -Recurse [-AllowSystemFolder] returns ONE row with
+#          Result 'Failed' and an Error that names the path and ends with "Nothing was
+#          changed." when refused: no snapshot, no backup folder, no tool call. -AllowSystemFolder
+#          skips the check. The GUI never passes it.
+Describe 'Recursive take ownership: skip folders it cannot open (D-034) and refuse drive roots and system folders (D-036)' {
+    BeforeAll {
+        function Invoke-WithRedirectedEnv {
+            # Points one of the protected-folder variables at a folder in $TestDrive for the
+            # duration of the script block (restored in finally).
+            param([string]$Name, [string]$Value, [scriptblock]$Do)
+            $old = [Environment]::GetEnvironmentVariable($Name, 'Process')
+            [Environment]::SetEnvironmentVariable($Name, $Value, 'Process')
+            try { & $Do } finally { [Environment]::SetEnvironmentVariable($Name, $old, 'Process') }
+        }
+    }
+    BeforeEach {
+        $script:Log = Join-Path $TestDrive ('logs-' + [guid]::NewGuid().ToString('N'))
+        $script:ToolCalls = [System.Collections.Generic.List[object]]::new()
+        $script:ToolResult = @{
+            takeown = [PSCustomObject]@{ ExitCode = 0; Output = '' }
+            icacls  = [PSCustomObject]@{ ExitCode = 0; Output = 'Successfully processed 4 files; Failed processing 0 files' }
+        }
+        $script:AfterToolsOwner = $null
+
+        Mock Set-Acl { }
+        Mock takeown { }
+        Mock icacls { }
+        Mock Invoke-AclTool {
+            $script:ToolCalls.Add([PSCustomObject]@{ Tool = $Tool; Arguments = @($Arguments) })
+            $script:ToolResult[$Tool]
+        }
+        # takeown /D N leaves a folder it cannot open alone: after the tools ran, the owner
+        # read back for that folder is still the old one.
+        Mock Get-ItemOwner {
+            if ($script:AfterToolsOwner -and $script:ToolCalls.Count -gt 0 -and $Path -eq $script:AfterToolsOwner) {
+                return [PSCustomObject]@{ Owner = 'CONTOSO\old.owner'; OwnerSid = 'S-1-5-21-1-2-3-1105' }
+            }
+            & $script:RealGetItemOwner -Path $Path
+        }
+    }
+
+    It 'AC16b_RecursiveTakeOwnership_RunsTakeownWithDNeverDY' {
+        $dir = New-TestTree 'ac16b'
+
+        $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+        $takeown = @($script:ToolCalls | Where-Object { $_.Tool -eq 'takeown' })
+        $takeown.Count | Should -Be 1
+        $takeown[0].Arguments | Should -Be @('/F', $dir, '/R', '/A', '/D', 'N')
+        $takeown[0].Arguments | Should -Not -Contain 'Y'
+        $rows[0].Detail | Should -BeLike "*Ran: takeown /F ""$dir"" /R /A /D N; icacls *"
+        $rows[0].Detail | Should -Not -Match '/D Y'
+    }
+
+    It 'AC16c_FolderTakeownCannotOpen_IsPartlyDoneNamedWithEscalateAndNotBackedUpOrChanged' {
+        $dir = New-TestTree 'ac16c'
+        $locked = Join-Path $dir 'sub'
+        $script:AfterToolsOwner = $locked
+        Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $LiteralPath -eq $locked }
+
+        $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+        $rows[0].Result | Should -Be 'Partly done'
+        $rows[0].TreeCounts.Unlisted | Should -Be 1
+        @($rows[0].TreeCounts.UnlistedFolders) | Should -Be @($locked)
+        $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
+        $message | Should -Match ([regex]::Escape('Escalate: 1 folder(s) could not be opened, so they were left alone.'))
+        $message | Should -Match ([regex]::Escape($locked))
+        # Their permissions are never changed, so there is nothing to back up.
+        @(Get-ChildItem -LiteralPath (Join-Path $script:Log 'Backups') -Filter '*_Permissions.csv').Count | Should -Be 0
+        @(Get-ChildItem -LiteralPath (Join-Path $script:Log 'Backups') -Filter '*_TakeOwnership.csv').Count | Should -Be 1
+        Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
+        ($script:ToolCalls | Where-Object { $_.Tool -eq 'takeown' }).Arguments | Should -Contain 'N'
+    }
+
+    It 'AC16c_EscalateSentenceCountsEveryFolderAndNothingSaysPermissionsAreReplacedOrLost' {
+        $dir = New-TestTree 'ac16c-two'
+        New-Item -ItemType Directory -Path (Join-Path $dir 'sub2') | Out-Null
+        $lockedA = Join-Path $dir 'sub'
+        $lockedB = Join-Path $dir 'sub2'
+        $script:LockedPair = @($lockedA, $lockedB)
+        Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $script:LockedPair -contains $LiteralPath }
+        # Their permissions cannot be read either: with D-034 that no longer matters.
+        Mock Get-Acl { throw 'Attempted to perform an unauthorized operation. (test)' } -ParameterFilter { $script:LockedPair -contains $LiteralPath }
+
+        $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+        $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
+        $message | Should -Match ([regex]::Escape('Escalate: 2 folder(s) could not be opened, so they were left alone.'))
+        $message | Should -Not -Match 'full control'
+        $message | Should -Not -Match 'replaces the permissions'
+        $message | Should -Not -Match '_Permissions\.csv'
+        $message | Should -Not -Match 'permissions were not backed up'
+        $rows[0].Detail | Should -Not -Match 'full control'
+        @(Get-ChildItem -LiteralPath (Join-Path $script:Log 'Backups') -Filter '*_Permissions.csv').Count | Should -Be 0
+        $script:ToolCalls.Count | Should -Be 2 -Because 'D-027: an unreadable folder does not stop the action'
+    }
+
+    It 'AC16d_VolumeRoot_IsRefusedWithNoSnapshotAndNoToolCall' {
+        $root = [System.IO.Path]::GetPathRoot($TestDrive)
+        # If the refusal is missing, these keep the test from walking the whole drive.
+        Mock Save-OwnerSnapshot { throw 'snapshot must not be taken (test)' }
+        Mock Get-OwnerTreeItem { [PSCustomObject]@{ Items = @(); Unlisted = @(); Links = @() } }
+
+        $rows = @(Set-ItemOwnerToCurrentUser -Path $root -Recurse -LogFolder $script:Log)
+
+        $rows.Count | Should -Be 1
+        $rows[0].Result | Should -Be 'Failed'
+        $rows[0].Error | Should -Match ([regex]::Escape($root))
+        $rows[0].Error | Should -Match 'Nothing was changed\.$'
+        Should -Invoke Save-OwnerSnapshot -Times 0 -Exactly -Scope It
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
+        Test-Path -LiteralPath (Join-Path $script:Log 'Backups') | Should -BeFalse
+    }
+
+    It 'AC16d_FolderUnder<Name>_IsRefusedWithNoSnapshotAndNoToolCall' -ForEach @(
+        @{ Name = 'SystemRoot' }
+        @{ Name = 'ProgramFiles' }
+        @{ Name = 'ProgramFiles(x86)' }
+        @{ Name = 'ProgramData' }
+    ) {
+        $base = Join-Path $TestDrive ('protected-' + [guid]::NewGuid().ToString('N'))
+        $dir = Join-Path $base 'Contoso'
+        New-Item -ItemType Directory -Path (Join-Path $dir 'sub') -Force | Out-Null
+        Mock Save-OwnerSnapshot { throw 'snapshot must not be taken (test)' }
+        $script:ProtectedDir = $dir
+
+        $rows = @(Invoke-WithRedirectedEnv -Name $Name -Value $base -Do {
+            Set-ItemOwnerToCurrentUser -Path $script:ProtectedDir -Recurse -LogFolder $script:Log
+        })
+
+        $rows[0].Result | Should -Be 'Failed'
+        $rows[0].Error | Should -Match ([regex]::Escape($dir))
+        $rows[0].Error | Should -Match 'Nothing was changed\.$'
+        Should -Invoke Save-OwnerSnapshot -Times 0 -Exactly -Scope It
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        Test-Path -LiteralPath (Join-Path $script:Log 'Backups') | Should -BeFalse
+    }
+
+    It 'AC16d_AllowSystemFolder_SkipsTheRefusalAndTakesOwnership' {
+        $base = Join-Path $TestDrive ('protected-' + [guid]::NewGuid().ToString('N'))
+        $dir = Join-Path $base 'Contoso'
+        New-Item -ItemType Directory -Path (Join-Path $dir 'sub') -Force | Out-Null
+        $script:ProtectedDir = $dir
+
+        $rows = @(Invoke-WithRedirectedEnv -Name 'ProgramData' -Value $base -Do {
+            Set-ItemOwnerToCurrentUser -Path $script:ProtectedDir -Recurse -AllowSystemFolder -LogFolder $script:Log
+        })
+
+        $rows[0].Result | Should -Be 'Done'
+        @($script:ToolCalls | Where-Object { $_.Tool -eq 'takeown' }).Count | Should -Be 1
+    }
+
+    It 'AC16d_AFolderUnderANormalPath_IsNotRefused' {
+        $dir = New-TestTree 'ac16d-normal'
+
+        $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+        $rows[0].Result | Should -Be 'Done'
+    }
+}
+
+Describe 'Get-TreeOwnershipRefusal' {
+    It 'AC16d_Refuses_<Path>' -ForEach @(
+        @{ Path = 'C:\' }
+        @{ Path = 'D:\' }
+        @{ Path = 'd:\' }
+        @{ Path = $env:SystemRoot }
+        @{ Path = ($env:SystemRoot + '\') }
+        @{ Path = ($env:SystemRoot + '\System32\drivers') }
+        @{ Path = ($env:SystemRoot.ToLowerInvariant() + '\system32') }
+        @{ Path = $env:ProgramFiles }
+        @{ Path = ($env:ProgramFiles + '\Contoso\App') }
+        @{ Path = ${env:ProgramFiles(x86)} }
+        @{ Path = (${env:ProgramFiles(x86)} + '\Contoso') }
+        @{ Path = $env:ProgramData }
+        @{ Path = ($env:ProgramData + '\Contoso') }
+    ) {
+        $text = Get-TreeOwnershipRefusal -Path $Path
+
+        $text | Should -Not -BeNullOrEmpty
+        $text | Should -Match ([regex]::Escape($Path))
+    }
+
+    It 'AC16d_Allows_<Path>' -ForEach @(
+        @{ Path = '\\fs01\share' }
+        @{ Path = '\\fs01\share\' }
+        @{ Path = '\\fs01\share\HR\2024' }
+        @{ Path = 'D:\Data' }
+        @{ Path = 'D:\Shares\HR Team' }
+        @{ Path = ($env:SystemRoot + 'Old\x') }
+        @{ Path = ($env:ProgramFiles + ' Archive') }
+        @{ Path = ($env:ProgramData + 'Backup') }
+    ) {
+        Get-TreeOwnershipRefusal -Path $Path | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'README after D-034 and D-036' {
+    BeforeAll {
+        $script:Readme = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\README.md') -Raw -Encoding UTF8
+    }
+
+    It 'AC16b_ReadmeSaysDN_AndNoLongerMentionsDYOrTheReplacedPermissionsWarning' {
+        $script:Readme | Should -Match '/R /A /D N'
+        $script:Readme | Should -Not -Match '/D Y'
+        $script:Readme | Should -Not -Match '_TakeOwnership_Permissions'
+        $script:Readme | Should -Not -Match 'full control for you'
+    }
+
+    It 'AC16c_ReadmeSaysFoldersThatCannotBeOpenedAreSkippedAndToEscalate' {
+        $script:Readme | Should -Match '(?is)cannot be opened.{0,200}(skipped|left alone)'
+        $script:Readme | Should -Match 'Escalate'
+    }
+
+    It 'AC16d_ReadmeExplainsTheDriveRootRefusalAndAllowSystemFolder' {
+        $script:Readme | Should -Match '-AllowSystemFolder'
+        $script:Readme | Should -Match '(?i)drive root|volume root|whole drive'
+    }
+}

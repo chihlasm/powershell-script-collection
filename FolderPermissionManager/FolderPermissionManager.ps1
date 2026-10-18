@@ -188,7 +188,8 @@ function Invoke-FolderPermissionCli {
     param(
         [string]$Path,
         [string]$LogFolder,
-        [switch]$Force
+        [switch]$Force,
+        [switch]$AllowSystemFolder
     )
 
     $whatIf = [bool]$WhatIfPreference

@@ -656,6 +656,12 @@ function Get-OwnerReadBack {
     }
 }
 
+function Get-TreeOwnershipRefusal {
+    # STUB (SQ-014 D-036): returns $null when allowed, else the refusal text.
+    param([Parameter(Mandatory)][string]$Path)
+    throw 'not implemented'
+}
+
 function Test-AclToolErrorLine {
     # True for a native-tool output line that looks like an error in any Windows language:
     # icacls reports a failed item as "<path>: <reason>", so a line starting with the target
@@ -897,7 +903,8 @@ function Set-ItemOwnerToCurrentUser {
     param(
         [Parameter(Mandatory)][AllowEmptyString()][AllowEmptyCollection()][string[]]$Path,
         [Parameter(Mandatory)][string]$LogFolder,
-        [switch]$Recurse
+        [switch]$Recurse,
+        [switch]$AllowSystemFolder
     )
 
     if ($Recurse) {
