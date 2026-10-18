@@ -130,8 +130,9 @@ Describe 'Set-LocalAdminMembership' {
         Mock Get-LocalAdminMember { $script:reads++; @($script:A, $script:B) }
         Mock Add-LocalAdminMember { throw 'Access is denied' }
 
-        $e = $null
-        { $e = Set-LocalAdminMembership -Action Add -Member 'CONTOSO\C' -ComputerName 'PC01' -Confirm:$false } | Should -Not -Throw
+        $script:e = $null
+        { $script:e = Set-LocalAdminMembership -Action Add -Member 'CONTOSO\C' -ComputerName 'PC01' -Confirm:$false } | Should -Not -Throw
+        $e = $script:e  # the block runs in a child scope (Pester: & $ActualValue)
 
         $e.Result   | Should -Be 'Failed'
         $e.Error    | Should -Match 'Access is denied'
@@ -144,8 +145,9 @@ Describe 'Set-LocalAdminMembership' {
         Mock Get-LocalAdminMember { @($script:A, $script:C) }
         Mock Remove-LocalAdminMember { throw 'Access is denied' }
 
-        $e = $null
-        { $e = Set-LocalAdminMembership -Action Remove -Member 'CONTOSO\C' -ComputerName 'PC01' -Confirm:$false } | Should -Not -Throw
+        $script:e = $null
+        { $script:e = Set-LocalAdminMembership -Action Remove -Member 'CONTOSO\C' -ComputerName 'PC01' -Confirm:$false } | Should -Not -Throw
+        $e = $script:e  # the block runs in a child scope (Pester: & $ActualValue)
 
         $e.Result | Should -Be 'Failed'
         $e.Error  | Should -Match 'Access is denied'
@@ -169,8 +171,9 @@ Describe 'Set-LocalAdminMembership' {
     It 'AC6_UnreachableComputerFailsBeforeAnyChange' {
         Mock Get-LocalAdminMember { throw 'The RPC server is unavailable' }
 
-        $e = $null
-        { $e = Set-LocalAdminMembership -Action Add -Member 'CONTOSO\C' -ComputerName 'PC01' -Confirm:$false } | Should -Not -Throw
+        $script:e = $null
+        { $script:e = Set-LocalAdminMembership -Action Add -Member 'CONTOSO\C' -ComputerName 'PC01' -Confirm:$false } | Should -Not -Throw
+        $e = $script:e  # the block runs in a child scope (Pester: & $ActualValue)
 
         Should -Invoke Add-LocalAdminMember -Times 0 -Exactly
         Should -Invoke Remove-LocalAdminMember -Times 0 -Exactly
