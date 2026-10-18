@@ -23,7 +23,7 @@ why it matters, and anything you already know (screens, edge cases, examples).
 ---
 
 ## SQ-001 · Ticket note from every quick check (kit, joiner, AD-UserQuickCheck)
-- status: review
+- status: done
 - priority: P1
 - type: feature
 - branch: squad/SQ-001-clipboard-history
