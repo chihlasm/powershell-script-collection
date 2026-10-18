@@ -120,38 +120,37 @@ turns inherited rules into explicit ones, and handlers use `-Path`, which breaks
 `[ ]`. Copy becomes add-only with the checkbox dropped: one `Set-Acl` on the target, locked
 subfolders untouched (D-031). Fix with a regression test for each. Builds after SQ-014 (D-011).
 
-## SQ-017 · FolderPermissionManager as a WPF app (replace the browser GUI)
-- status: new
+## SQ-017 · FolderPermissionManager as a WPF app: the window, browsing and viewing (read-only)
+- status: ready
 - priority: P1
 - type: feature
-- branch:
-- spec:
+- branch: squad/SQ-017-fpm-wpf-window
+- spec: squad/specs/SQ-017.md (AC1-AC25)
 
-Rewrite FolderPermissionManager-GUI.ps1 as a WPF window in the style of
-RobocopyMigration-GUI.ps1, replacing the HttpListener web server and browser page. Why (owner,
-2026-10-18): performance and a cleaner tool. The current server handles one request at a time, so
-a slow permission read, a whole-tree action or a robocopy run freezes everything; and it listens on
-`http://localhost:<port>/` with no origin check or token on endpoints that change permissions.
+Rewrite FolderPermissionManager-GUI.ps1 as a WPF window in the style of RobocopyMigration-GUI.ps1,
+replacing the HttpListener web server (owner, 2026-10-18: performance and a cleaner tool; the
+server handles one request at a time and listens on localhost with no origin check or token).
+This first half changes nothing: startup (STA/UAC relaunch, single instance, -LogFolder, -WhatIf,
+mapped drives), runspace-pool background reads with busy state and stale-result guard, drives,
+tree, folder and file permissions, path header, log-folder banner, export CSV. Core reused
+unchanged. The browser version is renamed FolderPermissionManager-WebGUI.ps1 (D-038) and stays
+until the owner's lab test. Robocopy tab and Copy Files To are dropped (D-037). Builds after
+SQ-014 and SQ-015 (same core and GUI file). Split per D-039.
 
-Must:
-- Reuse `FolderPermissions.Core.ps1` and its tests unchanged (backups, change log, take ownership,
-  copy, D-027/D-030/D-031/D-034/D-035/D-036). Only the UI layer changes.
-- Keep the window responsive: slow work (folder/permission reads on shares, whole-tree actions)
-  runs in the background (runspace pool, as RobocopyMigration does) with progress and a clear
-  busy state; one change at a time.
-- Keep every current single-item and whole-tree action, the confirmations, the result messages
-  (backup and log paths, "Partly done", "Could not read"), plain-English labels, paths always
-  visible, dark default with light toggle (root CLAUDE.md design context).
-- No network listener of any kind.
-- Admin check / elevation offer and single-instance like RobocopyMigration; `#Requires -Version 5.1`.
-- Safety first: the destructive-operations checklist applies in full; the old browser GUI stays
-  in the folder until the WPF version passes the owner's lab tests, then is removed in a
-  follow-up.
+## SQ-018 · FolderPermissionManager WPF app: every change, confirmations and results
+- status: ready
+- priority: P1
+- type: feature
+- branch: squad/SQ-018-fpm-wpf-changes
+- spec: squad/specs/SQ-017.md (AC26-AC46)
 
-Proposed by the squad lead (inferred, confirm in /squad:plan): drop the Robocopy tab and
-"Copy Files To..." from the new app and point to RobocopyMigration instead (its robocopy handling is
-far safer); moving the file-list copy, /SECFIX and type-MIRROR confirmation into RobocopyMigration
-would be a separate item. Builds after SQ-014 and SQ-015 (same core and GUI file).
+Second half of the WPF rewrite: add/remove permission (folders and files), take ownership
+(folder, files, whole tree with an item count before the confirm and the D-036 refusal), copy
+permissions, a themed confirm dialog (verb on the button, Cancel default), one change at a time,
+closing blocked while a change runs, result-status parity with the browser GUI, -WhatIf end to
+end, README and root README. Destructive-operations checklist applies in full. Builds after
+SQ-017. Split from SQ-017 per D-039. Follow-up after the owner's lab test (not planned): remove
+FolderPermissionManager-WebGUI.ps1 and its two test files.
 
 ## SQ-010 · Ticket note in Network-QuickCheck and Citrix-FSLogix-Triage
 - status: done
