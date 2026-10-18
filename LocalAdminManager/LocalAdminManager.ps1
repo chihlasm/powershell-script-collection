@@ -33,6 +33,8 @@
     - Domain users/groups must exist in Active Directory.
 #>
 
+#Requires -Version 3.0
+[CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
 param (
     [Parameter(Mandatory = $true)]
     [ValidateSet("Add", "Remove")]
@@ -42,63 +44,40 @@ param (
     [string]$Member,
 
     [Parameter(Mandatory = $false)]
-    [string]$ComputerName = $env:COMPUTERNAME
+    [string]$ComputerName = $env:COMPUTERNAME,
+
+    [string]$LogFolder = (Join-Path $PSScriptRoot 'Logs'),
+
+    [switch]$Force,
+
+    # Internal: dot-source the functions without running the main body.
+    [switch]$LoadFunctionsOnly
 )
 
-# Function to check if running as administrator
-function Test-Administrator {
-    $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = New-Object Security.Principal.WindowsPrincipal($currentUser)
-    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+# SQ-009 STUBS: signatures only. The builder replaces every body.
+function Write-Status { param([ValidateSet('PASS','WARN','FAIL','INFO')][string]$Level, [string]$Message) throw 'not implemented' }
+function Test-Administrator { throw 'not implemented' }
+function Test-IsLocalComputer { param([AllowEmptyString()][AllowNull()][string]$ComputerName) throw 'not implemented' }
+function Invoke-OnTarget { param([string]$ComputerName, [scriptblock]$ScriptBlock, [object[]]$ArgumentList) throw 'not implemented' }
+function Resolve-BuiltinAdministratorsName { param([scriptblock]$Translator) throw 'not implemented' }
+function Get-LocalAdminGroupName { param([string]$ComputerName) throw 'not implemented' }
+function Get-LocalAdminMember { param([string]$ComputerName) throw 'not implemented' }
+function Add-LocalAdminMember { param([string]$ComputerName, [string]$Member) throw 'not implemented' }
+function Remove-LocalAdminMember { param([string]$ComputerName, [string]$Member) throw 'not implemented' }
+function Format-MemberList { param([AllowEmptyCollection()][AllowNull()][object[]]$Members) throw 'not implemented' }
+function Test-LogFolderWritable { param([string]$LogFolder) throw 'not implemented' }
+function Write-LocalAdminChangeLog { param([AllowEmptyCollection()][object[]]$Entries, [string]$LogFolder) throw 'not implemented' }
+function Set-LocalAdminMembership {
+    [CmdletBinding(SupportsShouldProcess)]
+    param([ValidateSet('Add','Remove')][string]$Action, [string]$Member, [string]$ComputerName)
+    throw 'not implemented'
+}
+function Invoke-LocalAdminManagerMain {
+    [CmdletBinding(SupportsShouldProcess)]
+    param([string]$Action, [string]$Member, [string]$ComputerName, [string]$LogFolder, [switch]$Force)
+    throw 'not implemented'
 }
 
-# Function to add member to local administrators
-function Add-LocalAdmin {
-    param (
-        [string]$Member,
-        [string]$ComputerName
-    )
+if ($LoadFunctionsOnly) { return }
 
-    try {
-        Add-LocalGroupMember -Group "Administrators" -Member $Member -ComputerName $ComputerName
-        Write-Host "Successfully added $Member to local Administrators group on $ComputerName" -ForegroundColor Green
-    }
-    catch {
-        Write-Host "Failed to add $Member to local Administrators group on $ComputerName. Error: $($_.Exception.Message)" -ForegroundColor Red
-    }
-}
-
-# Function to remove member from local administrators
-function Remove-LocalAdmin {
-    param (
-        [string]$Member,
-        [string]$ComputerName
-    )
-
-    try {
-        Remove-LocalGroupMember -Group "Administrators" -Member $Member -ComputerName $ComputerName
-        Write-Host "Successfully removed $Member from local Administrators group on $ComputerName" -ForegroundColor Green
-    }
-    catch {
-        Write-Host "Failed to remove $Member from local Administrators group on $ComputerName. Error: $($_.Exception.Message)" -ForegroundColor Red
-    }
-}
-
-# Main script logic
-if (-not (Test-Administrator)) {
-    Write-Host "This script must be run as an administrator." -ForegroundColor Red
-    exit 1
-}
-
-Write-Host "Managing local administrators on $ComputerName..." -ForegroundColor Cyan
-
-switch ($Action) {
-    "Add" {
-        Add-LocalAdmin -Member $Member -ComputerName $ComputerName
-    }
-    "Remove" {
-        Remove-LocalAdmin -Member $Member -ComputerName $ComputerName
-    }
-}
-
-Write-Host "Operation completed." -ForegroundColor Cyan
+exit (Invoke-LocalAdminManagerMain -Action $Action -Member $Member -ComputerName $ComputerName -LogFolder $LogFolder -Force:$Force -WhatIf:$WhatIfPreference)
