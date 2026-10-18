@@ -25,10 +25,12 @@
     -Recurse) first saves the owner of every item to
     <LogFolder>\Backups\<yyyy-MM-dd_HHmmss>_TakeOwnership.csv (Path, ItemType, Owner,
     OwnerSid), because icacls /save does not store owners. Folders that cannot be opened are
-    skipped (takeown /D N) and keep their permissions; the result names them so they can be
-    escalated. Afterwards it reads every owner back. It logs one row for the whole folder
-    (ItemType 'Folder tree', Result Done, Partly done or Failed). The root of a drive and the
-    Windows system folders are refused unless the caller passes -AllowSystemFolder.
+    skipped (takeown /D N) and keep their permissions; the result is then at best Partly done,
+    names them so they can be escalated, and lists them all in <yyyy-MM-dd_HHmmss>_NotOpened.txt
+    next to the snapshot. Afterwards it reads every owner back. It logs one row for the whole
+    folder (ItemType 'Folder tree', Result Done, Partly done or Failed). The root of a drive and
+    the Windows system folders are refused, under any spelling and through junctions and
+    symbolic links, unless the caller passes -AllowSystemFolder.
 
     The change-log columns are shared with other tools that change things (LocalAdminManager):
     Time, Technician, Computer, Action, Target, ItemType, Detail, OldValue, NewValue, Result,
@@ -101,6 +103,20 @@
     - PathIntrinsics.GetUnresolvedProviderPathFromPSPath (a relative path made full against the
       PowerShell location, without wildcard expansion):
       https://learn.microsoft.com/dotnet/api/system.management.automation.pathintrinsics.getunresolvedproviderpathfrompspath
+    - Refusing drive roots and Windows folders under any spelling (D-036): \\?\, \\.\ and
+      trailing dots and spaces (naming-a-file); %ProgramW6432% in a 32-bit process (WOW64);
+      <letter>$ and ADMIN$ administrative shares; junctions, symbolic links and 8.3 names
+      resolved with CreateFile (no access rights, FILE_FLAG_BACKUP_SEMANTICS),
+      GetFinalPathNameByHandle and GetLongPathName:
+      https://learn.microsoft.com/windows/win32/fileio/naming-a-file
+      https://learn.microsoft.com/windows/win32/winprog64/wow64-implementation-details
+      https://learn.microsoft.com/troubleshoot/windows-server/networking/remove-administrative-shares
+      https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-createfilew
+      https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew
+      https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-getlongpathnamew
+    - An Excel cell holds at most 32,767 characters, so the change log's Detail names at most 20
+      folders per list:
+      https://support.microsoft.com/office/excel-specifications-and-limits-1672b34d-7043-467e-8e27-269d656771c3
     - DriveInfo.DriveType (Fixed, Network, Removable, ...) and
       Environment.SpecialFolder.LocalApplicationData, used to pick a local log folder:
       https://learn.microsoft.com/dotnet/api/system.io.driveinfo.drivetype
@@ -555,10 +571,23 @@ function Save-OwnerSnapshot {
         [PSCustomObject][ordered]@{ Path = $item.Path; ItemType = $item.ItemType; Owner = $owner.Owner; OwnerSid = $owner.OwnerSid }
     })
 
+    $backupFolder = Join-Path $LogFolder 'Backups'
+    $newFolder = -not (Test-Path -LiteralPath $backupFolder)
     $file = New-BackupFilePath -LogFolder $LogFolder -ActionSlug 'TakeOwnership'
-    $rows | ForEach-Object {
-        [PSCustomObject][ordered]@{ Path = (ConvertTo-CsvSafeText $_.Path); ItemType = $_.ItemType; Owner = (ConvertTo-CsvSafeText $_.Owner); OwnerSid = $_.OwnerSid }
-    } | Export-Csv -LiteralPath $file -NoTypeInformation -Encoding UTF8 -NoClobber -ErrorAction Stop
+    try {
+        $rows | ForEach-Object {
+            [PSCustomObject][ordered]@{ Path = (ConvertTo-CsvSafeText $_.Path); ItemType = $_.ItemType; Owner = (ConvertTo-CsvSafeText $_.Owner); OwnerSid = $_.OwnerSid }
+        } | Export-Csv -LiteralPath $file -NoTypeInformation -Encoding UTF8 -NoClobber -ErrorAction Stop
+    } catch {
+        # Nothing will be changed, so leave no empty Backups folder suggesting otherwise. Only
+        # a folder this call created, and only while it is empty: a file in it may be another
+        # run's backup (-NoClobber fails exactly when one appeared in between), so no file is
+        # ever deleted here.
+        if ($newFolder -and (Test-Path -LiteralPath $backupFolder) -and @(Get-ChildItem -LiteralPath $backupFolder -Force -ErrorAction SilentlyContinue).Count -eq 0) {
+            Remove-Item -LiteralPath $backupFolder -Force -ErrorAction SilentlyContinue
+        }
+        throw
+    }
 
     # A backup that cannot be read back is no backup: check it before anything changes.
     $saved = @(Import-Csv -LiteralPath $file -ErrorAction Stop)
@@ -590,19 +619,32 @@ function Get-OwnerReadBack {
         (owner differs from the snapshot), plus AdministratorsOnly: true when nothing is
         owned by -Sid and every item that is not is owned by Administrators (S-1-5-32-544).
         https://learn.microsoft.com/windows-server/identity/ad-ds/manage/understand-security-identifiers
+    .PARAMETER Watch
+        Paths to report on one by one (the folders that could not be opened): WatchedChanged
+        lists those this change gave a new owner, that is whose owner now differs from the
+        snapshot and is -Sid or Administrators, the only owners takeown /A and icacls set.
     #>
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Items,
-        [Parameter(Mandatory)][string]$Sid
+        [Parameter(Mandatory)][string]$Sid,
+        [AllowEmptyCollection()][string[]]$Watch = @()
     )
 
     $mine = 0; $notMine = 0; $unchecked = 0; $changed = 0; $admins = 0
+    $watched = @{}
+    foreach ($w in $Watch) { $watched[$w] = $true }
+    $watchedChanged = New-Object System.Collections.Generic.List[string]
     foreach ($item in $Items) {
         $now = Get-ItemOwner -Path $item.Path
         if (-not $now.OwnerSid) { $unchecked++; continue }
         if ($now.OwnerSid -eq $Sid) { $mine++ } else { $notMine++ }
         if ($now.OwnerSid -eq 'S-1-5-32-544' -and $now.OwnerSid -ne $Sid) { $admins++ }
-        if ($now.OwnerSid -ne $item.OwnerSid) { $changed++ }
+        if ($now.OwnerSid -ne $item.OwnerSid) {
+            $changed++
+            if ($watched.ContainsKey($item.Path) -and ($now.OwnerSid -eq $Sid -or $now.OwnerSid -eq 'S-1-5-32-544')) {
+                $watchedChanged.Add($item.Path)
+            }
+        }
     }
     [PSCustomObject]@{
         Mine               = $mine
@@ -610,38 +652,220 @@ function Get-OwnerReadBack {
         Unchecked          = $unchecked
         Changed            = $changed
         AdministratorsOnly = ($mine -eq 0 -and $notMine -gt 0 -and $admins -eq $notMine)
+        WatchedChanged     = $watchedChanged.ToArray()
     }
+}
+
+function ConvertTo-ComparablePath {
+    <#
+    .SYNOPSIS
+        One spelling of a path for comparing it with a protected folder (D-036), text only:
+        D:\..., \\server\share\..., or Volume{...}\... Returns '' for a blank path.
+    .DESCRIPTION
+        Windows reads several spellings as the same folder, so each is turned into one:
+        - \\?\ and \\.\ in front of a path are dropped and \\?\UNC\server\share becomes
+          \\server\share ("\\?\" sends the rest of the string straight to the file system;
+          "\\.\" is the device namespace, which also reaches C:\ through CreateFile).
+        - Trailing dots and spaces are trimmed from every segment: Windows drops them from a
+          name ("Do not end a file or directory name with a space or a period"), so
+          C:\Windows. is C:\Windows. With \\?\ they are kept by the file system and name a
+          different folder, but refusing that too is the safe side.
+        - '.' segments are dropped and '..' removes the segment before it (never the drive or
+          the \\server\share part); / is read as \ and repeated \ as one.
+        https://learn.microsoft.com/windows/win32/fileio/naming-a-file
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$Path)
+
+    $p = "$Path".Trim().Replace('/', '\')
+    if ($p -match '^\\\\[?.]\\UNC\\(.*)$') { $p = '\\' + $Matches[1] }
+    elseif ($p -match '^\\\\[?.]\\(.*)$') { $p = $Matches[1] }
+    $unc = $p.StartsWith('\\')
+    $segments = New-Object System.Collections.Generic.List[string]
+    foreach ($raw in @($p.TrimStart('\') -split '\\+')) {
+        if ($raw -eq '.' -or $raw -eq '') { continue }
+        if ($raw -eq '..') {
+            $keep = if ($unc) { 2 } else { 1 }
+            if ($segments.Count -gt $keep) { $segments.RemoveAt($segments.Count - 1) }
+            continue
+        }
+        $name = $raw.TrimEnd('.', ' ')
+        if ($name) { $segments.Add($name) }
+    }
+    if ($segments.Count -eq 0) { return '' }
+    if ($unc) { return '\\' + ($segments.ToArray() -join '\') }
+    if ($segments.Count -eq 1 -and $segments[0] -match '^[A-Za-z]:$') { return "$($segments[0])\" }
+    $segments.ToArray() -join '\'
 }
 
 function Get-TreeOwnershipRefusal {
     <#
     .SYNOPSIS
         Why taking ownership of everything under -Path is refused, or $null when it is allowed
-        (D-036). Refused: the root of a drive (D:\) and %SystemRoot%, %ProgramFiles%,
-        %ProgramFiles(x86)% and %ProgramData%, the folders themselves and anything under them.
-        The root of a share (\\fs01\share) is allowed.
+        (D-036). Refused: the root of a drive (D:\, \\?\D:\, \\server\D$) and %SystemRoot%,
+        %ProgramFiles%, %ProgramW6432%, %ProgramFiles(x86)% and %ProgramData%, the folders
+        themselves and anything under them; on another computer, its ADMIN$ share and
+        \\server\<letter>$\Windows, Program Files, Program Files (x86) and ProgramData. The root
+        of a share (\\fs01\share) is allowed.
     .DESCRIPTION
-        Text only, nothing is read from disk: -Path should already be a full path
-        (Resolve-AclTargetPath). Compared case-insensitively on whole path segments, so
-        C:\Windows\System32 is refused and C:\WindowsOld is not. The variables are read when
-        called, not when the file is loaded. The text names the path and does not say what to do
-        about it: each caller adds its own next step (the command line has -AllowSystemFolder,
-        the GUI has no override).
+        Text only, nothing is read from disk (Get-TreeOwnershipTargetRefusal adds what only the
+        disk can tell: junctions, symbolic links and 8.3 short names). The path and the
+        protected folders are compared in one spelling (ConvertTo-ComparablePath),
+        case-insensitively on whole path segments, so C:\Windows\System32 and \\?\C:\Windows.
+        are refused and C:\WindowsOld is not. The variables are read when called, not when the
+        file is loaded. %ProgramW6432% is the 64-bit Program Files folder seen from a 32-bit
+        process, whose %ProgramFiles% is the x86 folder; it is empty on 32-bit Windows and then
+        skipped. Another computer's variables cannot be read from here, so its standard folder
+        names are used. The text names the path and does not say what to do about it: each
+        caller adds its own next step (the command line has -AllowSystemFolder, the GUI has no
+        override).
+        WOW64: a 32-bit process has ProgramFiles=%ProgramFiles(x86)% and ProgramW6432=%ProgramFiles%.
+        https://learn.microsoft.com/windows/win32/winprog64/wow64-implementation-details
+        <DriveLetter>$ "is a shared root partition or volume"; ADMIN$ "is a resource that is
+        used during remote administration of a computer". That ADMIN$ is the Windows folder is
+        NOT VERIFIED on Learn; it is refused whatever it points to.
+        https://learn.microsoft.com/troubleshoot/windows-server/networking/remove-administrative-shares
     #>
     param([Parameter(Mandatory)][string]$Path)
 
-    $normalized = $Path.Trim().Replace('/', '\')
-    if ($normalized -match '^[A-Za-z]:\\*$') {
-        return "$Path is the root of a drive. Taking ownership of a whole drive also changes the owner of Windows and program files on it, which cannot easily be undone. Choose the folder that needs fixing instead."
+    $tail = 'Changing the owner of everything in it can stop Windows or installed programs from working, and cannot easily be undone. Choose the folder that needs fixing instead.'
+    $driveTail = 'Taking ownership of a whole drive also changes the owner of Windows and program files on it, which cannot easily be undone. Choose the folder that needs fixing instead.'
+    $normalized = ConvertTo-ComparablePath -Path $Path
+    if ($normalized -match '^[A-Za-z]:\\$' -or $normalized -match '^Volume\{[^\\]*\}$') {
+        return "$Path is the root of a drive. $driveTail"
     }
-    $normalized = $normalized.TrimEnd('\')
-    foreach ($name in @('SystemRoot', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramData')) {
-        $protected = "$([Environment]::GetEnvironmentVariable($name))".Trim().Replace('/', '\').TrimEnd('\')
+
+    # \\server\D$ is the root of drive D: on the server and ADMIN$ is used to administer it
+    # remotely (administrative shares). An ordinary share root is allowed.
+    if ($normalized -match '^\\\\([^\\]+)\\([^\\]+)(?:\\(.*))?$') {
+        $server = $Matches[1]; $share = $Matches[2]; $rest = "$($Matches[3])"
+        if ($share -ieq 'ADMIN$') {
+            return "$Path is on the ADMIN`$ administrative share of $server, which is used to administer Windows remotely. $tail"
+        }
+        if ($share -match '^([A-Za-z])\$$') {
+            $drive = $Matches[1].ToUpperInvariant()
+            if (-not $rest) {
+                return "$Path is the root of drive $($drive): on $server (the $($drive)`$ administrative share). $driveTail"
+            }
+            $top = ($rest -split '\\')[0]
+            foreach ($name in @('Windows', 'Program Files', 'Program Files (x86)', 'ProgramData')) {
+                if ($top -ieq $name) {
+                    return "$Path is in a Windows system folder on $server ($($drive):\$name). $tail"
+                }
+            }
+        }
+        return $null
+    }
+
+    foreach ($name in @('SystemRoot', 'ProgramFiles', 'ProgramW6432', 'ProgramFiles(x86)', 'ProgramData')) {
+        $protected = ConvertTo-ComparablePath -Path ([Environment]::GetEnvironmentVariable($name))
         if (-not $protected) { continue }
+        $protected = $protected.TrimEnd('\')
         if ($normalized.Equals($protected, [System.StringComparison]::OrdinalIgnoreCase) -or
             $normalized.StartsWith("$protected\", [System.StringComparison]::OrdinalIgnoreCase)) {
-            return "$Path is in a Windows system folder (%$name%, $protected). Changing the owner of everything in it can stop Windows or installed programs from working, and cannot easily be undone. Choose the folder that needs fixing instead."
+            return "$Path is in a Windows system folder (%$name%, $([Environment]::GetEnvironmentVariable($name))). $tail"
         }
+    }
+    $null
+}
+
+function Get-Win32PathName {
+    <#
+    .SYNOPSIS
+        What Windows itself calls an existing folder: -Kind Final follows every junction and
+        symbolic link in the path (the folder's own and its parents') and gives long names;
+        -Kind Long only expands 8.3 short names (PROGRA~1). $null when it cannot be told (the
+        path does not exist, cannot be opened, or the API cannot be loaded).
+    .DESCRIPTION
+        Final: CreateFile with no access rights ("can query certain metadata ... even if
+        GENERIC_READ access would have been denied") and FILE_FLAG_BACKUP_SEMANTICS (needed to
+        open a directory), then GetFinalPathNameByHandle ("for a symbolic link named
+        C:\tmp\mydir that points to D:\yourdir, the final path would be D:\yourdir"; the result
+        uses the \\?\ syntax). Over SMB it can fail with access denied on a parent folder.
+        Long: GetLongPathName (fails when the path does not exist).
+        https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-createfilew
+        https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew
+        https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-getlongpathnamew
+    #>
+    param([Parameter(Mandatory)][string]$Path, [ValidateSet('Final', 'Long')][string]$Kind = 'Final')
+
+    try {
+        if (-not ('FolderPermissionManager.Win32Path' -as [type])) {
+            Add-Type -Namespace FolderPermissionManager -Name Win32Path -ErrorAction Stop -MemberDefinition @'
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+public static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(string lpFileName, uint dwDesiredAccess, uint dwShareMode, IntPtr lpSecurityAttributes, uint dwCreationDisposition, uint dwFlagsAndAttributes, IntPtr hTemplateFile);
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+public static extern uint GetFinalPathNameByHandleW(Microsoft.Win32.SafeHandles.SafeFileHandle hFile, System.Text.StringBuilder lpszFilePath, uint cchFilePath, uint dwFlags);
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+public static extern uint GetLongPathNameW(string lpszShortPath, System.Text.StringBuilder lpszLongPath, uint cchBuffer);
+'@
+        }
+        $buffer = New-Object System.Text.StringBuilder -ArgumentList 32768
+        if ($Kind -eq 'Long') {
+            $length = [FolderPermissionManager.Win32Path]::GetLongPathNameW($Path, $buffer, [uint32]$buffer.Capacity)
+        } else {
+            # 7 = share read, write and delete; 3 = OPEN_EXISTING; 0x02000000 =
+            # FILE_FLAG_BACKUP_SEMANTICS. Flags 0 = FILE_NAME_NORMALIZED and VOLUME_NAME_DOS.
+            $handle = [FolderPermissionManager.Win32Path]::CreateFileW($Path, 0, 7, [IntPtr]::Zero, 3, 0x02000000, [IntPtr]::Zero)
+            try {
+                if ($handle.IsInvalid) { return $null }
+                $length = [FolderPermissionManager.Win32Path]::GetFinalPathNameByHandleW($handle, $buffer, [uint32]$buffer.Capacity, 0)
+            } finally { $handle.Dispose() }
+        }
+        if ($length -eq 0 -or $length -ge $buffer.Capacity) { return $null }
+        $buffer.ToString()
+    } catch {
+        $null
+    }
+}
+
+function Test-PathThroughLink {
+    # True when the folder or any folder above it is a junction or symbolic link
+    # (FileAttributes.ReparsePoint). Reads attributes only.
+    # https://learn.microsoft.com/dotnet/api/system.io.fileattributes
+    param([Parameter(Mandatory)][string]$Path)
+    $current = $Path
+    while ($current) {
+        $item = Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue
+        if ($item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { return $true }
+        $parent = Split-Path -Path $current -Parent
+        if (-not $parent -or $parent -eq $current) { break }
+        $current = $parent
+    }
+    $false
+}
+
+function Get-TreeOwnershipTargetRefusal {
+    <#
+    .SYNOPSIS
+        Get-TreeOwnershipRefusal for a folder as Windows will really reach it: also refused when
+        -Path leads into a protected folder through a junction or symbolic link (on the folder
+        or on any folder above it) or is spelt with 8.3 short names (C:\PROGRA~1). The text
+        names -Path as given. $null when it is allowed.
+    .DESCRIPTION
+        Reads the disk (Get-Win32PathName, attributes only; nothing is opened for reading or
+        changed). A path that does not exist is checked as text only. When the folder is, or
+        is inside, a junction or symbolic link and where it leads cannot be found out, it is
+        refused: takeown and icacls would follow it to a place nobody checked.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    $refusal = Get-TreeOwnershipRefusal -Path $Path
+    if ($refusal) { return $refusal }
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+
+    $final = Get-Win32PathName -Path $Path -Kind Final
+    $forms = @($final, (Get-Win32PathName -Path $Path -Kind Long)) | Where-Object { $_ }
+    $given = ConvertTo-ComparablePath -Path $Path
+    foreach ($form in $forms) {
+        $comparable = ConvertTo-ComparablePath -Path $form
+        if ($comparable -ieq $given) { continue }
+        $refusal = Get-TreeOwnershipRefusal -Path $comparable
+        if ($refusal) {
+            return "$Path leads to $comparable (through a junction, a symbolic link or a short name). $refusal"
+        }
+    }
+    if (-not $final -and (Test-PathThroughLink -Path $Path)) {
+        return "$Path is, or is inside, a junction or symbolic link, and where it leads could not be found out, so it cannot be checked against the Windows system folders. Choose the real folder it points to instead."
     }
     $null
 }
@@ -879,7 +1103,7 @@ function Set-ItemOwnerToCurrentUser {
         -Recurse (one row per folder, see Invoke-TreeOwnershipChange): the owner of every item
         is saved to an owner snapshot first, then takeown /R and icacls /setowner /T change the
         whole tree. The root of a drive and the Windows system folders are refused
-        (Get-TreeOwnershipRefusal) unless -AllowSystemFolder is given.
+        (Get-TreeOwnershipTargetRefusal) unless -AllowSystemFolder is given.
         https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
     .PARAMETER Recurse
         Take ownership of each folder and of all its subfolders and files.
@@ -904,10 +1128,12 @@ function Set-ItemOwnerToCurrentUser {
     Invoke-SingleItemAclChange -Cmdlet $PSCmdlet -Path $Path -Action 'Take ownership' -ActionSlug 'TakeOwnership' `
         -Detail "Owner set to $($me.Name)" -LogFolder $LogFolder -ProceedWhenUnreadable -Change {
         param($p, $itemType)
-        # Same arguments the GUI has always used. A takeown failure is not fatal on its own:
-        # Set-Acl below is what sets the final owner, and an administrator who already has
-        # access does not need takeown.
-        $tool = Invoke-AclTool -Tool takeown -Arguments @('/F', $p, '/A', '/D', 'Y')
+        # No /D: "You must use this option in conjunction with the /r option" (takeown), and
+        # its Y answer replaces a folder's permissions with full control for the user only. A
+        # takeown failure is not fatal on its own: Set-Acl below is what sets the final owner,
+        # and an administrator who already has access does not need takeown.
+        # https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
+        $tool = Invoke-AclTool -Tool takeown -Arguments @('/F', $p, '/A')
         try {
             $acl = Get-Acl -LiteralPath $p -ErrorAction Stop
             $acl.SetOwner($me.User)
@@ -1033,16 +1259,19 @@ function Invoke-TreeOwnershipChange {
         after saving every item's owner. Returns one row for the whole folder and never throws.
     .DESCRIPTION
         1. The path is made a full path once (Resolve-AclTargetPath) and used for everything.
-        2. The root of a drive and the Windows system folders are refused
-           (Get-TreeOwnershipRefusal, D-036) unless -AllowSystemFolder: nothing is read,
-           written or changed.
-        3. ShouldProcess once for the folder (-WhatIf: nothing is read, written or changed).
+        2. The root of a drive and the Windows system folders are refused, also when reached
+           through a junction, a symbolic link or a short name (Get-TreeOwnershipTargetRefusal,
+           D-036), unless -AllowSystemFolder: only the folder's name and attributes are read,
+           and nothing is written or changed.
+        3. ShouldProcess once for the folder (-WhatIf: no owner is read, nothing is written or
+           changed).
         4. Save-OwnerSnapshot: if it cannot be written and checked, nothing is changed.
         5. takeown /F <dir> /R /A /D N gives every item to Administrators, so an administrator
            can open items they are locked out of. A folder the account cannot list (no List
            Folder and Read permission) is skipped by /D N and keeps its permissions (D-034);
-           /D Y would replace them with full control for the user only. The read-back then
-           shows it is not owned, and the message tells the technician to escalate it.
+           /D Y would replace them with full control for the user only. The tree is then at
+           best Partly done, the folders are listed in <stamp>_NotOpened.txt next to the
+           snapshot (Save-NotOpenedList), and the message tells the technician to escalate them.
         6. icacls <dir> /setowner <DOMAIN\user> /T /C /Q makes the current account the owner.
            The full name from WindowsIdentity, not $env:USERNAME, which has no domain and is
            wrong under SYSTEM and service accounts.
@@ -1060,7 +1289,9 @@ function Invoke-TreeOwnershipChange {
 
         The row also carries, in its TreeCounts member set (Add-TreeEntryCount), for the messages
         and not for the log file: ItemCount, Unreadable (no readable owner before), Unlisted and
-        UnlistedFolders (folders that could not be opened, which takeown skipped), Links and
+        UnlistedFolders (folders that could not be opened, which takeown skipped),
+        UnlistedChanged and UnlistedChangedFolders (those of them whose owner was changed
+        anyway), NotOpenedFile (the full list of them, or ''), Links and
         LinkPaths (junctions and symbolic links, listed but not gone into),
         Unchecked (no readable owner afterwards), NotOwned (still not owned by the current
         account) and Changed (owner differs from the snapshot).
@@ -1094,7 +1325,7 @@ function Invoke-TreeOwnershipChange {
             -ErrorText "$Path is a file, not a folder: take ownership of this item only instead. Nothing was changed."
     }
     if (-not $AllowSystemFolder) {
-        $refusal = Get-TreeOwnershipRefusal -Path $Path
+        $refusal = Get-TreeOwnershipTargetRefusal -Path $Path
         if ($refusal) {
             return New-PermissionChangeEntry -Action $action -Target $Path -ItemType 'Folder tree' -Detail $detail -Result 'Failed' `
                 -ErrorText "$refusal Nothing was changed."
@@ -1126,20 +1357,15 @@ function Invoke-TreeOwnershipChange {
     # https://learn.microsoft.com/windows-server/administration/windows-commands/icacls
     $icaclsArgs = @($Path, '/setowner', $me, '/T', '/C', '/Q')
 
-    # Detail is for the log reader; the messages use the counts on the row instead.
-    $notes = @(
-        "$detail."
-        $(if ($snapshot.Unreadable -gt 0) { "$($snapshot.Unreadable) item(s) had no readable owner before the change." })
-        $(if ($snapshot.Unlisted -gt 0) { "$($snapshot.Unlisted) folder(s) could not be opened, so takeown /D N skipped them and the owners inside them are not in the backup: $(@($snapshot.UnlistedFolders) -join '; ')." })
-        $(if ($snapshot.Links -gt 0) { "$($snapshot.Links) junction(s) or symbolic link(s) were listed but not gone into: $(@($snapshot.LinkPaths) -join '; ')." })
-        "Ran: $(Format-AclToolCommand -Tool takeown -Arguments $takeownArgs); $(Format-AclToolCommand -Tool icacls -Arguments $icaclsArgs)"
-    ) | Where-Object { $_ }
-    $common = @{ Action = $action; Target = $Path; ItemType = 'Folder tree'; Detail = ($notes -join ' '); OldValue = "Saved in $($snapshot.File)"; BackupFile = $snapshot.File }
-
     $takeown = Invoke-AclTool -Tool takeown -Arguments $takeownArgs
     $icacls = Invoke-AclTool -Tool icacls -Arguments $icaclsArgs
-    $check = Get-OwnerReadBack -Items $snapshot.Items -Sid $mySid
+    # A folder takeown skipped may still get a new owner: icacls /setowner /T is run on the
+    # whole tree and may set the owner of the skipped folder itself (NOT VERIFIED on Learn,
+    # which says nothing about it). So its owner is read back like every other item, and the
+    # message says "left alone" only when it did not change.
+    $check = Get-OwnerReadBack -Items $snapshot.Items -Sid $mySid -Watch @($snapshot.UnlistedFolders)
     $total = $snapshot.Count
+    $unlistedChanged = @($check.WatchedChanged)
 
     # What the owners are now, from the read-back.
     $newValue = if ($check.Mine -eq $total) { "Owner: $me" }
@@ -1148,8 +1374,11 @@ function Invoke-TreeOwnershipChange {
                 elseif ($check.NotMine -eq 0) { 'Not checked' }
                 elseif ($check.Changed -eq 0) { 'Owner unchanged' }
                 else { "Owner: $me on 0 of $total items" }
-    # No owner read back at all is not a success: nothing is known about the result.
+    # No owner read back at all is not a success: nothing is known about the result. A folder
+    # that could not be opened was skipped with what is inside it, so the tree is at best
+    # Partly done (D-034), even when every item that was read back is owned.
     $readBackResult = if ($check.Mine -eq 0 -and $check.NotMine -eq 0) { 'Partly done' }
+                      elseif ($check.NotMine -eq 0 -and $snapshot.Unlisted -gt 0) { 'Partly done' }
                       elseif ($check.NotMine -eq 0) { 'Done' }
                       elseif ($check.Mine -eq 0) { 'Failed' }
                       else { 'Partly done' }
@@ -1173,19 +1402,90 @@ function Invoke-TreeOwnershipChange {
     $order = @('Done', 'Partly done', 'Failed')
     $result = $order[[Math]::Max([array]::IndexOf($order, $readBackResult), [array]::IndexOf($order, $toolResult))]
 
-    $row = New-PermissionChangeEntry @common -NewValue $newValue -Result $result -ErrorText ($problems -join ' ')
+    # Written after the tools ran, so the owner snapshot is the only file in Backups while
+    # anything changes; it is a list for the escalation, not a backup.
+    $notOpenedFile = ''
+    if ($snapshot.Unlisted -gt 0) {
+        $notOpenedFile = Save-NotOpenedList -SnapshotFile $snapshot.File -Path $Path -Folder @($snapshot.UnlistedFolders) -OwnerChanged $unlistedChanged
+    }
+
+    # Detail is for the log reader; the messages use the counts on the row instead. At most
+    # 20 names per list: an Excel cell holds 32,767 characters, and the full list of folders
+    # that could not be opened is in its own file.
+    # https://support.microsoft.com/office/excel-specifications-and-limits-1672b34d-7043-467e-8e27-269d656771c3
+    $fullList = if ($notOpenedFile) { " (full list: $notOpenedFile)" } else { '' }
+    $notes = @(
+        "$detail."
+        $(if ($snapshot.Unreadable -gt 0) { "$($snapshot.Unreadable) item(s) had no readable owner before the change." })
+        $(if ($snapshot.Unlisted -gt 0) { "$($snapshot.Unlisted) folder(s) could not be opened, so takeown /D N skipped them and the owners inside them are not in the backup: $(Format-PathList -Path @($snapshot.UnlistedFolders) -First 20 -More $fullList)." })
+        $(if ($unlistedChanged.Count -gt 0) { "The owner of $($unlistedChanged.Count) of them was changed anyway (read back), but not their permissions: $(Format-PathList -Path $unlistedChanged -First 20)." })
+        $(if ($snapshot.Links -gt 0) { "$($snapshot.Links) junction(s) or symbolic link(s) were listed but not gone into: $(Format-PathList -Path @($snapshot.LinkPaths) -First 20)." })
+        "Ran: $(Format-AclToolCommand -Tool takeown -Arguments $takeownArgs); $(Format-AclToolCommand -Tool icacls -Arguments $icaclsArgs)"
+    ) | Where-Object { $_ }
+
+    $row = New-PermissionChangeEntry -Action $action -Target $Path -ItemType 'Folder tree' -Detail ($notes -join ' ') `
+        -OldValue "Saved in $($snapshot.File)" -NewValue $newValue -Result $result -ErrorText ($problems -join ' ') -BackupFile $snapshot.File
     Add-TreeEntryCount -Entry $row -Counts ([ordered]@{
-        ItemCount       = $total
-        Unreadable      = $snapshot.Unreadable
-        Unlisted        = $snapshot.Unlisted
-        UnlistedFolders = @($snapshot.UnlistedFolders)
-        Links           = $snapshot.Links
-        LinkPaths       = @($snapshot.LinkPaths)
-        Unchecked       = $check.Unchecked
-        NotOwned        = $check.NotMine
-        Changed         = $check.Changed
+        ItemCount              = $total
+        Unreadable             = $snapshot.Unreadable
+        Unlisted               = $snapshot.Unlisted
+        UnlistedFolders        = @($snapshot.UnlistedFolders)
+        UnlistedChanged        = $unlistedChanged.Count
+        UnlistedChangedFolders = $unlistedChanged
+        NotOpenedFile          = $notOpenedFile
+        Links                  = $snapshot.Links
+        LinkPaths              = @($snapshot.LinkPaths)
+        Unchecked              = $check.Unchecked
+        NotOwned               = $check.NotMine
+        Changed                = $check.Changed
     })
     $row
+}
+
+function Format-PathList {
+    # "a; b; c and 2 more": the first -First paths, then how many were left out and -More (for
+    # example " (full list: <file>)"), which is only added when some were left out.
+    param([AllowEmptyCollection()][string[]]$Path = @(), [int]$First = 3, [string]$More = '')
+    $all = @($Path)
+    $shown = @($all | Select-Object -First $First)
+    $text = $shown -join '; '
+    if ($all.Count -gt $shown.Count) { $text += " and $($all.Count - $shown.Count) more$More" }
+    $text
+}
+
+function Save-NotOpenedList {
+    <#
+    .SYNOPSIS
+        Writes every folder that could not be opened while taking ownership of -Path to
+        <stamp>_NotOpened.txt next to the owner snapshot (one path per line, after a heading),
+        for the escalation. Returns the file, or '' when it cannot be written: the change is
+        already made, and the change log still names the first 20 folders.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$SnapshotFile,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string[]]$Folder,
+        [AllowEmptyCollection()][string[]]$OwnerChanged = @()
+    )
+
+    $name = (Split-Path -Leaf $SnapshotFile) -replace '_TakeOwnership(_\d+)?\.csv$', '_NotOpened$1.txt'
+    $file = Join-Path (Split-Path -Parent $SnapshotFile) $name
+    $changed = @{}
+    foreach ($c in $OwnerChanged) { $changed[$c] = $true }
+    $lines = @(
+        "Folders that could not be opened while taking ownership of $Path ($(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))."
+        'takeown skipped them, so their permissions were not changed. Ask a senior engineer to take ownership of them with an account that can open them.'
+        $(if ($changed.Count -gt 0) { 'A folder marked (owner changed) has a new owner, but not new permissions.' })
+        ''
+        $(foreach ($f in $Folder) { if ($changed.ContainsKey($f)) { "$f`t(owner changed)" } else { $f } })
+    ) | Where-Object { $null -ne $_ }
+    try {
+        Set-Content -LiteralPath $file -Value $lines -Encoding UTF8 -ErrorAction Stop
+        $file
+    } catch {
+        Write-Verbose "Could not write the list of folders that could not be opened: $($_.Exception.Message)"
+        ''
+    }
 }
 
 function Get-AclToolProblem {
@@ -1343,6 +1643,42 @@ function Get-UnrestorableItemCount {
     $count
 }
 
+function Get-NotOpenedEscalation {
+    <#
+    .SYNOPSIS
+        The next step for the folders a whole-tree row could not open (D-034), as one passage:
+        "Escalate: <n> folder(s) could not be opened, so they were left alone." (or, for those
+        whose owner was read back changed, that their owner was changed but not their
+        permissions), the first three names and the file with all of them, who to hand them to,
+        and that what is inside them cannot be restored from the snapshot.
+    .DESCRIPTION
+        takeown /D N skips a folder it cannot open, so its permissions stay as they were; its
+        owner is read back, because icacls /setowner /T may still change it (NOT VERIFIED).
+        https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
+    #>
+    param([Parameter(Mandatory)][object]$Entry)
+
+    $count = Get-TreeEntryCount $Entry 'Unlisted'
+    $changed = @($Entry.TreeCounts.UnlistedChangedFolders)
+    $opening = if ($changed.Count -eq 0) {
+        "Escalate: $count folder(s) could not be opened, so they were left alone."
+    } elseif ($changed.Count -ge $count -and $count -eq 1) {
+        'Escalate: 1 folder(s) could not be opened: its owner was changed, but its permissions were not.'
+    } elseif ($changed.Count -ge $count) {
+        "Escalate: $count folder(s) could not be opened: their owners were changed, but their permissions were not."
+    } else {
+        "Escalate: $count folder(s) could not be opened. $($changed.Count) of them had their owner changed, but not their permissions ($(Format-PathList -Path $changed -First 3)); the other $($count - $changed.Count) were left alone."
+    }
+    $file = "$($Entry.TreeCounts.NotOpenedFile)"
+    @(
+        $opening
+        "Not opened: $(Format-PathList -Path @($Entry.TreeCounts.UnlistedFolders) -First 3)."
+        $(if ($file) { "Full list: $file." })
+        'Ask a senior engineer to take ownership of them with an account that can open them.'
+        'The owners of what is inside them were not saved and cannot be restored from this backup.'
+    ) -join ' '
+}
+
 function Get-TreeChangeResultMessage {
     <#
     .SYNOPSIS
@@ -1360,10 +1696,15 @@ function Get-TreeChangeResultMessage {
     foreach ($e in $Entries) {
         $what = "ownership of $($e.Target) and all subfolders and files"
         $restore = "The owners before the change are in $($e.BackupFile); see ""Undo a change"" in the README to put them back."
+        $unlisted = Get-TreeEntryCount $e 'Unlisted'
         switch ($e.Result) {
             'Done'                { $parts.Add("Took $what.") }
             'Partly done'         {
-                if ($e.NewValue -eq 'Not checked') {
+                if ($unlisted -gt 0 -and -not $e.Error -and (Get-TreeEntryCount $e 'NotOwned') -eq 0 -and $e.NewValue -ne 'Not checked') {
+                    # Partly done only because folders could not be opened (D-034): everything
+                    # else is owned now, and the escalation below names what was skipped.
+                    $parts.Add("Took ownership of $($e.Target) and every subfolder and file that could be opened. $restore")
+                } elseif ($e.NewValue -eq 'Not checked') {
                     $parts.Add("Partly done: ran takeown and icacls on $($e.Target), but no owner could be read back afterwards, so it is not known whether ownership was taken. $(Format-Sentence $e.Error) $restore".Replace('  ', ' '))
                 } else {
                     $parts.Add("Partly done: took $what, but not on every item ($($e.NewValue)). $(Format-Sentence $e.Error) $restore")
@@ -1385,15 +1726,8 @@ function Get-TreeChangeResultMessage {
             }
         }
 
-        $unlisted = Get-TreeEntryCount $e 'Unlisted'
         if ($unlisted -gt 0) {
-            $names = @($e.TreeCounts.UnlistedFolders | Select-Object -First 3)
-            $more = if ($unlisted -gt $names.Count) { " and $($unlisted - $names.Count) more" } else { '' }
-            $parts.Add("$unlisted folder(s) could not be opened ($($names -join '; ')$more), so the owners of what is inside them were not saved and cannot be restored from this backup.")
-            # takeown /D N skips a folder it cannot open (D-034): its permissions are as they
-            # were, and the next step is to escalate it.
-            # https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
-            $parts.Add("Escalate: $unlisted folder(s) could not be opened, so they were left alone.")
+            $parts.Add((Get-NotOpenedEscalation -Entry $e))
         }
         $links = Get-TreeEntryCount $e 'Links'
         if ($links -gt 0) {

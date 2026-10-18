@@ -1120,7 +1120,9 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* Status bar */
-.status-bar { padding: 6px 16px; font-size: 12px; background: var(--bg-card); border-top: 1px solid var(--border); flex-shrink: 0; min-height: 34px; line-height: 1.5; display: flex; align-items: center; overflow-wrap: anywhere; }
+/* A long result (folders to escalate) scrolls inside the bar instead of pushing the panel up.
+   Block, not flex: a centred flex line that overflows cannot be scrolled to its start. */
+.status-bar { padding: 8px 16px; font-size: 12px; background: var(--bg-card); border-top: 1px solid var(--border); flex-shrink: 0; min-height: 34px; max-height: 30vh; overflow-y: auto; line-height: 1.5; overflow-wrap: anywhere; }
 .status-bar.success { color: var(--success); }
 .status-bar.error   { color: var(--danger); }
 .status-bar.info    { color: var(--accent); }
@@ -1618,7 +1620,7 @@ function showChangeResult(r) {
     if (type === 'warning' && msg.indexOf('Partly done:') !== 0) {
         var res = r.results || [];
         var partial = res.some(function(x) { return x.status !== 'success'; });
-        msg = (partial ? 'Partly done: ' : 'Check this: ') + msg;
+        msg = (partial ? 'Partly done: ' : 'Done, with items to check: ') + msg;
     }
     setStatus(msg, type);
 }

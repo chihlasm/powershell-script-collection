@@ -238,14 +238,17 @@ Describe 'Recursive take ownership' {
 
         $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
 
-        $rows[0].Result | Should -Be 'Done'
+        # D-034: a folder that could not be opened makes the result Partly done, never Done
+        # (was 'Done' before D-034; changed in fix round 1 of the 2026-10-17 review).
+        $rows[0].Result | Should -Be 'Partly done'
         $rows[0].TreeCounts.Unlisted | Should -Be 1
         @($rows[0].TreeCounts.UnlistedFolders) | Should -Be @($locked)
         Test-TreeEntryIncomplete $rows[0] | Should -BeTrue
         $saved = @(Import-Csv -LiteralPath $rows[0].BackupFile)
         @($saved | ForEach-Object { $_.Path }) | Should -Not -Contain (Join-Path $locked 'a.txt')
         $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
-        $message | Should -BeLike "*1 folder(s) could not be opened ($locked)*"
+        # One merged escalation (review 2026-10-17, UI): the pinned sentence, then the names.
+        $message | Should -BeLike "*Escalate: 1 folder(s) could not be opened, so they were left alone. Not opened: $locked.*"
         $message | Should -Match 'cannot be restored from this backup'
     }
 
@@ -371,6 +374,7 @@ Describe 'Recursive take ownership' {
 
         $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
 
+        $rows[0].Result | Should -Be 'Partly done' -Because 'D-034: a skipped folder never leaves the result Done'
         $takeown = @($script:ToolCalls | Where-Object { $_.Tool -eq 'takeown' })
         $takeown[0].Arguments | Should -Be @('/F', $dir, '/R', '/A', '/D', 'N')
         foreach ($c in $script:ToolCalls) {
@@ -397,7 +401,7 @@ Describe 'Recursive take ownership' {
         $rows[0].TreeCounts.Unlisted | Should -Be 1
         @($rows[0].TreeCounts.UnlistedFolders) | Should -Be @($locked)
         $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
-        $message | Should -BeLike "*1 folder(s) could not be opened ($locked)*Escalate: 1 folder(s) could not be opened, so they were left alone.*"
+        $message | Should -BeLike "*Escalate: 1 folder(s) could not be opened, so they were left alone. Not opened: $locked.*cannot be restored from this backup*"
         $message | Should -Not -Match 'are lost'
     }
 
@@ -413,7 +417,7 @@ Describe 'Recursive take ownership' {
         $rows[0].Result | Should -Be 'Failed'
         $rows[0].Error | Should -Match '^Could not save a backup of the current permissions'
         $rows[0].Error | Should -Match 'Nothing was changed\.$'
-        @(Get-ChildItem -LiteralPath (Join-Path $script:Log 'Backups') -Filter '*_Permissions.csv' -ErrorAction SilentlyContinue).Count | Should -Be 0
+        Test-Path -LiteralPath (Join-Path $script:Log 'Backups') | Should -BeFalse -Because 'a snapshot that could not be saved leaves no backup folder behind'
     }
 
     It 'AC17_NoOwnerCouldBeReadBack_IsPartlyDoneNeverDone' {
@@ -738,5 +742,397 @@ Describe 'README after D-034 and D-036' {
     It 'AC16d_ReadmeExplainsTheDriveRootRefusalAndAllowSystemFolder' {
         $script:Readme | Should -Match '-AllowSystemFolder'
         $script:Readme | Should -Match '(?i)drive root|volume root|whole drive'
+    }
+
+    It 'AC16d_ReadmeNamesTheOtherSpellingsThatAreRefused' {
+        $script:Readme | Should -Match ([regex]::Escape('ADMIN$'))
+        $script:Readme | Should -Match '(?i)junction'
+        $script:Readme | Should -Match '(?i)short name'
+    }
+
+    It 'AC16c_ReadmeListsTheNotOpenedFileAndWhoToEscalateTo' {
+        $script:Readme | Should -Match '_NotOpened\.txt'
+        $script:Readme | Should -Match '(?i)senior engineer'
+    }
+
+    It 'ReadmeSaysTheLogsHoldClientDataAndWhenToDeleteThem' {
+        $script:Readme | Should -Match '(?is)Logs\\.{0,80}client paths, account names and SIDs'
+        $script:Readme | Should -Match '(?i)delete it when the ticket is closed'
+    }
+}
+
+# --- Fix round 1 (SQ-014 review 2026-10-17, D-034 and D-036) ---------------------------------
+#
+# Pinned for the implementer:
+#   D-036  Get-TreeOwnershipRefusal stays text only. It compares a canonical form of the path:
+#          \\?\ and \\.\ are dropped, \\?\UNC\ becomes \\, trailing dots and spaces are trimmed
+#          from every segment. On a UNC path the ADMIN$ share is refused, \\host\<letter>$ is a
+#          volume root, and \\host\<letter>$\{Windows, Program Files, Program Files (x86),
+#          ProgramData} and anything under them are refused. %ProgramW6432% is checked as well
+#          (skipped when empty). Get-TreeOwnershipTargetRefusal -Path <string> reads the disk:
+#          the text check, then the same check on the path's final form (junctions and symbolic
+#          links on the folder or any parent followed, 8.3 short names expanded); a refusal
+#          found that way names the path as given. Invoke-TreeOwnershipChange and the CLI use it.
+#   D-034  A folder that could not be opened always makes the row at best Partly done. Its owner
+#          is read back: "left alone" only when unchanged, otherwise "its owner was changed, but
+#          its permissions were not". The message keeps "Escalate: <n> folder(s) could not be
+#          opened, so they were left alone." (or the owner-changed form), then "Not opened:
+#          <first 3>[ and <n> more]." and "Full list: <Backups\<stamp>_NotOpened.txt>.", then
+#          "Ask a senior engineer to take ownership of them with an account that can open them."
+#          Detail names at most 20 folders, then "and <n> more (full list: <file>)".
+#          TreeCounts gains UnlistedChanged, UnlistedChangedFolders and NotOpenedFile.
+#   Single-item take ownership passes no /D (takeown: /D is used with /R only).
+Describe 'Fix round 1 (review 2026-10-17): canonical refusal, truthful skip results, full escalation list' {
+    BeforeAll {
+        function Invoke-WithEnv {
+            # Sets process environment variables for the duration of the script block.
+            param([hashtable]$Values, [scriptblock]$Do)
+            $old = @{}
+            foreach ($k in $Values.Keys) {
+                $old[$k] = [Environment]::GetEnvironmentVariable($k, 'Process')
+                [Environment]::SetEnvironmentVariable($k, $Values[$k], 'Process')
+            }
+            try { & $Do } finally { foreach ($k in $old.Keys) { [Environment]::SetEnvironmentVariable($k, $old[$k], 'Process') } }
+        }
+        function New-TestJunction {
+            # A junction at $Link pointing at $Target, or $null when this machine cannot make one.
+            param([string]$Link, [string]$Target)
+            try { New-Item -ItemType Junction -Path $Link -Target $Target -ErrorAction Stop | Out-Null } catch { return $null }
+            if (Test-Path -LiteralPath $Link) { $Link } else { $null }
+        }
+        if (-not ('FpmTest.ShortName' -as [type])) {
+            Add-Type -Namespace FpmTest -Name ShortName -MemberDefinition @'
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+public static extern uint GetShortPathNameW(string lpszLongPath, System.Text.StringBuilder lpszShortPath, uint cchBuffer);
+'@
+        }
+        function Get-TestShortPath {
+            # The 8.3 form of an existing path, or the path itself when the volume has none.
+            # https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-getshortpathnamew
+            param([string]$Path)
+            $sb = New-Object System.Text.StringBuilder -ArgumentList 1024
+            $n = [FpmTest.ShortName]::GetShortPathNameW($Path, $sb, 1024)
+            if ($n -eq 0) { return $Path }
+            $sb.ToString()
+        }
+    }
+    BeforeEach {
+        $script:Log = Join-Path $TestDrive ('logs-' + [guid]::NewGuid().ToString('N'))
+        $script:ToolCalls = [System.Collections.Generic.List[object]]::new()
+        $script:ToolResult = @{
+            takeown = [PSCustomObject]@{ ExitCode = 0; Output = '' }
+            icacls  = [PSCustomObject]@{ ExitCode = 0; Output = '' }
+        }
+        Mock Set-Acl { }
+        Mock takeown { }
+        Mock icacls { }
+        Mock Invoke-AclTool {
+            $script:ToolCalls.Add([PSCustomObject]@{ Tool = $Tool; Arguments = @($Arguments) })
+            $script:ToolResult[$Tool]
+        }
+    }
+
+    Context 'Get-TreeOwnershipRefusal: other spellings of a protected path (text only)' {
+        It 'AC16d_Refuses_<Path>' -ForEach @(
+            @{ Path = '\\?\C:\' }
+            @{ Path = '\\?\D:' }
+            @{ Path = '\\.\C:\' }
+            @{ Path = ('\\?\' + $env:SystemRoot) }
+            @{ Path = ('\\?\' + $env:SystemRoot + '\System32') }
+            @{ Path = ('\\.\' + $env:ProgramData + '\Contoso') }
+            @{ Path = ('\\?\' + $env:ProgramFiles + '\') }
+            @{ Path = ($env:SystemRoot + '.') }
+            @{ Path = ($env:SystemRoot + '. \System32') }
+            @{ Path = ($env:ProgramFiles + ' \Contoso') }
+            @{ Path = ($env:ProgramData + '...\Contoso ') }
+            @{ Path = ('\\?\' + $env:SystemRoot + ' .\System32') }
+            @{ Path = ($env:SystemRoot + '\System32\..\System32') }
+            @{ Path = '\\fs01\ADMIN$' }
+            @{ Path = '\\fs01\admin$\System32' }
+            @{ Path = '\\?\UNC\fs01\ADMIN$\System32' }
+            @{ Path = '\\fs01\C$' }
+            @{ Path = '\\fs01\d$\' }
+            @{ Path = '\\localhost\C$' }
+            @{ Path = '\\127.0.0.1\E$' }
+            @{ Path = '\\?\UNC\fs01\C$' }
+            @{ Path = '\\fs01\C$\Windows' }
+            @{ Path = '\\fs01\c$\windows\System32\drivers' }
+            @{ Path = '\\fs01\C$\Windows.\System32' }
+            @{ Path = '\\fs01\C$\Program Files' }
+            @{ Path = '\\fs01\C$\Program Files\Contoso' }
+            @{ Path = '\\fs01\C$\Program Files (x86)\Contoso' }
+            @{ Path = '\\fs01\E$\ProgramData\Contoso' }
+            @{ Path = '\\?\UNC\localhost\C$\Windows' }
+        ) {
+            $text = Get-TreeOwnershipRefusal -Path $Path
+
+            $text | Should -Not -BeNullOrEmpty
+            $text | Should -Match ([regex]::Escape($Path))
+        }
+
+        It 'AC16d_Allows_<Path>' -ForEach @(
+            @{ Path = '\\fs01\C$\Data' }
+            @{ Path = '\\fs01\D$\Shares\HR' }
+            @{ Path = '\\fs01\C$\WindowsOld' }
+            @{ Path = '\\fs01\C$\Program Files Archive' }
+            @{ Path = '\\fs01\share\Windows' }
+            @{ Path = '\\fs01\share\Program Files' }
+            @{ Path = '\\fs01\ADMIN' }
+            @{ Path = '\\fs01\CD$' }
+            @{ Path = '\\?\UNC\fs01\share' }
+            @{ Path = '\\?\D:\Data' }
+            @{ Path = 'D:\Data.\HR ' }
+        ) {
+            Get-TreeOwnershipRefusal -Path $Path | Should -BeNullOrEmpty
+        }
+
+        It 'AC16d_Wow64_ProgramW6432IsRefusedWhenProgramFilesIsTheX86Folder' {
+            # In a 32-bit PowerShell on 64-bit Windows, %ProgramFiles% is the x86 folder and
+            # only %ProgramW6432% names the 64-bit one.
+            $x86 = 'C:\Program Files (x86)'
+            $native = 'C:\Program Files'
+            $text = Invoke-WithEnv -Values @{ ProgramFiles = $x86; ProgramW6432 = $native } -Do {
+                Get-TreeOwnershipRefusal -Path "$native\Contoso"
+            }
+
+            $text | Should -Not -BeNullOrEmpty
+            $text | Should -Match ([regex]::Escape("$native\Contoso"))
+        }
+
+        It 'AC16d_Wow64_AnEmptyProgramW6432IsSkipped' {
+            # 32-bit Windows has no %ProgramW6432%.
+            $text = Invoke-WithEnv -Values @{ ProgramW6432 = $null } -Do {
+                Get-TreeOwnershipRefusal -Path 'D:\Data'
+            }
+
+            $text | Should -BeNullOrEmpty
+        }
+    }
+
+    Context 'Get-TreeOwnershipTargetRefusal: junctions, symbolic links and short names (reads the disk)' {
+        BeforeEach {
+            $script:Base = Join-Path $TestDrive ('ProtectedFolderForTests-' + [guid]::NewGuid().ToString('N'))
+            $script:Protected = Join-Path $script:Base 'ContosoApplication'
+            New-Item -ItemType Directory -Path (Join-Path $script:Protected 'sub') -Force | Out-Null
+            Mock Save-OwnerSnapshot { throw 'snapshot must not be taken (test)' }
+        }
+
+        It 'AC16d_JunctionToAProtectedFolder_IsRefusedWithNoSnapshotAndNoToolCall' {
+            $link = New-TestJunction -Link (Join-Path $TestDrive ('jn-' + [guid]::NewGuid().ToString('N'))) -Target $script:Protected
+            if (-not $link) { Set-ItResult -Skipped -Because 'a junction could not be created here'; return }
+            $script:LinkPath = $link
+
+            $rows = @(Invoke-WithEnv -Values @{ ProgramData = $script:Base } -Do {
+                Set-ItemOwnerToCurrentUser -Path $script:LinkPath -Recurse -LogFolder $script:Log
+            })
+
+            $rows.Count | Should -Be 1
+            $rows[0].Result | Should -Be 'Failed'
+            $rows[0].Error | Should -Match ([regex]::Escape($link))
+            $rows[0].Error | Should -Match 'Nothing was changed\.$'
+            Should -Invoke Save-OwnerSnapshot -Times 0 -Exactly -Scope It
+            Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+            Test-Path -LiteralPath (Join-Path $script:Log 'Backups') | Should -BeFalse
+        }
+
+        It 'AC16d_FolderInsideAJunctionToAProtectedFolder_IsRefused' {
+            $link = New-TestJunction -Link (Join-Path $TestDrive ('jn-' + [guid]::NewGuid().ToString('N'))) -Target $script:Base
+            if (-not $link) { Set-ItResult -Skipped -Because 'a junction could not be created here'; return }
+            $script:Inside = Join-Path $link 'ContosoApplication\sub'
+
+            $text = Invoke-WithEnv -Values @{ ProgramData = $script:Base } -Do {
+                Get-TreeOwnershipTargetRefusal -Path $script:Inside
+            }
+
+            $text | Should -Not -BeNullOrEmpty
+            $text | Should -Match ([regex]::Escape($script:Inside))
+        }
+
+        It 'AC16d_JunctionToAnOrdinaryFolder_IsAllowed' {
+            $plain = Join-Path $TestDrive ('plain-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $plain | Out-Null
+            $link = New-TestJunction -Link (Join-Path $TestDrive ('jn-' + [guid]::NewGuid().ToString('N'))) -Target $plain
+            if (-not $link) { Set-ItResult -Skipped -Because 'a junction could not be created here'; return }
+            $script:LinkPath = $link
+
+            $text = Invoke-WithEnv -Values @{ ProgramData = $script:Base } -Do {
+                Get-TreeOwnershipTargetRefusal -Path $script:LinkPath
+            }
+
+            $text | Should -BeNullOrEmpty
+        }
+
+        It 'AC16d_ShortNameOfAProtectedFolder_IsRefused' {
+            $short = Get-TestShortPath -Path $script:Protected
+            if ($short -eq $script:Protected) { Set-ItResult -Skipped -Because '8.3 short names are turned off on this volume'; return }
+            $script:ShortPath = $short
+            Invoke-WithEnv -Values @{ ProgramData = $script:Base } -Do {
+                Get-TreeOwnershipRefusal -Path $script:ShortPath
+            } | Should -BeNullOrEmpty -Because 'the text alone does not show it is protected'
+
+            $text = Invoke-WithEnv -Values @{ ProgramData = $script:Base } -Do {
+                Get-TreeOwnershipTargetRefusal -Path $script:ShortPath
+            }
+
+            $text | Should -Not -BeNullOrEmpty
+            $text | Should -Match ([regex]::Escape($short))
+        }
+
+        It 'AC16d_TextRefusalStillWorksForAPathThatDoesNotExist' {
+            Get-TreeOwnershipTargetRefusal -Path '\\fs01\C$\Windows\NoSuchFolder' | Should -Not -BeNullOrEmpty
+            Get-TreeOwnershipTargetRefusal -Path (Join-Path $TestDrive 'no-such-folder') | Should -BeNullOrEmpty
+        }
+    }
+
+    Context 'D-034: a folder that could not be opened' {
+        It 'AC16c_UnopenedFolderWhoseOwnerWasChanged_IsPartlyDoneAndSaysSoInsteadOfLeftAlone' {
+            # icacls /setowner /T may still change the owner of the skipped folder itself; the
+            # read-back is what the message reports.
+            $dir = New-TestTree 'fr1-changed'
+            $script:Locked = Join-Path $dir 'sub'
+            Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $LiteralPath -eq $script:Locked }
+            Mock Get-ItemOwner {
+                if ($Path -eq $script:Locked) {
+                    if ($script:ToolCalls.Count -gt 0) { return [PSCustomObject]@{ Owner = 'me'; OwnerSid = $script:MySid } }
+                    return [PSCustomObject]@{ Owner = 'CONTOSO\old.owner'; OwnerSid = 'S-1-5-21-1-2-3-1105' }
+                }
+                & $script:RealGetItemOwner -Path $Path
+            }
+
+            $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+            $rows[0].Result | Should -Be 'Partly done'
+            $rows[0].TreeCounts.UnlistedChanged | Should -Be 1
+            @($rows[0].TreeCounts.UnlistedChangedFolders) | Should -Be @($script:Locked)
+            $rows[0].Detail | Should -BeLike "*owner*changed*$($script:Locked)*"
+            $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
+            $message | Should -Match ([regex]::Escape('Escalate: 1 folder(s) could not be opened: its owner was changed, but its permissions were not.'))
+            $message | Should -Not -Match 'left alone'
+            $message | Should -Match ([regex]::Escape($script:Locked))
+            $message | Should -Match ([regex]::Escape('Ask a senior engineer to take ownership of them with an account that can open them.'))
+        }
+
+        It 'AC16c_UnopenedFolderWhoseOwnerIsUnchanged_SaysLeftAlone' {
+            $dir = New-TestTree 'fr1-unchanged'
+            $script:Locked = Join-Path $dir 'sub'
+            Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $LiteralPath -eq $script:Locked }
+            Mock Get-ItemOwner {
+                if ($Path -eq $script:Locked) { return [PSCustomObject]@{ Owner = 'CONTOSO\old.owner'; OwnerSid = 'S-1-5-21-1-2-3-1105' } }
+                & $script:RealGetItemOwner -Path $Path
+            }
+
+            $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+            $rows[0].Result | Should -Be 'Partly done'
+            $rows[0].TreeCounts.UnlistedChanged | Should -Be 0
+            $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
+            $message | Should -Match ([regex]::Escape('Escalate: 1 folder(s) could not be opened, so they were left alone.'))
+            $message | Should -Not -Match 'owner was changed'
+        }
+
+        It 'AC16c_ManyUnopenedFolders_MessageNamesThreeAndPointsAtTheFullListFile' {
+            $dir = New-TestTree 'fr1-five'
+            $script:LockedSet = @(1..5 | ForEach-Object {
+                $p = Join-Path $dir ('locked{0}' -f $_)
+                New-Item -ItemType Directory -Path $p | Out-Null
+                $p
+            })
+            Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $script:LockedSet -contains $LiteralPath }
+
+            $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+            $file = $rows[0].TreeCounts.NotOpenedFile
+            $file | Should -Not -BeNullOrEmpty
+            (Split-Path -Parent $file) | Should -Be (Split-Path -Parent $rows[0].BackupFile)
+            (Split-Path -Leaf $file) | Should -Be ((Split-Path -Leaf $rows[0].BackupFile) -replace '_TakeOwnership\.csv$', '_NotOpened.txt')
+            $listed = @(Get-Content -LiteralPath $file)
+            foreach ($p in $script:LockedSet) { $listed | Should -Contain $p }
+
+            $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
+            $message | Should -Match ([regex]::Escape('Escalate: 5 folder(s) could not be opened, so they were left alone.'))
+            $shown = @($rows[0].TreeCounts.UnlistedFolders | Select-Object -First 3)
+            $message | Should -Match ([regex]::Escape("Not opened: $($shown -join '; ') and 2 more."))
+            $message | Should -Match ([regex]::Escape("Full list: $file."))
+            $message | Should -Match ([regex]::Escape('Ask a senior engineer to take ownership of them with an account that can open them.'))
+            @([regex]::Matches($message, 'could not be opened')).Count | Should -Be 1 -Because 'one escalation, not two sentences saying the same thing'
+        }
+
+        It 'AC16c_MoreThanTwentyUnopenedFolders_DetailNamesTwentyAndPointsAtTheFullList' {
+            $dir = New-TestTree 'fr1-many'
+            $script:LockedSet = @(1..25 | ForEach-Object {
+                $p = Join-Path $dir ('locked{0:00}' -f $_)
+                New-Item -ItemType Directory -Path $p | Out-Null
+                $p
+            })
+            Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $script:LockedSet -contains $LiteralPath }
+
+            $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+            $file = $rows[0].TreeCounts.NotOpenedFile
+            $detail = $rows[0].Detail
+            $named = @($script:LockedSet | Where-Object { $detail.Contains($_ + ';') -or $detail.Contains($_ + ' and') })
+            $named.Count | Should -Be 20
+            $detail | Should -BeLike "* and 5 more (full list: $([WildcardPattern]::Escape($file)))*"
+            @(Get-Content -LiteralPath $file | Where-Object { $script:LockedSet -contains $_ }).Count | Should -Be 25
+        }
+
+        It 'AC16c_NotOpenedListIsWrittenAfterTheToolsSoTheSnapshotIsTheOnlyBackupBeforeTheChange' {
+            $dir = New-TestTree 'fr1-order'
+            $script:Locked = Join-Path $dir 'sub'
+            $script:FilesAtToolTime = [System.Collections.Generic.List[string]]::new()
+            Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $LiteralPath -eq $script:Locked }
+            Mock Invoke-AclTool {
+                foreach ($f in @([System.IO.Directory]::GetFiles((Join-Path $script:Log 'Backups')))) { $script:FilesAtToolTime.Add($f) }
+                [PSCustomObject]@{ ExitCode = 0; Output = '' }
+            }
+
+            $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+            @($script:FilesAtToolTime | Where-Object { $_ -like '*_NotOpened.txt' }).Count | Should -Be 0
+            Test-Path -LiteralPath $rows[0].TreeCounts.NotOpenedFile | Should -BeTrue
+        }
+
+        It 'AC16c_NoFolderLeftUnopened_WritesNoNotOpenedList' {
+            $dir = New-TestTree 'fr1-none'
+
+            $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+            $rows[0].Result | Should -Be 'Done'
+            $rows[0].TreeCounts.NotOpenedFile | Should -BeNullOrEmpty
+            @(Get-ChildItem -LiteralPath (Join-Path $script:Log 'Backups') -Filter '*_NotOpened.txt').Count | Should -Be 0
+        }
+    }
+
+    Context 'takeown /D only with /R' {
+        It 'AC6_SingleItemTakeOwnership_PassesNoDAnswerWithoutR' {
+            $dir = New-TestTree 'fr1-single'
+
+            $null = @(Set-ItemOwnerToCurrentUser -Path $dir -LogFolder $script:Log)
+
+            $takeown = @($script:ToolCalls | Where-Object { $_.Tool -eq 'takeown' })
+            $takeown.Count | Should -Be 1
+            $takeown[0].Arguments | Should -Not -Contain '/D'
+            $takeown[0].Arguments | Should -Not -Contain 'Y'
+        }
+
+        It 'AC16b_NoTakeownCallInAnyScriptPassesYAfterD' {
+            # Learn: "You must use this option in conjunction with the /r option"; Y replaces permissions.
+            # https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
+            foreach ($name in 'FolderPermissions.Core.ps1', 'FolderPermissionManager.ps1', 'FolderPermissionManager-GUI.ps1') {
+                $path = (Resolve-Path (Join-Path $PSScriptRoot "..\$name")).Path
+                $tokens = $null; $errors = $null
+                $null = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+                $skip = @('Comment', 'NewLine', 'Comma', 'LineContinuation')
+                $words = @($tokens | Where-Object { $skip -notcontains "$($_.Kind)" } | ForEach-Object {
+                    if ($_ -is [System.Management.Automation.Language.StringToken]) { $_.Value } else { $_.Text }
+                })
+                for ($i = 0; $i -lt $words.Count - 1; $i++) {
+                    if ($words[$i] -eq '/D') { $words[$i + 1] | Should -Not -Be 'Y' -Because "$name passes /D Y" }
+                }
+                foreach ($s in @($tokens | Where-Object { $_ -is [System.Management.Automation.Language.StringToken] })) {
+                    $s.Value | Should -Not -Match '/D Y\b' -Because "$name builds a takeown /D Y command line"
+                }
+            }
+        }
     }
 }

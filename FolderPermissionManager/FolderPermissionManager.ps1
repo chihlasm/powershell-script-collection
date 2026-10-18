@@ -13,8 +13,10 @@
        the script (takeown /R /A /D N, then icacls /setowner /T). The current owner of every
        item is saved to <LogFolder>\Backups\<yyyy-MM-dd_HHmmss>_TakeOwnership.csv first; if
        that file cannot be written, nothing is changed. A folder that cannot be opened is
-       skipped and left as it was; the result names it so it can be escalated. The root of a
-       drive and the Windows system folders are refused unless -AllowSystemFolder is given.
+       skipped and its permissions are left as they were; the result is Partly done, names it
+       so it can be escalated, and lists every such folder (also saved to
+       <LogFolder>\Backups\<yyyy-MM-dd_HHmmss>_NotOpened.txt). The root of a drive and the
+       Windows system folders are refused unless -AllowSystemFolder is given.
     2. Shows the top folder's owner and permissions, and the owner of each subfolder.
     3. Copies the top folder's permissions to every subfolder: entries a subfolder does not
        already have are added, nothing is removed. The permissions of every subfolder are
@@ -54,9 +56,11 @@
 
 .PARAMETER AllowSystemFolder
     Take ownership even when the folder is the root of a drive (D:\) or is in %SystemRoot%,
-    %ProgramFiles%, %ProgramFiles(x86)% or %ProgramData%. Without it such a folder is refused
-    and nothing is changed, because changing every owner in it can stop Windows or installed
-    programs from working. The root of a share (\\fs01\share) is never refused.
+    %ProgramFiles%, %ProgramFiles(x86)% or %ProgramData%, or is another server's ADMIN$ or
+    drive share (\\fs01\D$, \\fs01\C$\Windows), also when the folder leads there through a
+    junction, a symbolic link or a short name. Without it such a folder is refused and nothing
+    is changed, because changing every owner in it can stop Windows or installed programs from
+    working. The root of an ordinary share (\\fs01\share) is never refused.
 
 .PARAMETER LoadFunctionsOnly
     Define the functions and return without doing anything (used by the tests).
@@ -219,8 +223,9 @@ function Invoke-FolderPermissionCli {
         return 1
     }
     # D-036: a drive root or a Windows system folder is refused before anything is asked,
-    # counted or saved.
-    $refusal = if ($AllowSystemFolder) { $null } else { Get-TreeOwnershipRefusal -Path $Path }
+    # counted or saved, also when the folder leads there through a junction, a symbolic link
+    # or a short name.
+    $refusal = if ($AllowSystemFolder) { $null } else { Get-TreeOwnershipTargetRefusal -Path $Path }
     if ($refusal) {
         Write-Host "[FAIL] $refusal If you are sure, run the script again with -AllowSystemFolder. Nothing was changed." -ForegroundColor Red
         return 1
@@ -277,6 +282,12 @@ function Invoke-FolderPermissionCli {
                 Set-ItemOwnerToCurrentUser -Path $Path -Recurse -AllowSystemFolder:$AllowSystemFolder -LogFolder $logFolderUsed -WhatIf:$false
             }
             if (Write-CliChangeResult -Entries $result.Entries -LogPath $result.LogPath -LogFolder $logFolderUsed) { $exitCode = 1 }
+            # The result names the first few folders that could not be opened; the escalation
+            # needs all of them, one per line so they can be copied into the ticket.
+            foreach ($entry in @($result.Entries | Where-Object { (Get-TreeEntryCount $_ 'Unlisted') -gt 0 })) {
+                Write-Host "[WARN] Folders that could not be opened ($(Get-TreeEntryCount $entry 'Unlisted')):" -ForegroundColor Yellow
+                foreach ($folder in @($entry.TreeCounts.UnlistedFolders)) { Write-Host "  $folder" }
+            }
             $ownershipTaken = @($result.Entries | Where-Object { $_.Result -eq 'Done' -or $_.Result -eq 'Partly done' }).Count -gt 0
         }
     } else {

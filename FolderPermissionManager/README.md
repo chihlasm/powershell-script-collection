@@ -58,6 +58,7 @@ The console shows the log folder at startup.
 | `Logs\Changes_<yyyy-MM-dd>.csv` | One row per folder or file changed: `Time`, `Technician`, `Computer`, `Action`, `Target`, `ItemType`, `Detail`, `OldValue`, `NewValue`, `Result`, `Error`, `BackupFile`. `OldValue` and `NewValue` are the permissions before and after, as SDDL text. |
 | `Logs\Backups\<yyyy-MM-dd_HHmmss>_<Action>.csv` | The permissions as they were just before one action: `Path`, `ItemType`, `Sddl`. |
 | `Logs\Backups\<yyyy-MM-dd_HHmmss>_TakeOwnership.csv` (whole folder) | The owner snapshot written before taking ownership of a folder and everything under it: `Path`, `ItemType`, `Owner`, `OwnerSid`, one row for the folder and every subfolder and file under it (hidden ones too). |
+| `Logs\Backups\<yyyy-MM-dd_HHmmss>_NotOpened.txt` (whole folder) | Written after taking ownership when some folders could not be opened: all of them, one path per line, for the escalation. Not a backup: their permissions were not changed. |
 
 `Result` is one of `Done`, `Partly done`, `Failed`, `Skipped (not found)` or `Skipped (WhatIf)`. A `Failed`
 row whose `NewValue` differs from its `OldValue` was **partly changed** (for example, takeown
@@ -88,25 +89,35 @@ did not) or `Owner unchanged`. `Error` says how many items you do not own and ad
 own messages, for example `Successfully processed 3 files; Failed processing 2 files`.
 
 Items under a folder the tool could not open are not in the snapshot, so their owners cannot
-be put back from it. The result is then never shown as a plain success: the status bar (or the
-console, with `[WARN]`) says how many folders that was and names them.
+be put back from it. The result is then `Partly done`, never `Done`, even when you own
+everything that could be opened.
 
 **A folder that cannot be opened is skipped and left alone.** For a folder the account has no
 "List folder" and "Read" permission on, `takeown /R /A /D N` skips the folder instead of taking
 it ([takeown](https://learn.microsoft.com/windows-server/administration/windows-commands/takeown):
 answering `Y` instead would take it and replace its permissions with permission granting only
-you full control, so the tool never does that on a whole folder). Its permissions are not changed, so
-there is nothing extra to back up. Reading the owners back then shows it is not yours, the
-result is `Partly done`, and the status bar (or the console, with `[WARN]`) names it with the
-next step: `Escalate: 1 folder(s) could not be opened, so they were left alone.` Hand the ticket
-to someone who can get into that folder. The console `[WARN]` line before the change and the
-GUI's confirm dialog say that such folders are skipped.
+you full control, so the tool never does that; taking ownership of a single item passes no `/D`
+at all, because the page says it must be used with `/R`). Its permissions are not changed, so
+there is nothing extra to back up. `icacls /setowner /T` may still change the owner of the
+skipped folder itself (Microsoft's documentation does not say), so its owner is read back too.
+The result is `Partly done`, and the status bar (or the console, with `[WARN]`) gives the next
+step: `Escalate: 1 folder(s) could not be opened, so they were left alone.` (or, when its owner
+was changed: `its owner was changed, but its permissions were not`), the first three folders,
+the `..._NotOpened.txt` file that lists all of them, and `Ask a senior engineer to take
+ownership of them with an account that can open them.` The console also prints every such
+folder on its own line, and the change log's `Detail` names the first 20. The console `[WARN]`
+line before the change and the GUI's confirm dialog say that such folders are skipped.
 
 **The root of a drive and the Windows folders are refused.** Taking ownership of a whole drive
 root (`C:\`, `D:\`), or of anything in `%SystemRoot%` (`C:\Windows`), `%ProgramFiles%`,
 `%ProgramFiles(x86)%` or `%ProgramData%` (the folders themselves too), would change the owner
 of Windows and program files and is very hard to undo, so the tool stops before saving or
-changing anything and says why. The root of a share (`\\fs01\share`) is allowed. The GUI has no
+changing anything and says why. The same goes for the 64-bit Program Files folder seen from a
+32-bit PowerShell (`%ProgramW6432%`); for those folders spelt another way (`\\?\C:\Windows`,
+`C:\Windows.`, a short name such as `C:\PROGRA~1`) or reached through a junction or symbolic
+link; and for another server's administrative shares: `ADMIN$`, a drive share such as
+`\\fs01\D$`, and `Windows`, `Program Files`, `Program Files (x86)` and `ProgramData` on one
+(`\\fs01\C$\Windows`). The root of an ordinary share (`\\fs01\share`) is allowed. The GUI has no
 way around this; the command-line script takes `-AllowSystemFolder` for the rare case where it
 is really needed.
 
@@ -139,8 +150,10 @@ the console says so with `[WARN]`. A `-LogFolder` you pass is always used as giv
 the network the console warns, because every change is refused while it cannot be written. If
 no local folder can be found at all, the tool stops with `[FAIL]` and asks for `-LogFolder`.
 
-Logs and backups hold client paths, account names and SIDs: they stay on the machine that ran
-the tool and are never deleted automatically. **They get the permissions of the folder they
+`Logs\` holds client paths, account names and SIDs:
+keep it with the ticket and delete it when the ticket is closed.
+The logs and backups stay on the machine that ran the tool and are never deleted
+automatically. **They get the permissions of the folder they
 are in**: the tool does not lock them down. Keep the tool in a folder only administrators can
 read (or pass a `-LogFolder` that is), and do not copy it to a shared folder on a server that
 other users can open.

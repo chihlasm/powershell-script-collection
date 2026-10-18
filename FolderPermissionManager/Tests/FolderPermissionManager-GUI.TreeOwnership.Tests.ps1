@@ -132,7 +132,7 @@ Describe 'GUI recursive take ownership' {
 
         $response.StatusCode | Should -Be 200
         $script:Sent.status | Should -Be 'partial'
-        $script:Sent.message | Should -BeLike "*1 folder(s) could not be opened ($([WildcardPattern]::Escape($locked)))*cannot be restored from this backup*"
+        $script:Sent.message | Should -BeLike "*Escalate: 1 folder(s) could not be opened, so they were left alone. Not opened: $([WildcardPattern]::Escape($locked)).*cannot be restored from this backup*"
     }
 
     It 'AC17_GuiPage_ShowsPartialAsAWarningWithoutDoublingThePrefix' {
@@ -316,5 +316,41 @@ Describe 'GUI recursive take ownership' {
     It 'AC16d_GuiScript_HasNoSystemFolderOverride' {
         $raw = Get-Content -LiteralPath $script:GuiPath -Raw
         $raw | Should -Not -Match 'AllowSystemFolder'
+    }
+
+    # --- Fix round 1 (SQ-014 review 2026-10-17) ------------------------------------------------
+
+    It 'AC16c_GuiRecursiveTakeOwnership_ManyFoldersThatCannotBeOpened_MessagePointsAtTheFullList' {
+        $script:LockedSet = @(1..5 | ForEach-Object {
+            $p = Join-Path $script:Dir ('locked{0}' -f $_)
+            New-Item -ItemType Directory -Path $p -Force | Out-Null
+            $p
+        })
+        Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $script:LockedSet -contains $LiteralPath }
+        $script:Body = [PSCustomObject]@{ path = $script:Dir; recursive = $true }
+        $response = [PSCustomObject]@{ StatusCode = 200 }
+
+        Invoke-TakeOwnership $null $response
+
+        $script:Sent.status | Should -Be 'partial'
+        $script:Sent.message | Should -Match 'and 2 more\.'
+        $script:Sent.message | Should -Match 'Full list: .*_NotOpened\.txt\.'
+        $script:Sent.message | Should -Match ([regex]::Escape('Ask a senior engineer to take ownership of them with an account that can open them.'))
+    }
+
+    It 'AC17_GuiPage_DoneWithItemsToCheckInsteadOfCheckThis' {
+        $raw = Get-Content -LiteralPath $script:GuiPath -Raw
+        $show = [regex]::Match($raw, '(?s)function showChangeResult\(r\) \{.*?\n\}')
+        $show.Success | Should -BeTrue
+        $show.Value | Should -Match "'Done, with items to check: '"
+        $show.Value | Should -Not -Match 'Check this:'
+    }
+
+    It 'AC16c_GuiPage_LongStatusMessagesScrollInsteadOfGrowingTheWindow' {
+        $raw = Get-Content -LiteralPath $script:GuiPath -Raw
+        $css = [regex]::Match($raw, '\.status-bar \{[^}]*\}')
+        $css.Success | Should -BeTrue
+        $css.Value | Should -Match 'max-height:'
+        $css.Value | Should -Match 'overflow-y: auto'
     }
 }
