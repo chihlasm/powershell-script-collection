@@ -402,3 +402,61 @@ Describe 'Get-DeviceStepArguments (step 6 scope)' {
         (Get-DeviceStepArguments -DaysBack 365 -OutputPath 'C:\case')['DaysBack'] | Should -Be 90
     }
 }
+
+Describe 'SQ-006 encryption-type block in SUMMARY.txt (D-023)' {
+    BeforeAll {
+        $script:EGate = [PSCustomObject]@{ Ran=$true; Blocking=$false; CriticalGaps=@(); OtherGaps=@(); Message='' }
+        $script:ESteps = @([PSCustomObject]@{ Step='Audit policy'; Script='Test-ADAuditPolicy.ps1'; Ran=$true; ExitCode=0; Error='' })
+        $script:EFinding = @([PSCustomObject]@{ FailureCount=3; Sentence='svc_backup (3 failures from SQLSRV02) - stale password'
+                                                Confidence='High'; Remediation='Update the service password.' })
+        $script:ETimeline = @([PSCustomObject]@{ Computer='SQLSRV02'; Verdict='SQLSRV02 was on at the time'; Next='Check it.' })
+    }
+
+    It 'AC23_EtypeBlockFollowsFindings' {
+        $etype = @([PSCustomObject]@{ Kind='Account'; Account='svc-scan'; ClientAddress=''
+                                      Sentence='Not a password problem: encryption type blocked for svc-scan.'
+                                      NextStep='Reset the password for svc-scan so it gets AES keys.' })
+        $cant  = @([PSCustomObject]@{ DC='DC02'; Reason="couldn't reach DC02: RPC server is unavailable" })
+        $out = New-CaseSummary -Identity 'jdoe' -DaysBack 7 -Gate $script:EGate -Steps $script:ESteps -CaseFolder 'C:\x' `
+                 -GeneratedOn '2026-10-18 10:00:00' -Findings $script:EFinding -TimelineRows $script:ETimeline `
+                 -EtypeFindings $etype -EtypeCantTell $cant
+        $out | Should -Match '(?m)^ENCRYPTION-TYPE BLOCKS'
+        $out | Should -Match 'Not a password problem: encryption type blocked for svc-scan\.'
+        $out | Should -Match 'Reset the password for svc-scan so it gets AES keys\.'
+        $out | Should -Match "DC02: couldn't reach DC02: RPC server is unavailable"
+        $f = $out.IndexOf('FINDINGS'); $e = $out.IndexOf('ENCRYPTION-TYPE BLOCKS')
+        $f | Should -BeGreaterThan -1
+        $e | Should -BeGreaterThan $f
+        $e | Should -BeLessThan $out.IndexOf('DEVICE TIMELINE')
+        $e | Should -BeLessThan $out.IndexOf('EVIDENCE QUALITY')
+
+        # Nothing to report: output identical to today's.
+        $today = New-CaseSummary -Identity 'jdoe' -DaysBack 7 -Gate $script:EGate -Steps $script:ESteps -CaseFolder 'C:\x' `
+                 -GeneratedOn '2026-10-18 10:00:00' -Findings $script:EFinding -TimelineRows $script:ETimeline
+        $none  = New-CaseSummary -Identity 'jdoe' -DaysBack 7 -Gate $script:EGate -Steps $script:ESteps -CaseFolder 'C:\x' `
+                 -GeneratedOn '2026-10-18 10:00:00' -Findings $script:EFinding -TimelineRows $script:ETimeline `
+                 -EtypeFindings @() -EtypeCantTell @()
+        $none | Should -BeExactly $today
+        $none | Should -Not -Match 'ENCRYPTION-TYPE BLOCKS'
+    }
+
+    It 'AC23_ImportEtypeFindingsCsvSplitsFindingsFromCantTell' {
+        $csv = Join-Path $TestDrive 'ADLockoutEtype_jdoe_2026-10-18_100000.csv'
+        @(
+            'Kind,Account,ClientAddress,DC,Sentence,NextStep,Reason'
+            'Account,svc-scan,,DC01,Not a password problem: encryption type blocked for svc-scan.,Reset the password for svc-scan so it gets AES keys.,'
+            'Client,jdoe,192.0.2.77,DC01,Not a password problem: encryption type blocked for 192.0.2.77.,Update or replace the device.,'
+            "CantTell,,,DC02,,,couldn't reach DC02: RPC server is unavailable"
+        ) | Set-Content -LiteralPath $csv -Encoding UTF8
+        $r = Import-EtypeFindingsCsv -Path $csv
+        @($r.Findings).Count | Should -Be 2
+        $r.Findings[0].Kind          | Should -Be 'Account'
+        $r.Findings[0].Account       | Should -Be 'svc-scan'
+        $r.Findings[0].NextStep      | Should -Match 'AES keys'
+        $r.Findings[1].Kind          | Should -Be 'Client'
+        $r.Findings[1].ClientAddress | Should -Be '192.0.2.77'
+        @($r.CantTell).Count | Should -Be 1
+        $r.CantTell[0].DC     | Should -Be 'DC02'
+        $r.CantTell[0].Reason | Should -Be "couldn't reach DC02: RPC server is unavailable"
+    }
+}

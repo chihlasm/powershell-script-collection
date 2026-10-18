@@ -331,6 +331,12 @@ function Invoke-Step {
     return $row
 }
 
+function Import-EtypeFindingsCsv {
+    # SQ-006 stub: reads ADLockoutEtype_<sam>_<stamp>.csv into @{ Findings; CantTell }.
+    param([string]$Path)
+    throw 'not implemented'
+}
+
 function New-CaseSummary {
     # Builds the plain-text SUMMARY.txt. Pure string work so it is testable.
     param(
@@ -346,7 +352,11 @@ function New-CaseSummary {
         # denied - the common case for a helpdesk account without DC admin rights.
         [bool]$LockoutEventsFound = $false,
         # One row per machine from step 8 (SourceActivitySummary CSV): Computer, Verdict, Next.
-        [object[]]$TimelineRows = @()
+        [object[]]$TimelineRows = @(),
+        # SQ-006: encryption-type blocks (Kind Account|Client, Account, ClientAddress, Sentence, NextStep)
+        # and DCs that could not be checked (DC, Reason). Not implemented yet.
+        [object[]]$EtypeFindings = @(),
+        [object[]]$EtypeCantTell = @()
     )
 
     $sb = New-Object System.Text.StringBuilder
