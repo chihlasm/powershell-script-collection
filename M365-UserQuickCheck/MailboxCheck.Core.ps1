@@ -41,6 +41,14 @@
     Raw Exchange error text stays in the console and the HTML too: the note gives each section
     a fixed reason (NoteReason). Rule names are written by whoever controls the mailbox, so
     control characters are removed and they are cut to 100 characters before they are shown.
+
+    RECENT CHANGES (SQ-016). The entry script reads the unified audit log; the functions here
+    match its records to the mailbox (every identifier form, exact and case-insensitive), turn
+    them into rows, and raise a sign for every inbox-rule, forwarding or delegate change in the
+    window (owner decision D-032). The rows name the actor, IP and app in the local report
+    only. Sign messages (the verdict) say "by the mailbox's own account" or "by another account"
+    instead of the actor, and the ticket note gets a fixed NoteText per sign: kind, UTC date,
+    rule name and own or another account, never the actor, IP or delegate address.
 .NOTES
     REFERENCES
       Get-InboxRule: -Mailbox, -IncludeHidden ("whether to include hidden Inbox rules in the
@@ -86,6 +94,41 @@
       Message trace in Exchange Online: Global Administrator or Exchange Administrator in Entra
       ID also grant it; Get-MessageTraceV2 needs ExchangeOnlineManagement 3.7.0 or later
         https://learn.microsoft.com/exchange/monitoring/trace-an-email-message/message-trace-modern-eac
+      Recent changes. Search-UnifiedAuditLog: StartDate / EndDate are UTC; ResultSize default
+      100, maximum 5,000; -SessionCommand ReturnLargeSet returns unsorted data and "by using
+      paging, you can access a maximum of 50,000 results"; the same -SessionId on every page;
+      ResultIndex / ResultCount gauge progress. Learn recommends the Management Activity API for
+      programmatic bulk download; this tool runs one bounded search per check instead
+        https://learn.microsoft.com/powershell/module/exchangepowershell/search-unifiedauditlog
+      Paging stops on an empty page or when the last ResultIndex equals ResultCount (Microsoft's
+      own script)
+        https://learn.microsoft.com/purview/audit-log-search-script
+      Audit record fields: Id, CreationTime (UTC), UserId, ClientIP, ClientInfoString (mailbox
+      activity), ObjectId (for Exchange admin records "the name of the object that was modified
+      by the cmdlet"), Parameters ("the name and value for all parameters that were used with
+      the cmdlet"), MailboxGuid ("the Exchange GUID of the mailbox"), MailboxOwnerUPN
+        https://learn.microsoft.com/purview/audit-log-detailed-properties
+      Operations: New-InboxRule / Set-InboxRule (Outlook on the web), UpdateInboxRules ("created,
+      modified, or removed an inbox rule by using the Outlook client"), Add-MailboxPermission;
+      the admin audit log records every Exchange cmdlet except Get-, Search- and Test-, so
+      Add-RecipientPermission and Set-Mailbox are in it too
+        https://learn.microsoft.com/purview/audit-log-activities
+      UpdateInboxRules is a default mailbox-audit action for Admin, Delegate and Owner;
+      AuditDisabled False on Get-OrganizationConfig means mailbox auditing on by default is on,
+      and then the per-mailbox AuditEnabled always shows True; a mailbox audit bypass stops
+      every mailbox action by that account from being logged
+        https://learn.microsoft.com/purview/audit-mailboxes
+      Get-MailboxAuditBypassAssociation -Identity: AuditBypassEnabled; "The value $null ... for
+      the Identity parameter returns all objects", so it is never called without one
+        https://learn.microsoft.com/powershell/module/exchangepowershell/get-mailboxauditbypassassociation
+      Get-AdminAuditLogConfig UnifiedAuditLogIngestionEnabled: read it in Exchange Online
+      PowerShell ("The value in Security & Compliance PowerShell is always False")
+        https://learn.microsoft.com/powershell/module/exchangepowershell/get-adminauditlogconfig
+        https://learn.microsoft.com/purview/audit-log-enable-disable
+      Roles: "Audit Logs or View-Only Audit Logs roles in the Exchange admin center"; Exchange
+      records are typically searchable 60 to 90 minutes after the event; Audit (Standard) keeps
+      records 180 days, so a window of at most 90 days is never cut short by retention
+        https://learn.microsoft.com/purview/audit-search
       CSV cells starting with = + - @ are neutralised with a leading ' (CSV injection); the entry
       script uses ConvertTo-M365CsvValue from M365UserCheck.Core.ps1
         https://owasp.org/www-community/attacks/CSV_Injection
@@ -106,6 +149,10 @@
         Get-EXORecipient property sets (it is a Get-Recipient property of mail contacts and mail
         users). -Properties takes any property name, so it is asked for by name. A recipient that
         comes back without a usable address leaves Mailbox forwarding at Could not check.
+      - Recent changes: how a cleared value appears in Parameters ('', '$null' or a JSON null
+        are all read as cleared); ClientIPAddress (read when ClientIP is absent) and
+        OperationProperties RuleName in UpdateInboxRules records; the Exchange object-path form
+        of ObjectId ('.../contoso.onmicrosoft.com/jdoe', matched on its last segment).
       - The junk-mail rule exemption also needs the rule to have none of the actions this check
         reads (forward, redirect, delete, move, mark as read). If the real built-in rule ever
         shows one of them, it is reported as a hidden rule: a false alarm, never a missed one.
@@ -120,8 +167,28 @@ $script:MailboxTakeoverLine = 'Possible account takeover: do NOT reset the passw
 $script:MailboxTakeoverNextStep = "Check CIPP's BEC report for this user."
 $script:MailboxCleanLine = 'No takeover signs found in the checks below.'
 
-# Owner decision D-008: recent rule and delegate changes need the unified audit log (SQ-016).
-$script:MailboxRecentChangesLine = "Recent rule, forwarding and delegate changes: not checked here, see CIPP's BEC report."
+# Recent changes (SQ-016). The audit operations searched, owner's list (SQ-007 Q1, D-032):
+# New-InboxRule / Set-InboxRule (rules made in Outlook on the web or PowerShell),
+# UpdateInboxRules (rules made in the Outlook client, a mailbox-audit action logged by default
+# for owner, delegate and admin), Add-MailboxPermission, Add-RecipientPermission, Set-Mailbox.
+# https://learn.microsoft.com/purview/audit-log-activities
+# https://learn.microsoft.com/purview/audit-mailboxes
+$script:MailboxRecentOperations = @('New-InboxRule', 'Set-InboxRule', 'UpdateInboxRules', 'Add-MailboxPermission', 'Add-RecipientPermission', 'Set-Mailbox')
+
+# Search-UnifiedAuditLog: "ResultSize ... maximum is 5,000"; "ReturnLargeSet ... By using paging,
+# you can access a maximum of 50,000 results".
+# https://learn.microsoft.com/powershell/module/exchangepowershell/search-unifiedauditlog
+$script:MailboxAuditPageSize = 5000
+$script:MailboxAuditLargeSetCap = 50000
+
+# Fixed wording (SQ-016 AC13). Exchange audit records are "typically 60 to 90 minutes" behind
+# and Microsoft "doesn't commit to a specific time" (https://learn.microsoft.com/purview/audit-search).
+$script:MailboxRecentNoChangesFormat = 'No inbox rules, forwarding or mailbox access were added or changed in the last {0} days.'
+$script:MailboxAuditLatencyLine = 'Changes from the last few hours may not be in the audit log yet.'
+
+# "To access audit cmdlets, you must be assigned the Audit Logs or View-Only Audit Logs roles in
+# the Exchange admin center." https://learn.microsoft.com/purview/audit-search
+$script:MailboxAuditRoles = 'the View-Only Audit Logs role in Exchange Online (Audit Logs also works)'
 
 # The built-in hidden junk-mail rule (NOT VERIFIED on Learn, see .NOTES).
 $script:MailboxJunkRuleName = 'Junk E-mail Rule'
@@ -142,6 +209,7 @@ $script:MailboxSectionRoles = @{
     'Hidden inbox rules' = 'the Recipient Management or Organization Management role group; Global Reader and View-Only Organization Management cannot read inbox rules'
     'Message trace'    = 'the Organization Management, Compliance Management or Help Desk role group, or Exchange Administrator in Entra ID'
     'Accepted domains' = 'the Organization Management role group (View-Only Organization Management can view it)'
+    'Recent changes'   = $script:MailboxAuditRoles
 }
 
 # Errors that mean "the signed-in account may not do this". Exchange Online only offers the
@@ -304,7 +372,8 @@ function New-MailboxGate {
         One section of the check and whether this run could read it.
     .DESCRIPTION
         Sources: 'Accepted domains', 'Mailbox forwarding', 'Mailbox size', 'Archive size',
-        'Full Access', 'Send As', 'Inbox rules', 'Hidden inbox rules', 'Message trace'.
+        'Full Access', 'Send As', 'Inbox rules', 'Hidden inbox rules', 'Message trace',
+        'Recent changes' and 'Rule changes made in Outlook' (SQ-016).
         Reason is for the console and the HTML (it may hold the raw error). NoteReason is the
         fixed plain-English reason for the ticket note; it never carries Exchange text.
     #>
@@ -818,6 +887,383 @@ function Format-MailboxCheckTime {
 }
 
 # =============================================================================
+# Recent changes from the audit log (pure, SQ-016)
+# =============================================================================
+
+function ConvertTo-MailboxUtcTime {
+    # A DateTime as UTC. Unspecified is read as UTC: the audit log stores UTC (search-unifiedauditlog).
+    param([Parameter(Mandatory = $true)][datetime]$When)
+    if ($When.Kind -eq [DateTimeKind]::Utc) { return $When }
+    if ($When.Kind -eq [DateTimeKind]::Local) { return $When.ToUniversalTime() }
+    return [datetime]::SpecifyKind($When, [DateTimeKind]::Utc)
+}
+
+function Format-MailboxChangeTime {
+    # 'yyyy-MM-dd HH:mm (yyyy-MM-dd HH:mm UTC)': this computer's local time first (SQ-016
+    # Approach), then UTC, so a change can be compared with the message trace (shown in UTC).
+    param([Parameter(Mandatory = $true)][datetime]$When)
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $utc = ConvertTo-MailboxUtcTime -When $When
+    return ('{0} ({1} UTC)' -f $utc.ToLocalTime().ToString('yyyy-MM-dd HH:mm', $inv), $utc.ToString('yyyy-MM-dd HH:mm', $inv))
+}
+
+function Format-MailboxChangeAge {
+    # How long ago, in plain English: 'less than an hour ago', '5 hours ago', '1 day ago', '2 days ago'.
+    param([Parameter(Mandatory = $true)][datetime]$When, [Parameter(Mandatory = $true)][datetime]$Now)
+    $span = (ConvertTo-MailboxUtcTime -When $Now) - (ConvertTo-MailboxUtcTime -When $When)
+    if ($span.TotalHours -lt 1) { return 'less than an hour ago' }
+    if ($span.TotalHours -lt 24) {
+        $h = [int][math]::Floor($span.TotalHours)
+        return $(if ($h -eq 1) { '1 hour ago' } else { "$h hours ago" })
+    }
+    $d = [int][math]::Floor($span.TotalDays)
+    return $(if ($d -eq 1) { '1 day ago' } else { "$d days ago" })
+}
+
+function Get-MailboxRightText {
+    # 'FullAccess' -> 'Full Access', 'SendAs' -> 'Send As', 'SendOnBehalf' -> 'Send on Behalf';
+    # any other right is shown as Exchange names it.
+    param([AllowEmptyString()][AllowNull()][string]$Right)
+    $names = @{ FullAccess = 'Full Access'; SendAs = 'Send As'; SendOnBehalf = 'Send on Behalf'; ReadPermission = 'Read Permission' }
+    $parts = @([string]$Right -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ } | ForEach-Object { if ($names.ContainsKey($_)) { $names[$_] } else { $_ } })
+    if ($parts.Count -eq 0) { return 'access' }
+    return ($parts -join ', ')
+}
+
+function Get-MailboxIdentifierSet {
+    <#
+    .SYNOPSIS
+        Every value an audit record can use to name this mailbox: Alias, Name, DisplayName, UPN,
+        primary SMTP address, every SMTP proxy address (without its smtp:/SMTP: prefix),
+        ExchangeGuid, ExternalDirectoryObjectId, Guid, Identity and DistinguishedName.
+    .DESCRIPTION
+        In admin-cmdlet records ObjectId is whatever -Identity the admin typed, so the set holds
+        every form (SQ-016 Approach). Get-EXOMailbox returns Alias, DisplayName, Name,
+        EmailAddresses, Guid, Identity, DistinguishedName and ExternalDirectoryObjectId in its
+        Minimum property set; ExchangeGuid (the MailboxGuid of mailbox-audit records) is asked
+        for by name (cmdlet-property-sets). Blank and all-zero values are left out.
+    #>
+    param([object]$Mailbox)
+    $set = New-Object System.Collections.Generic.List[string]
+    $add = {
+        param($v)
+        $t = ([string]$v).Trim()
+        if (-not $t -or $t -match '^[0-]+$') { return }
+        foreach ($e in $set) { if ($e -ieq $t) { return } }
+        $set.Add($t)
+    }
+    foreach ($n in 'Alias', 'Name', 'DisplayName', 'UserPrincipalName', 'PrimarySmtpAddress', 'ExchangeGuid', 'ExternalDirectoryObjectId', 'Guid', 'Identity', 'DistinguishedName') {
+        & $add (Get-MailboxCheckValue $Mailbox $n)
+    }
+    foreach ($a in @(Get-MailboxCheckValue $Mailbox 'EmailAddresses')) {
+        $s = [string]$a
+        if ($s -match '^(?i)smtp:(?<a>.+)$') { & $add $Matches['a'] }
+    }
+    return $set.ToArray()
+}
+
+function Get-MailboxOwnAddressSet {
+    # The mailbox's own sign-in name and SMTP addresses: an actor (UserId) that is one of these
+    # is "the mailbox's own account" (SQ-016 Approach).
+    param([object]$Mailbox)
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($v in @((Get-MailboxCheckValue $Mailbox 'UserPrincipalName'), (Get-MailboxCheckValue $Mailbox 'PrimarySmtpAddress'))) {
+        if (Test-MailboxCheckValue $v) { $out.Add(([string]$v).Trim()) }
+    }
+    foreach ($a in @(Get-MailboxCheckValue $Mailbox 'EmailAddresses')) {
+        if ([string]$a -match '^(?i)smtp:(?<a>.+)$') { $out.Add($Matches['a'].Trim()) }
+    }
+    return $out.ToArray()
+}
+
+function ConvertFrom-AuditRecord {
+    <#
+    .SYNOPSIS
+        One Search-UnifiedAuditLog row, with its AuditData JSON read: Id, Operation, Time (UTC),
+        UserId, ClientIP, ClientApp, ObjectId, MailboxOwnerUPN, MailboxGuid and Parameters (a
+        hashtable Name -> Value). $null when AuditData is not valid JSON.
+    .DESCRIPTION
+        Field meanings (audit-log-detailed-properties): Id identifies the record; CreationTime is
+        UTC; UserId is who did it; ClientIP is the device's IP; ClientInfoString is the email
+        client; ObjectId is the object the cmdlet changed; Parameters holds "the name and value
+        for all parameters that were used with the cmdlet" (admin records); MailboxOwnerUPN and
+        MailboxGuid (the Exchange GUID) name the mailbox in mailbox-audit records. A JSON null
+        parameter value reads as ''. NOT VERIFIED: mailbox-audit records carry the IP as
+        ClientIPAddress (read when ClientIP is absent) and the rule name of UpdateInboxRules in
+        OperationProperties (read when present).
+    #>
+    param([Parameter(Mandatory = $true)][AllowNull()][object]$Record)
+    if ($null -eq $Record) { return $null }
+    $raw = Get-MailboxCheckValue $Record 'AuditData'
+    $d = $null
+    if ($raw -is [string]) {
+        if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+        try { $d = $raw | ConvertFrom-Json -ErrorAction Stop } catch { return $null }
+    } elseif ($null -ne $raw) {
+        $d = $raw
+    }
+    if ($null -eq $d -or $d -is [string] -or $d -is [System.ValueType] -or $d -is [array]) { return $null }
+
+    $toTable = {
+        param($list)
+        $h = @{}
+        foreach ($p in @($list)) {
+            if ($null -eq $p) { continue }
+            $name = [string](Get-MailboxCheckValue $p 'Name')
+            if (-not $name) { continue }
+            $value = Get-MailboxCheckValue $p 'Value'
+            $h[$name] = $(if ($null -eq $value) { '' } else { [string]$value })
+        }
+        $h
+    }
+
+    $time = $null
+    foreach ($v in @((Get-MailboxCheckValue $d 'CreationTime'), (Get-MailboxCheckValue $Record 'CreationDate'))) {
+        if ($null -eq $v) { continue }
+        if ($v -is [datetime]) { $time = ConvertTo-MailboxUtcTime -When $v; break }
+        $parsed = [datetime]::MinValue
+        $styles = [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal
+        if ([datetime]::TryParse([string]$v, [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$parsed)) {
+            $time = [datetime]::SpecifyKind($parsed, [DateTimeKind]::Utc); break
+        }
+    }
+
+    $id = [string](Get-MailboxCheckValue $d 'Id')
+    if (-not $id) { $id = [string](Get-MailboxCheckValue $Record 'Identity') }
+    $ip = [string](Get-MailboxCheckValue $d 'ClientIP')
+    if (-not $ip) { $ip = [string](Get-MailboxCheckValue $d 'ClientIPAddress') }
+    $operation = [string](Get-MailboxCheckValue $d 'Operation')
+    if (-not $operation) { $operation = [string](Get-MailboxCheckValue $Record 'Operations') }
+    return [PSCustomObject]@{
+        Id = $id
+        Operation = $operation
+        Time = $time
+        UserId = [string](Get-MailboxCheckValue $d 'UserId')
+        ClientIP = $ip
+        ClientApp = [string](Get-MailboxCheckValue $d 'ClientInfoString')
+        ObjectId = [string](Get-MailboxCheckValue $d 'ObjectId')
+        MailboxOwnerUPN = [string](Get-MailboxCheckValue $d 'MailboxOwnerUPN')
+        MailboxGuid = [string](Get-MailboxCheckValue $d 'MailboxGuid')
+        Parameters = (& $toTable (Get-MailboxCheckValue $d 'Parameters'))
+        OperationProperties = (& $toTable (Get-MailboxCheckValue $d 'OperationProperties'))
+    }
+}
+
+function Get-AuditTargetForms {
+    # The forms of one target value to compare: the value itself; for 'jdoe\RuleName' also the
+    # mailbox part before the first '\'; for an Exchange object path ('.../contoso.onmicrosoft.com/jdoe',
+    # NOT VERIFIED on Learn) also the last '/' segment.
+    param([AllowEmptyString()][AllowNull()][string]$Value)
+    $v = ([string]$Value).Trim()
+    if (-not $v) { return @() }
+    $forms = New-Object System.Collections.Generic.List[string]
+    $forms.Add($v)
+    $owner = $v
+    $slash = $v.IndexOf('\')
+    if ($slash -gt 0) { $owner = $v.Substring(0, $slash).Trim(); $forms.Add($owner) }
+    $i = $owner.LastIndexOf('/')
+    if ($i -ge 0 -and $i -lt $owner.Length - 1) { $forms.Add($owner.Substring($i + 1).Trim()) }
+    return $forms.ToArray()
+}
+
+function Test-AuditRecordTargetsMailbox {
+    <#
+    .SYNOPSIS
+        True when the record's target is this mailbox: ObjectId, the Identity or Mailbox
+        parameter, the mailbox part of 'jdoe\RuleName', or MailboxOwnerUPN / MailboxGuid equals
+        one of the identifiers, compared without regard to case. Never a substring match.
+    #>
+    param([Parameter(Mandatory = $true)][object]$Record, [AllowEmptyCollection()][string[]]$IdentifierSet = @())
+    $params = Get-MailboxCheckValue $Record 'Parameters'
+    $values = @(
+        (Get-MailboxCheckValue $Record 'ObjectId'),
+        (Get-MailboxCheckValue $params 'Identity'),
+        (Get-MailboxCheckValue $params 'Mailbox'),
+        (Get-MailboxCheckValue $Record 'MailboxOwnerUPN'),
+        (Get-MailboxCheckValue $Record 'MailboxGuid'))
+    foreach ($v in $values) {
+        foreach ($form in @(Get-AuditTargetForms -Value ([string]$v))) {
+            foreach ($id in @($IdentifierSet)) { if ($id -and $form -ieq $id) { return $true } }
+        }
+    }
+    return $false
+}
+
+function Test-MailboxClearedValue {
+    # A parameter value that clears a setting: '', '$null' (as typed in PowerShell) or a JSON null.
+    # NOT VERIFIED on Learn: how the audit record writes a cleared value; all three are accepted.
+    param([AllowEmptyString()][AllowNull()][string]$Value)
+    $t = ([string]$Value).Trim()
+    return (-not $t -or $t -ieq '$null' -or $t -ieq 'null')
+}
+
+function Get-RecentChangeRows {
+    <#
+    .SYNOPSIS
+        The Recent changes rows for one parsed audit record that targets the mailbox: zero, one
+        or (for a Set-Mailbox that sets several things) more.
+    .DESCRIPTION
+        Kinds: RecentRuleChange, RecentDelegateChange, RecentForwardingChange (signs, owner
+        decision D-032) and ForwardingOff (a fact, no sign). Text is for the local report and
+        names the actor; Message (the verdict line) and NoteText (the ticket note) never carry
+        the actor's address or the IP (D-025 spirit, SQ-016 AC17). NoteText names neither a
+        delegate nor a forwarding recipient either.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][object]$Record,
+        [AllowEmptyCollection()][string[]]$OwnAddress = @(),
+        [AllowEmptyCollection()][string[]]$CurrentRuleName = @(),
+        [switch]$RuleListUnavailable,
+        [Parameter(Mandatory = $true)][datetime]$Now
+    )
+    $p = $Record.Parameters
+    $op = [string]$Record.Operation
+    $actor = ConvertTo-MailboxSafeText -Text $Record.UserId -MaxLength 256
+    $own = $false
+    foreach ($a in @($OwnAddress)) { if ($actor -and $actor -ieq $a) { $own = $true } }
+    $by = if ($own) { "by the mailbox's own account" } else { 'by another account' }
+    $actorText = if ($actor) { $actor } else { 'an account the audit record does not name' }
+    $when = $Record.Time
+    $age = if ($when) { Format-MailboxChangeAge -When $when -Now $Now } else { 'at a time the audit record does not give' }
+    $date = if ($when) { '{0} (UTC)' -f $when.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture) } else { 'date unknown' }
+    $rows = New-Object System.Collections.Generic.List[object]
+    $row = {
+        param([string]$Kind, [bool]$IsSign, [string]$Text, [string]$Message, [string]$NoteText, [hashtable]$More = @{})
+        $o = [ordered]@{
+            Time = $when; Kind = $Kind; IsSign = $IsSign; Text = $Text; Actor = $actor; OwnAccount = $own
+            ClientIP = $Record.ClientIP; ClientApp = (ConvertTo-MailboxSafeText -Text $Record.ClientApp -MaxLength 256)
+            RuleName = ''; RuleGone = $false; Delegate = ''; Right = ''; Domain = ''; Operation = $op; Id = $Record.Id
+            Message = $Message; NoteText = $NoteText
+        }
+        foreach ($k in $More.Keys) { $o[$k] = $More[$k] }
+        $rows.Add([PSCustomObject]$o)
+    }
+
+    if ($op -in 'New-InboxRule', 'Set-InboxRule', 'UpdateInboxRules') {
+        $name = ''
+        $obj = [string]$Record.ObjectId
+        if ($op -ne 'UpdateInboxRules' -and $obj.IndexOf('\') -ge 0) { $name = $obj.Substring($obj.IndexOf('\') + 1) }
+        if (-not $name) { $name = [string](Get-MailboxCheckValue $p 'Name') }
+        if (-not $name) { $idp = [string](Get-MailboxCheckValue $p 'Identity'); if ($idp.IndexOf('\') -ge 0) { $name = $idp.Substring($idp.IndexOf('\') + 1) } }
+        if (-not $name) { $name = [string](Get-MailboxCheckValue $Record.OperationProperties 'RuleName') }
+        $name = ConvertTo-MailboxSafeText -Text $name -MaxLength $script:MailboxRuleNameMaxLength
+        $gone = $false
+        if ($name -and -not $RuleListUnavailable) {
+            $gone = $true
+            foreach ($n in @($CurrentRuleName)) { if ($n -ieq $name) { $gone = $false } }
+        }
+        $verb = switch ($op) { 'New-InboxRule' { 'created' } 'Set-InboxRule' { 'changed' } default { 'created, changed or removed in Outlook' } }
+        $subject = if ($name) { "Inbox rule '$name'" } else { 'An inbox rule' }
+        $noteSubject = if ($name) { "inbox rule '$name'" } else { 'an inbox rule' }
+        $goneText = if ($gone) { ' This rule no longer exists.' } else { '' }
+        & $row 'RecentRuleChange' $true ("{0} {1} by {2}.{3}" -f $subject, $verb, $actorText, $goneText) `
+            ("{0} was {1} {2} {3}.{4}" -f $subject, $verb, $age, $by, $goneText) `
+            ("RecentRuleChange: {0}, {1} {2} {3}{4}." -f $date, $noteSubject, $verb, $by, $(if ($gone) { ' (the rule no longer exists)' } else { '' })) `
+            @{ RuleName = $name; RuleGone = $gone }
+        return $rows.ToArray()
+    }
+
+    if ($op -in 'Add-MailboxPermission', 'Add-RecipientPermission') {
+        $who = if ($op -eq 'Add-MailboxPermission') { Get-MailboxCheckValue $p 'User' } else { Get-MailboxCheckValue $p 'Trustee' }
+        $who = ConvertTo-MailboxSafeText -Text ([string]$who) -MaxLength 256
+        $right = [string](Get-MailboxCheckValue $p 'AccessRights')
+        if (-not $right -and $op -eq 'Add-RecipientPermission') { $right = 'SendAs' }
+        $right = ConvertTo-MailboxSafeText -Text $right -MaxLength 100
+        $rightText = Get-MailboxRightText -Right $right
+        $whoText = if ($who) { $who } else { 'someone the audit record does not name' }
+        & $row 'RecentDelegateChange' $true ("{0} given to {1} by {2}." -f $rightText, $whoText, $actorText) `
+            ("{0} was given to {1} {2} {3}." -f $rightText, $whoText, $age, $by) `
+            ("RecentDelegateChange: {0}, {1} given {2}." -f $date, $rightText, $by) `
+            @{ Delegate = $who; Right = $right }
+        return $rows.ToArray()
+    }
+
+    if ($op -eq 'Set-Mailbox') {
+        # Only forwarding and Send on Behalf matter; every other Set-Mailbox parameter is ignored.
+        $smtpSet = $p.ContainsKey('ForwardingSmtpAddress')
+        $fwdSet = $p.ContainsKey('ForwardingAddress')
+        $smtp = [string](Get-MailboxCheckValue $p 'ForwardingSmtpAddress')
+        $fwd = [string](Get-MailboxCheckValue $p 'ForwardingAddress')
+        $turnedOn = $false
+        if ($smtpSet -and -not (Test-MailboxClearedValue $smtp)) {
+            $turnedOn = $true
+            $domain = Get-MailboxAddressDomain -Address $smtp
+            $where = if ($domain) { "an address at $domain" } else { 'an address this tool could not read' }
+            & $row 'RecentForwardingChange' $true ("Forwarding turned on to {0} by {1}." -f $where, $actorText) `
+                ("Forwarding was turned on to {0} {1} {2}." -f $where, $age, $by) `
+                ("RecentForwardingChange: {0}, forwarding turned on to {1} {2}." -f $date, $where, $by) `
+                @{ Domain = $domain }
+        }
+        if ($fwdSet -and -not (Test-MailboxClearedValue $fwd)) {
+            $turnedOn = $true
+            $recipient = ConvertTo-MailboxSafeText -Text $fwd -MaxLength 256
+            & $row 'RecentForwardingChange' $true ("Forwarding turned on to the recipient '{0}' by {1}." -f $recipient, $actorText) `
+                ("Forwarding was turned on to the recipient '{0}' {1} {2}." -f $recipient, $age, $by) `
+                ("RecentForwardingChange: {0}, forwarding turned on to a recipient in this tenant {1}." -f $date, $by)
+        }
+        if (-not $turnedOn -and ($smtpSet -or $fwdSet)) {
+            # Shown so a tech can see a clean-up after a takeover; not a sign (squad assumption).
+            & $row 'ForwardingOff' $false ("Forwarding turned off by {0}." -f $actorText) `
+                ("Forwarding was turned off {0} {1}." -f $age, $by) `
+                ("Forwarding turned off: {0} {1}." -f $date, $by)
+        }
+        if ($p.ContainsKey('GrantSendOnBehalfTo') -and -not (Test-MailboxClearedValue ([string]$p['GrantSendOnBehalfTo']))) {
+            $who = ConvertTo-MailboxSafeText -Text ([string]$p['GrantSendOnBehalfTo']) -MaxLength 256
+            & $row 'RecentDelegateChange' $true ("Send on Behalf given to {0} by {1}." -f $who, $actorText) `
+                ("Send on Behalf was given to {0} {1} {2}." -f $who, $age, $by) `
+                ("RecentDelegateChange: {0}, Send on Behalf given {1}." -f $date, $by) `
+                @{ Delegate = $who; Right = 'SendOnBehalf' }
+        }
+    }
+    return $rows.ToArray()
+}
+
+function Get-RecentChangeSigns {
+    <#
+    .SYNOPSIS
+        The Recent changes rows (newest first), the signs among them, and how many records had
+        AuditData that could not be read.
+    .DESCRIPTION
+        Records are read with ConvertFrom-AuditRecord, de-duplicated on their Id (ReturnLargeSet
+        pages are unsorted, and the same record can come back twice), and kept only when they
+        target this mailbox (Test-AuditRecordTargetsMailbox). Every rule, forwarding or delegate
+        change in the window is a sign (owner decision D-032); turning forwarding off is listed
+        but is not a sign. A rule that is not in -Rule (the current rules) is marked "no longer
+        exists", unless -RuleListUnavailable says the current rules could not be read.
+    #>
+    param(
+        [AllowEmptyCollection()][AllowNull()][object[]]$AuditRecord = @(),
+        [object]$Mailbox,
+        [AllowEmptyCollection()][AllowNull()][object[]]$Rule = @(),
+        [switch]$RuleListUnavailable,
+        [datetime]$Now = [datetime]::UtcNow
+    )
+    $ids = @(Get-MailboxIdentifierSet -Mailbox $Mailbox)
+    $own = @(Get-MailboxOwnAddressSet -Mailbox $Mailbox)
+    $ruleNames = @(@($Rule) | Where-Object { $null -ne $_ } | ForEach-Object { ConvertTo-MailboxSafeText -Text ([string](Get-MailboxCheckValue $_ 'Name')) -MaxLength $script:MailboxRuleNameMaxLength })
+    $seen = @{}
+    $skipped = 0
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($raw in @($AuditRecord)) {
+        if ($null -eq $raw) { continue }
+        $rec = ConvertFrom-AuditRecord -Record $raw
+        if ($null -eq $rec) { $skipped++; continue }
+        if ($rec.Id) {
+            if ($seen.ContainsKey($rec.Id)) { continue }
+            $seen[$rec.Id] = $true
+        }
+        if (-not (Test-AuditRecordTargetsMailbox -Record $rec -IdentifierSet $ids)) { continue }
+        foreach ($r in @(Get-RecentChangeRows -Record $rec -OwnAddress $own -CurrentRuleName $ruleNames -RuleListUnavailable:$RuleListUnavailable -Now $Now)) { $rows.Add($r) }
+    }
+    $sorted = @($rows | Sort-Object -Property @{ Expression = { if ($_.Time) { $_.Time } else { [datetime]::MinValue } } } -Descending)
+    return [PSCustomObject]@{
+        Changes = $sorted
+        Signs = @($sorted | Where-Object { $_.IsSign })
+        Skipped = $skipped
+    }
+}
+
+# =============================================================================
 # Verdict (pure)
 # =============================================================================
 
@@ -851,7 +1297,6 @@ function Get-MailboxCheckAssessment {
         $lines.Add($script:MailboxCleanLine)
         $next = "Nothing in this mailbox points to a takeover. If you still suspect one, check CIPP's BEC report for this user."
     }
-    $lines.Add($script:MailboxRecentChangesLine)
     $lines.Add("Next step: $next")
 
     return [PSCustomObject]@{
@@ -949,7 +1394,38 @@ function ConvertTo-MailboxCheckHtml {
             [void]$sb.AppendLine('</table>')
         }
     }
-    [void]$sb.AppendLine("<p class=`"INFO`">$(Enc $script:MailboxRecentChangesLine) Message bodies and attachments are never read.</p></body></html>")
+    # Recent changes (SQ-016): every value from the audit record (rule name, actor, delegate,
+    # IP, app) is encoded; an attacker can choose the rule name.
+    $recentGate = @($f.Gates | Where-Object { $_.Source -eq 'Recent changes' })[0]
+    $outlookGate = @($f.Gates | Where-Object { $_.Source -eq 'Rule changes made in Outlook' })[0]
+    $rc = $f.RecentChanges
+    $title = if ($rc) { "Recent changes (last $($rc.Days) days)" } else { 'Recent changes' }
+    [void]$sb.AppendLine("<h2>$(Enc $title)</h2>")
+    if ($recentGate -and $recentGate.State -ne 'Checked') {
+        [void]$sb.AppendLine("<p class=`"WARN`">[WARN] Could not check recent changes: $(Enc $recentGate.Reason)</p>")
+    }
+    if ($outlookGate -and $outlookGate.State -ne 'Checked') {
+        [void]$sb.AppendLine("<p class=`"WARN`">[WARN] Rule changes made in Outlook: $(Enc $outlookGate.Reason)</p>")
+    }
+    if ($rc) {
+        if ($rc.Skipped -gt 0) { [void]$sb.AppendLine("<p class=`"WARN`">[WARN] $(Enc $rc.Skipped) audit record(s) could not be read and were skipped.</p>") }
+        $changes = @($rc.Changes)
+        if ($changes.Count -eq 0) {
+            if (-not $rc.CutOff) { [void]$sb.AppendLine("<p>$(Enc ($script:MailboxRecentNoChangesFormat -f $rc.Days))</p>") }
+        } else {
+            [void]$sb.AppendLine("<p>Newest first. Times are this computer's local time ($(Enc ([System.TimeZoneInfo]::Local.DisplayName))), with UTC in brackets.</p>")
+            [void]$sb.AppendLine('<table><tr><th>When</th><th>What changed</th><th>Takeover sign</th><th>Mailbox''s own account?</th><th>Client IP</th><th>App</th></tr>')
+            foreach ($c in $changes) {
+                $when = if ($c.Time) { Format-MailboxChangeTime -When $c.Time } else { 'unknown time' }
+                $sign = if ($c.IsSign) { 'Yes' } else { 'No' }
+                $ownText = if ($c.OwnAccount) { 'Yes' } else { 'No' }
+                [void]$sb.AppendLine("<tr><td>$(Enc $when)</td><td>$(Enc $c.Text)</td><td>$(Enc $sign)</td><td>$(Enc $ownText)</td><td>$(Enc $c.ClientIP)</td><td>$(Enc $c.ClientApp)</td></tr>")
+            }
+            [void]$sb.AppendLine('</table>')
+        }
+        [void]$sb.AppendLine("<p class=`"INFO`">$(Enc $script:MailboxAuditLatencyLine)</p>")
+    }
+    [void]$sb.AppendLine('<p class="INFO">Message bodies and attachments are never read.</p></body></html>')
     return $sb.ToString()
 }
 
@@ -986,14 +1462,20 @@ function Get-MailboxCheckNote {
             default { $script:MailboxPartlyNoteHeadline }
         }
         $traceText = if ($f.Trace) { ', message trace for the last {0} days' -f $f.Trace.Days } else { '' }
-        $scopeLine = 'Mailbox {0} in {1}: delegates, forwarding, inbox rules (hidden ones included), size, archive and holds{2}.' -f $Result.Identity, $tenantName, $traceText
+        $recentText = if ($f.RecentChanges) { ', audit log for the last {0} days' -f $f.RecentChanges.Days } else { '' }
+        $scopeLine = 'Mailbox {0} in {1}: delegates, forwarding, inbox rules (hidden ones included), size, archive and holds{2}{3}.' -f $Result.Identity, $tenantName, $traceText, $recentText
 
-        foreach ($s in @($a.Signs)) { $items.Add((New-TicketNoteItem -Kind Problem -Text ('{0}: {1}' -f $s.Kind, $s.Message))) }
+        # A recent-change sign has its own NoteText (kind, UTC date, rule name, own or another
+        # account): its Message names the delegate, and the note never does (SQ-016 AC17).
+        foreach ($s in @($a.Signs)) {
+            $noteText = [string](Get-MailboxCheckValue $s 'NoteText')
+            if (-not $noteText) { $noteText = '{0}: {1}' -f $s.Kind, $s.Message }
+            $items.Add((New-TicketNoteItem -Kind Problem -Text $noteText))
+        }
         foreach ($c in @($a.CouldNotCheck)) {
             $why = if ($c.NoteReason) { [string]$c.NoteReason } else { $script:MailboxNoteReasonDefault }
             $items.Add((New-TicketNoteItem -Kind NotChecked -Text ('{0}: {1}' -f $c.Source, $why)))
         }
-        $items.Add((New-TicketNoteItem -Kind NotChecked -Text $script:MailboxRecentChangesLine))
 
         $checked = @{}
         foreach ($g in @($f.Gates)) { $checked[[string]$g.Source] = ($g.State -eq 'Checked') }
@@ -1006,6 +1488,10 @@ function Get-MailboxCheckNote {
         if ($checked['Inbox rules'] -and $checked['Accepted domains'] -and $checked['Hidden inbox rules'] -ne $false -and @($kinds | Where-Object { $ruleKinds -contains $_ }).Count -eq 0) {
             $n = @($f.Rules).Count
             $items.Add((New-TicketNoteItem -Kind Clear -CouldLook $true -Text ('Inbox rules: {0} rule(s), hidden ones included; no rule matched the checks this tool runs (English folder names).' -f $n)))
+        }
+        $recentKinds = @('RecentRuleChange', 'RecentDelegateChange', 'RecentForwardingChange')
+        if ($checked['Recent changes'] -and -not $checked.ContainsKey('Rule changes made in Outlook') -and $f.RecentChanges -and @($kinds | Where-Object { $recentKinds -contains $_ }).Count -eq 0) {
+            $items.Add((New-TicketNoteItem -Kind Clear -CouldLook $true -Text ('Recent changes (audit log, last {0} days): no rule, forwarding or delegate change was found.' -f $f.RecentChanges.Days)))
         }
         $counts = foreach ($d in @(@('Full Access', $f.FullAccess), @('Send As', $f.SendAs))) {
             if ($checked[$d[0]]) { '{0}: {1}' -f $d[0], @($d[1]).Count }

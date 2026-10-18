@@ -180,6 +180,8 @@ If an Exchange Online session is already open in the window, the tool uses it an
 |---|---|
 | `-TraceDays 3` | Read 3 days of message trace instead of 7 (1 to 10; one Microsoft query covers at most 10 days). |
 | `-NoTrace` | Skip the message trace. |
+| `-RecentDays 30` | Search 30 days of the audit log for rule, forwarding and delegate changes instead of 14 (1 to 90). |
+| `-NoRecentChanges` | Skip the audit log search (when it is too slow). The report then says **Recent changes: could not check (skipped)** and the verdict is **PARTLY CHECKED** at best. |
 | `-OutputPath C:\Temp` | Save an HTML report and three CSVs (`_rules`, `_delegates`, `_trace`) named `MailboxCheck_<mailbox>_<date>_<time>`. **Rule conditions and message subjects are only in these files.** Without it no report is written. |
 | `-TicketNumber 482113` | Save the ticket note in the ticket's folder (and the reports too, when `-OutputPath` is given). Same rules as the [ticket note](#ticket-note) above. |
 | `-NoClipboard` / `-FullDetail` | As for the sign-in check. |
@@ -203,13 +205,28 @@ The takeover signs are:
 - **An inbox rule that forwards to a recipient the tool cannot classify** as inside or outside (for example a bare name). It is a sign until someone looks at it.
 - **An inbox rule that deletes mail.**
 - **An inbox rule that hides mail**: it moves mail to RSS Feeds, RSS Subscriptions, Conversation History, Deleted Items, Junk Email or Archive, or moves it anywhere and marks it read.
+- **A recent change** (owner decision D-032): any inbox rule created or changed, forwarding turned on, or Full Access, Send As or Send on Behalf given in the last 14 days (`-RecentDays`), found in the Microsoft 365 audit log. The sign says when ("2 days ago") and whether it was done by the mailbox's own account or by another account, for example "Inbox rule 'xx' was created 2 days ago by the mailbox's own account. This rule no longer exists." A rule created and then deleted still counts: that is a known way to hide a takeover.
 - **A hidden inbox rule** (one Exchange only lists when asked for hidden rules). The built-in junk-mail rule is hidden too; it is listed but is not a sign, as long as it does none of the things above (a rule with that name that forwards, deletes or moves mail is a sign). A rule Exchange returns without an identity is a sign too, because the tool cannot tell whether it is hidden.
 
 A rule that is turned off still counts (someone made it); the sign says it is off.
 
 Under the verdict come the facts: mailbox type (user, shared, room, equipment), forwarding, total size and the prohibit-send quota, archive on/off and its size, litigation hold and other holds (eDiscovery holds and retention policies are labelled), who has **Full Access**, **Send As** and **Send on Behalf**, every inbox rule (hidden ones marked), and the message trace (sent and received). The console shows rule actions but not their conditions, and trace rows without subjects; both are in the HTML and CSV report.
 
-**Not checked here:** when a rule, forwarding or delegate was added, and by whom. That needs the audit log; the report says "not checked here, see CIPP's BEC report" (owner decision D-008).
+### Recent changes (the audit log)
+
+The **Recent changes (last 14 days)** section lists, newest first, every inbox rule that was created or changed (in Outlook on the web, PowerShell or the Outlook client), forwarding that was turned on or off, and Full Access, Send As or Send on Behalf that was given. Each row has the time (this computer's local time, with UTC in brackets), what changed, who did it, whether that was the mailbox's own account, and the client IP and app when the audit record has them. Turning forwarding off is listed so you can see a clean-up, but it is not a sign. When nothing changed it says `No inbox rules, forwarding or mailbox access were added or changed in the last 14 days.`
+
+- **It can take a minute or more** on a large tenant: the tool asks Microsoft for every rule, forwarding and permission change in the tenant for those days (up to 50,000 records) and picks out this mailbox's on your computer, so a change made with any form of the mailbox's name is found. Use a smaller `-RecentDays`, or `-NoRecentChanges` to skip it.
+- **Changes from the last hour or two may not be there yet.** Microsoft says Exchange audit records are typically searchable 60 to 90 minutes after the change and does not promise a time. The section says so every time.
+- **Recent changes: could not check** means the verdict is **PARTLY CHECKED** at best, never the all-clear. The reason is one of:
+  - *your account needs the View-Only Audit Logs role in Exchange Online*: the audit search is not available to the account you signed in with (see the roles below);
+  - *audit logging is turned off in this tenant*: nobody can search changes from while it was off. An admin with the Audit Logs role (the Organization Management or Compliance Management role group) can turn it on in the Microsoft Purview portal (Audit). This tool never turns it on; ask the client's admin or escalate;
+  - *results were cut off*: more than 50,000 matching records in the window. Run it again with a smaller `-RecentDays`;
+  - *skipped (-NoRecentChanges)*;
+  - the error from the search itself (for example a timeout).
+- **Rule changes made in Outlook: could not check** means mailbox auditing is turned off for the organization, or bypassed for this mailbox's account (or the tool could not tell). Rule changes made in the Outlook client are then not recorded; changes made by admins, in Outlook on the web or with PowerShell still are, and are still listed.
+
+For pulling large amounts of audit data regularly, Microsoft recommends the Office 365 Management Activity API instead of `Search-UnifiedAuditLog`; this tool runs one bounded search per check, which is what the cmdlet is meant for.
 
 ### Roles it needs
 
@@ -221,6 +238,7 @@ From Microsoft Learn (cited in the scripts). Owner decision D-026: these are con
 | Inbox rules | Recipient Management or Organization Management. **Global Reader and View-Only Organization Management cannot read inbox rules** (Microsoft says so on the Get-InboxRule page). |
 | Message trace | Organization Management, Compliance Management or Help Desk; also Exchange Administrator or Global Administrator in Entra ID |
 | Accepted domains | Organization Management (View-Only Organization Management can view them) |
+| Recent changes (audit log) | **View-Only Audit Logs** or Audit Logs in Exchange Online (Microsoft: "To access audit cmdlets, you must be assigned the Audit Logs or View-Only Audit Logs roles in the Exchange admin center"). By default the Organization Management and Compliance Management role groups have them. Whether that role alone also reads the mailbox audit setting and audit bypass is confirmed by the Integration test (D-026); if it does not, **Rule changes made in Outlook** is listed under **Could not check**. |
 
 Because inbox rules cannot be read with a read-only role, the account you use can change mailboxes. This tool never does: a test reads the script's own commands and fails if any of them could change something.
 
@@ -228,7 +246,7 @@ A section your role cannot read shows up under **Could not check** with the role
 
 ### Ticket note
 
-Same four-part note as the sign-in check, written to the clipboard (and to the ticket folder with `-TicketNumber`). It carries the verdict, the sign kinds (for example `ExternalRuleForward`), rule names and the **outside domain only** (`gmail.com`, never the full address). The note names the checked mailbox, but never a forwarding, delegate or message-trace address. Rule conditions, delegate names and message-trace rows never go into the note (owner decision D-025); they stay in the local HTML and CSV. A section that could not be read is listed under **Could not check**, never under **Ruled out**, with a fixed reason (the role it needs, or "see the report"): the Exchange error text itself stays in the console and the HTML report. Rule names have line breaks and other control characters removed and are cut to 100 characters.
+Same four-part note as the sign-in check, written to the clipboard (and to the ticket folder with `-TicketNumber`). It carries the verdict, the sign kinds (for example `ExternalRuleForward`), rule names and the **outside domain only** (`gmail.com`, never the full address). A recent change is written as its kind, the date (UTC), the rule name, and "by the mailbox's own account" or "by another account": who did it, from which IP and app, and the delegate's name stay in the local report. The note names the checked mailbox, but never a forwarding, delegate or message-trace address. Rule conditions, delegate names and message-trace rows never go into the note (owner decision D-025); they stay in the local HTML and CSV. A section that could not be read is listed under **Could not check**, never under **Ruled out**, with a fixed reason (the role it needs, or "see the report"): the Exchange error text itself stays in the console and the HTML report. Rule names have line breaks and other control characters removed and are cut to 100 characters.
 
 ### Exit codes
 

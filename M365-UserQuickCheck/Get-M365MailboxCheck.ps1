@@ -21,8 +21,10 @@
            No takeover signs found in the checks below.
              (only when every section was read)
       3. The facts: mailbox type, forwarding, size against the quota, archive, holds; who has
-         Full Access, Send As and Send on Behalf; every inbox rule (hidden ones marked); and the
-         message trace (sent and received, last -TraceDays days).
+         Full Access, Send As and Send on Behalf; every inbox rule (hidden ones marked); the
+         message trace (sent and received, last -TraceDays days); and the recent changes from
+         the audit log (last -RecentDays days): when an inbox rule, forwarding or a delegate
+         was added or changed, by whom, and from where.
 
     TAKEOVER SIGNS
       - Mailbox forwarding to an address outside the tenant's accepted domains, directly or
@@ -33,9 +35,20 @@
       - An inbox rule that moves mail to RSS Feeds, RSS Subscriptions, Conversation History,
         Deleted Items, Junk Email or Archive, or moves it and marks it read
       - A hidden inbox rule other than the built-in junk-mail rule
+      - Any inbox rule, forwarding or delegate change in the last -RecentDays days, found in
+        the unified audit log (owner decision D-032), each with when, who, and whether it was
+        the mailbox's own account
     The tool does not score the risk; every sign leads to CIPP's BEC report (owner decision
-    D-003). Recent rule, forwarding and delegate changes need the audit log and are not checked
-    here: the report says "not checked here, see CIPP's BEC report" (owner decision D-008).
+    D-003).
+
+    RECENT CHANGES. Search-UnifiedAuditLog for New-InboxRule, Set-InboxRule, UpdateInboxRules,
+    Add-MailboxPermission, Add-RecipientPermission and Set-Mailbox, matched to this mailbox on
+    this computer. It needs the View-Only Audit Logs (or Audit Logs) role; without it, with
+    auditing turned off in the tenant, with -NoRecentChanges, or when the search returns more
+    than 50,000 records, the section is "could not check" and the verdict is PARTLY CHECKED at
+    best. When mailbox auditing is off or bypassed for this mailbox, rule changes made in the
+    Outlook client are not recorded, and that is listed as "could not check" too. Changes from
+    the last hour or two may not be in the audit log yet. The tool never changes audit settings.
 
     READ-ONLY, whatever the account. Even signed in as the client's Global Administrator
     (owner decision D-002) the tool only runs Get- cmdlets: it never removes a rule, forwarding
@@ -59,6 +72,12 @@
     line and exit code 3, before anything is read.
 .PARAMETER NoTrace
     Do not read the message trace.
+.PARAMETER RecentDays
+    How many days of the audit log to search for rule, forwarding and delegate changes, 1 to 90
+    (default 14). The search can take a minute or more on a large tenant.
+.PARAMETER NoRecentChanges
+    Do not search the audit log (when it is too slow). The report then says "Recent changes:
+    could not check (skipped)" and the verdict is PARTLY CHECKED at best.
 .PARAMETER NoClipboard
     Do not copy the ticket note to the clipboard.
 .PARAMETER FullDetail
@@ -82,6 +101,9 @@
 .EXAMPLE
     .\Get-M365MailboxCheck.ps1 accounts@contoso.com -TraceDays 2 -OutputPath C:\Temp
     A busy mailbox whose trace was cut off at 5000 messages: read two days instead.
+.EXAMPLE
+    .\Get-M365MailboxCheck.ps1 accounts@contoso.com -RecentDays 30
+    Look 30 days back in the audit log for rule, forwarding and delegate changes.
 .NOTES
     Exit codes (without -PassThru): 0 = no takeover signs and every section read, 1 = possible
     takeover, 2 = partly checked (no sign in what could be read), 3 = could not run (module
@@ -136,8 +158,20 @@
       100 queries in a 5-minute window, output times in UTC; module 3.7.0 or later
         https://learn.microsoft.com/powershell/module/exchangepowershell/get-messagetracev2
         https://learn.microsoft.com/exchange/monitoring/trace-an-email-message/message-trace-modern-eac
-      Roles per section, hold prefixes and the rule-action properties: see the REFERENCES in
-      MailboxCheck.Core.ps1
+      Search-UnifiedAuditLog -StartDate -EndDate (UTC) -Operations -SessionId -SessionCommand
+      ReturnLargeSet (paging up to 50,000 results) -ResultSize (maximum 5,000); Learn points
+      bulk, repeated downloads to the Management Activity API instead
+        https://learn.microsoft.com/powershell/module/exchangepowershell/search-unifiedauditlog
+      Get-AdminAuditLogConfig (UnifiedAuditLogIngestionEnabled, accurate in Exchange Online
+      PowerShell only), Get-OrganizationConfig AuditDisabled, Get-MailboxAuditBypassAssociation
+      -Identity (AuditBypassEnabled)
+        https://learn.microsoft.com/powershell/module/exchangepowershell/get-adminauditlogconfig
+        https://learn.microsoft.com/purview/audit-mailboxes
+        https://learn.microsoft.com/powershell/module/exchangepowershell/get-mailboxauditbypassassociation
+      Audit roles (View-Only Audit Logs or Audit Logs) and search latency
+        https://learn.microsoft.com/purview/audit-search
+      Roles per section, hold prefixes, the rule-action properties and the audit record fields:
+      see the REFERENCES in MailboxCheck.Core.ps1
       Ticket note clipboard (WinForms first, D-033): see CaseKit.ps1
 
     NOT VERIFIED ON LEARN
@@ -146,6 +180,9 @@
         any other error is "could not run", never "no mailbox".
       - Whether StartDate / EndDate are read as local time or UTC. They are passed as DateTime
         values (not strings), so no regional date format is involved.
+      - That View-Only Audit Logs also covers Get-AdminAuditLogConfig and
+        Get-MailboxAuditBypassAssociation. A lookup the role does not allow is listed under
+        Could not check (never an all-clear); the Integration test settles it (D-026).
       - That Recipient Management alone can run Get-InboxRule. Learn names the roles per feature
         (feature-permissions) and says Global Reader cannot; the Integration test in
         Tests\MailboxCheck.Tests.ps1 confirms the README's roles against a real tenant (D-026).
@@ -167,6 +204,11 @@ param(
     [string]$TicketNumber,
 
     [switch]$NoTrace,
+
+    [ValidateRange(1, 90)]
+    [int]$RecentDays = 14,
+
+    [switch]$NoRecentChanges,
 
     [switch]$NoClipboard,
 
@@ -264,6 +306,131 @@ function Write-M365MailboxBanner {
     Write-Host ('=' * 70) -ForegroundColor DarkGray
 }
 
+function Get-RecentMailboxChanges {
+    <#
+    .SYNOPSIS
+        The Recent changes section (SQ-016): audit role, audit settings, then the paged audit
+        search. Returns Gates, Facts (the Facts.RecentChanges object, or $null when the search
+        did not run) and Signs.
+    .DESCRIPTION
+        One try/catch, like every section: a failure becomes a 'Recent changes' Could not check
+        with the error, and the rest of the check still stands. In order:
+          1. Get-Command Search-UnifiedAuditLog. Exchange Online only offers the cmdlets a role
+             allows, so a missing cmdlet means the account lacks View-Only Audit Logs.
+          2. Get-AdminAuditLogConfig: UnifiedAuditLogIngestionEnabled False = no audit log.
+          3. Mailbox auditing (Get-OrganizationConfig AuditDisabled, Get-MailboxAuditBypassAssociation
+             AuditBypassEnabled). Off, bypassed or not known = 'Rule changes made in Outlook' is
+             Could not check (UpdateInboxRules is a mailbox-audit record); a failure here never
+             fails the section, because admin-cmdlet records still come from the unified log.
+          4. Search-UnifiedAuditLog, filtered on the server by date and operations only, paged
+             with one SessionId and ReturnLargeSet until a page is empty or the last ResultIndex
+             reaches ResultCount. A last ResultIndex at the 50,000 cap = results were cut off.
+        Read-only: the tool never changes an audit setting (AC19).
+    #>
+    param(
+        [Parameter(Mandatory = $true)][object]$Mailbox,
+        [Parameter(Mandatory = $true)][string]$Address,
+        [AllowEmptyCollection()][object[]]$Rule = @(),
+        [switch]$RuleListUnavailable,
+        [object]$OrganizationConfig,
+        [int]$RecentDays = 14,
+        [datetime]$Now = [datetime]::UtcNow,
+        [switch]$Quiet
+    )
+    $source = 'Recent changes'
+    $out = [PSCustomObject]@{ Gates = @(); Facts = $null; Signs = @() }
+    try {
+        if (-not (Get-Command -Name Search-UnifiedAuditLog -ErrorAction SilentlyContinue)) {
+            $out.Gates = @(New-MailboxGate -Source $source -State CouldNotCheck `
+                    -Reason ('Search-UnifiedAuditLog is not available to the signed-in account, so it cannot search the audit log: your account needs {0}.' -f $script:MailboxAuditRoles) `
+                    -NoteReason ('the signed-in account cannot search the audit log; it needs {0}.' -f $script:MailboxAuditRoles))
+            return $out
+        }
+
+        $config = @(Get-AdminAuditLogConfig -ErrorAction Stop | Where-Object { $_ }) | Select-Object -First 1
+        if ($null -eq $config) { throw 'Get-AdminAuditLogConfig returned nothing, so it is not known whether audit logging is on.' }
+        if ($config.UnifiedAuditLogIngestionEnabled -eq $false) {
+            # https://learn.microsoft.com/purview/audit-log-enable-disable: the Audit Logs role
+            # (Organization Management, Compliance Management) turns it on. This tool never does.
+            $out.Gates = @(New-MailboxGate -Source $source -State CouldNotCheck `
+                    -Reason 'audit logging is turned off in this tenant (UnifiedAuditLogIngestionEnabled is False). An admin with the Audit Logs role (Organization Management or Compliance Management) can turn it on in the Microsoft Purview portal; this tool never changes it.' `
+                    -NoteReason 'audit logging is turned off in this tenant.')
+            return $out
+        }
+
+        # Mailbox auditing: a gap here only hides rule changes made in the Outlook client.
+        $outlook = New-Object System.Collections.Generic.List[string]
+        $org = $OrganizationConfig
+        if ($null -eq $org) {
+            try { $org = Get-OrganizationConfig -ErrorAction Stop } catch { $outlook.Add(('could not tell whether mailbox auditing is on in this tenant: {0}' -f (Get-MailboxErrorSummary -Message (Get-M365MailboxErrorText $_)))) }
+        }
+        if ($null -ne $org) {
+            $disabled = Get-MailboxCheckValue $org 'AuditDisabled'
+            if ($disabled -eq $true) {
+                $outlook.Add('mailbox auditing is turned off for the whole organization (AuditDisabled is True), so rule changes made in Outlook are not being recorded for this mailbox')
+            } elseif ($null -eq $disabled) {
+                $outlook.Add('could not tell whether mailbox auditing is on in this tenant (Get-OrganizationConfig did not return AuditDisabled)')
+            }
+        }
+        $account = @([string]$Mailbox.UserPrincipalName, $Address) | Where-Object { $_ } | Select-Object -First 1
+        if ($account) {
+            # Never without -Identity: "$null ... returns all objects" (get-mailboxauditbypassassociation).
+            try {
+                $bypass = @(Get-MailboxAuditBypassAssociation -Identity $account -ErrorAction Stop | Where-Object { $_ })
+                if (@($bypass | Where-Object { $_.AuditBypassEnabled -eq $true }).Count -gt 0) {
+                    $outlook.Add("mailbox audit bypass is on for this mailbox's account, so rule changes made in Outlook are not being recorded for this mailbox")
+                }
+            } catch {
+                $outlook.Add(('could not tell whether mailbox audit bypass is on for this account: {0}' -f (Get-MailboxErrorSummary -Message (Get-M365MailboxErrorText $_))))
+            }
+        }
+
+        $end = ConvertTo-MailboxUtcTime -When $Now
+        $start = $end.AddDays(-$RecentDays)
+        if (-not $Quiet) { Write-Status ('Searching the audit log for the last {0} days (this can take a minute)...' -f $RecentDays) 'INFO' }
+        $sessionId = 'M365MailboxCheck_' + [guid]::NewGuid().ToString()
+        $records = New-Object System.Collections.Generic.List[object]
+        $cutOff = $false
+        # 50,000 / 5,000 = 10 pages; one more guards against a ResultIndex that never reaches ResultCount.
+        $maxPages = [int]($script:MailboxAuditLargeSetCap / $script:MailboxAuditPageSize) + 1
+        for ($pageNo = 1; ; $pageNo++) {
+            # ForEach-Object flattens a page that arrives as one array object.
+            $page = @(Search-UnifiedAuditLog -StartDate $start -EndDate $end -Operations $script:MailboxRecentOperations -SessionId $sessionId -SessionCommand ReturnLargeSet -ResultSize $script:MailboxAuditPageSize -ErrorAction Stop | ForEach-Object { $_ } | Where-Object { $_ })
+            if ($page.Count -eq 0) { break }
+            foreach ($r in $page) { $records.Add($r) }
+            $last = $page[$page.Count - 1]
+            $index = 0; $count = 0
+            [void][int]::TryParse([string]$last.ResultIndex, [ref]$index)
+            [void][int]::TryParse([string]$last.ResultCount, [ref]$count)
+            if ($index -ge $script:MailboxAuditLargeSetCap -or $pageNo -ge $maxPages) { $cutOff = $true; break }
+            if ($index -ge $count) { break }
+        }
+
+        $found = Get-RecentChangeSigns -AuditRecord $records.ToArray() -Mailbox $Mailbox -Rule $Rule -RuleListUnavailable:$RuleListUnavailable -Now $Now
+        if ($found.Skipped -gt 0 -and -not $Quiet) { Write-Status ('{0} audit record(s) could not be read and were skipped.' -f $found.Skipped) 'WARN' }
+        $out.Facts = [PSCustomObject]@{ Changes = @($found.Changes); Skipped = [int]$found.Skipped; CutOff = [bool]$cutOff; Days = $RecentDays; Start = $start; End = $end }
+        $out.Signs = @($found.Signs)
+        $gates = New-Object System.Collections.Generic.List[object]
+        if ($cutOff) {
+            $gates.Add((New-MailboxGate -Source $source -State CouldNotCheck `
+                        -Reason ('results were cut off: the audit search reached its limit of {0:N0} records for these {1} days, so changes may be missing. Run the check again with a smaller -RecentDays.' -f $script:MailboxAuditLargeSetCap, $RecentDays) `
+                        -NoteReason 'results were cut off at the audit search limit; run the check again with a smaller -RecentDays.'))
+        } else {
+            $gates.Add((New-MailboxGate -Source $source -State Checked))
+        }
+        if ($outlook.Count -gt 0) {
+            $note = if (@($outlook | Where-Object { $_ -match 'not being recorded' }).Count -gt 0) { 'rule changes made in Outlook are not being recorded for this mailbox (mailbox auditing is off or bypassed).' } else { 'could not tell whether rule changes made in Outlook are recorded for this mailbox (see the report).' }
+            $gates.Add((New-MailboxGate -Source 'Rule changes made in Outlook' -State CouldNotCheck -Reason ((($outlook | Select-Object -Unique) -join '; ') + '.') -NoteReason $note))
+        }
+        $out.Gates = $gates.ToArray()
+    } catch {
+        $out.Gates = @(Get-MailboxGateFromError -Source $source -Message ('The audit log search failed: ' + (Get-M365MailboxErrorText $_)))
+        $out.Facts = $null
+        $out.Signs = @()
+    }
+    return $out
+}
+
 function Invoke-M365MailboxCheck {
     <#
     .SYNOPSIS
@@ -279,6 +446,8 @@ function Invoke-M365MailboxCheck {
         [int]$ConnectionCount = 1,
         [int]$TraceDays = 7,
         [switch]$NoTrace,
+        [int]$RecentDays = 14,
+        [switch]$NoRecentChanges,
         [switch]$Quiet,
         [datetime]$Now = [datetime]::UtcNow
     )
@@ -292,6 +461,7 @@ function Invoke-M365MailboxCheck {
     # --- Tenant: accepted domains (internal = these) and the initial domain for the banner ---
     $domains = @()
     $tenantName = ''
+    $orgConfig = $null
     try {
         $accepted = @(Get-AcceptedDomain -ErrorAction Stop | Where-Object { $_ })
         # ExternalRelay domains relay to "an external email system that's completely outside of
@@ -305,7 +475,10 @@ function Invoke-M365MailboxCheck {
         $gates.Add((Get-MailboxGateFromError -Source 'Accepted domains' -Message (Get-M365MailboxErrorText $_)))
     }
     if (-not $tenantName) {
-        try { $tenantName = [string](Get-OrganizationConfig -ErrorAction Stop).Name } catch { Write-Verbose "Get-OrganizationConfig: $($_.Exception.Message)" }
+        try {
+            $orgConfig = @(Get-OrganizationConfig -ErrorAction Stop) | Select-Object -First 1
+            $tenantName = [string]$orgConfig.Name
+        } catch { Write-Verbose "Get-OrganizationConfig: $($_.Exception.Message)" }
     }
     $tenant = [PSCustomObject]@{
         Name = $(if ($tenantName) { $tenantName } else { 'not known' })
@@ -319,7 +492,9 @@ function Invoke-M365MailboxCheck {
     # --- The mailbox (no mailbox = nothing else to read) ---
     $mbx = $null
     try {
-        $mbx = @(Get-EXOMailbox -Identity $id -PropertySets Minimum, Delivery, Archive, Hold, Quota -ErrorAction Stop | Where-Object { $_ }) | Select-Object -First 1
+        # ExchangeGuid is in no property set the check needs otherwise (StatisticsSeed), so it is
+        # asked for by name: mailbox-audit records name the mailbox by it (cmdlet-property-sets).
+        $mbx = @(Get-EXOMailbox -Identity $id -PropertySets Minimum, Delivery, Archive, Hold, Quota -Properties ExchangeGuid -ErrorAction Stop | Where-Object { $_ }) | Select-Object -First 1
     } catch {
         $msg = Get-M365MailboxErrorText $_
         if ($msg -notmatch $script:MailboxNotFoundPattern) {
@@ -392,6 +567,7 @@ function Invoke-M365MailboxCheck {
     # from the -IncludeHidden set; if the second call fails, they still do, and only telling
     # the hidden rules apart becomes Could not check ---
     $rules = @()
+    $rulesUnavailable = $false
     try {
         $all = @(Get-InboxRule -Mailbox $address -IncludeHidden -ResultSize Unlimited -ErrorAction Stop | Where-Object { $_ })
         $visible = @()
@@ -405,6 +581,7 @@ function Invoke-M365MailboxCheck {
         $rules = @(ConvertTo-MailboxRuleList -Rule $all -VisibleRule $visible -VisibleRuleUnavailable:$visibleFailed)
         $gates.Add((New-MailboxGate -Source 'Inbox rules' -State Checked))
     } catch {
+        $rulesUnavailable = $true
         $gates.Add((Get-MailboxGateFromError -Source 'Inbox rules' -Message (Get-M365MailboxErrorText $_)))
     }
 
@@ -438,14 +615,24 @@ function Invoke-M365MailboxCheck {
         }
     }
 
+    # --- Recent changes from the audit log (SQ-016). Last: the search can take a minute ---
+    $recent = $null
+    if ($NoRecentChanges) {
+        $gates.Add((New-MailboxGate -Source 'Recent changes' -State CouldNotCheck -Reason 'skipped (-NoRecentChanges).' -NoteReason 'skipped (-NoRecentChanges).'))
+    } else {
+        $recent = Get-RecentMailboxChanges -Mailbox $mbx -Address $address -Rule $rules -RuleListUnavailable:$rulesUnavailable -OrganizationConfig $orgConfig -RecentDays $RecentDays -Now $Now -Quiet:$Quiet
+        foreach ($g in @($recent.Gates)) { $gates.Add($g) }
+    }
+
     # --- Assess ---
     $signs = @(Get-ForwardingSigns -Mailbox $mbx -ForwardingRecipient $forwardingRecipient -AcceptedDomain $domains) + @(Get-InboxRuleSigns -Rule $rules -AcceptedDomain $domains)
+    if ($recent) { $signs += @($recent.Signs) }
     $assessment = Get-MailboxCheckAssessment -Signs $signs -Gate $gates.ToArray()
     $result.Facts = [PSCustomObject]@{
         Mailbox = $mbx; Address = $address; ForwardingRecipient = $forwardingRecipient
         FactRows = @(Get-MailboxFactRows -Mailbox $mbx -Statistics $stats -ArchiveStatistics $archiveStats -ForwardingRecipient $forwardingRecipient)
         FullAccess = $fullAccess; SendAs = $sendAs; SendOnBehalf = $sendOnBehalf
-        Rules = $rules; Trace = $trace; Gates = $gates.ToArray()
+        Rules = $rules; Trace = $trace; RecentChanges = $(if ($recent) { $recent.Facts } else { $null }); Gates = $gates.ToArray()
     }
     $result.Identity = $address
     $result.Assessment = $assessment
@@ -518,6 +705,27 @@ function Write-M365MailboxCheckConsole {
             $other = if ($m.Direction -eq 'Sent') { 'to ' + $m.RecipientAddress } else { 'from ' + $m.SenderAddress }
             Write-Host ("  {0}  {1,-8} {2,-40} {3}" -f (Format-MailboxCheckTime $m.Received), $m.Direction, $other, $m.Status) -ForegroundColor Gray
         }
+    }
+
+    # Recent changes: who did what and when. Client IPs and apps are in the HTML report only.
+    Write-Host ''
+    $cg = & $gateOf 'Recent changes'
+    $og = & $gateOf 'Rule changes made in Outlook'
+    $rc = $f.RecentChanges
+    if ($cg -and $cg.State -ne 'Checked') { Write-Status "Recent changes: could not check ($($cg.Reason))" 'WARN' }
+    if ($og) { Write-Status "Rule changes made in Outlook: could not check ($($og.Reason))" 'WARN' }
+    if ($rc) {
+        $changes = @($rc.Changes)
+        if ($changes.Count -eq 0) {
+            if (-not $rc.CutOff) { Write-Host ($script:MailboxRecentNoChangesFormat -f $rc.Days) -ForegroundColor White }
+        } else {
+            Write-Host ("Recent changes, last {0} days, newest first (local time, UTC in brackets; IPs and apps in the HTML report):" -f $rc.Days) -ForegroundColor White
+            foreach ($c in $changes) {
+                $when = if ($c.Time) { Format-MailboxChangeTime -When $c.Time } else { 'unknown time' }
+                Write-Host ("  {0}  {1}" -f $when, $c.Text) -ForegroundColor $(if ($c.IsSign) { 'Yellow' } else { 'Gray' })
+            }
+        }
+        Write-Status $script:MailboxAuditLatencyLine 'INFO'
     }
 }
 
@@ -659,7 +867,7 @@ try {
     }
     if (-not $result) {
         try {
-            $result = Invoke-M365MailboxCheck -Identity $Identity -Connection $connections[0] -ConnectionCount $connections.Count -TraceDays $TraceDays -NoTrace:$NoTrace -Quiet:$Quiet
+            $result = Invoke-M365MailboxCheck -Identity $Identity -Connection $connections[0] -ConnectionCount $connections.Count -TraceDays $TraceDays -NoTrace:$NoTrace -RecentDays $RecentDays -NoRecentChanges:$NoRecentChanges -Quiet:$Quiet
         } catch {
             $result = New-M365MailboxStartFailure "The check stopped unexpectedly: $($_.Exception.Message)"
         }

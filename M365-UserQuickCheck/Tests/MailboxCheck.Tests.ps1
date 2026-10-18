@@ -86,6 +86,10 @@ BeforeAll {
         'Get-MessageTraceV2'           = @{ Params = @('StartDate', 'EndDate', 'SenderAddress', 'RecipientAddress', 'ResultSize', 'Status'); Switches = @() }
         'Get-AcceptedDomain'           = @{ Params = @('Identity', 'ResultSize'); Switches = @() }
         'Get-OrganizationConfig'       = @{ Params = @('Identity'); Switches = @() }
+        # SQ-016 (the audit-log lookup runs by default; its own tests are in MailboxCheck.RecentChanges.Tests.ps1)
+        'Search-UnifiedAuditLog'            = @{ Params = @('StartDate', 'EndDate', 'Operations', 'SessionId', 'SessionCommand', 'ResultSize'); Switches = @() }
+        'Get-AdminAuditLogConfig'           = @{ Params = @(); Switches = @() }
+        'Get-MailboxAuditBypassAssociation' = @{ Params = @('Identity'); Switches = @() }
     }
     # From Microsoft Learn (these are proxy cmdlets that exist only after a connection).
     # https://learn.microsoft.com/powershell/module/exchangepowershell/get-inboxrule
@@ -97,6 +101,12 @@ BeforeAll {
         'Get-MessageTraceV2'     = @('EndDate', 'FromIP', 'MessageId', 'MessageTraceId', 'RecipientAddress', 'ResultSize', 'SenderAddress', 'StartDate', 'StartingRecipientAddress', 'Status', 'Subject', 'SubjectFilterType', 'ToIP')
         'Get-AcceptedDomain'     = @('DomainController', 'Identity', 'ResultSize')
         'Get-OrganizationConfig' = @('ErrorAction', 'Identity', 'DomainController')
+        # https://learn.microsoft.com/powershell/module/exchangepowershell/search-unifiedauditlog
+        # https://learn.microsoft.com/powershell/module/exchangepowershell/get-adminauditlogconfig
+        # https://learn.microsoft.com/powershell/module/exchangepowershell/get-mailboxauditbypassassociation
+        'Search-UnifiedAuditLog'            = @('EndDate', 'Formatted', 'FreeText', 'HighCompleteness', 'IPAddresses', 'LegacyFlow', 'LongerRetentionEnabled', 'ObjectIds', 'Operations', 'RecordType', 'ResultSize', 'SessionCommand', 'SessionId', 'SiteIds', 'StartDate', 'UserIds')
+        'Get-AdminAuditLogConfig'           = @('DomainController')
+        'Get-MailboxAuditBypassAssociation' = @('DomainController', 'Identity', 'ResultSize')
     }
     foreach ($name in $script:StubSpec.Keys) {
         $spec = $script:StubSpec[$name]
@@ -192,7 +202,11 @@ Describe 'running the check' {
         Mock Get-ConnectionInformation {
             if ($script:Connected) { [PSCustomObject]@{ State = 'Connected'; Name = 'ExchangeOnline_1'; UserPrincipalName = $script:Scn.Me; TenantID = $script:Scn.TenantGuid } }
         }
-        Mock Get-OrganizationConfig { [PSCustomObject]@{ Name = $script:Scn.Tenant; Identity = $script:Scn.Tenant } }
+        Mock Get-OrganizationConfig { [PSCustomObject]@{ Name = $script:Scn.Tenant; Identity = $script:Scn.Tenant; AuditDisabled = $false } }
+        # SQ-016: auditing on, no bypass, an audit search that finds nothing.
+        Mock Get-AdminAuditLogConfig { [PSCustomObject]@{ UnifiedAuditLogIngestionEnabled = $true } }
+        Mock Get-MailboxAuditBypassAssociation { [PSCustomObject]@{ Name = 'accounts'; AuditBypassEnabled = $false } }
+        Mock Search-UnifiedAuditLog { }
         Mock Get-AcceptedDomain { $script:Scn.Accepted }
         Mock Get-EXOMailbox {
             $script:Events.Add('EXO-MAILBOX')
