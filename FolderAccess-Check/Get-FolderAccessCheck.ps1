@@ -178,6 +178,17 @@ param(
     [ValidateRange(1, 50)]
     [int]$MaxNestingDepth = 10,
 
+    # SQ-013 stub: not implemented yet (ticket note via CaseKit.ps1).
+    [string]$TicketNumber,
+
+    [switch]$NoClipboard,
+
+    [switch]$FullDetail,
+
+    [switch]$PassThru,
+
+    [switch]$Quiet,
+
     [Parameter(ParameterSetName = 'Load')]
     [switch]$LoadFunctionsOnly
 )
@@ -749,7 +760,10 @@ function Get-FolderAccessAssessment {
         [string[]]$UserSids, [hashtable]$GroupPaths = @{},
         [object[]]$FolderAces, [string]$FolderError, [bool]$FolderConditional = $false,
         [object[]]$ShareAces, [ValidateSet('Present', 'Null', 'Empty', 'Unreadable')][string]$ShareDaclState = 'Present', [string]$ShareError,
-        [hashtable]$LocalGroupExpansions = @{}
+        [hashtable]$LocalGroupExpansions = @{},
+        # SQ-013 stubs (not implemented yet): narrowest-group candidates, newest membership link per
+        # granting group SID, and the user's newest lastLogon across DCs ($null = unknown).
+        [object[]]$CandidateGroups = @(), [hashtable]$MembershipLinks = @{}, [object]$LastLogon
     )
 
     $requested = $script:FolderAccessRequest[$Access]
@@ -1570,6 +1584,12 @@ function Export-FolderAccessReport {
     @(Get-FolderAccessCsvRows -Result $Result) | Export-Csv -LiteralPath $csv -NoTypeInformation -Encoding UTF8
     [System.IO.File]::WriteAllText($html, (ConvertTo-FolderAccessHtml -Result $Result), (New-Object System.Text.UTF8Encoding($true)))
     return [PSCustomObject]@{ Html = $html; Csv = $csv }
+}
+
+function ConvertTo-FolderAccessTicketNote {
+    # SQ-013 stub: not implemented yet.
+    param([Parameter(Mandatory = $true)][object]$Result, [string[]]$EvidencePaths = @(), [System.Management.Automation.PSCredential]$Credential)
+    throw 'ConvertTo-FolderAccessTicketNote is not implemented'
 }
 
 if ($LoadFunctionsOnly) { return }
