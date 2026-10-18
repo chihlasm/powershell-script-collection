@@ -811,7 +811,9 @@ function Get-LockoutVerdict {
         [object[]]$Lockouts,    # rows from ConvertFrom-LockoutEvent (have .CallerComputer)
         [object[]]$BadLogons,   # rows from ConvertFrom-BadLogonEvent (.SourceHost/.SourceIp/.LogonType)
         [object]$Policy,        # has .LockoutThreshold (int)
-        [object]$EntraConnectDiagnostics
+        [object]$EntraConnectDiagnostics,
+        [object[]]$EtypeEvidence = @(),   # SQ-006: rows from ConvertFrom-EtypeFailureEvent / ConvertFrom-KdcsvcEvent
+        [object[]]$EtypeGate = @()        # SQ-006: rows from Get-EtypeGate
     )
 
     # Treat null arrays as empty so callers can pass $null without guarding.
@@ -908,6 +910,32 @@ function Get-LockoutVerdict {
     }
 
     return $findings.ToArray()
+}
+
+# --- SQ-006 STUBS (test-first): Kerberos encryption-type block detection. Not implemented. ---
+function ConvertFrom-EtypeFailureEvent {
+    param([string]$EventXml, [int]$EventId, [string]$DcName)
+    throw 'not implemented'
+}
+
+function ConvertFrom-KdcsvcEvent {
+    param([string]$EventXml, [int]$EventId, [string]$DcName)
+    throw 'not implemented'
+}
+
+function Select-EtypeEvidenceForAccount {
+    param([object[]]$Rows, [string]$SamAccountName)
+    throw 'not implemented'
+}
+
+function Get-EtypeGate {
+    param([string]$DcName, [string]$QueryError, [int[]]$KdcEventIds, [string]$AuditSetting)
+    throw 'not implemented'
+}
+
+function Get-EtypeEvidence {
+    param([string[]]$DomainControllers, [string]$SamAccountName, [int]$DaysBack)
+    throw 'not implemented'
 }
 
 function Get-LockoutEvents {
@@ -1188,7 +1216,9 @@ function Write-LockoutReport {
         [string]$OutputPath,
         [int]$DaysBack,
         [string[]]$DcList,
-        [string]$Pdc
+        [string]$Pdc,
+        [object[]]$EtypeEvidence = @(),   # SQ-006
+        [object[]]$EtypeGate = @()        # SQ-006
     )
 
     if (-not (Test-Path -LiteralPath $OutputPath)) {
