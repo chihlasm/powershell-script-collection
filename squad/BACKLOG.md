@@ -121,7 +121,8 @@ turns inherited rules into explicit ones, and handlers use `-Path`, which breaks
 subfolders untouched (D-031). Fix with a regression test for each. Builds after SQ-014 (D-011).
 
 ## SQ-017 · FolderPermissionManager as a WPF app: the window, browsing and viewing (read-only)
-- status: ready
+- status: needs-answers
+- waiting: SQ-014 and SQ-015 merged to main (owner hold, 2026-10-18 review); set back to ready after that review
 - priority: P1
 - type: feature
 - branch: squad/SQ-017-fpm-wpf-window
@@ -138,7 +139,8 @@ until the owner's lab test. Robocopy tab and Copy Files To are dropped (D-037). 
 SQ-014 and SQ-015 (same core and GUI file). Split per D-039.
 
 ## SQ-018 · FolderPermissionManager WPF app: every change, confirmations and results
-- status: ready
+- status: needs-answers
+- waiting: SQ-014 and SQ-015 merged to main (owner hold, 2026-10-18 review); set back to ready after that review
 - priority: P1
 - type: feature
 - branch: squad/SQ-018-fpm-wpf-changes
