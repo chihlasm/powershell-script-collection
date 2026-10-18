@@ -629,6 +629,45 @@ Describe 'running the check' {
                 (ConvertTo-TicketNoteText -Note $r2.TicketNote -PasteSafe:$paste) -join "`n" | Should -Not -Match 'x@gmail\.com'
             }
         }
+
+        It 'AC19_ForwardingRecipientLookupErrorNeverReachesTheNote: neither the error nor the ForwardingAddress' {
+            New-Scenario @{
+                Mailbox = (New-Mbx @{ ForwardingAddress = 'leak.target@fabrikam.com' })
+                RecipientThrow = 'The server could not resolve secret.person@gmail.com right now.'
+            }
+            $r = Invoke-Entry
+            $r.ExitCode | Should -Be 2
+            $gate = @($r.Assessment.CouldNotCheck | Where-Object { $_.Source -eq 'Mailbox forwarding' })
+            $gate.Count | Should -Be 1
+            $gate[0].Reason | Should -Match 'secret\.person@gmail\.com' -Because 'the console and the HTML keep the raw reason'
+            $gate[0].Reason | Should -Match 'leak\.target@fabrikam\.com'
+            . (Join-Path $script:Root 'CaseKit.ps1')
+            foreach ($paste in @($false, $true)) {
+                $text = (ConvertTo-TicketNoteText -Note $r.TicketNote -PasteSafe:$paste) -join "`n"
+                $text | Should -Not -Match 'secret\.person|gmail\.com'
+                $text | Should -Not -Match 'leak\.target|fabrikam\.com'
+                $text | Should -Match 'Mailbox forwarding: the forwarding recipient could not be looked up'
+            }
+        }
+
+        It 'AC19_HiddenRulesErrorNeverReachesTheNote: the second Get-InboxRule fails with an address in the error' {
+            Mock Get-InboxRule {
+                $script:RuleCalls.Add(@{ IncludeHidden = [bool]$IncludeHidden })
+                if (-not $IncludeHidden) { throw 'Mailbox hidden.person@gmail.com is busy; try again later.' }
+                @($script:Scn.Rules)
+            }
+            $r = Invoke-Entry
+            $r.ExitCode | Should -Be 2
+            $gate = @($r.Assessment.CouldNotCheck | Where-Object { $_.Source -eq 'Hidden inbox rules' })
+            $gate.Count | Should -Be 1
+            $gate[0].Reason | Should -Match 'hidden\.person@gmail\.com'
+            . (Join-Path $script:Root 'CaseKit.ps1')
+            foreach ($paste in @($false, $true)) {
+                $text = (ConvertTo-TicketNoteText -Note $r.TicketNote -PasteSafe:$paste) -join "`n"
+                $text | Should -Not -Match 'hidden\.person|gmail\.com'
+                $text | Should -Match ([regex]::Escape('Hidden inbox rules: could not be read (see the report)'))
+            }
+        }
     }
 
     Context 'AC22 only this run''s connection' {
@@ -730,7 +769,7 @@ Describe 'pure functions (MailboxCheck.Core.ps1)' {
         It 'Edge_AddressScope: Internal only when positively internal, Unknown for anything unparseable' {
             $acc = @('contoso.com')
             Get-MailboxAddressScope -Address 'x@gmail.com' -AcceptedDomain $acc | Should -BeExactly 'External'
-            Get-MailboxAddressScope -Address 'a@mail.contoso.com' -AcceptedDomain $acc | Should -BeExactly 'Internal'
+            Get-MailboxAddressScope -Address 'a@mail.contoso.com' -AcceptedDomain $acc | Should -BeExactly 'Unknown' -Because 'a subdomain that is not itself accepted is not positively inside'
             Get-MailboxAddressScope -Address '"Jane Doe" [EX:/o=ExchangeLabs/ou=Exchange Administrative Group (FYDIBOHF23SPDLT)/cn=Recipients/cn=abc-jane]' -AcceptedDomain $acc | Should -BeExactly 'Internal'
             Get-MailboxAddressScope -Address '/o=ExchangeLabs/ou=Exchange Administrative Group (FYDIBOHF23SPDLT)/cn=Recipients/cn=abc-jane' -AcceptedDomain $acc | Should -BeExactly 'Internal'
             Get-MailboxAddressScope -Address '"x@gmail.com" [EX:/o=ExchangeLabs/cn=Recipients/cn=abc]' -AcceptedDomain $acc | Should -BeExactly 'Internal' -Because 'the display name is not the address'
@@ -738,6 +777,54 @@ Describe 'pure functions (MailboxCheck.Core.ps1)' {
             Get-MailboxAddressScope -Address 'smtp:not-an-address' -AcceptedDomain $acc | Should -BeExactly 'Unknown'
             Get-MailboxAddressScope -Address '' -AcceptedDomain $acc | Should -BeExactly 'Unknown'
             Test-ExternalAddress -Address 'Jane Doe' -AcceptedDomain $acc | Should -BeFalse
+        }
+
+        It 'Edge_SubdomainIsInternalOnlyWhenAcceptedItselfOrByAWildcard' {
+            Get-MailboxAddressScope -Address 'a@mail.contoso.com' -AcceptedDomain @('contoso.com', 'mail.contoso.com') | Should -BeExactly 'Internal'
+            Get-MailboxAddressScope -Address 'a@MAIL.contoso.com' -AcceptedDomain @('*.contoso.com') | Should -BeExactly 'Internal'
+            Get-MailboxAddressScope -Address 'a@deep.mail.contoso.com' -AcceptedDomain @('*.contoso.com') | Should -BeExactly 'Internal'
+            Get-MailboxAddressScope -Address 'a@contoso.com' -AcceptedDomain @('*.contoso.com') | Should -BeExactly 'Internal'
+            Get-MailboxAddressScope -Address 'a@mail.contoso.com' -AcceptedDomain @('contoso.com') | Should -BeExactly 'Unknown'
+            Get-MailboxAddressScope -Address 'a@evilcontoso.com' -AcceptedDomain @('*.contoso.com') | Should -BeExactly 'External'
+            # Unknown is never inside: a rule forwarding there is a sign, mailbox forwarding there is Could not check.
+            $rule = New-Rule @{ Name = 'Sub'; ForwardTo = @('a@mail.contoso.com') }
+            @(Get-InboxRuleSigns -Rule @($rule) -AcceptedDomain @('contoso.com') | ForEach-Object { $_.Kind }) | Should -Contain 'UnclassifiedRuleForward'
+            (Get-MailboxForwardingGate -Mailbox (New-Mbx @{ ForwardingSmtpAddress = 'smtp:a@mail.contoso.com' }) -AcceptedDomain @('contoso.com')).State | Should -Be 'CouldNotCheck'
+        }
+
+        It 'Edge_DomainWithControlCharactersIsUnknown' {
+            foreach ($cc in @([char]0x1B, [char]0x00, [char]0x07, [char]0x7F)) {
+                $addr = 'x@contoso.com' + $cc + 'evil'
+                Get-MailboxAddressDomain -Address $addr | Should -BeExactly ''
+                Get-MailboxAddressScope -Address $addr -AcceptedDomain @('contoso.com') | Should -BeExactly 'Unknown'
+            }
+            Get-MailboxAddressDomain -Address ('x@' + [char]0x1B + 'gmail.com') | Should -BeExactly ''
+        }
+
+        It 'Edge_MailUserAndContactAreJudgedByExternalAddressOnly (a tenant PrimarySmtpAddress is never a false Internal)' {
+            $acc = @('contoso.com')
+            $m = New-Mbx @{ ForwardingAddress = 'Partner' }
+            foreach ($type in 'MailUser', 'MailContact', 'GuestMailUser') {
+                $noExternal = [PSCustomObject]@{ Name = 'Partner'; RecipientTypeDetails = $type; ExternalEmailAddress = $null; PrimarySmtpAddress = 'partner@contoso.com' }
+                Get-ForwardingRecipientAddress -Recipient $noExternal | Should -BeExactly ''
+                @(Get-ForwardingSigns -Mailbox $m -ForwardingRecipient $noExternal -AcceptedDomain $acc).Count | Should -Be 0
+                $g = Get-MailboxForwardingGate -Mailbox $m -ForwardingRecipient $noExternal -AcceptedDomain $acc
+                $g.State | Should -Be 'CouldNotCheck' -Because "$type delivers to its ExternalEmailAddress; without one, where the mail goes is not known"
+                $g.NoteReason | Should -BeExactly 'the forwarding recipient has no external address to judge (see the report).'
+                $g.NoteReason | Should -Not -Match 'Partner|contoso'
+            }
+
+            $contact = [PSCustomObject]@{ Name = 'Partner'; RecipientTypeDetails = 'MailContact'; ExternalEmailAddress = 'SMTP:x@gmail.com'; PrimarySmtpAddress = 'partner@contoso.com' }
+            $signs = @(Get-ForwardingSigns -Mailbox $m -ForwardingRecipient $contact -AcceptedDomain $acc)
+            $signs.Count | Should -Be 1
+            $signs[0].Kind | Should -Be 'ExternalForwarding'
+            $signs[0].Domain | Should -Be 'gmail.com'
+            (Get-MailboxForwardingGate -Mailbox $m -ForwardingRecipient $contact -AcceptedDomain $acc).State | Should -Be 'Checked'
+
+            $mailbox = [PSCustomObject]@{ Name = 'Jane'; RecipientTypeDetails = 'UserMailbox'; ExternalEmailAddress = $null; PrimarySmtpAddress = 'jane@contoso.com' }
+            Get-ForwardingRecipientAddress -Recipient $mailbox | Should -BeExactly 'jane@contoso.com'
+            @(Get-ForwardingSigns -Mailbox $m -ForwardingRecipient $mailbox -AcceptedDomain $acc).Count | Should -Be 0
+            (Get-MailboxForwardingGate -Mailbox $m -ForwardingRecipient $mailbox -AcceptedDomain $acc).State | Should -Be 'Checked'
         }
 
         It 'Edge_SmtpGroupWinsOverAnAddressLookingDisplayName' {

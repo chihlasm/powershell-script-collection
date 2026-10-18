@@ -26,11 +26,14 @@
     sign leads to the same next step.
 
     INSIDE, OUTSIDE OR UNKNOWN (Get-MailboxAddressScope). An address is Internal only when it is
-    positively inside: its domain is an accepted domain of the tenant (or a subdomain of one), or
-    it is an Exchange object reference (EX:/o=... legacy DN). An SMTP address in any other domain
-    is External. Anything else (a bare display name, an address that does not parse) is Unknown,
-    and Unknown is never treated as inside: for a rule it is a sign, for mailbox forwarding the
-    section is Could not check.
+    positively inside: its domain is an accepted domain of the tenant (or falls under a wildcard
+    accepted domain such as *.contoso.com), or it is an Exchange object reference (EX:/o=...
+    legacy DN). A subdomain of an accepted domain that is not itself accepted is Unknown, as is
+    anything else that does not parse (a bare display name, a domain with a control character).
+    An SMTP address in any other domain is External. Unknown is never treated as inside: for a
+    rule it is a sign, for mailbox forwarding the section is Could not check. A mail contact,
+    mail user or guest mail user that mail is forwarded to is judged by its ExternalEmailAddress
+    only, never by its (tenant) PrimarySmtpAddress.
 
     PERSONAL DATA (D-025). Rule conditions (Description), full forwarding addresses and the
     message trace (with subjects) go only into the local HTML and CSV. Sign messages name the
@@ -221,11 +224,14 @@ function Get-MailboxAddressFromText {
 }
 
 function Get-MailboxAddressDomain {
-    # 'x@Gmail.com' -> 'gmail.com'; '' when there is no SMTP address.
+    # 'x@Gmail.com' -> 'gmail.com'; '' when there is no SMTP address, or when the domain holds a
+    # control character (no real domain does; shown, it could rewrite the console or the note).
     param([AllowEmptyString()][AllowNull()][string]$Address)
     $a = Get-MailboxAddressFromText -Text $Address
     if (-not $a) { return '' }
-    return $a.Substring($a.LastIndexOf('@') + 1).ToLowerInvariant()
+    $domain = $a.Substring($a.LastIndexOf('@') + 1).ToLowerInvariant()
+    if ($domain -match '\p{Cc}') { return '' }
+    return $domain
 }
 
 function Get-MailboxAddressScope {
@@ -233,13 +239,16 @@ function Get-MailboxAddressScope {
     .SYNOPSIS
         'Internal', 'External' or 'Unknown' for an Exchange recipient string.
     .DESCRIPTION
-        Internal: the SMTP domain is an accepted domain or a subdomain of one (case-insensitive;
-        a leading '*.' on an accepted domain is ignored), or the value is an Exchange object
-        reference ('"Jane Doe" [EX:/o=...]', '/o=...'). External: an SMTP address in any other
-        domain. Unknown: anything else, such as a bare display name or an address that does not
-        parse. Unknown is never inside: callers raise a sign or mark the section Could not check.
-        'evilcontoso.com' is not a subdomain of 'contoso.com': only a whole label before the
-        accepted domain counts ('mail.contoso.com').
+        Internal: the SMTP domain is an accepted domain (case-insensitive), or a subdomain of a
+        wildcard accepted domain ('*.contoso.com' covers contoso.com and every name under it),
+        or the value is an Exchange object reference ('"Jane Doe" [EX:/o=...]', '/o=...').
+        Unknown: a subdomain of an accepted domain that is not itself accepted
+        ('mail.contoso.com' when only 'contoso.com' is accepted: the tenant does not receive
+        mail there, so it may be a different mail system), anything else that does not parse
+        (a bare display name, a domain with a control character). External: an SMTP address in
+        any other domain. Unknown is never inside: callers raise a sign or mark the section
+        Could not check. 'evilcontoso.com' is not a subdomain of 'contoso.com': only a whole
+        label before the accepted domain counts.
     #>
     param([AllowEmptyString()][AllowNull()][string]$Address, [AllowEmptyCollection()][string[]]$AcceptedDomain = @())
     if ([string]::IsNullOrWhiteSpace($Address)) { return 'Unknown' }
@@ -248,14 +257,21 @@ function Get-MailboxAddressScope {
         if ($Address -match '(?i)\[EX:/o=' -or $Address.Trim() -match '(?i)^(EX:)?/o=') { return 'Internal' }
         return 'Unknown'
     }
+    $underAccepted = $false
     foreach ($accepted in @($AcceptedDomain)) {
         if ([string]::IsNullOrWhiteSpace($accepted)) { continue }
         $a = $accepted.Trim().ToLowerInvariant()
-        if ($a.StartsWith('*.')) { $a = $a.Substring(2) }
+        $wildcard = $a.StartsWith('*.')
+        if ($wildcard) { $a = $a.Substring(2) }
         $a = $a.Trim('.')
         if (-not $a) { continue }
-        if ($domain -eq $a -or $domain.EndsWith('.' + $a)) { return 'Internal' }
+        if ($domain -eq $a) { return 'Internal' }
+        if ($domain.EndsWith('.' + $a)) {
+            if ($wildcard) { return 'Internal' }
+            $underAccepted = $true
+        }
     }
+    if ($underAccepted) { return 'Unknown' }
     return 'External'
 }
 
@@ -387,15 +403,26 @@ function Get-ForwardingRecipientAddress {
     <#
     .SYNOPSIS
         Where a ForwardingAddress recipient (from Get-EXORecipient) sends the mail: its
-        ExternalEmailAddress when it has one (a mail contact or mail user), else its
-        PrimarySmtpAddress. '' when it has neither.
+        ExternalEmailAddress when it has one, else its PrimarySmtpAddress. A mail contact, mail
+        user or guest mail user (Test-ForwardingRecipientIsMailUser) delivers to its
+        ExternalEmailAddress only: its PrimarySmtpAddress is usually a tenant address, so judging
+        by it would call an outside forward Internal. '' when there is no address to judge.
     #>
     param([object]$Recipient)
-    foreach ($n in 'ExternalEmailAddress', 'PrimarySmtpAddress') {
+    $names = if (Test-ForwardingRecipientIsMailUser -Recipient $Recipient) { @('ExternalEmailAddress') } else { @('ExternalEmailAddress', 'PrimarySmtpAddress') }
+    foreach ($n in $names) {
         $v = [string](Get-MailboxCheckValue $Recipient $n)
         if (-not [string]::IsNullOrWhiteSpace($v)) { return $v.Trim() }
     }
     return ''
+}
+
+function Test-ForwardingRecipientIsMailUser {
+    # True for a mail contact, mail user or guest mail user: a recipient whose mailbox, if any,
+    # is outside the tenant, so it delivers to its ExternalEmailAddress.
+    param([object]$Recipient)
+    $type = [string](Get-MailboxCheckValue $Recipient 'RecipientTypeDetails')
+    return ($type -match '(?i)Mail(Contact|User)' -or $type -match '(?i)GuestMailUser')
 }
 
 function Get-ForwardingRecipientTypeText {
@@ -478,6 +505,9 @@ function Get-MailboxForwardingGate {
         } elseif ($null -eq $ForwardingRecipient) {
             $reasons.Add(("The forwarding recipient '{0}' was not found, so where the mail goes is not known" -f $fwd))
             $noteReasons.Add('the forwarding recipient was not found (see the report)')
+        } elseif ((Test-ForwardingRecipientIsMailUser -Recipient $ForwardingRecipient) -and -not (Get-ForwardingRecipientAddress -Recipient $ForwardingRecipient)) {
+            $reasons.Add(("The forwarding recipient '{0}' is {1} without an external email address, so where it delivers is not known; look at it in the Exchange admin center" -f $fwd, (Get-ForwardingRecipientTypeText -Recipient $ForwardingRecipient)))
+            $noteReasons.Add('the forwarding recipient has no external address to judge (see the report)')
         } elseif ((Get-MailboxAddressScope -Address (Get-ForwardingRecipientAddress -Recipient $ForwardingRecipient) -AcceptedDomain $AcceptedDomain) -eq 'Unknown') {
             $reasons.Add(("The forwarding recipient '{0}' has no email address this tool can judge; look at it in the Exchange admin center" -f $fwd))
             $noteReasons.Add('the forwarding recipient could not be judged (see the report)')
