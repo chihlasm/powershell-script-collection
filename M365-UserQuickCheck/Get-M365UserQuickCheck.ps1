@@ -347,7 +347,12 @@ function Invoke-M365UserQuickCheck {
         if (-not $SkipOnPremises) {
             $onPrem = Get-M365OnPremisesFacts -User $null -UserPrincipalName $upn @adArgs
             $result.OnPremises = $onPrem
-            if ($onPrem.Gate.State -eq 'Available' -and $null -ne $onPrem.AdUser) {
+            if ($null -ne $onPrem.SyncedCloudUser) {
+                # A cloud user holds the AD account's SID (AC20b): it syncs under another name,
+                # so that user is the one to assess, never "exists in AD but not in Microsoft 365".
+                $found = [PSCustomObject]@{ Status = 'Found'; User = $onPrem.SyncedCloudUser; Candidates = @(); MatchedBy = 'the security identifier (SID) of the AD account with that sign-in name' }
+                $result.MatchedBy = $found.MatchedBy
+            } elseif ($onPrem.Gate.State -eq 'Available' -and $null -ne $onPrem.AdUser) {
                 $facts = New-M365NoCloudUserFacts -OnPremises $onPrem -TenantLastSync $tenant.OnPremisesLastSyncDateTime -Days $Days -Now $Now
                 $assessment = Get-M365UserAssessment -Facts $facts
                 $result.Status = 'Ok'; $result.ExitCode = $assessment.ExitCode; $result.MatchedBy = 'on-premises AD sign-in name'
@@ -355,14 +360,16 @@ function Invoke-M365UserQuickCheck {
                 return $result
             }
         }
-        $result.Status = 'NotFound'; $result.ExitCode = 2
-        $result.Message = "No Microsoft 365 user matched '$upn' in $($tenant.DisplayName) (by sign-in name, email or proxy address). Check the spelling, or that this is the right tenant."
-        if ($result.OnPremises) {
-            $g = $result.OnPremises.Gate
-            $adPart = if ($g.State -eq 'Available') { 'No on-premises AD account has that sign-in name either.' } else { "$(Format-M365SourceLine -Gate $g)." }
-            $result.Message += " $adPart"
+        if ($found.Status -eq 'NotFound') {
+            $result.Status = 'NotFound'; $result.ExitCode = 2
+            $result.Message = "No Microsoft 365 user matched '$upn' in $($tenant.DisplayName) (by sign-in name, email or proxy address). Check the spelling, or that this is the right tenant."
+            if ($result.OnPremises) {
+                $g = $result.OnPremises.Gate
+                $adPart = if ($g.State -eq 'Available') { 'No on-premises AD account has that sign-in name either.' } else { "$(Format-M365SourceLine -Gate $g)." }
+                $result.Message += " $adPart"
+            }
+            return $result
         }
-        return $result
     }
     if ($found.Status -eq 'Ambiguous') {
         $result.Status = 'Ambiguous'; $result.ExitCode = 2; $result.Candidates = @($found.Candidates)
@@ -394,6 +401,12 @@ function Get-M365SourceGates {
     # The five sources in banner order.
     param([Parameter(Mandatory = $true)][object]$Facts)
     return @($Facts.SignInGate, $Facts.ConditionalAccessGate, $Facts.MfaGate, $Facts.RiskGate, $Facts.OnPremisesGate | Where-Object { $null -ne $_ })
+}
+
+function Test-M365AddressCheckFailed {
+    # True when the assessment lists the address-conflict lookup under Could not check (AC22c).
+    param([Parameter(Mandatory = $true)][object]$Assessment)
+    return (@($Assessment.CouldNotCheck | Where-Object { $_.Source -eq $script:M365AddressCheckSource }).Count -gt 0)
 }
 
 function Get-M365UserDisplayName {
@@ -571,6 +584,7 @@ function Write-M365UserCheckConsole {
         Write-Host 'Could not check:' -ForegroundColor White
         foreach ($c in $a.CouldNotCheck) { Write-Status (& $safe (Format-M365CouldNotCheckLine -Item $c)) 'WARN' }
         if ($Result.User -and $f.SignInGate.State -ne 'Available') { Write-Host ("       What to do: {0}" -f $script:M365NoSignInHistoryStep) -ForegroundColor Gray }
+        if (Test-M365AddressCheckFailed -Assessment $a) { Write-Host ("       What to do: {0}" -f $script:M365AddressCheckStep) -ForegroundColor Gray }
     }
 
     Write-Host ''
@@ -668,6 +682,7 @@ function ConvertTo-M365UserCheckHtml {
         [void]$sb.AppendLine('<h2>Could not check</h2>')
         foreach ($c in $a.CouldNotCheck) { [void]$sb.AppendLine("<div class=`"reason`"><span class=`"WARN`">[WARN]</span> $(Enc (Format-M365CouldNotCheckLine -Item $c))</div>") }
         if ($Result.User -and $f.SignInGate.State -ne 'Available') { [void]$sb.AppendLine("<p class=`"INFO`">$(Enc $script:M365NoSignInHistoryStep)</p>") }
+        if (Test-M365AddressCheckFailed -Assessment $a) { [void]$sb.AppendLine("<p class=`"INFO`">$(Enc $script:M365AddressCheckStep)</p>") }
     }
     [void]$sb.AppendLine('<h2>Details</h2><table>')
     foreach ($d in (Get-M365UserCheckDetail -Result $Result)) { [void]$sb.AppendLine("<tr><th>$(Enc $d.Item)</th><td>$(Enc $d.Value)</td></tr>") }
@@ -738,6 +753,7 @@ function ConvertTo-M365UserCheckTicketNote {
 
         foreach ($r in @($a.Reasons | Where-Object { $_.Level -eq 'Blocker' -or $_.Level -eq 'Probable' })) { $next.Add($r.Action) }
         if ($Result.User -and $f.SignInGate.State -ne 'Available') { $next.Add($script:M365NoSignInHistoryStep) }
+        if (Test-M365AddressCheckFailed -Assessment $a) { $next.Add($script:M365AddressCheckStep) }
         if ($next.Count -eq 0 -and $a.Verdict -eq 'YES') {
             $next.Add('No Microsoft 365 account problem found. Look at the device, the app or the network next, and at the on-premises account with AD-UserQuickCheck.')
         }

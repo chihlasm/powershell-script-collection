@@ -863,6 +863,33 @@ Describe 'SQ-011 on-premises comparison, pure assessment' {
         $line | Should -Be 'Address conflicts: the lookup failed'
     }
 
+    It 'AC22c_AddressCheckFailedHedgesVerdict: nothing else blocks but the address lookup failed -> PROBABLY YES (exit 0) with the reason as the note; with no sign-in history too, both notes' {
+        $a = Get-M365UserAssessment -Facts (New-HybridFacts @{ AddressCheckError = 'Forbidden: Insufficient privileges to complete the operation' })
+        $a.Verdict | Should -Be 'PROBABLY YES'
+        $a.ExitCode | Should -Be 0
+        $a.VerdictNote | Should -Be 'could not check whether another Microsoft 365 object holds its addresses'
+        $noP1 = New-M365Gate -Source 'Sign-in history' -State NotLicensed -Reason 'this tenant has no Entra ID P1'
+        $both = Get-M365UserAssessment -Facts (New-HybridFacts @{ AddressCheckError = 'Forbidden'; SignInGate = $noP1 })
+        $both.Verdict | Should -Be 'PROBABLY YES'
+        $both.VerdictNote | Should -Be 'sign-in history not available (no Entra ID P1); could not check whether another Microsoft 365 object holds its addresses'
+        $blocked = Get-M365UserAssessment -Facts (New-HybridFacts @{ AddressCheckError = 'Forbidden'; AdUser = (New-AdUser @{ Enabled = $false }) } @{ accountEnabled = $false })
+        $blocked.Verdict | Should -Be 'NO' -Because 'a blocker still decides'
+    }
+
+    It 'AC20b_NeverSyncedChecksSid: the SID lookup in Microsoft 365 failed -> PROBABLY NOT (not NO), "Microsoft 365 account by SID" under Could not check' {
+        $f = New-NoCloudUserFacts -AdUser (New-AdUser)
+        $f | Add-Member -NotePropertyName CloudSidCheckError -NotePropertyValue 'the request failed: Service unavailable'
+        $a = Get-M365UserAssessment -Facts $f
+        $r = Get-Reason $a 'NeverSynced'
+        $r.Level | Should -Be 'Probable'
+        $r.Message | Should -Match 'exists in AD but not in Microsoft 365'
+        $r.Message | Should -Match 'not ruled out'
+        $a.Verdict | Should -Be 'PROBABLY NOT'
+        $c = @($a.CouldNotCheck | Where-Object { $_.Source -eq 'Microsoft 365 account by SID' })
+        $c.Count | Should -Be 1
+        $c[0].Reason | Should -Match 'Service unavailable'
+    }
+
     It 'Edge_HealthyHybridAccount: synced, AD agrees, nothing held, recent sync -> YES with no AD reasons' {
         $a = Get-M365UserAssessment -Facts (New-HybridFacts)
         $a.Verdict | Should -Be 'YES'
@@ -972,6 +999,40 @@ Describe 'SQ-011 Get-M365OnPremisesFacts (AD and Graph faked)' {
         $r.AdUser.SamAccountName | Should -Be 'jdoe'
         $r.AdMatchedBy | Should -Be 'UserPrincipalName'
         $r.Gate.State | Should -Be 'Available'
+    }
+
+    It 'AC20b_NeverSyncedChecksSid: no cloud user, the AD account''s SID is held by one cloud user -> SyncedCloudUser, and no address lookup for the wrong (null) user' {
+        $ad = New-AdUserObj; $ad['SID'] = New-Object System.Security.Principal.SecurityIdentifier ($script:Sid)
+        $script:AdByFilter = @($ad)
+        $script:SidCloud = New-User @{ userPrincipalName = 'jane.doe@contoso.com'; onPremisesSyncEnabled = $true; onPremisesSecurityIdentifier = $script:Sid }
+        Mock Invoke-MgGraphRequest {
+            $u = [uri]::UnescapeDataString([string]$Uri)
+            $script:GraphUris.Add("$Method $u")
+            if ($u -match '/users\?.*onPremisesSecurityIdentifier eq ') { return @{ value = @($script:SidCloud) } }
+            return @{ value = @() }
+        }
+        $r = Get-M365OnPremisesFacts -User $null -UserPrincipalName 'jdoe@contoso.com'
+        $r.SyncedCloudUser.userPrincipalName | Should -Be 'jane.doe@contoso.com'
+        $r.CloudSidCheckError | Should -BeNullOrEmpty
+        @($script:GraphUris).Count | Should -Be 1 -Because 'the address lookups belong to the cloud user, which the caller assesses next'
+        $script:GraphUris[0] | Should -Match ("^GET .*/users\?\`$filter=onPremisesSecurityIdentifier eq '{0}'" -f [regex]::Escape($script:Sid))
+        $script:GraphUris[0] | Should -Match 'onPremisesSecurityIdentifier,' -Because 'the user is selected with the fields the assessment needs'
+    }
+
+    It 'AC20b_NeverSyncedChecksSid: the SID lookup throws -> CloudSidCheckError set, gate still Available, address lookups still run' {
+        $ad = New-AdUserObj; $ad['SID'] = New-Object System.Security.Principal.SecurityIdentifier ($script:Sid)
+        $script:AdByFilter = @($ad)
+        Mock Invoke-MgGraphRequest {
+            $u = [uri]::UnescapeDataString([string]$Uri)
+            $script:GraphUris.Add("$Method $u")
+            if ($u -match 'onPremisesSecurityIdentifier eq ') { throw 'Response status code does not indicate success: ServiceUnavailable (Service Unavailable).' }
+            return @{ value = @() }
+        }
+        $r = Get-M365OnPremisesFacts -User $null -UserPrincipalName 'jdoe@contoso.com'
+        $r.Gate.State | Should -Be 'Available'
+        $r.SyncedCloudUser | Should -BeNullOrEmpty
+        $r.CloudSidCheckError | Should -Match 'ServiceUnavailable'
+        @($script:GraphUris | Where-Object { $_ -match 'mail eq ' }).Count | Should -BeGreaterThan 0
     }
 
     It 'Edge_ServerAndCredentialPassThrough: -Server is passed to Get-ADUser; neither given means neither is passed' {
