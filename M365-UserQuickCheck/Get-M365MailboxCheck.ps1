@@ -317,14 +317,19 @@ function Get-RecentMailboxChanges {
         with the error, and the rest of the check still stands. In order:
           1. Get-Command Search-UnifiedAuditLog. Exchange Online only offers the cmdlets a role
              allows, so a missing cmdlet means the account lacks View-Only Audit Logs.
-          2. Get-AdminAuditLogConfig: UnifiedAuditLogIngestionEnabled False = no audit log.
+          2. Get-AdminAuditLogConfig: UnifiedAuditLogIngestionEnabled False = no audit log, so no
+             search. Missing or not True = not known: the search still runs and its signs stand,
+             but the section is Could not check.
           3. Mailbox auditing (Get-OrganizationConfig AuditDisabled, Get-MailboxAuditBypassAssociation
              AuditBypassEnabled). Off, bypassed or not known = 'Rule changes made in Outlook' is
              Could not check (UpdateInboxRules is a mailbox-audit record); a failure here never
              fails the section, because admin-cmdlet records still come from the unified log.
           4. Search-UnifiedAuditLog, filtered on the server by date and operations only, paged
-             with one SessionId and ReturnLargeSet until a page is empty or the last ResultIndex
-             reaches ResultCount. A last ResultIndex at the 50,000 cap = results were cut off.
+             with one SessionId and ReturnLargeSet until a page is empty or the page's highest
+             ResultIndex reaches ResultCount (an unknown ResultCount keeps paging, up to the
+             page cap). A ResultIndex at the 50,000 cap = results were cut off. A page that
+             fails keeps the records read before it, and unreadable records are counted: both
+             make the section Could not check, with any signs found still raised.
         Read-only: the tool never changes an audit setting (AC19).
     #>
     param(
@@ -347,15 +352,24 @@ function Get-RecentMailboxChanges {
             return $out
         }
 
+        # Every reason the read below is not complete; merged into one 'Recent changes' gate.
+        $partial = New-Object System.Collections.Generic.List[object]
         $config = @(Get-AdminAuditLogConfig -ErrorAction Stop | Where-Object { $_ }) | Select-Object -First 1
-        if ($null -eq $config) { throw 'Get-AdminAuditLogConfig returned nothing, so it is not known whether audit logging is on.' }
-        if ($config.UnifiedAuditLogIngestionEnabled -eq $false) {
+        $ingestion = Get-MailboxCheckValue $config 'UnifiedAuditLogIngestionEnabled'
+        if ($ingestion -eq $false) {
             # https://learn.microsoft.com/purview/audit-log-enable-disable: the Audit Logs role
             # (Organization Management, Compliance Management) turns it on. This tool never does.
             $out.Gates = @(New-MailboxGate -Source $source -State CouldNotCheck `
                     -Reason 'audit logging is turned off in this tenant (UnifiedAuditLogIngestionEnabled is False). An admin with the Audit Logs role (Organization Management or Compliance Management) can turn it on in the Microsoft Purview portal; this tool never changes it.' `
                     -NoteReason 'audit logging is turned off in this tenant.')
             return $out
+        }
+        if ($ingestion -ne $true) {
+            # Unknown is not "off": search anyway and keep what is found, but an empty result
+            # cannot prove that nothing changed.
+            $partial.Add((New-MailboxGate -Source $source -State CouldNotCheck `
+                        -Reason 'could not tell whether audit logging is on in this tenant (Get-AdminAuditLogConfig did not return UnifiedAuditLogIngestionEnabled), so finding no changes does not prove nothing changed.' `
+                        -NoteReason 'could not tell whether audit logging is on in this tenant.'))
         }
 
         # Mailbox auditing: a gap here only hides rule changes made in the Outlook client.
@@ -393,30 +407,58 @@ function Get-RecentMailboxChanges {
         $cutOff = $false
         # 50,000 / 5,000 = 10 pages; one more guards against a ResultIndex that never reaches ResultCount.
         $maxPages = [int]($script:MailboxAuditLargeSetCap / $script:MailboxAuditPageSize) + 1
-        for ($pageNo = 1; ; $pageNo++) {
-            # ForEach-Object flattens a page that arrives as one array object.
-            $page = @(Search-UnifiedAuditLog -StartDate $start -EndDate $end -Operations $script:MailboxRecentOperations -SessionId $sessionId -SessionCommand ReturnLargeSet -ResultSize $script:MailboxAuditPageSize -ErrorAction Stop | ForEach-Object { $_ } | Where-Object { $_ })
-            if ($page.Count -eq 0) { break }
-            foreach ($r in $page) { $records.Add($r) }
-            $last = $page[$page.Count - 1]
-            $index = 0; $count = 0
-            [void][int]::TryParse([string]$last.ResultIndex, [ref]$index)
-            [void][int]::TryParse([string]$last.ResultCount, [ref]$count)
-            if ($index -ge $script:MailboxAuditLargeSetCap -or $pageNo -ge $maxPages) { $cutOff = $true; break }
-            if ($index -ge $count) { break }
+        $pageNo = 0
+        # Its own try/catch: a page that fails after others were read keeps the records (and so
+        # the signs) already read; the section is then Could not check, never an all-clear.
+        try {
+            for ($pageNo = 1; ; $pageNo++) {
+                # ForEach-Object flattens a page that arrives as one array object.
+                $page = @(Search-UnifiedAuditLog -StartDate $start -EndDate $end -Operations $script:MailboxRecentOperations -SessionId $sessionId -SessionCommand ReturnLargeSet -ResultSize $script:MailboxAuditPageSize -ErrorAction Stop | ForEach-Object { $_ } | Where-Object { $_ })
+                if ($page.Count -eq 0) { break }
+                foreach ($r in $page) { $records.Add($r) }
+                # ReturnLargeSet pages are unsorted, so progress is the page's highest ResultIndex.
+                # A missing or non-numeric ResultIndex / ResultCount is unknown (-1): an unknown
+                # ResultCount never ends the search early; an empty page or the page cap does.
+                $index = -1; $count = -1
+                foreach ($r in $page) {
+                    $n = 0
+                    if ([int]::TryParse([string](Get-MailboxCheckValue $r 'ResultIndex'), [ref]$n) -and $n -gt $index) { $index = $n }
+                    if ([int]::TryParse([string](Get-MailboxCheckValue $r 'ResultCount'), [ref]$n) -and $n -gt $count) { $count = $n }
+                }
+                if ($index -ge $script:MailboxAuditLargeSetCap) { $cutOff = $true; break }
+                if ($count -ge 0 -and $index -ge $count) { break }
+                if ($pageNo -ge $maxPages) { $cutOff = $true; break }
+            }
+        } catch {
+            $failed = Get-M365MailboxErrorText $_
+            $what = if ($records.Count -gt 0) { 'The audit log search failed on page {0}, so only the {1} record(s) read before it were checked: ' -f $pageNo, $records.Count } else { 'The audit log search failed: ' }
+            $partial.Add((Get-MailboxGateFromError -Source $source -Message ($what + $failed)))
         }
 
         $found = Get-RecentChangeSigns -AuditRecord $records.ToArray() -Mailbox $Mailbox -Rule $Rule -RuleListUnavailable:$RuleListUnavailable -Now $Now
         if ($found.Skipped -gt 0 -and -not $Quiet) { Write-Status ('{0} audit record(s) could not be read and were skipped.' -f $found.Skipped) 'WARN' }
         $out.Facts = [PSCustomObject]@{ Changes = @($found.Changes); Skipped = [int]$found.Skipped; CutOff = [bool]$cutOff; Days = $RecentDays; Start = $start; End = $end }
         $out.Signs = @($found.Signs)
-        $gates = New-Object System.Collections.Generic.List[object]
         if ($cutOff) {
-            $gates.Add((New-MailboxGate -Source $source -State CouldNotCheck `
+            $partial.Add((New-MailboxGate -Source $source -State CouldNotCheck `
                         -Reason ('results were cut off: the audit search reached its limit of {0:N0} records for these {1} days, so changes may be missing. Run the check again with a smaller -RecentDays.' -f $script:MailboxAuditLargeSetCap, $RecentDays) `
                         -NoteReason 'results were cut off at the audit search limit; run the check again with a smaller -RecentDays.'))
-        } else {
+        }
+        if ($found.Skipped -gt 0) {
+            # A record that cannot be read may be the very change being looked for.
+            $partial.Add((New-MailboxGate -Source $source -State CouldNotCheck `
+                        -Reason ('{0} audit record(s) could not be read (their AuditData is not valid JSON), so changes in them may be missing.' -f $found.Skipped) `
+                        -NoteReason 'some audit record(s) could not be read (see the report).'))
+        }
+        $gates = New-Object System.Collections.Generic.List[object]
+        if ($partial.Count -eq 0) {
             $gates.Add((New-MailboxGate -Source $source -State Checked))
+        } elseif ($partial.Count -eq 1) {
+            $gates.Add($partial[0])
+        } else {
+            $gates.Add((New-MailboxGate -Source $source -State CouldNotCheck `
+                        -Reason ((@($partial | ForEach-Object { ([string]$_.Reason).Trim().TrimEnd('.') }) -join '; ') + '.') `
+                        -NoteReason ((@($partial | ForEach-Object { ([string]$_.NoteReason).Trim().TrimEnd('.') }) -join '; ') + '.')))
         }
         if ($outlook.Count -gt 0) {
             $note = if (@($outlook | Where-Object { $_ -match 'not being recorded' }).Count -gt 0) { 'rule changes made in Outlook are not being recorded for this mailbox (mailbox auditing is off or bypassed).' } else { 'could not tell whether rule changes made in Outlook are recorded for this mailbox (see the report).' }
@@ -717,7 +759,8 @@ function Write-M365MailboxCheckConsole {
     if ($rc) {
         $changes = @($rc.Changes)
         if ($changes.Count -eq 0) {
-            if (-not $rc.CutOff) { Write-Host ($script:MailboxRecentNoChangesFormat -f $rc.Days) -ForegroundColor White }
+            # "Nothing changed" needs a complete read: no cut-off, no unreadable record, no failed page.
+            if (-not ($cg -and $cg.State -ne 'Checked') -and -not $rc.CutOff -and [int]$rc.Skipped -eq 0) { Write-Host ($script:MailboxRecentNoChangesFormat -f $rc.Days) -ForegroundColor White }
         } else {
             Write-Host ("Recent changes, last {0} days, newest first (local time, UTC in brackets; IPs and apps in the HTML report):" -f $rc.Days) -ForegroundColor White
             foreach ($c in $changes) {

@@ -67,7 +67,8 @@
         https://learn.microsoft.com/powershell/exchange/cmdlet-property-sets
       Mailbox forwarding: ForwardingAddress is a recipient in the organization (any value that
       identifies it: name, alias, DN, email address, GUID); when both it and
-      ForwardingSmtpAddress are set, ForwardingSmtpAddress is ignored
+      ForwardingSmtpAddress are set, ForwardingSmtpAddress is ignored; GrantSendOnBehalfTo
+      takes a plain list or @{Add="Value1","Value2"...; Remove="Value3","Value4"...}
         https://learn.microsoft.com/powershell/module/exchangepowershell/set-mailbox
       Get-EXORecipient -Identity -Properties: the recipient's RecipientTypeDetails and
       PrimarySmtpAddress (and, by name, ExternalEmailAddress: where a mail contact or mail user
@@ -152,7 +153,9 @@
       - Recent changes: how a cleared value appears in Parameters ('', '$null' or a JSON null
         are all read as cleared); ClientIPAddress (read when ClientIP is absent) and
         OperationProperties RuleName in UpdateInboxRules records; the Exchange object-path form
-        of ObjectId ('.../contoso.onmicrosoft.com/jdoe', matched on its last segment).
+        of ObjectId ('.../contoso.onmicrosoft.com/jdoe', matched on its last segment); how a
+        Set-Mailbox -GrantSendOnBehalfTo @{Add=...; Remove=...} value is written in Parameters
+        ('add=' / 'remove=' are read in any case; removals alone are listed, not a sign).
       - The junk-mail rule exemption also needs the rule to have none of the actions this check
         reads (forward, redirect, delete, move, mark as read). If the real built-in rule ever
         shows one of them, it is reported as a hidden rule: a false alarm, never a missed one.
@@ -1097,6 +1100,35 @@ function Test-MailboxClearedValue {
     return (-not $t -or $t -ieq '$null' -or $t -ieq 'null')
 }
 
+function ConvertFrom-MultiValueEdit {
+    <#
+    .SYNOPSIS
+        What a multivalued parameter value in an audit record adds and removes: Add and Remove,
+        each the entries joined with ', ' ('' when none).
+    .DESCRIPTION
+        Set-Mailbox -GrantSendOnBehalfTo replaces the list with a plain value, or adds and
+        removes entries with @{Add="Value1","Value2"...; Remove="Value3","Value4"...}
+        (https://learn.microsoft.com/powershell/module/exchangepowershell/set-mailbox). How the
+        audit record writes the hashtable form is NOT VERIFIED on Learn, so 'add=' / 'remove='
+        are read in any case, with or without @{ } and quotes. A plain value counts as an add; a
+        cleared value ('', '$null', JSON null) is neither.
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$Value)
+    $text = ([string]$Value).Trim()
+    $out = [PSCustomObject]@{ Add = ''; Remove = '' }
+    if (Test-MailboxClearedValue $text) { return $out }
+    $parts = [regex]::Matches($text, '(?i)\b(add|remove)\s*=\s*([^;}]*)')
+    if ($parts.Count -eq 0) { $out.Add = $text; return $out }
+    foreach ($m in $parts) {
+        $entries = @($m.Groups[2].Value -split ',' | ForEach-Object { $_.Trim().Trim('"', "'").Trim() } | Where-Object { $_ })
+        if ($entries.Count -eq 0) { continue }
+        $joined = $entries -join ', '
+        if ($m.Groups[1].Value -ieq 'add') { $out.Add = (@($out.Add, $joined) | Where-Object { $_ }) -join ', ' }
+        else { $out.Remove = (@($out.Remove, $joined) | Where-Object { $_ }) -join ', ' }
+    }
+    return $out
+}
+
 function Get-RecentChangeRows {
     <#
     .SYNOPSIS
@@ -1104,7 +1136,7 @@ function Get-RecentChangeRows {
         or (for a Set-Mailbox that sets several things) more.
     .DESCRIPTION
         Kinds: RecentRuleChange, RecentDelegateChange, RecentForwardingChange (signs, owner
-        decision D-032) and ForwardingOff (a fact, no sign). Text is for the local report and
+        decision D-032), ForwardingOff and SendOnBehalfRemoved (facts, no sign). Text is for the local report and
         names the actor; Message (the verdict line) and NoteText (the ticket note) never carry
         the actor's address or the IP (D-025 spirit, SQ-016 AC17). NoteText names neither a
         delegate nor a forwarding recipient either.
@@ -1199,7 +1231,7 @@ function Get-RecentChangeRows {
             $recipient = ConvertTo-MailboxSafeText -Text $fwd -MaxLength 256
             & $row 'RecentForwardingChange' $true ("Forwarding turned on to the recipient '{0}' by {1}." -f $recipient, $actorText) `
                 ("Forwarding was turned on to the recipient '{0}' {1} {2}." -f $recipient, $age, $by) `
-                ("RecentForwardingChange: {0}, forwarding turned on to a recipient in this tenant {1}." -f $date, $by)
+                ("RecentForwardingChange: {0}, forwarding turned on to a recipient object {1} (see the report)." -f $date, $by)
         }
         if (-not $turnedOn -and ($smtpSet -or $fwdSet)) {
             # Shown so a tech can see a clean-up after a takeover; not a sign (squad assumption).
@@ -1207,12 +1239,23 @@ function Get-RecentChangeRows {
                 ("Forwarding was turned off {0} {1}." -f $age, $by) `
                 ("Forwarding turned off: {0} {1}." -f $date, $by)
         }
-        if ($p.ContainsKey('GrantSendOnBehalfTo') -and -not (Test-MailboxClearedValue ([string]$p['GrantSendOnBehalfTo']))) {
-            $who = ConvertTo-MailboxSafeText -Text ([string]$p['GrantSendOnBehalfTo']) -MaxLength 256
-            & $row 'RecentDelegateChange' $true ("Send on Behalf given to {0} by {1}." -f $who, $actorText) `
-                ("Send on Behalf was given to {0} {1} {2}." -f $who, $age, $by) `
-                ("RecentDelegateChange: {0}, Send on Behalf given {1}." -f $date, $by) `
-                @{ Delegate = $who; Right = 'SendOnBehalf' }
+        if ($p.ContainsKey('GrantSendOnBehalfTo')) {
+            $edit = ConvertFrom-MultiValueEdit -Value ([string]$p['GrantSendOnBehalfTo'])
+            if ($edit.Add) {
+                $who = ConvertTo-MailboxSafeText -Text $edit.Add -MaxLength 256
+                & $row 'RecentDelegateChange' $true ("Send on Behalf given to {0} by {1}." -f $who, $actorText) `
+                    ("Send on Behalf was given to {0} {1} {2}." -f $who, $age, $by) `
+                    ("RecentDelegateChange: {0}, Send on Behalf given {1}." -f $date, $by) `
+                    @{ Delegate = $who; Right = 'SendOnBehalf' }
+            } elseif ($edit.Remove) {
+                # Taking Send on Behalf away is listed (an attacker's clean-up) but is not a sign,
+                # like turning forwarding off.
+                $who = ConvertTo-MailboxSafeText -Text $edit.Remove -MaxLength 256
+                & $row 'SendOnBehalfRemoved' $false ("Send on Behalf removed from {0} by {1}." -f $who, $actorText) `
+                    ("Send on Behalf was removed from {0} {1} {2}." -f $who, $age, $by) `
+                    ("Send on Behalf removed: {0} {1}." -f $date, $by) `
+                    @{ Delegate = $who; Right = 'SendOnBehalf' }
+            }
         }
     }
     return $rows.ToArray()
@@ -1408,10 +1451,12 @@ function ConvertTo-MailboxCheckHtml {
         [void]$sb.AppendLine("<p class=`"WARN`">[WARN] Rule changes made in Outlook: $(Enc $outlookGate.Reason)</p>")
     }
     if ($rc) {
-        if ($rc.Skipped -gt 0) { [void]$sb.AppendLine("<p class=`"WARN`">[WARN] $(Enc $rc.Skipped) audit record(s) could not be read and were skipped.</p>") }
+        # Unreadable records, a cut-off or a failed page make the gate Could not check (its
+        # [WARN] line above says why); the "nothing changed" wording needs a complete read.
+        $complete = -not ($recentGate -and $recentGate.State -ne 'Checked') -and -not $rc.CutOff -and [int]$rc.Skipped -eq 0
         $changes = @($rc.Changes)
         if ($changes.Count -eq 0) {
-            if (-not $rc.CutOff) { [void]$sb.AppendLine("<p>$(Enc ($script:MailboxRecentNoChangesFormat -f $rc.Days))</p>") }
+            if ($complete) { [void]$sb.AppendLine("<p>$(Enc ($script:MailboxRecentNoChangesFormat -f $rc.Days))</p>") }
         } else {
             [void]$sb.AppendLine("<p>Newest first. Times are this computer's local time ($(Enc ([System.TimeZoneInfo]::Local.DisplayName))), with UTC in brackets.</p>")
             [void]$sb.AppendLine('<table><tr><th>When</th><th>What changed</th><th>Takeover sign</th><th>Mailbox''s own account?</th><th>Client IP</th><th>App</th></tr>')
@@ -1490,7 +1535,7 @@ function Get-MailboxCheckNote {
             $items.Add((New-TicketNoteItem -Kind Clear -CouldLook $true -Text ('Inbox rules: {0} rule(s), hidden ones included; no rule matched the checks this tool runs (English folder names).' -f $n)))
         }
         $recentKinds = @('RecentRuleChange', 'RecentDelegateChange', 'RecentForwardingChange')
-        if ($checked['Recent changes'] -and -not $checked.ContainsKey('Rule changes made in Outlook') -and $f.RecentChanges -and @($kinds | Where-Object { $recentKinds -contains $_ }).Count -eq 0) {
+        if ($checked['Recent changes'] -and -not $checked.ContainsKey('Rule changes made in Outlook') -and $f.RecentChanges -and [int]$f.RecentChanges.Skipped -eq 0 -and @($kinds | Where-Object { $recentKinds -contains $_ }).Count -eq 0) {
             $items.Add((New-TicketNoteItem -Kind Clear -CouldLook $true -Text ('Recent changes (audit log, last {0} days): no rule, forwarding or delegate change was found.' -f $f.RecentChanges.Days)))
         }
         $counts = foreach ($d in @(@('Full Access', $f.FullAccess), @('Send As', $f.SendAs))) {

@@ -222,8 +222,10 @@ The **Recent changes (last 14 days)** section lists, newest first, every inbox r
   - *your account needs the View-Only Audit Logs role in Exchange Online*: the audit search is not available to the account you signed in with (see the roles below);
   - *audit logging is turned off in this tenant*: nobody can search changes from while it was off. An admin with the Audit Logs role (the Organization Management or Compliance Management role group) can turn it on in the Microsoft Purview portal (Audit). This tool never turns it on; ask the client's admin or escalate;
   - *results were cut off*: more than 50,000 matching records in the window. Run it again with a smaller `-RecentDays`;
+  - *could not tell whether audit logging is on*: the tenant's audit setting did not come back. The search still runs and anything it finds is still a sign, but finding nothing proves nothing;
+  - *N audit record(s) could not be read*: some records came back damaged and were skipped. One of them could be the change you are looking for;
   - *skipped (-NoRecentChanges)*;
-  - the error from the search itself (for example a timeout).
+  - the error from the search itself (for example a timeout). When it fails part-way, the changes from the pages already read are still listed and still count as signs.
 - **Rule changes made in Outlook: could not check** means mailbox auditing is turned off for the organization, or bypassed for this mailbox's account (or the tool could not tell). Rule changes made in the Outlook client are then not recorded; changes made by admins, in Outlook on the web or with PowerShell still are, and are still listed.
 
 For pulling large amounts of audit data regularly, Microsoft recommends the Office 365 Management Activity API instead of `Search-UnifiedAuditLog`; this tool runs one bounded search per check, which is what the cmdlet is meant for.

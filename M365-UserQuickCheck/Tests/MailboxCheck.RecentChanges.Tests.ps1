@@ -430,6 +430,41 @@ Describe 'recent changes: pure functions' {
             @($res.Changes)[1].RuleName | Should -Be 'old'
         }
     }
+
+    Context 'Review fixes (SQ-016 fix round 1): Send on Behalf removals and neutral note wording' {
+        It 'Fix_SendOnBehalfOnlyRemovedIsAFactNotASign: <Case>' -ForEach @(
+            @{ Case = 'remove= only'; Value = 'remove=helpdesk' }
+            @{ Case = 'remove= in a hashtable'; Value = '@{remove="helpdesk"}' }
+            @{ Case = 'Remove= mixed case'; Value = '@{Remove=helpdesk@contoso.com}' }
+        ) {
+            $raw = New-AuditRecord -Operation 'Set-Mailbox' -UserId 'admin@contoso.com' -Top @{ ObjectId = 'jdoe' } -Param ([ordered]@{ GrantSendOnBehalfTo = $Value })
+            $res = Get-ChangeSigns -Record @($raw)
+            @($res.Signs).Count | Should -Be 0 -Because 'taking Send on Behalf away is not a takeover sign'
+            @($res.Changes).Count | Should -Be 1 -Because 'it is still listed so a tech can see it'
+            $row = @($res.Changes)[0]
+            $row.IsSign | Should -BeFalse
+            $row.Text | Should -Match 'Send on Behalf'
+            $row.Text | Should -Match 'removed'
+        }
+
+        It 'Fix_SendOnBehalfAddedInAHashtableIsASignNamingTheDelegate' {
+            $raw = New-AuditRecord -Operation 'Set-Mailbox' -UserId 'admin@contoso.com' -Top @{ ObjectId = 'jdoe' } -Param ([ordered]@{ GrantSendOnBehalfTo = '@{add="helpdesk"; remove="old"}' })
+            $res = Get-ChangeSigns -Record @($raw)
+            @($res.Signs).Count | Should -Be 1
+            @($res.Signs)[0].Kind | Should -Be 'RecentDelegateChange'
+            @($res.Signs)[0].Delegate | Should -Be 'helpdesk'
+        }
+
+        It 'Fix_ForwardingAddressNoteTextIsNeutral (does not claim the recipient is in this tenant)' {
+            $raw = New-AuditRecord -Operation 'Set-Mailbox' -UserId 'admin@contoso.com' -Top @{ ObjectId = 'jdoe' } -Param ([ordered]@{ ForwardingAddress = 'Fred Contact' })
+            $res = Get-ChangeSigns -Record @($raw)
+            $note = @($res.Signs)[0].NoteText
+            $note | Should -Match ([regex]::Escape('forwarding turned on to a recipient object'))
+            $note | Should -Match ([regex]::Escape('(see the report)'))
+            $note | Should -Not -Match 'in this tenant'
+            $note | Should -Not -Match 'Fred Contact' -Because 'the note never names a forwarding recipient'
+        }
+    }
 }
 
 Describe 'recent changes: running the check' {
@@ -664,6 +699,108 @@ Describe 'recent changes: running the check' {
             $r = Invoke-Check @{ NoRecentChanges = $true }
             $r.ExitCode | Should -Be 1
             @($r.Assessment.Lines)[0] | Should -BeExactly $script:TakeoverLine
+        }
+    }
+
+    Context 'Review fixes (SQ-016 fix round 1): no all-clear from a partial read' {
+        BeforeAll {
+            function New-BadRecord([string]$Id = 'bad-1') {
+                [PSCustomObject]@{ RecordType = 'ExchangeAdmin'; CreationDate = $script:Now; UserIds = 'x'; Operations = 'Set-Mailbox'; AuditData = '{not json'; ResultIndex = 1; ResultCount = 1; Identity = $Id }
+            }
+        }
+
+        It 'Fix_UnreadableAuditRecordsMeanRecentChangesCouldNotBeChecked (no sign: PARTLY CHECKED, no clean wording)' {
+            New-Scenario @{ Pages = @(, (Get-Page @((New-BadRecord 'bad-1'), (New-BadRecord 'bad-2')))) }
+            $r = Invoke-Check
+            $r.Facts.RecentChanges.Skipped | Should -Be 2
+            $c = Get-Source $r 'Recent changes'
+            $c.Count | Should -Be 1
+            $c[0].Reason | Should -Match ([regex]::Escape('2 audit record(s) could not be read'))
+            $c[0].NoteReason | Should -Match ([regex]::Escape('audit record(s) could not be read'))
+            @($r.Assessment.Lines)[0] | Should -Match '^PARTLY CHECKED'
+            $r.ExitCode | Should -Be 2
+            $html = ConvertTo-MailboxCheckHtml -Result $r
+            $html | Should -Not -Match ([regex]::Escape('No inbox rules, forwarding or mailbox access were added or changed'))
+            . (Join-Path $script:Root 'CaseKit.ps1')
+            $text = (ConvertTo-TicketNoteText -Note $r.TicketNote -PasteSafe:$false) -join "`n"
+            $text | Should -Not -Match ([regex]::Escape('no rule, forwarding or delegate change was found'))
+            $text | Should -Match 'Recent changes'
+        }
+
+        It 'Fix_UnreadableAuditRecordsKeepTheSignsFound (takeover line first, still could not check)' {
+            New-Scenario @{ Pages = @(, (Get-Page @((New-BadRecord), (New-RuleRecord -RuleName 'xx' -Id 'sign-1')))) }
+            $r = Invoke-Check
+            @($r.Assessment.Lines)[0] | Should -BeExactly $script:TakeoverLine
+            @($r.Assessment.Signs | Where-Object { $_.Kind -eq 'RecentRuleChange' }).Count | Should -Be 1
+            (Get-Source $r 'Recent changes').Count | Should -Be 1
+            $r.ExitCode | Should -Be 1
+        }
+
+        It 'Fix_ASearchThatFailsOnALaterPageKeepsTheSignsAlreadyRead' {
+            $script:Page1 = Get-Page @((New-RuleRecord -RuleName 'xx' -Id 'sign-1')) -Count 5
+            Mock Search-UnifiedAuditLog {
+                $script:SearchCalls.Add(@{ SessionId = $SessionId })
+                if ($script:SearchCalls.Count -eq 1) { return , @($script:Page1) }
+                throw 'The search timed out after 600 seconds.'
+            }
+            $r = Invoke-Check
+            $script:SearchCalls.Count | Should -Be 2
+            @($r.Assessment.Lines)[0] | Should -BeExactly $script:TakeoverLine
+            @($r.Assessment.Signs | Where-Object { $_.Kind -eq 'RecentRuleChange' }).Count | Should -Be 1
+            @($r.Facts.RecentChanges.Changes).Count | Should -Be 1
+            $c = Get-Source $r 'Recent changes'
+            $c.Count | Should -Be 1
+            $c[0].Reason | Should -Match 'search timed out after 600 seconds'
+            $c[0].NoteReason | Should -Not -BeNullOrEmpty
+            $c[0].NoteReason | Should -Not -Match 'timed out after 600'
+            ($r.Assessment.Lines -join "`n") | Should -Match 'Could not check: Recent changes'
+            $r.ExitCode | Should -Be 1
+            (ConvertTo-MailboxCheckHtml -Result $r) | Should -Not -Match ([regex]::Escape('No inbox rules, forwarding or mailbox access were added or changed'))
+        }
+
+        It 'Fix_MissingResultIndexAndResultCountKeepPagingUntilAnEmptyPage' {
+            $a = New-RuleRecord -Id 'a'; $b = New-RuleRecord -Id 'b'; $c = New-RuleRecord -Id 'c'
+            foreach ($x in $a, $b, $c) { $x.ResultIndex = $null; $x.ResultCount = $null }
+            $b.ResultCount = 'not a number'
+            New-Scenario @{ Pages = @(@($a, $b), @(, $c), @()) }
+            $r = Invoke-Check
+            $script:SearchCalls.Count | Should -Be 3 -Because 'an unknown ResultCount never ends the search early'
+            @($r.Facts.RecentChanges.Changes).Count | Should -Be 3
+            (Get-Source $r 'Recent changes').Count | Should -Be 0
+        }
+
+        It 'Fix_AnUnsortedPageIsJudgedByItsHighestResultIndex' {
+            $a = New-RuleRecord -Id 'a' -Index 3 -Count 3
+            $b = New-RuleRecord -Id 'b' -Index 1 -Count 3
+            $c = New-RuleRecord -Id 'c' -Index 2 -Count 3
+            New-Scenario @{ Pages = @(@($a, $b, $c), @((New-RuleRecord -Id 'beyond'))) }
+            $null = Invoke-Check
+            $script:SearchCalls.Count | Should -Be 1 -Because 'the highest ResultIndex on the page already reached ResultCount'
+        }
+
+        It 'Fix_UnknownAuditLogSettingIsCouldNotCheckButStillSearches: <Case>' -ForEach @(
+            @{ Case = 'UnifiedAuditLogIngestionEnabled is null'; Missing = $false }
+            @{ Case = 'UnifiedAuditLogIngestionEnabled is missing'; Missing = $true }
+        ) {
+            if ($Missing) {
+                Mock Get-AdminAuditLogConfig { [PSCustomObject]@{ Name = 'Admin Audit Log Settings' } }
+            } else {
+                Mock Get-AdminAuditLogConfig { [PSCustomObject]@{ UnifiedAuditLogIngestionEnabled = $null } }
+            }
+            New-Scenario @{ Pages = @(, (Get-Page @((New-RuleRecord -RuleName 'xx' -Id 'sign-1')))) }
+            $r = Invoke-Check
+            $script:SearchCalls.Count | Should -BeGreaterThan 0 -Because 'an unknown setting is not a reason to skip the search'
+            $c = Get-Source $r 'Recent changes'
+            $c.Count | Should -Be 1
+            $c[0].Reason | Should -Match 'could not tell whether audit logging is on'
+            $c[0].NoteReason | Should -Match 'could not tell whether audit logging is on'
+            @($r.Assessment.Signs | Where-Object { $_.Kind -eq 'RecentRuleChange' }).Count | Should -Be 1
+            @($r.Assessment.Lines)[0] | Should -BeExactly $script:TakeoverLine
+
+            New-Scenario @{ Pages = @(, @()) }
+            $r2 = Invoke-Check
+            @($r2.Assessment.Lines)[0] | Should -Match '^PARTLY CHECKED'
+            $r2.ExitCode | Should -Be 2
         }
     }
 

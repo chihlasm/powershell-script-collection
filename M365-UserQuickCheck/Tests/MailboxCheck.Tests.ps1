@@ -1,6 +1,6 @@
 <#
     Tests for M365-UserQuickCheck\Get-M365MailboxCheck.ps1 + MailboxCheck.Core.ps1 (Pester 5, pwsh).
-    SQ-007, mailbox check: AC1-AC25. (AC26, the audit-log search, is OUT: D-008, SQ-016.)
+    SQ-007, mailbox check: AC1-AC25. (AC26, the audit-log search, is implemented by SQ-016.)
 
     The entry script is RUN (dot-sourced, never '&') with Exchange Online and the clipboard
     faked: Import-Module, Connect-/Disconnect-ExchangeOnline, Get-ConnectionInformation,
