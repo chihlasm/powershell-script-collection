@@ -88,8 +88,9 @@ Describe 'Window markup' {
         $all = Get-AllXaml
         $all.Count | Should -Be 4
         foreach ($k in $all.Keys) {
-            $xml = $null
-            { $xml = [xml]$all[$k] } | Should -Not -Throw -Because "$k must return well-formed XML"
+            { [xml]$all[$k] } | Should -Not -Throw -Because "$k must return well-formed XML"
+            # The scriptblock above runs in a child scope, so parse again here for the name check.
+            $xml = [xml]$all[$k]
             $names = Get-XamlNames -Xml $xml
             $dupes = @($names | Group-Object | Where-Object Count -gt 1 | ForEach-Object Name)
             $dupes | Should -BeNullOrEmpty -Because "$k has duplicate x:Name values"
