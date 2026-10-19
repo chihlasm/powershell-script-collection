@@ -1,10 +1,92 @@
 # Folder Permission Manager
 
-Tools for managing NTFS folder permissions, ownership, and ACLs. Includes a command-line script and a browser-based GUI.
+Tools for managing NTFS folder permissions, ownership, and ACLs. Includes a Windows app, a
+command-line script, and the older browser-based GUI.
 
 ## Scripts
 
-### FolderPermissionManager-GUI.ps1 (Web GUI)
+### FolderPermissionManager-GUI.ps1 (Windows app)
+
+A normal Windows window (WPF) for looking at folder and file permissions on local drives,
+mapped drives and network shares. Nothing listens on the network, and slow work (opening a
+folder on a busy share, reading permissions, the export) runs in the background, so the
+window never freezes.
+
+**View only in this version.** The buttons that change permissions (Add Permission, Remove
+Permission, Take Ownership, Copy Permissions To...) are shown but switched off; the window
+says so. Until they are switched on, make changes with the browser version,
+`FolderPermissionManager-WebGUI.ps1` (below). Changes anything? **No.**
+
+**How to start it:** right-click `FolderPermissionManager-GUI.ps1` and choose **Run with
+PowerShell**, or run it from a PowerShell window:
+
+```powershell
+# Open the window (asks for administrator rights first if needed)
+.\FolderPermissionManager-GUI.ps1
+
+# Keep backups and the change log in the ticket folder
+.\FolderPermissionManager-GUI.ps1 -LogFolder 'D:\Tickets\12345\PermissionChanges'
+
+# Dry run: the window says "Dry run (WhatIf): nothing will be changed"
+.\FolderPermissionManager-GUI.ps1 -WhatIf
+```
+
+- **Administrator rights.** Started without them, it asks Windows for them (the UAC prompt)
+  and opens again elevated. If you choose No, it says why it needs them and closes. Mapped
+  drives are passed on to the elevated window, because an elevated window usually cannot see
+  your mapped drives ([Microsoft Learn](https://learn.microsoft.com/troubleshoot/windows-client/networking/mapped-drives-not-available-from-elevated-command)).
+- **One window per log folder.** A second copy that would use the same log folder is refused
+  with "Folder Permission Manager is already open (possibly in another session on this
+  computer). Use that window, or close it first." Two windows must never write to the same
+  change log at once. A copy started with a different `-LogFolder` can run alongside.
+- **Where changes are logged.** The bar under the title says "Changes are backed up and logged
+  to `<folder>`", with any warning about that folder (for example when it is on a network
+  share), and **Open log folder** opens it. The folder is chosen exactly as in the browser
+  version (see "Changes are backed up and logged" below).
+
+**What you see:**
+- The full path of the selected folder at the top, at all times, and the real location
+  (`\\server\share\...`) behind a mapped drive letter. Both can be selected and copied.
+- A folder tree of the local and mapped drives; type a path such as `\\fs01\Data` in the box
+  above it and press Enter to open a share that is not mapped. Folders open in the background;
+  a folder with no subfolders loses its expander. A folder you cannot open shows the next step,
+  for example "Access denied to '`<path>`'. Take ownership (this folder only) first, then use
+  Add Permission to give yourself access."
+- **Folder permissions:** who owns the folder, whether it gets the permissions of the folder
+  above it, and each entry: User or Group, Permission Level, Allow/Deny (Deny in red), Inherited.
+- **Files:** name, size and modified time. Select one or several files (click, Ctrl+click,
+  Shift+click, **Select all** or Ctrl+A) to see who owns each one and who has access to it on
+  the right (the first 20 selected). When the selected files' permissions differ, it says
+  "Selected files have different permissions — this operation applies uniformly to all".
+- A busy line with a progress bar and the elapsed time while anything loads, and a status line
+  whose text can be selected and copied.
+- **Export to CSV...** saves the permissions of the selected folder and all its subfolders to a
+  CSV file you choose (`Path`, `Owner`, `Identity`, `Rights`, `AccessType`, `IsInherited`,
+  `InheritanceFlags`; a folder that could not be read gets a row with `Owner` = `ERROR` and the
+  reason). It runs in the background and can be stopped. Text that Excel would run as a
+  formula gets a leading `'`, as in the change log.
+- **Dark or light:** the button at the top right switches; the choice is remembered in
+  `%LOCALAPPDATA%\FolderPermissionManager\settings.json`. Unexpected errors are written to
+  `gui-errors.log` in the same folder.
+- **F5** or **Refresh** reads the current folder again.
+
+To copy files with their permissions, use [RobocopyMigration](../RobocopyMigration/): the
+Windows app has no Robocopy tab and no "Copy Files To...".
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `-LogFolder` | `Logs` next to the script | Where permission backups and the change log go (see below) |
+| `-WhatIf` | | Dry run: the window says nothing will be changed |
+| `-DriveMap` | | Used by the tool itself when it opens again as administrator; leave it out |
+
+Requires Windows PowerShell 5.1 (or PowerShell 7 on Windows). Keep
+`FolderPermissions.Core.ps1` in the same folder.
+
+### FolderPermissionManager-WebGUI.ps1 (browser version, kept until the Windows app is lab-tested)
+
+The browser version of the tool, until now `FolderPermissionManager-GUI.ps1`. It is kept only
+until the Windows app above has been lab-tested and can make changes, then it is removed. Use
+it to make changes in the meantime.
 
 A browser-based interface for managing folder permissions across local drives and network shares. Runs a local web server and opens an interactive dashboard.
 
@@ -21,10 +103,10 @@ A browser-based interface for managing folder permissions across local drives an
 
 ```powershell
 # Launch with defaults (opens browser automatically)
-.\FolderPermissionManager-GUI.ps1
+.\FolderPermissionManager-WebGUI.ps1
 
 # Custom port, don't auto-open browser
-.\FolderPermissionManager-GUI.ps1 -Port 9090 -NoBrowserOpen
+.\FolderPermissionManager-WebGUI.ps1 -Port 9090 -NoBrowserOpen
 ```
 
 Press Ctrl+C in the PowerShell window to stop the server.
@@ -322,8 +404,8 @@ To give someone access: add it on the folder they need. Adding it on a folder gi
 everything inside it that inherits, so adding it on a share or home-folder root gives them
 everything below. Subfolders that block inheritance (inheritance turned off, often locked down
 on purpose) do not get it, nor do the folders inside them; the script names them after the
-owner list. An explicit Deny on a subfolder still wins. Add it with Add Permission in the GUI
-or on Explorer's Security tab (Properties > Security > Edit > Add). Without a browser:
+owner list. An explicit Deny on a subfolder still wins. Add it with Add Permission in the
+browser version (`FolderPermissionManager-WebGUI.ps1`) or on Explorer's Security tab (Properties > Security > Edit > Add). Without a browser:
 
 ```powershell
 icacls "D:\Shares\HR\Finance" /grant "DOMAIN\user:(OI)(CI)RX"
@@ -394,8 +476,9 @@ interrupted runs above.
 
 ## Requirements
 
-- PowerShell 5.1+ for the GUI; PowerShell 3.0+ for the command-line script (Windows Server 2012
-  and later)
-- Run as Administrator (required for ownership and permission operations)
-- Keep `FolderPermissions.Core.ps1` in the same folder as both scripts: it holds the backup,
+- PowerShell 5.1+ for the Windows app and the browser version; PowerShell 3.0+ for the
+  command-line script (Windows Server 2012 and later)
+- Run as Administrator (required for ownership and permission operations; the Windows app asks
+  for it itself)
+- Keep `FolderPermissions.Core.ps1` in the same folder as the scripts: it holds the backup,
   logging and change logic

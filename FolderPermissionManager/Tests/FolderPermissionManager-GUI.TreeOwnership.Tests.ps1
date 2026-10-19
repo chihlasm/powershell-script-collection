@@ -25,7 +25,7 @@ BeforeAll {
     }
     $script:RealGetItemOwner = ${function:Get-ItemOwner}
 
-    $script:GuiPath = (Resolve-Path (Join-Path $folder 'FolderPermissionManager-GUI.ps1')).Path
+    $script:GuiPath = (Resolve-Path (Join-Path $folder 'FolderPermissionManager-WebGUI.ps1')).Path
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:GuiPath, [ref]$null, [ref]$null)
     $handlers = 'Resolve-MappedDrive', 'Complete-PermissionChange', 'ConvertTo-ChangeResultRow',
         'Send-SingleChangeResult', 'Send-BatchChangeResult', 'Invoke-TakeOwnership'

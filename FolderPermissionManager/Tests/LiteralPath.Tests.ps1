@@ -15,7 +15,7 @@ BeforeAll {
     $script:ToolFolder = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
     $script:ScriptFiles = @(Get-ChildItem -LiteralPath $script:ToolFolder -Recurse -File -Filter '*.ps1' |
         Where-Object { $_.FullName.Substring($script:ToolFolder.Length) -notmatch '^[\\/]Tests[\\/]' })
-    $script:GuiPath = Join-Path $script:ToolFolder 'FolderPermissionManager-GUI.ps1'
+    $script:GuiPath = Join-Path $script:ToolFolder 'FolderPermissionManager-WebGUI.ps1'
 
     # Cmdlets (and their usual aliases) that take a file-system path.
     $script:PathCommands = 'Test-Path', 'Get-Item', 'Get-ChildItem', 'Get-Acl', 'Set-Acl', 'Resolve-Path',

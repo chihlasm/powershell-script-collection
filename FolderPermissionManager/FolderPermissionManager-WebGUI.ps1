@@ -1,0 +1,2304 @@
+﻿#Requires -Version 5.1
+#Requires -RunAsAdministrator
+
+<#
+.SYNOPSIS
+    Folder Permission Manager — Browser-based GUI for NTFS permissions.
+
+.DESCRIPTION
+    The browser version of FolderPermissionManager-GUI.ps1 (the Windows app). It is kept only
+    until the Windows app has been lab-tested, then removed (owner decision D-038).
+
+    Starts a local web server and opens a browser-based interface for:
+    - Browsing local drives and network shares
+    - Viewing folder ownership and ACL entries
+    - Taking ownership (single or recursive)
+    - Adding/removing permission entries
+    - Copying a folder's own permissions to other folders (adds only, nothing is removed)
+    - Exporting permissions reports to CSV
+
+.PARAMETER Port
+    TCP port for the local web server. Default: 8271
+
+.PARAMETER NoBrowserOpen
+    Do not automatically open the browser on launch.
+
+.PARAMETER LogFolder
+    Folder for permission backups and the change log. Defaults to the Logs folder next to this
+    script (not the current directory, which is C:\Windows\System32 when started "as
+    administrator"). If the script is on a network share or any drive that is not a local fixed
+    disk, or that folder is read-only, %LOCALAPPDATA%\FolderPermissionManager\Logs is used
+    instead. A folder passed here is used as given (with a warning if it is on the network).
+
+.EXAMPLE
+    .\FolderPermissionManager-WebGUI.ps1
+
+.EXAMPLE
+    .\FolderPermissionManager-WebGUI.ps1 -Port 9090 -NoBrowserOpen
+
+.EXAMPLE
+    .\FolderPermissionManager-WebGUI.ps1 -LogFolder 'D:\Tickets\12345\PermissionChanges'
+
+.NOTES
+    Must run as Administrator for ownership operations.
+    Press Ctrl+C in the PowerShell window to stop the server.
+
+    Before every change to one folder or to selected files (add or remove a permission, take
+    ownership of this folder only, copy permissions), the current permissions are saved to
+    <LogFolder>\Backups. If that fails, nothing is changed. Each change is then logged to
+    <LogFolder>\Changes_<yyyy-MM-dd>.csv. See README "Undo a change".
+    Taking ownership of all subfolders and files first saves the owner of every item to
+    <LogFolder>\Backups\<yyyy-MM-dd_HHmmss>_TakeOwnership.csv and logs one row for the folder.
+    Copy Permissions To... adds the permissions set directly on the current folder (not the
+    ones it inherits) to each target folder with one change per target. Nothing is removed.
+    Subfolders and files under a target that inherit permissions get the new ones from Windows;
+    subfolders that block inheritance are not changed. A target that is a file is refused.
+    The logic lives in FolderPermissions.Core.ps1, which must stay next to this script.
+
+    REFERENCES
+    - See FolderPermissions.Core.ps1 for Get-Acl, Set-Acl, SDDL, takeown, icacls, and how a
+      copied permission reaches subfolders that inherit (and not those that block inheritance).
+    - -LiteralPath on every Test-Path, Get-ChildItem and Get-Acl call: with -Path, [ ] is a
+      wildcard range, so a folder named "HR [old]" would not be found:
+      https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_wildcards
+#>
+
+[CmdletBinding()]
+param(
+    [Parameter()]
+    [ValidateRange(1024, 65535)]
+    [int]$Port = 8271,
+
+    [Parameter()]
+    [switch]$NoBrowserOpen,
+
+    [Parameter()]
+    [string]$LogFolder
+)
+
+$ErrorActionPreference = 'Continue'
+$baseUrl = "http://localhost:$Port/"
+
+# Backups, the change log and the single-item changes live in the core (testable without a GUI).
+$corePath = Join-Path $PSScriptRoot 'FolderPermissions.Core.ps1'
+if (-not (Test-Path -LiteralPath $corePath)) {
+    Write-Host "[FAIL] FolderPermissions.Core.ps1 is missing from $PSScriptRoot. Keep all the files in the folder together." -ForegroundColor Red
+    exit 1
+}
+. $corePath -LoadFunctionsOnly
+# Not $script:LogFolder: at script scope that IS the -LogFolder parameter, and the startup
+# notice needs to know whether -LogFolder was passed.
+$defaultLogFolder = Join-Path $PSScriptRoot 'Logs'
+try {
+    $script:ChangeLogFolder = Resolve-ChangeLogFolder -LogFolder $LogFolder -DefaultFolder $defaultLogFolder
+}
+catch {
+    Write-Host "[FAIL] $($_.Exception.Message)" -ForegroundColor Red
+    exit 1
+}
+
+# Cache mapped network drives from the user session via WMI
+# Elevated processes can't see drive mappings, so we grab them here
+$script:driveMappings = @{}
+try {
+    Get-WmiObject -Class Win32_MappedLogicalDisk -ErrorAction SilentlyContinue | ForEach-Object {
+        $script:driveMappings[$_.DeviceID.TrimEnd(':').ToUpper()] = $_.ProviderName
+    }
+    # Also try net use as a fallback
+    $netUse = net use 2>$null | Where-Object { $_ -match '^\s*(OK|Disconnected|Unavailable)\s+([A-Z]:)\s+(\\\\[^\s]+)' }
+    foreach ($line in $netUse) {
+        if ($line -match '^\s*(?:OK|Disconnected|Unavailable)\s+([A-Z]:)\s+(\\\\[^\s]+)') {
+            $letter = $Matches[1].TrimEnd(':').ToUpper()
+            if (-not $script:driveMappings.ContainsKey($letter)) {
+                $script:driveMappings[$letter] = $Matches[2]
+            }
+        }
+    }
+    if ($script:driveMappings.Count -gt 0) {
+        Write-Host "[INFO] Found $($script:driveMappings.Count) mapped drive(s): $(($script:driveMappings.GetEnumerator() | ForEach-Object { "$($_.Key): -> $($_.Value)" }) -join ', ')" -ForegroundColor Cyan
+    }
+}
+catch {
+    Write-Host "[WARN] Could not enumerate mapped drives: $_" -ForegroundColor Yellow
+}
+
+# --- Helper Functions ---
+
+# JSON helper
+function Send-Json {
+    param(
+        [System.Net.HttpListenerResponse]$Response,
+        [object]$Data
+    )
+    if ($null -eq $Data) { $Data = @() }
+    $json = $Data | ConvertTo-Json -Depth 10 -Compress
+    if ([string]::IsNullOrEmpty($json)) { $json = '[]' }
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+    $Response.ContentType = 'application/json; charset=utf-8'
+    $Response.ContentLength64 = $bytes.Length
+    $Response.OutputStream.Write($bytes, 0, $bytes.Length)
+    $Response.OutputStream.Close()
+}
+
+# HTML helper
+function Send-Html {
+    param([System.Net.HttpListenerResponse]$Response)
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($script:htmlContent)
+    $Response.ContentType = 'text/html; charset=utf-8'
+    $Response.ContentLength64 = $bytes.Length
+    $Response.OutputStream.Write($bytes, 0, $bytes.Length)
+    $Response.OutputStream.Close()
+}
+
+# Helper to read JSON POST body
+function Read-RequestBody {
+    param([System.Net.HttpListenerRequest]$Request)
+    $reader = [System.IO.StreamReader]::new($Request.InputStream, $Request.ContentEncoding)
+    $json = $reader.ReadToEnd()
+    $reader.Close()
+    return $json | ConvertFrom-Json
+}
+
+# Runs one core change function, logging each item as soon as it completes, and builds the
+# fields every change endpoint adds to its JSON: the plain-English status-bar message, the log
+# and backup paths, and how many changed items cannot be restored from the backup (their
+# permissions could not be read first). Returns the rows (Entries) and those fields (Data).
+# $Change is the handler's { Add-FolderPermission ... } block; it runs in a child scope of this
+# call chain and reads the handler's variables ($folderPath, $filePaths, ...), so the functions
+# between the handler and the core must not define variables with those names.
+function Complete-PermissionChange {
+    param([scriptblock]$Change)
+    $result = Invoke-LoggedPermissionChange -Change $Change -LogFolder $script:ChangeLogFolder
+    $entries = @($result.Entries)
+    $backup = @($entries | Where-Object { $_.BackupFile } | Select-Object -First 1)
+    [PSCustomObject]@{
+        Entries = $entries
+        Data    = @{
+            message      = Get-ChangeResultMessage -Entries $entries -LogPath $result.LogPath -LogFolder $script:ChangeLogFolder
+            logPath      = $result.LogPath
+            backupPath   = $(if ($backup.Count -gt 0) { $backup[0].BackupFile } else { $null })
+            unrestorable = Get-UnrestorableItemCount -Entries $entries
+        }
+    }
+}
+
+# Per-item results in the shape the page already reads: path, status, message. 'unchanged' is
+# an item that already had what was asked (Copy permissions with nothing to copy): not a
+# failure and not a shortfall, so the page does not count it against the result.
+function ConvertTo-ChangeResultRow {
+    param([object[]]$Entries)
+    @($Entries | Where-Object { $null -ne $_ } | ForEach-Object {
+        $status = switch ($_.Result) {
+            'Done'                      { 'success' }
+            'Skipped (not found)'       { 'skipped' }
+            'Skipped (nothing to copy)' { 'unchanged' }
+            default                     { 'error' }
+        }
+        # Nothing to copy says why in Detail ("Already has these permissions; nothing changed.").
+        $text = if ($_.Error) { $_.Error } elseif ($_.Result -eq 'Skipped (nothing to copy)') { $_.Detail } else { $_.Result }
+        [PSCustomObject]@{ path = $_.Target; status = $status; message = $text }
+    })
+}
+
+# Sends the result of a change to ONE folder: 200 with status 'success', 200 with status
+# 'partial' when a whole-tree change was only partly done or could not be checked everywhere
+# (folders it could not open, owners it could not read back; the page shows it as a warning),
+# or the existing error shape (400 when the folder does not exist, 500 otherwise) with the same
+# added fields.
+function Send-SingleChangeResult {
+    param([System.Net.HttpListenerResponse]$Response, [scriptblock]$Change)
+    $completed = Complete-PermissionChange -Change $Change
+    $entries = @($completed.Entries)
+    $data = $completed.Data
+    $incomplete = @($entries | Where-Object { Test-TreeEntryIncomplete $_ })
+    if ($entries.Count -gt 0 -and $incomplete.Count -eq 0 -and @($entries | Where-Object { $_.Result -ne 'Done' }).Count -eq 0) {
+        $data['status'] = 'success'
+    } elseif ($entries.Count -gt 0 -and @($entries | Where-Object { $_.Result -ne 'Done' -and $_.Result -ne 'Partly done' }).Count -eq 0) {
+        $data['status'] = 'partial'
+    } else {
+        $Response.StatusCode = if (@($entries | Where-Object { $_.Result -eq 'Skipped (not found)' }).Count -gt 0) { 400 } else { 500 }
+        $data['error'] = $data.message
+    }
+    Send-Json $Response $data
+}
+
+# Sends the result of a change to several items in the existing batch shape.
+function Send-BatchChangeResult {
+    param([System.Net.HttpListenerResponse]$Response, [scriptblock]$Change)
+    $completed = Complete-PermissionChange -Change $Change
+    $data = $completed.Data
+    $data['status'] = 'complete'
+    $data['results'] = @(ConvertTo-ChangeResultRow -Entries $completed.Entries)
+    Send-Json $Response $data
+}
+
+# --- API Endpoint Functions ---
+
+function Resolve-MappedDrive {
+    # Elevated sessions can't see mapped drives from the standard user session.
+    # Query WMI for all mapped network drives so we can resolve letter -> UNC path.
+    param([string]$Path)
+    if ($Path -match '^([A-Za-z]):\\') {
+        $letter = $Matches[1]
+        $mapping = $script:driveMappings[$letter.ToUpper()]
+        if ($mapping) {
+            return $Path -replace "^$letter`:\\", "$mapping\"
+        }
+    }
+    return $Path
+}
+
+function Get-Drives {
+    param([System.Net.HttpListenerResponse]$Response)
+
+    # Get local filesystem drives
+    $drives = [System.Collections.Generic.List[object]]::new()
+    Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Root } | ForEach-Object {
+        $usedGB = [math]::Round($_.Used / 1GB, 1)
+        $freeGB = [math]::Round($_.Free / 1GB, 1)
+        $drives.Add([PSCustomObject]@{
+            name     = $_.Name
+            root     = $_.Root
+            label    = if ($_.Description) { "$($_.Name):\ — $($_.Description)" } else { "$($_.Name):\" }
+            usedGB   = $usedGB
+            freeGB   = $freeGB
+            provider = 'FileSystem'
+            isMapped = $false
+        })
+    }
+
+    # Also include mapped drives from the non-elevated user session via WMI
+    # These won't show in Get-PSDrive when running elevated
+    foreach ($letter in $script:driveMappings.Keys) {
+        $existing = $drives | Where-Object { $_.name -eq $letter }
+        if (-not $existing) {
+            $unc = $script:driveMappings[$letter]
+            $drives.Add([PSCustomObject]@{
+                name     = $letter
+                root     = "$letter`:\"
+                label    = "$letter ($unc)"
+                usedGB   = 0
+                freeGB   = 0
+                provider = 'FileSystem'
+                isMapped = $true
+                uncPath  = $unc
+            })
+        }
+    }
+
+    Send-Json $Response @($drives)
+}
+
+function Get-Children {
+    param(
+        [System.Net.HttpListenerRequest]$Request,
+        [System.Net.HttpListenerResponse]$Response
+    )
+
+    $folderPath = Resolve-MappedDrive $Request.QueryString['path']
+    if (-not $folderPath -or -not (Test-Path -LiteralPath $folderPath -PathType Container)) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Invalid or missing path parameter" }
+        return
+    }
+
+    try {
+        $items = Get-ChildItem -LiteralPath $folderPath -Directory -Force -ErrorAction Stop
+    }
+    catch [System.UnauthorizedAccessException] {
+        $Response.StatusCode = 403
+        Send-Json $Response @{ error = "Access denied to '$folderPath'. Try taking ownership first." }
+        return
+    }
+    catch {
+        $Response.StatusCode = 500
+        Send-Json $Response @{ error = "Failed to list '$folderPath': $($_.Exception.Message)" }
+        return
+    }
+
+    $children = @($items | ForEach-Object {
+        $hasChildren = $false
+        try {
+            $hasChildren = @(Get-ChildItem -LiteralPath $_.FullName -Directory -Force -ErrorAction SilentlyContinue | Select-Object -First 1).Count -gt 0
+        } catch {}
+
+        [PSCustomObject]@{
+            name        = $_.Name
+            path        = $_.FullName
+            hasChildren = $hasChildren
+        }
+    })
+    if ($null -eq $children) { $children = @() }
+    Send-Json $Response $children
+}
+
+function Get-Files {
+    param(
+        [System.Net.HttpListenerRequest]$Request,
+        [System.Net.HttpListenerResponse]$Response
+    )
+
+    $folderPath = Resolve-MappedDrive $Request.QueryString['path']
+    if (-not $folderPath -or -not (Test-Path -LiteralPath $folderPath -PathType Container)) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Invalid or missing path parameter" }
+        return
+    }
+
+    try {
+        $items = Get-ChildItem -LiteralPath $folderPath -File -Force -ErrorAction Stop
+    }
+    catch [System.UnauthorizedAccessException] {
+        $Response.StatusCode = 403
+        Send-Json $Response @{ error = "Access denied to '$folderPath'. Try taking ownership first." }
+        return
+    }
+    catch {
+        $Response.StatusCode = 500
+        Send-Json $Response @{ error = "Failed to list files: $($_.Exception.Message)" }
+        return
+    }
+
+    $files = @($items | ForEach-Object {
+        $sizeDisplay = if ($_.Length -gt 1GB) { "$([math]::Round($_.Length / 1GB, 2)) GB" }
+                       elseif ($_.Length -gt 1MB) { "$([math]::Round($_.Length / 1MB, 1)) MB" }
+                       elseif ($_.Length -gt 1KB) { "$([math]::Round($_.Length / 1KB, 1)) KB" }
+                       else { "$($_.Length) B" }
+        [PSCustomObject]@{
+            name         = $_.Name
+            path         = $_.FullName
+            extension    = $_.Extension
+            size         = $_.Length
+            sizeDisplay  = $sizeDisplay
+            lastModified = $_.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')
+            created      = $_.CreationTime.ToString('yyyy-MM-dd HH:mm:ss')
+            isReadOnly   = $_.IsReadOnly
+            attributes   = $_.Attributes.ToString()
+        }
+    })
+    if ($null -eq $files) { $files = @() }
+    Send-Json $Response $files
+}
+
+function Get-FolderAcl {
+    param(
+        [System.Net.HttpListenerRequest]$Request,
+        [System.Net.HttpListenerResponse]$Response
+    )
+
+    $folderPath = Resolve-MappedDrive $Request.QueryString['path']
+    if (-not $folderPath -or -not (Test-Path -LiteralPath $folderPath -PathType Container)) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Invalid or missing path parameter" }
+        return
+    }
+
+    try {
+        $acl = Get-Acl -LiteralPath $folderPath -ErrorAction Stop
+        $entries = @($acl.Access | ForEach-Object {
+            [PSCustomObject]@{
+                identity         = $_.IdentityReference.ToString()
+                rights           = $_.FileSystemRights.ToString()
+                type             = $_.AccessControlType.ToString()
+                isInherited      = $_.IsInherited
+                inheritanceFlags = $_.InheritanceFlags.ToString()
+                propagationFlags = $_.PropagationFlags.ToString()
+            }
+        })
+
+        $result = [PSCustomObject]@{
+            path                      = $folderPath
+            owner                     = $acl.Owner
+            areAccessRulesProtected   = $acl.AreAccessRulesProtected
+            entries                   = $entries
+        }
+        Send-Json $Response $result
+    }
+    catch {
+        $Response.StatusCode = 500
+        Send-Json $Response @{ error = "Failed to read ACL: $($_.Exception.Message)" }
+    }
+}
+
+function Invoke-TakeOwnership {
+    param(
+        [System.Net.HttpListenerRequest]$Request,
+        [System.Net.HttpListenerResponse]$Response
+    )
+
+    $body = Read-RequestBody $Request
+    $folderPath = Resolve-MappedDrive $body.path
+    $recursive = $body.recursive -eq $true
+
+    if (-not $folderPath -or -not (Test-Path -LiteralPath $folderPath -PathType Container)) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Invalid or missing path" }
+        return
+    }
+
+    if (-not $recursive) {
+        # This folder only: backed up and logged by the core, which never throws.
+        Send-SingleChangeResult $Response { Set-ItemOwnerToCurrentUser -Path $folderPath -LogFolder $script:ChangeLogFolder }
+        return
+    }
+
+    # All subfolders and files: the core saves every item's owner first, then runs takeown /R
+    # and icacls /setowner /T, and logs one row for the whole folder. The root of a drive and
+    # the Windows system folders are refused by the core with a plain message (D-036); the GUI
+    # has no override, so nothing from the request can turn that check off.
+    Send-SingleChangeResult $Response { Set-ItemOwnerToCurrentUser -Path $folderPath -Recurse -LogFolder $script:ChangeLogFolder }
+}
+
+function Invoke-ReplicatePermissions {
+    param(
+        [System.Net.HttpListenerRequest]$Request,
+        [System.Net.HttpListenerResponse]$Response
+    )
+
+    $body = Read-RequestBody $Request
+    $sourcePath = Resolve-MappedDrive $body.sourcePath
+    # Blank lines in the target list are dropped rather than reported as missing folders.
+    $targetPaths = @($body.targetPaths | Where-Object { $null -ne $_ -and "$_".Trim() } | ForEach-Object { Resolve-MappedDrive "$_".Trim() })
+    # An older page may still send "recursive"; it is ignored (owner decision D-031: copy only
+    # adds, with one change per target folder, and never resets anything below it).
+
+    if (-not $sourcePath -or -not (Test-Path -LiteralPath $sourcePath -PathType Container)) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Invalid source path" }
+        return
+    }
+    if ($targetPaths.Count -eq 0) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Missing required field: targetPaths" }
+        return
+    }
+
+    # Backed up and logged by the core; missing targets are skipped, files are refused.
+    Send-BatchChangeResult $Response { Copy-FolderPermission -SourcePath $sourcePath -TargetPath $targetPaths -LogFolder $script:ChangeLogFolder }
+}
+
+function Invoke-AddAce {
+    param(
+        [System.Net.HttpListenerRequest]$Request,
+        [System.Net.HttpListenerResponse]$Response
+    )
+
+    $body = Read-RequestBody $Request
+    $folderPath = Resolve-MappedDrive $body.path
+    $identity = $body.identity
+    $rights = $body.rights
+    $type = if ($body.type -eq 'Deny') { 'Deny' } else { 'Allow' }
+
+    if (-not $folderPath -or -not $identity -or -not $rights) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Missing required fields: path, identity, rights" }
+        return
+    }
+
+    Send-SingleChangeResult $Response { Add-FolderPermission -Path $folderPath -Identity $identity -Rights $rights -Type $type -LogFolder $script:ChangeLogFolder }
+}
+
+function Invoke-RemoveAce {
+    param(
+        [System.Net.HttpListenerRequest]$Request,
+        [System.Net.HttpListenerResponse]$Response
+    )
+
+    $body = Read-RequestBody $Request
+    $folderPath = Resolve-MappedDrive $body.path
+    $identity = $body.identity
+    $rights = $body.rights
+    $type = if ($body.type -eq 'Deny') { 'Deny' } else { 'Allow' }
+
+    if (-not $folderPath -or -not $identity -or -not $rights) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Missing required fields: path, identity, rights" }
+        return
+    }
+
+    Send-SingleChangeResult $Response { Remove-FolderPermission -Path $folderPath -Identity $identity -Rights $rights -Type $type -LogFolder $script:ChangeLogFolder }
+}
+
+function Invoke-ExportReport {
+    param(
+        [System.Net.HttpListenerRequest]$Request,
+        [System.Net.HttpListenerResponse]$Response
+    )
+
+    $folderPath = Resolve-MappedDrive $Request.QueryString['path']
+    if (-not $folderPath -or -not (Test-Path -LiteralPath $folderPath -PathType Container)) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Invalid or missing path parameter" }
+        return
+    }
+
+    $rows = [System.Collections.Generic.List[object]]::new()
+    $folders = @($folderPath) + @(Get-ChildItem -LiteralPath $folderPath -Recurse -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+
+    foreach ($folder in $folders) {
+        try {
+            $acl = Get-Acl -LiteralPath $folder -ErrorAction Stop
+            foreach ($entry in $acl.Access) {
+                $rows.Add([PSCustomObject]@{
+                    Path             = $folder
+                    Owner            = $acl.Owner
+                    Identity         = $entry.IdentityReference.ToString()
+                    Rights           = $entry.FileSystemRights.ToString()
+                    AccessType       = $entry.AccessControlType.ToString()
+                    IsInherited      = $entry.IsInherited
+                    InheritanceFlags = $entry.InheritanceFlags.ToString()
+                })
+            }
+        }
+        catch {
+            $rows.Add([PSCustomObject]@{
+                Path = $folder; Owner = 'ERROR'; Identity = ''; Rights = ''
+                AccessType = ''; IsInherited = ''; InheritanceFlags = $_.Exception.Message
+            })
+        }
+    }
+
+    $csv = ($rows | ConvertTo-Csv -NoTypeInformation) -join "`r`n"
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($csv)
+    $Response.ContentType = 'text/csv; charset=utf-8'
+    $safeName = ($folderPath -replace '[\\/:*?"<>|]', '_')
+    $Response.Headers.Add('Content-Disposition', "attachment; filename=Permissions-$safeName.csv")
+    $Response.ContentLength64 = $bytes.Length
+    $Response.OutputStream.Write($bytes, 0, $bytes.Length)
+    $Response.OutputStream.Close()
+}
+
+function Get-FileAcl {
+    param(
+        [System.Net.HttpListenerRequest]$Request,
+        [System.Net.HttpListenerResponse]$Response
+    )
+
+    $filePath = Resolve-MappedDrive $Request.QueryString['path']
+    if (-not $filePath -or -not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Invalid or missing path parameter" }
+        return
+    }
+
+    try {
+        $acl = Get-Acl -LiteralPath $filePath -ErrorAction Stop
+        $entries = @($acl.Access | ForEach-Object {
+            [PSCustomObject]@{
+                identity         = $_.IdentityReference.ToString()
+                rights           = $_.FileSystemRights.ToString()
+                type             = $_.AccessControlType.ToString()
+                isInherited      = $_.IsInherited
+                inheritanceFlags = $_.InheritanceFlags.ToString()
+                propagationFlags = $_.PropagationFlags.ToString()
+            }
+        })
+        $result = [PSCustomObject]@{
+            path                    = $filePath
+            owner                   = $acl.Owner
+            areAccessRulesProtected = $acl.AreAccessRulesProtected
+            entries                 = $entries
+        }
+        Send-Json $Response $result
+    }
+    catch [System.UnauthorizedAccessException] {
+        $Response.StatusCode = 403
+        Send-Json $Response @{ error = "Access denied to '$filePath'. Try taking ownership first." }
+    }
+    catch {
+        $Response.StatusCode = 500
+        Send-Json $Response @{ error = "Failed to read ACL: $($_.Exception.Message)" }
+    }
+}
+
+function Invoke-AddFileAce {
+    param(
+        [System.Net.HttpListenerRequest]$Request,
+        [System.Net.HttpListenerResponse]$Response
+    )
+
+    $body     = Read-RequestBody $Request
+    # Blank entries are dropped, so a selection with no real paths gets the 400 below.
+    $paths    = @($body.paths | Where-Object { $null -ne $_ -and "$_".Trim() })
+    $identity = $body.identity
+    $rights   = $body.rights
+    $type     = if ($body.type -eq 'Deny') { 'Deny' } else { 'Allow' }
+
+    if (-not $paths -or $paths.Count -eq 0 -or -not $identity -or -not $rights) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Missing required fields: paths, identity, rights" }
+        return
+    }
+
+    # One backup for the whole selection; a file that fails does not stop the others.
+    $filePaths = @($paths | ForEach-Object { Resolve-MappedDrive "$_" })
+    Send-BatchChangeResult $Response { Add-FolderPermission -Path $filePaths -Identity $identity -Rights $rights -Type $type -LogFolder $script:ChangeLogFolder }
+}
+
+function Invoke-RemoveFileAce {
+    param(
+        [System.Net.HttpListenerRequest]$Request,
+        [System.Net.HttpListenerResponse]$Response
+    )
+
+    $body     = Read-RequestBody $Request
+    # Blank entries are dropped, so a selection with no real paths gets the 400 below.
+    $paths    = @($body.paths | Where-Object { $null -ne $_ -and "$_".Trim() })
+    $identity = $body.identity
+    $rights   = $body.rights
+    $type     = if ($body.type -eq 'Deny') { 'Deny' } else { 'Allow' }
+
+    if (-not $paths -or $paths.Count -eq 0 -or -not $identity -or -not $rights) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Missing required fields: paths, identity, rights" }
+        return
+    }
+
+    # One backup for the whole selection; a file that fails does not stop the others.
+    $filePaths = @($paths | ForEach-Object { Resolve-MappedDrive "$_" })
+    Send-BatchChangeResult $Response { Remove-FolderPermission -Path $filePaths -Identity $identity -Rights $rights -Type $type -LogFolder $script:ChangeLogFolder }
+}
+
+function Invoke-TakeFileOwnership {
+    param(
+        [System.Net.HttpListenerRequest]$Request,
+        [System.Net.HttpListenerResponse]$Response
+    )
+
+    $body  = Read-RequestBody $Request
+    # Blank entries are dropped, so a selection with no real paths gets the 400 below.
+    $paths = @($body.paths | Where-Object { $null -ne $_ -and "$_".Trim() })
+
+    if (-not $paths -or $paths.Count -eq 0) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Missing required field: paths" }
+        return
+    }
+
+    # takeown, then the owner set to the current account; backed up and logged by the core.
+    $filePaths = @($paths | ForEach-Object { Resolve-MappedDrive "$_" })
+    Send-BatchChangeResult $Response { Set-ItemOwnerToCurrentUser -Path $filePaths -LogFolder $script:ChangeLogFolder }
+}
+
+function Invoke-RobocopyFiles {
+    param(
+        [System.Net.HttpListenerRequest]$Request,
+        [System.Net.HttpListenerResponse]$Response
+    )
+
+    $body       = Read-RequestBody $Request
+    $sourceDir  = Resolve-MappedDrive $body.sourceDir
+    $destDir    = Resolve-MappedDrive $body.destDir
+    $files      = @($body.files)
+    $extraFlags = $body.extraFlags
+
+    # Explicit rejection — empty files[] must never fall through to a full directory copy
+    if (-not $files -or $files.Count -eq 0) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "files[] must not be empty" }
+        return
+    }
+
+    if (-not $sourceDir -or -not (Test-Path -LiteralPath $sourceDir -PathType Container)) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Invalid or missing sourceDir" }
+        return
+    }
+
+    if (-not $destDir) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Missing destDir" }
+        return
+    }
+
+    # Validate each file exists as a leaf before invoking robocopy
+    $invalidFiles = $files | Where-Object { -not (Test-Path -LiteralPath (Join-Path $sourceDir $_) -PathType Leaf) }
+    if ($invalidFiles) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Files not found in sourceDir: $($invalidFiles -join ', ')" }
+        return
+    }
+
+    # Build robocopy args
+    # /COPY:DATSO = Data, Attributes, Timestamps, Security (ACLs), Owner info
+    # /COPY:U (auditing) is intentionally excluded — requires SeSecurityPrivilege (Backup Operator+)
+    # which is not guaranteed in standard MSP environments and causes silent partial failures.
+    # /SECFIX is required for file copies — without it robocopy skips ACL copying on unchanged files
+    $roboArgs = [System.Collections.Generic.List[string]]::new()
+    $roboArgs.Add("`"$sourceDir`"")
+    $roboArgs.Add("`"$destDir`"")
+    foreach ($f in $files) { $roboArgs.Add("`"$f`"") }
+    $roboArgs.Add('/COPY:DATSO')
+    $roboArgs.Add('/SECFIX')
+    $roboArgs.Add('/ZB')
+    $roboArgs.Add('/NP')
+    $roboArgs.Add('/R:3')
+    $roboArgs.Add('/W:5')
+    if ($extraFlags) { $roboArgs.Add($extraFlags) }
+
+    $cmdLine = "robocopy $($roboArgs -join ' ')"
+
+    try {
+        $output   = cmd /c $cmdLine 2>&1
+        $exitCode = $LASTEXITCODE
+        $success  = $exitCode -lt 8
+
+        $summary = @{
+            status   = if ($success) { 'success' } else { 'error' }
+            exitCode = $exitCode
+            exitMeaning = switch ($exitCode) {
+                0  { 'No files copied — source and destination are identical' }
+                1  { 'Files copied successfully' }
+                2  { 'Extra files detected in destination' }
+                3  { 'Files copied + extra files detected' }
+                4  { 'Mismatched files detected' }
+                5  { 'Files copied + mismatched files' }
+                6  { 'Extra and mismatched files detected' }
+                7  { 'Files copied + extra + mismatched' }
+                8  { 'Some files could not be copied (errors occurred)' }
+                16 { 'Fatal error — no files were copied' }
+                default { "Exit code $exitCode" }
+            }
+            command  = $cmdLine
+            output   = ($output | Out-String).Trim()
+        }
+
+        if (-not $success) { $Response.StatusCode = 500 }
+        Send-Json $Response $summary
+    }
+    catch {
+        $Response.StatusCode = 500
+        Send-Json $Response @{ error = "Robocopy failed: $($_.Exception.Message)"; command = $cmdLine }
+    }
+}
+
+function Invoke-Robocopy {
+    param(
+        [System.Net.HttpListenerRequest]$Request,
+        [System.Net.HttpListenerResponse]$Response
+    )
+
+    $body = Read-RequestBody $Request
+    $source = Resolve-MappedDrive $body.source
+    $destination = Resolve-MappedDrive $body.destination
+    $mode = $body.mode          # 'copy' or 'mirror'
+    $threads = $body.threads    # /MT:N
+    $retries = $body.retries    # /R:N
+    $waitTime = $body.waitTime  # /W:N
+    $logFile = $body.logFile    # log path — defaults to destination folder if true/empty
+    $extraFlags = $body.extraFlags  # optional raw flags string
+
+    if (-not $source -or -not (Test-Path -LiteralPath $source -PathType Container)) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Invalid or missing source path" }
+        return
+    }
+
+    if (-not $destination) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Missing destination path" }
+        return
+    }
+
+    # Build robocopy arguments
+    # /COPY:DATSOU = Data, Attributes, Timestamps, Security (ACLs), Owner, aUditing
+    # /DCOPY:DAT   = Directory Data, Attributes, Timestamps
+    $roboArgs = [System.Collections.Generic.List[string]]::new()
+    $roboArgs.Add("`"$source`"")
+    $roboArgs.Add("`"$destination`"")
+
+    if ($mode -eq 'mirror') {
+        $roboArgs.Add('/MIR')
+    } else {
+        $roboArgs.Add('/E')
+    }
+
+    $roboArgs.Add('/COPY:DATSOU')
+    $roboArgs.Add('/DCOPY:DAT')
+    $roboArgs.Add('/ZB')
+    $roboArgs.Add('/NP')
+    $roboArgs.Add('/ETA')
+    $roboArgs.Add('/R:' + $(if ($retries) { $retries } else { 3 }))
+    $roboArgs.Add('/W:' + $(if ($waitTime) { $waitTime } else { 5 }))
+
+    if ($threads -and $threads -gt 0) {
+        $roboArgs.Add("/MT:$threads")
+    } else {
+        $roboArgs.Add('/MT:8')
+    }
+
+    if ($logFile) {
+        $roboArgs.Add("/LOG:`"$logFile`"")
+        $roboArgs.Add('/TEE')
+    }
+
+    if ($extraFlags) {
+        $extraFlags -split '\s+' | Where-Object { $_ } | ForEach-Object { $roboArgs.Add($_) }
+    }
+
+    $argString = $roboArgs -join ' '
+    $cmdLine = "robocopy $argString"
+
+    try {
+        # Create destination if it doesn't exist
+        if (-not (Test-Path -LiteralPath $destination -PathType Container)) {
+            New-Item -Path $destination -ItemType Directory -Force | Out-Null
+        }
+
+        # If logFile path was provided, ensure its parent directory exists
+        if ($logFile) {
+            $logDir = Split-Path -Path $logFile -Parent
+            if ($logDir -and -not (Test-Path -LiteralPath $logDir -PathType Container)) {
+                New-Item -Path $logDir -ItemType Directory -Force | Out-Null
+            }
+        }
+
+        $output = cmd /c $cmdLine 2>&1
+        $exitCode = $LASTEXITCODE
+
+        # Robocopy exit codes: 0-7 = success (bitmask), 8+ = errors
+        $success = $exitCode -lt 8
+        $summary = @{
+            status   = if ($success) { 'success' } else { 'error' }
+            exitCode = $exitCode
+            exitMeaning = switch ($exitCode) {
+                0 { 'No files copied — source and destination are synchronized' }
+                1 { 'Files copied successfully' }
+                2 { 'Extra files or directories detected in destination' }
+                3 { 'Files copied + extra files in destination' }
+                4 { 'Mismatched files or directories detected' }
+                5 { 'Files copied + mismatched files detected' }
+                6 { 'Extra and mismatched files detected' }
+                7 { 'Files copied + extra + mismatched' }
+                8 { 'Some files or directories could not be copied (errors occurred)' }
+                16 { 'Fatal error — no files were copied' }
+                default { "Exit code $exitCode" }
+            }
+            command  = $cmdLine
+            output   = ($output | Out-String).Trim()
+        }
+
+        if (-not $success) { $Response.StatusCode = 500 }
+        Send-Json $Response $summary
+    }
+    catch {
+        $Response.StatusCode = 500
+        Send-Json $Response @{ error = "Robocopy failed: $($_.Exception.Message)"; command = $cmdLine }
+    }
+}
+
+function Get-RobocopyPreview {
+    param(
+        [System.Net.HttpListenerRequest]$Request,
+        [System.Net.HttpListenerResponse]$Response
+    )
+
+    $source = Resolve-MappedDrive $Request.QueryString['source']
+    $destination = Resolve-MappedDrive $Request.QueryString['destination']
+
+    if (-not $source -or -not (Test-Path -LiteralPath $source -PathType Container)) {
+        $Response.StatusCode = 400
+        Send-Json $Response @{ error = "Invalid source path" }
+        return
+    }
+
+    try {
+        # /L = List only (no copy), /E = include subdirs, /BYTES = show sizes in bytes
+        $output = robocopy $source $(if ($destination) { $destination } else { 'NUL' }) /L /E /BYTES /NP /NFL /NDL 2>&1
+        $summary = ($output | Out-String).Trim()
+
+        # Parse the summary lines
+        $dirs = 0; $files = 0; $bytes = 0
+        if ($summary -match 'Dirs\s*:\s*(\d+)') { $dirs = [int]$Matches[1] }
+        if ($summary -match 'Files\s*:\s*(\d+)') { $files = [int]$Matches[1] }
+        if ($summary -match 'Bytes\s*:\s*(\d+)') { $bytes = [long]$Matches[1] }
+
+        Send-Json $Response @{
+            dirs  = $dirs
+            files = $files
+            bytes = $bytes
+            sizeDisplay = if ($bytes -gt 1GB) { "$([math]::Round($bytes / 1GB, 2)) GB" }
+                          elseif ($bytes -gt 1MB) { "$([math]::Round($bytes / 1MB, 1)) MB" }
+                          else { "$([math]::Round($bytes / 1KB, 0)) KB" }
+            rawSummary = $summary
+        }
+    }
+    catch {
+        $Response.StatusCode = 500
+        Send-Json $Response @{ error = "Preview failed: $($_.Exception.Message)" }
+    }
+}
+
+# --- Route Dispatcher ---
+
+function Invoke-Route {
+    param(
+        [System.Net.HttpListenerContext]$Context
+    )
+
+    $request = $Context.Request
+    $response = $Context.Response
+    $path = $request.Url.AbsolutePath
+    $method = $request.HttpMethod
+
+    try {
+        switch -Regex ("$method $path") {
+            '^GET /$'                    { Send-Html $response }
+            '^GET /api/drives$'          { Get-Drives $response }
+            '^GET /api/children$'        { Get-Children $request $response }
+            '^GET /api/files$'           { Get-Files $request $response }
+            '^GET /api/acl$'             { Get-FolderAcl $request $response }
+            '^POST /api/take-ownership$' { Invoke-TakeOwnership $request $response }
+            '^POST /api/replicate$'      { Invoke-ReplicatePermissions $request $response }
+            '^POST /api/add-ace$'        { Invoke-AddAce $request $response }
+            '^POST /api/remove-ace$'     { Invoke-RemoveAce $request $response }
+            '^GET /api/export$'          { Invoke-ExportReport $request $response }
+            '^POST /api/robocopy$'       { Invoke-Robocopy $request $response }
+            '^GET /api/robocopy-preview$' { Get-RobocopyPreview $request $response }
+            '^GET /api/file-acl$'                  { Get-FileAcl $request $response }
+            '^POST /api/file-acl/add$'             { Invoke-AddFileAce $request $response }
+            '^POST /api/file-acl/remove$'          { Invoke-RemoveFileAce $request $response }
+            '^POST /api/file-acl/take-ownership$'  { Invoke-TakeFileOwnership $request $response }
+            '^POST /api/robocopy-files$'           { Invoke-RobocopyFiles $request $response }
+            '^GET /api/shutdown$'        {
+                Send-Json $response @{ status = 'shutting down' }
+                $script:running = $false
+            }
+            default {
+                $response.StatusCode = 404
+                Send-Json $response @{ error = 'Not found' }
+            }
+        }
+    }
+    catch {
+        $response.StatusCode = 500
+        Send-Json $response @{ error = $_.Exception.Message }
+    }
+}
+
+# --- Placeholder HTML Content ---
+
+$script:htmlContent = @"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Folder Permission Manager</title>
+<style>
+:root {
+    --bg: #1a1d23;
+    --bg-card: #23272e;
+    --bg-hover: #2a2f38;
+    --bg-input: #1e2229;
+    --text: #e0e0e0;
+    --text-muted: #8b95a5;
+    --accent: #5dade2;
+    --accent-hover: #4a9bd4;
+    --border: #333a45;
+    --success: #2ecc71;
+    --warning: #f39c12;
+    --danger: #e74c3c;
+    --danger-hover: #c0392b;
+    --shadow: rgba(0,0,0,0.3);
+}
+body.light {
+    --bg: #f5f5f5;
+    --bg-card: #ffffff;
+    --bg-hover: #e8ecf0;
+    --bg-input: #ffffff;
+    --text: #2c3e50;
+    --text-muted: #7f8c8d;
+    --accent: #3498db;
+    --accent-hover: #2980b9;
+    --border: #dce1e8;
+    --shadow: rgba(0,0,0,0.1);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+/* Top nav */
+.topbar { display: flex; align-items: center; justify-content: space-between; padding: 8px 16px; background: var(--bg-card); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.topbar h1 { font-size: 14px; font-weight: 600; color: var(--accent); }
+.topbar-actions { display: flex; gap: 8px; align-items: center; }
+
+/* Tab bar */
+.tabbar { display: flex; background: var(--bg-card); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.tab { padding: 8px 16px; font-size: 13px; cursor: pointer; border-bottom: 2px solid transparent; color: var(--text-muted); transition: color 0.15s, border-color 0.15s; user-select: none; }
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* Main layout */
+.main { display: flex; flex: 1; overflow: hidden; }
+
+/* Left panel — folder tree */
+.panel-left { width: 280px; min-width: 200px; border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; background: var(--bg-card); }
+.panel-left-header { padding: 10px 12px; font-size: 12px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.tree-container { flex: 1; overflow-y: auto; padding: 4px 0; }
+
+/* Tree nodes */
+.tree-node { padding: 5px 8px 5px 0; cursor: pointer; font-size: 13px; display: flex; align-items: center; gap: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-radius: 4px; margin: 1px 4px; }
+.tree-node:hover { background: var(--bg-hover); }
+.tree-node.selected { background: var(--accent); color: #fff; }
+.tree-node .toggle { width: 16px; text-align: center; flex-shrink: 0; font-size: 10px; color: var(--text-muted); }
+.tree-node.selected .toggle { color: rgba(255,255,255,0.7); }
+.tree-children { padding-left: 16px; }
+
+/* Right panel */
+.panel-right { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; }
+
+/* Tab content panes */
+.tab-pane { display: none; flex: 1; overflow: hidden; }
+.tab-pane.active { display: flex; flex-direction: column; }
+
+/* Permissions pane — stacked: folder ACL top, files section below */
+#pane-permissions { flex-direction: column; }
+.pane-section { padding: 14px 16px; border-bottom: 1px solid var(--border); }
+.pane-section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.pane-section-title { font-size: 13px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+
+/* Folder ACL section */
+#folder-acl-section { flex-shrink: 0; }
+.owner-row { font-size: 12px; margin-bottom: 10px; color: var(--text-muted); }
+.owner-row span { color: var(--text); font-weight: 500; }
+.acl-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.acl-table th { text-align: left; padding: 4px 8px; color: var(--text-muted); font-weight: 500; border-bottom: 1px solid var(--border); }
+.acl-table td { padding: 5px 8px; border-bottom: 1px solid var(--border); }
+.acl-table tr:last-child td { border-bottom: none; }
+.badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; }
+.badge-allow { background: rgba(46,204,113,0.15); color: var(--success); }
+.badge-deny  { background: rgba(231,76,60,0.15); color: var(--danger); }
+.badge-inherited { background: rgba(139,149,165,0.15); color: var(--text-muted); }
+
+/* Buttons */
+.btn { padding: 5px 12px; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 500; transition: background 0.15s, color 0.15s, border-color 0.15s; }
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-primary:hover { background: var(--accent-hover); }
+.btn-danger  { background: var(--danger); color: #fff; }
+.btn-danger:hover  { background: var(--danger-hover); }
+.btn-secondary { background: var(--bg-hover); color: var(--text); border: 1px solid var(--border); }
+.btn-secondary:hover { background: var(--border); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Status bar */
+/* A long result (folders to escalate) scrolls inside the bar instead of pushing the panel up.
+   Block, not flex: a centred flex line that overflows cannot be scrolled to its start. */
+.status-bar { padding: 8px 16px; font-size: 12px; background: var(--bg-card); border-top: 1px solid var(--border); flex-shrink: 0; min-height: 34px; max-height: 30vh; overflow-y: auto; line-height: 1.5; overflow-wrap: anywhere; }
+.status-bar.success { color: var(--success); }
+.status-bar.error   { color: var(--danger); }
+.status-bar.info    { color: var(--accent); }
+.status-bar.warning { color: var(--warning); }
+
+/* Modal overlay */
+.modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100; align-items: center; justify-content: center; }
+.modal-overlay.open { display: flex; }
+.modal { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 20px; min-width: 360px; max-width: 520px; width: 90%; }
+.modal h3 { font-size: 14px; font-weight: 600; margin-bottom: 14px; }
+.form-row { margin-bottom: 10px; }
+.form-row label { display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+.form-row input, .form-row select { width: 100%; padding: 6px 8px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 13px; transition: border-color 0.15s; }
+.form-row input:focus, .form-row select:focus { outline: none; border-color: var(--accent); }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+
+/* Placeholder state */
+.placeholder-msg { display: flex; align-items: center; justify-content: center; flex: 1; color: var(--text-muted); font-size: 13px; }
+
+/* Files section */
+#files-section { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+.files-list-header { display: grid; grid-template-columns: 24px 1fr 80px 140px 24px; align-items: center; gap: 6px; padding: 6px 16px; background: var(--bg-card); border-bottom: 1px solid var(--border); font-size: 11px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; flex-shrink: 0; }
+.files-list { flex: 1; overflow-y: auto; }
+.file-row { display: grid; grid-template-columns: 24px 1fr 80px 140px 24px; align-items: center; gap: 6px; padding: 5px 16px; font-size: 12px; border-bottom: 1px solid var(--border); cursor: default; }
+.file-row:hover { background: var(--bg-hover); }
+.file-row.checked { background: rgba(93,173,226,0.08); }
+.file-row input[type=checkbox] { cursor: pointer; }
+.file-row .file-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.file-row .file-size { color: var(--text-muted); text-align: right; }
+.file-row .file-date { color: var(--text-muted); }
+.expand-btn { background: none; border: none; cursor: pointer; color: var(--text-muted); padding: 0 2px; font-size: 11px; }
+.expand-btn:hover { color: var(--accent); }
+
+/* Inline file ACL */
+.file-acl-row { background: var(--bg-input); padding: 8px 16px 8px 44px; border-bottom: 1px solid var(--border); font-size: 11px; }
+.file-acl-row .acl-entry { display: flex; gap: 8px; align-items: center; padding: 2px 0; }
+
+/* Sticky action bar */
+.action-bar { display: none; padding: 8px 16px; background: var(--bg-card); border-top: 2px solid var(--accent); flex-shrink: 0; }
+.action-bar.visible { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.action-bar .selection-count { font-size: 12px; font-weight: 600; color: var(--accent); margin-right: 4px; }
+.acl-diff-warning { width: 100%; padding: 4px 8px; background: rgba(243,156,18,0.15); border: 1px solid var(--warning); border-radius: 4px; color: var(--warning); font-size: 11px; margin-top: 4px; }
+
+/* Robocopy pane */
+#pane-robocopy { padding: 20px 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 0; }
+
+/* Mode selector cards */
+.robo-mode-cards { display: flex; gap: 8px; margin-bottom: 20px; }
+.robo-mode-card { flex: 1; max-width: 220px; padding: 10px 14px; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; background: var(--bg-input); transition: border-color 0.15s, background 0.15s; }
+.robo-mode-card:hover { border-color: var(--accent); background: var(--bg-hover); }
+.robo-mode-card.active { border-color: var(--accent); background: rgba(93,173,226,0.08); }
+.robo-mode-card .card-title { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 2px; }
+.robo-mode-card.active .card-title { color: var(--accent); }
+.robo-mode-card .card-desc { font-size: 11px; color: var(--text-muted); line-height: 1.4; }
+
+/* Form sections */
+.robo-form { display: flex; flex-direction: column; gap: 12px; max-width: 580px; }
+.robo-form label { font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 4px; }
+.robo-form input, .robo-form select { padding: 6px 8px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 13px; width: 100%; }
+.robo-form input:focus, .robo-form select:focus { outline: none; border-color: var(--accent); }
+
+/* Advanced options disclosure */
+.robo-advanced { margin-top: 4px; }
+.robo-advanced summary { font-size: 12px; color: var(--text-muted); cursor: pointer; user-select: none; padding: 6px 0; display: flex; align-items: center; gap: 6px; list-style: none; }
+.robo-advanced summary::-webkit-details-marker { display: none; }
+.robo-advanced summary::before { content: '▶'; font-size: 9px; transition: transform 0.15s; display: inline-block; }
+.robo-advanced[open] summary::before { transform: rotate(90deg); }
+.robo-advanced summary:hover { color: var(--text); }
+.robo-advanced-body { display: flex; flex-direction: column; gap: 10px; padding-top: 10px; border-top: 1px solid var(--border); margin-top: 6px; }
+
+/* Output area */
+.robo-output-wrap { margin-top: 20px; max-width: 580px; }
+.robo-output-header { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; background: var(--bg-hover); border: 1px solid var(--border); border-bottom: none; border-radius: 4px 4px 0 0; font-size: 11px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.robo-output-header .robo-exit-badge { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 3px; }
+.robo-output-header .robo-exit-badge.ok { background: rgba(46,204,113,0.15); color: var(--success); }
+.robo-output-header .robo-exit-badge.warn { background: rgba(243,156,18,0.15); color: var(--warning); }
+.robo-output { font-family: 'Consolas', monospace; font-size: 11px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 0 0 4px 4px; padding: 10px; white-space: pre-wrap; height: 200px; overflow-y: auto; color: var(--text-muted); }
+.robo-output.placeholder { display: flex; align-items: center; justify-content: center; color: var(--text-muted); font-family: 'Segoe UI', sans-serif; font-size: 12px; font-style: italic; }
+
+/* File list */
+.robo-file-list { border: 1px solid var(--border); border-radius: 4px; max-height: 180px; overflow-y: auto; background: var(--bg-input); }
+.robo-file-item { display: flex; align-items: center; gap: 6px; padding: 4px 8px; font-size: 12px; border-bottom: 1px solid var(--border); }
+.robo-file-item:last-child { border-bottom: none; }
+.robo-file-item input[type=checkbox] { cursor: pointer; }
+
+/* Icons */
+.btn svg, .btn-icon svg { vertical-align: middle; margin-right: 4px; flex-shrink: 0; }
+.btn-icon { display: inline-flex; align-items: center; gap: 4px; }
+.btn-ghost { background: transparent; color: var(--text-muted); border: 1px solid var(--border); }
+.btn-ghost:hover { background: rgba(231,76,60,0.1); color: var(--danger); border-color: var(--danger); }
+.tree-node .node-icon { flex-shrink: 0; color: var(--text-muted); }
+.tree-node.selected .node-icon { color: rgba(255,255,255,0.8); }
+.file-icon { color: var(--text-muted); flex-shrink: 0; }
+
+/* Path context header */
+.path-header { padding: 8px 16px; background: var(--bg-card); border-bottom: 1px solid var(--border); font-size: 12px; color: var(--text-muted); flex-shrink: 0; display: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.path-header .path-drive { color: var(--accent); font-weight: 600; }
+.path-header .path-rest { color: var(--text); }
+
+/* Overflow action menu */
+.folder-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; align-items: center; }
+.action-overflow { position: relative; display: inline-block; }
+.action-overflow-btn { padding: 5px 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-hover); color: var(--text-muted); cursor: pointer; font-size: 13px; line-height: 1; transition: background 0.15s, color 0.15s; }
+.action-overflow-btn:hover { background: var(--border); color: var(--text); }
+.action-overflow-menu { position: absolute; top: calc(100% + 4px); left: 0; background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; min-width: 210px; z-index: 50; box-shadow: 0 4px 16px var(--shadow); padding: 4px 0; opacity: 0; pointer-events: none; transform: translateY(-4px); transition: opacity 0.12s ease-out, transform 0.12s ease-out; }
+.action-overflow-menu.open { opacity: 1; pointer-events: auto; transform: translateY(0); }
+.overflow-item { display: flex; align-items: center; gap: 8px; padding: 7px 12px; font-size: 12px; cursor: pointer; color: var(--text); white-space: nowrap; }
+.overflow-item:hover { background: var(--bg-hover); }
+.overflow-item svg { flex-shrink: 0; color: var(--text-muted); }
+.overflow-item.danger { color: var(--danger); }
+.overflow-item.danger svg { color: var(--danger); }
+.overflow-divider { height: 1px; background: var(--border); margin: 4px 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>Folder Permission Manager</h1>
+  <div class="topbar-actions">
+    <button class="btn btn-secondary btn-icon" onclick="toggleTheme()" id="btnTheme" title="Switch to light mode">
+      <svg id="iconTheme" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+      <span id="btnThemeLabel">Light</span>
+    </button>
+    <button class="btn btn-ghost btn-icon" onclick="shutdown()" title="Stop the server">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg>
+      Shut Down
+    </button>
+  </div>
+</div>
+
+<div class="tabbar">
+  <div class="tab active" data-tab="permissions" onclick="switchTab('permissions')">Permissions</div>
+  <div class="tab" data-tab="robocopy" onclick="switchTab('robocopy')">Robocopy</div>
+</div>
+
+<div class="main">
+  <!-- Left panel: folder tree -->
+  <div class="panel-left">
+    <div class="panel-left-header" id="panelLeftHeader">Folders</div>
+    <div id="panelLeftHint" style="padding:4px 12px 6px;font-size:11px;color:var(--accent);display:none;border-bottom:1px solid var(--border);">Click a folder to set as source</div>
+    <div class="tree-container" id="treeContainer"></div>
+  </div>
+
+  <!-- Right panel -->
+  <div class="panel-right">
+
+    <!-- Permissions tab pane -->
+    <div class="tab-pane active" id="pane-permissions">
+
+      <div id="path-header" class="path-header"></div>
+
+      <div id="no-folder-msg" class="placeholder-msg">
+        <div style="text-align:center;">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="color:var(--border);display:block;margin:0 auto 10px;"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+          <div>Choose a folder from the left panel to view and manage its permissions.</div>
+        </div>
+      </div>
+
+      <!-- Folder ACL section -->
+      <div id="folder-acl-section" class="pane-section" style="display:none;">
+        <div class="pane-section-header">
+          <span class="pane-section-title" id="folderAclTitle">Folder Permissions</span>
+          <span class="owner-row">Owner: <span id="folderOwner">—</span></span>
+        </div>
+        <table class="acl-table">
+          <thead><tr><th>User or Group</th><th>Permission Level</th><th>Type</th><th>Inherited</th></tr></thead>
+          <tbody id="folderAclBody"></tbody>
+        </table>
+        <div class="folder-actions">
+          <button class="btn btn-primary btn-icon" onclick="showAddAceModal('folder')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Add Permission</button>
+          <button class="btn btn-secondary btn-icon" onclick="showRemoveAceModal('folder')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"/></svg>Remove Permission</button>
+          <div class="action-overflow" id="folderOverflow">
+            <button class="action-overflow-btn" onclick="toggleOverflow('folderOverflow')" title="More actions">•••</button>
+            <div class="action-overflow-menu" id="folderOverflowMenu">
+              <div class="overflow-item" onclick="closeOverflow('folderOverflow'); takeOwnership(false)">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                Take Ownership
+              </div>
+              <div class="overflow-item danger" onclick="closeOverflow('folderOverflow'); takeOwnership(true)">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                Take Ownership — All Files Too
+              </div>
+              <div class="overflow-divider"></div>
+              <div class="overflow-item" onclick="closeOverflow('folderOverflow'); showReplicateModal()">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                Copy Permissions To...
+              </div>
+              <div class="overflow-item" id="overflowExport" onclick="closeOverflow('folderOverflow'); exportReport()">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Export CSV
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Files section -->
+      <div id="files-section" style="display:none;">
+        <div class="files-list-header">
+          <input type="checkbox" id="selectAllFiles" onchange="toggleSelectAll(this.checked)" title="Select all">
+          <span>Name</span>
+          <span style="text-align:right">Size</span>
+          <span>Modified</span>
+          <span></span>
+        </div>
+        <div class="files-list" id="filesList"></div>
+        <!-- Sticky batch action bar -->
+        <div class="action-bar" id="actionBar">
+          <span class="selection-count" id="selectionCount">0 selected</span>
+          <button class="btn btn-primary btn-icon" onclick="showAddAceModal('files')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Add Permission</button>
+          <button class="btn btn-secondary btn-icon" onclick="showRemoveAceModal('files')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"/></svg>Remove Permission</button>
+          <button class="btn btn-secondary btn-icon" onclick="takeFileOwnership()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>Take Ownership</button>
+          <button class="btn btn-secondary btn-icon" onclick="showCopyFilesModal()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Copy Files To...</button>
+          <div class="acl-diff-warning" id="aclDiffWarning" style="display:none;">
+            Selected files have different permissions — this operation applies uniformly to all
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /pane-permissions -->
+
+    <!-- Robocopy tab pane -->
+    <div class="tab-pane" id="pane-robocopy">
+
+      <!-- Mode selector -->
+      <div class="robo-mode-cards">
+        <div class="robo-mode-card active" id="roboModeFolderCard" onclick="setRoboMode('folder')" title="Sync a folder">
+          <div class="card-title">Sync a folder</div>
+          <div class="card-desc">Copy or mirror an entire directory tree to another location</div>
+        </div>
+        <div class="robo-mode-card" id="roboModeFileCard" onclick="setRoboMode('file')" title="Copy specific files">
+          <div class="card-title">Copy specific files</div>
+          <div class="card-desc">Pick individual files from a folder and copy them to a destination</div>
+        </div>
+      </div>
+
+      <!-- Folder sync mode -->
+      <div id="roboFolderForm" class="robo-form">
+        <div><label>Source folder</label><input type="text" id="roboSrc" placeholder="\\server\share\source or C:\local\path"></div>
+        <div><label>Destination folder</label><input type="text" id="roboDst" placeholder="\\server\share\dest or C:\local\dest"></div>
+        <div>
+          <label>Copy mode</label>
+          <select id="roboMode" onchange="updateMirrorWarning()">
+            <option value="copy">Copy — add and update files, keep files that only exist in destination</option>
+            <option value="mirror">Mirror — make destination an exact copy (deletes extra files in destination)</option>
+          </select>
+        </div>
+        <div id="mirrorWarning" style="display:none; padding:8px 10px; background:rgba(243,156,18,0.12); border:1px solid var(--warning); border-radius:4px; font-size:12px; color:var(--warning);">
+          <strong>Warning:</strong> Mirror mode will permanently delete any files in the destination that don't exist in the source. This cannot be undone.
+        </div>
+
+        <!-- Advanced options -->
+        <details class="robo-advanced">
+          <summary>Advanced options</summary>
+          <div class="robo-advanced-body">
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
+              <div><label>Parallel threads</label><input type="number" id="roboThreads" value="8" min="1" max="128" title="Number of parallel copy threads (/MT)"></div>
+              <div><label>Retry attempts</label><input type="number" id="roboRetries" value="3" min="0" title="Times to retry a failed file copy (/R)"></div>
+              <div><label>Retry wait (sec)</label><input type="number" id="roboWait" value="5" min="0" title="Seconds to wait between retries (/W)"></div>
+            </div>
+            <div><label>Extra flags <span style="font-weight:400;font-style:italic;">(e.g. /XF *.tmp /XD .git)</span></label><input type="text" id="roboExtra" placeholder="Optional additional robocopy flags"></div>
+            <div><label>Log file path <span style="font-weight:400;font-style:italic;">(leave empty to skip)</span></label><input type="text" id="roboLog" placeholder="C:\Logs\robocopy.log"></div>
+          </div>
+        </details>
+
+        <div style="display:flex;gap:8px;margin-top:4px;">
+          <button class="btn btn-secondary btn-icon" id="btnRoboPreview" onclick="roboPreview()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>Preview</button>
+          <button class="btn btn-primary btn-icon" id="btnRobocopy" onclick="runRobocopy()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>Run Copy</button>
+        </div>
+      </div>
+
+      <!-- File picker mode -->
+      <div id="roboFileForm" class="robo-form" style="display:none;">
+        <div style="display:flex;gap:8px;align-items:flex-end;">
+          <div style="flex:1;"><label>Source folder</label><input type="text" id="roboFileSrc" placeholder="\\server\share\source or C:\local\path"></div>
+          <button class="btn btn-secondary" style="margin-bottom:0;" onclick="loadRoboFileList()">Load files</button>
+        </div>
+        <div><label>Select files to copy</label><div class="robo-file-list" id="roboFileList"><span style="padding:8px;color:var(--text-muted);font-size:12px;display:block;">Enter a source folder above, then click Load files</span></div></div>
+        <div><label>Destination folder</label><input type="text" id="roboFileDst" placeholder="\\server\share\dest or C:\local\dest"></div>
+        <div><label>Extra flags <span style="font-weight:400;font-style:italic;">(optional)</span></label><input type="text" id="roboFileExtra" placeholder="/XO"></div>
+        <div style="margin-top:4px;">
+          <button class="btn btn-primary btn-icon" id="btnRobocopyFiles" onclick="runRobocopyFiles()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>Copy Selected Files</button>
+        </div>
+      </div>
+
+      <!-- Output area — always visible -->
+      <div class="robo-output-wrap">
+        <div class="robo-output-header">
+          <span>Output</span>
+          <span id="roboExitBadge"></span>
+        </div>
+        <div class="robo-output placeholder" id="roboOutput">Run a copy to see output here</div>
+      </div>
+
+    </div><!-- /pane-robocopy -->
+
+    <div class="status-bar" id="statusBar" role="status" aria-live="polite">Ready</div>
+
+  </div><!-- /panel-right -->
+</div><!-- /main -->
+
+<!-- Add ACE modal -->
+<div class="modal-overlay" id="addAceModal">
+  <div class="modal">
+    <h3 id="addAceModalTitle">Add Permission</h3>
+    <div class="form-row"><label>User or Group</label><input type="text" id="addAceIdentity" placeholder="DOMAIN\User or DOMAIN\Group"></div>
+    <div class="form-row">
+      <label>Permission Level</label>
+      <select id="addAceRights">
+        <option value="FullControl">Full Control</option>
+        <option value="Modify">Modify</option>
+        <option value="ReadAndExecute">Read & Execute</option>
+        <option value="Read">Read</option>
+        <option value="Write">Write</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <label>Type</label>
+      <select id="addAceType">
+        <option value="Allow">Allow</option>
+        <option value="Deny">Deny</option>
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('addAceModal')">Cancel</button>
+      <button class="btn btn-primary" onclick="submitAddAce()">Add</button>
+    </div>
+  </div>
+</div>
+
+<!-- Remove ACE modal -->
+<div class="modal-overlay" id="removeAceModal">
+  <div class="modal">
+    <h3 id="removeAceModalTitle">Remove Permission</h3>
+    <div class="form-row">
+      <label>User or Group</label>
+      <select id="removeAceIdentity"></select>
+    </div>
+    <div class="form-row">
+      <label>Permission Level</label>
+      <select id="removeAceRights">
+        <option value="FullControl">Full Control</option>
+        <option value="Modify">Modify</option>
+        <option value="ReadAndExecute">Read & Execute</option>
+        <option value="Read">Read</option>
+        <option value="Write">Write</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <label>Type</label>
+      <select id="removeAceType">
+        <option value="Allow">Allow</option>
+        <option value="Deny">Deny</option>
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('removeAceModal')">Cancel</button>
+      <button class="btn btn-danger" onclick="submitRemoveAce()">Remove</button>
+    </div>
+  </div>
+</div>
+
+<!-- Replicate modal -->
+<div class="modal-overlay" id="replicateModal">
+  <div class="modal">
+    <h3>Copy Permissions To...</h3>
+    <p style="font-size:12px;margin-bottom:6px;">Copy from: <strong id="replicateSource" style="word-break:break-all;"></strong></p>
+    <p style="font-size:12px;margin-bottom:6px;">Adds this folder's own permissions to each folder you list. Nothing is removed.</p>
+    <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">Subfolders that inherit permissions get them too. Subfolders that block inheritance (folders with inheritance turned off) are not changed.</p>
+    <p id="replicateDenyNote" style="font-size:12px;color:var(--warning);margin-bottom:12px;display:none;"></p>
+    <div class="form-row"><label for="replicateTargets">Folders to copy to (one per line)</label><textarea id="replicateTargets" rows="5" style="width:100%;background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:6px 8px;font-size:12px;resize:vertical;" placeholder="C:\Shares\FolderA&#10;C:\Shares\FolderB"></textarea></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('replicateModal')">Cancel</button>
+      <button class="btn btn-primary" onclick="submitReplicate()">Copy Permissions</button>
+    </div>
+  </div>
+</div>
+
+<!-- Copy files modal -->
+<div class="modal-overlay" id="copyFilesModal">
+  <div class="modal">
+    <h3>Copy Selected Files</h3>
+    <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">Files will be copied with ACL preservation (/COPY:DATSO /SECFIX).</p>
+    <div class="form-row"><label>Destination folder</label><input type="text" id="copyFilesDest" placeholder="\\server\share\dest"></div>
+    <div class="form-row"><label>Extra robocopy flags (optional)</label><input type="text" id="copyFilesExtra" placeholder="/XO"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('copyFilesModal')">Cancel</button>
+      <button class="btn btn-primary" onclick="submitCopyFiles()">Copy</button>
+    </div>
+  </div>
+</div>
+
+<!-- Mirror confirmation modal -->
+<div class="modal-overlay" id="mirrorConfirmModal">
+  <div class="modal" style="max-width:480px;">
+    <h3 style="color:var(--warning);">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:6px;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      Confirm Mirror Operation
+    </h3>
+    <p style="font-size:12px;margin-bottom:10px;">Mirror will make the destination an <strong>exact copy</strong> of the source. Files in the destination that don't exist in the source <strong>will be permanently deleted</strong>.</p>
+    <div style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;padding:8px 10px;font-size:12px;margin-bottom:12px;">
+      <div style="color:var(--text-muted);margin-bottom:4px;">Source</div>
+      <div id="mirrorConfirmSrc" style="color:var(--text);word-break:break-all;"></div>
+      <div style="color:var(--text-muted);margin:6px 0 4px;">Destination (files may be deleted)</div>
+      <div id="mirrorConfirmDst" style="color:var(--danger);word-break:break-all;"></div>
+    </div>
+    <div class="form-row">
+      <label style="color:var(--text);">Type <strong>MIRROR</strong> to confirm</label>
+      <input type="text" id="mirrorConfirmInput" placeholder="MIRROR" autocomplete="off" spellcheck="false"
+        oninput="document.getElementById('btnMirrorConfirm').disabled = this.value !== 'MIRROR'; document.getElementById('mirrorConfirmError').style.display='none';"
+        onkeydown="if(event.key==='Enter' && this.value==='MIRROR') document.getElementById('btnMirrorConfirm').click();">
+    </div>
+    <div id="mirrorConfirmError" style="display:none;font-size:12px;color:var(--danger);margin-bottom:8px;">Type MIRROR exactly to confirm</div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('mirrorConfirmModal')">Cancel</button>
+      <button class="btn btn-danger" id="btnMirrorConfirm" disabled>Run Mirror</button>
+    </div>
+  </div>
+</div>
+
+<script>
+
+// --- State ---
+var currentFolder  = null;   // currently selected folder path
+var currentFolderEntries = []; // permission entries of currentFolderEntriesPath, as last loaded
+var currentFolderEntriesPath = null; // the folder currentFolderEntries belong to (null: none loaded)
+var currentFiles   = [];     // array of file objects for current folder
+var checkedFiles   = new Set(); // paths of checked files
+var addAceTarget   = 'folder'; // 'folder' or 'files'
+var removeAceTarget = 'folder';
+var fileAclCache   = {};     // path -> acl object, for inline expand + diff check
+
+// --- Utilities ---
+function setStatus(msg, type) {
+    var el = document.getElementById('statusBar');
+    // Errors interrupt a screen reader (alert); everything else is announced when it is idle.
+    el.setAttribute('role', type === 'error' ? 'alert' : 'status');
+    el.setAttribute('aria-live', type === 'error' ? 'assertive' : 'polite');
+    el.textContent = msg;
+    el.className = 'status-bar ' + (type || '');
+}
+
+function api(url, opts) {
+    return fetch(url, opts).catch(function(e) {
+        // The request never got an answer: the server is not running or not reachable.
+        e.network = true; throw e;
+    }).then(function(r) {
+        return r.json().catch(function() {
+            var bad = new Error('The server sent a reply that could not be read (HTTP ' + r.status + ').');
+            bad.badReply = true; throw bad;
+        }).then(function(d) {
+            if (!r.ok) { var err = new Error(d.error || r.statusText); err.fromServer = true; throw err; }
+            return d;
+        });
+    });
+}
+
+// True while any permission change (add, remove, copy permissions, take ownership; folders or
+// files) is running. One flag for all of them: a second click must not start another change
+// on the same items before the first one has finished and been logged. (The name is older
+// than the sharing.)
+var ownershipBusy = false;
+// Says so and returns true when a change is still running; the caller then does nothing.
+function changeIsBusy() {
+    if (!ownershipBusy) return false;
+    setStatus('Still working on the previous change. Wait for it to finish, then try again.', 'warning');
+    return true;
+}
+
+// Permission changes: the server's message already says what was done, where it was backed up
+// and logged, or why nothing was changed.
+function showChangeError(e) {
+    if (e.fromServer) { setStatus(e.message, 'error'); return; }
+    if (e.network) {
+        setStatus('Could not reach the Folder Permission Manager server. Is the PowerShell window still running? If it was closed, start the tool again. (' + e.message + ')', 'error');
+        return;
+    }
+    setStatus('The change may or may not have been made. Check the folder\'s permissions. (' + e.message + ')', 'error');
+}
+function changeStatusType(r) {
+    var res = r.results || [];
+    var failed = res.filter(function(x) { return x.status === 'error'; }).length;
+    var done = res.filter(function(x) { return x.status === 'success'; }).length;
+    var notFound = res.filter(function(x) { return x.status === 'skipped'; }).length;
+    // 'unchanged': the item already had what was asked. Not a shortfall.
+    var unchanged = res.filter(function(x) { return x.status === 'unchanged'; }).length;
+    // 'partial': a whole-tree change partly done, or not checked everywhere.
+    if (r.status === 'partial') return 'warning';
+    if (res.length && failed && !done) return 'error';
+    // Every item already up to date: nothing was changed, and nothing needed to be.
+    if (res.length && unchanged === res.length) return 'info';
+    if (failed || notFound || !r.logPath || r.unrestorable) return 'warning';
+    return 'success';
+}
+// Shows a change result; a warning is also spelled out in words, not only in colour.
+function showChangeResult(r) {
+    var type = changeStatusType(r);
+    var msg = r.message || '';
+    // A partly done whole-tree change already starts "Partly done:"; never say it twice.
+    if (type === 'warning' && msg.indexOf('Partly done:') !== 0) {
+        var res = r.results || [];
+        // Partly done only when something was done and another item failed or was not found;
+        // an item that was already up to date is not a shortfall.
+        var partial = res.some(function(x) { return x.status === 'success'; }) &&
+            res.some(function(x) { return x.status === 'error' || x.status === 'skipped'; });
+        msg = (partial ? 'Partly done: ' : 'Done, with items to check: ') + msg;
+    }
+    setStatus(msg, type);
+}
+
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+function openModal(id)  { document.getElementById(id).classList.add('open'); }
+
+function toggleOverflow(wrapperId) {
+    var menu = document.getElementById(wrapperId + 'Menu');
+    var isOpen = menu.classList.contains('open');
+    // Close all open overflow menus first
+    document.querySelectorAll('.action-overflow-menu.open').forEach(function(m) { m.classList.remove('open'); });
+    if (!isOpen) menu.classList.add('open');
+}
+function closeOverflow(wrapperId) {
+    var menu = document.getElementById(wrapperId + 'Menu');
+    if (menu) menu.classList.remove('open');
+}
+// Close overflow menus on outside click
+document.addEventListener('click', function(e) {
+    if (!e.target.closest('.action-overflow')) {
+        document.querySelectorAll('.action-overflow-menu.open').forEach(function(m) { m.classList.remove('open'); });
+    }
+});
+
+function updateThemeButton(isLight) {
+    var lbl = document.getElementById('btnThemeLabel');
+    var icon = document.getElementById('iconTheme');
+    var btn = document.getElementById('btnTheme');
+    if (lbl) lbl.textContent = isLight ? 'Dark' : 'Light';
+    if (btn) btn.title = isLight ? 'Switch to dark mode' : 'Switch to light mode';
+    if (icon) {
+        if (isLight) {
+            // Moon icon for switching to dark
+            icon.innerHTML = '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>';
+        } else {
+            // Sun icon for switching to light
+            icon.innerHTML = '<circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>';
+        }
+    }
+}
+function toggleTheme() {
+    document.body.classList.toggle('light');
+    var isLight = document.body.classList.contains('light');
+    updateThemeButton(isLight);
+    localStorage.setItem('fpm-theme', isLight ? 'light' : 'dark');
+}
+function initTheme() {
+    if (localStorage.getItem('fpm-theme') === 'light') { document.body.classList.add('light'); updateThemeButton(true); }
+}
+
+function switchTab(name) {
+    document.querySelectorAll('.tab').forEach(function(t) { t.classList.toggle('active', t.dataset.tab === name); });
+    document.querySelectorAll('.tab-pane').forEach(function(p) { p.classList.toggle('active', p.id === 'pane-' + name); });
+    var hint = document.getElementById('panelLeftHint');
+    if (hint) hint.style.display = name === 'robocopy' ? 'block' : 'none';
+}
+
+function shutdown() {
+    if (!confirm('Stop the Folder Permission Manager server?')) return;
+    fetch('/api/shutdown').catch(function(){});
+    document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#8b95a5;font-family:sans-serif;">Server stopped. You may close this tab.</div>';
+}
+
+// --- Folder Tree ---
+function loadDrives() {
+    setStatus('Loading drives...', 'info');
+    api('/api/drives').then(function(drives) {
+        var container = document.getElementById('treeContainer');
+        container.innerHTML = '';
+        drives.forEach(function(d) {
+            var node = makeTreeNode(d.label || d.name, d.root, 0, true);
+            container.appendChild(node);
+        });
+        setStatus('Ready');
+    }).catch(function(e) { setStatus('Failed to load drives: ' + e.message, 'error'); });
+}
+
+function makeTreeNode(label, path, depth, hasChildren) {
+    var wrapper = document.createElement('div');
+    var node = document.createElement('div');
+    node.className = 'tree-node';
+    node.style.paddingLeft = (8 + depth * 16) + 'px';
+    node.dataset.path = path;
+
+    var toggle = document.createElement('span');
+    toggle.className = 'toggle';
+    toggle.textContent = hasChildren ? '▶' : ' ';
+
+    var name = document.createElement('span');
+    name.textContent = label;
+
+    node.appendChild(toggle);
+    node.appendChild(name);
+    wrapper.appendChild(node);
+
+    var childContainer = document.createElement('div');
+    childContainer.className = 'tree-children';
+    childContainer.style.display = 'none';
+    wrapper.appendChild(childContainer);
+
+    var expanded = false;
+
+    node.addEventListener('click', function() {
+        selectFolder(path);
+        if (hasChildren) {
+            expanded = !expanded;
+            toggle.textContent = expanded ? '▼' : '▶';
+            childContainer.style.display = expanded ? 'block' : 'none';
+            if (expanded && childContainer.children.length === 0) {
+                loadChildren(path, depth + 1, childContainer);
+            }
+        }
+    });
+
+    return wrapper;
+}
+
+function loadChildren(path, depth, container) {
+    api('/api/children?path=' + encodeURIComponent(path)).then(function(children) {
+        container.innerHTML = '';
+        children.forEach(function(c) {
+            container.appendChild(makeTreeNode(c.name, c.path, depth, c.hasChildren));
+        });
+    }).catch(function(e) { setStatus('Error loading children: ' + e.message, 'error'); });
+}
+
+function selectFolder(path) {
+    // Update selection highlight
+    document.querySelectorAll('.tree-node').forEach(function(n) {
+        n.classList.toggle('selected', n.dataset.path === path);
+    });
+
+    // Detect active tab — tree drives different behavior per tab
+    var activeTab = (document.querySelector('.tab.active') || {}).dataset && document.querySelector('.tab.active').dataset.tab;
+
+    if (activeTab === 'robocopy') {
+        // On Robocopy tab: populate whichever source field is visible
+        var folderFormVisible = document.getElementById('roboFolderForm').style.display !== 'none';
+        if (folderFormVisible) {
+            document.getElementById('roboSrc').value = path;
+            setStatus('Source set to: ' + path, 'info');
+        } else {
+            document.getElementById('roboFileSrc').value = path;
+            loadRoboFileList();
+            setStatus('Source set to: ' + path + ' — loading files...', 'info');
+        }
+        return; // don't load ACL
+    }
+
+    // Permissions tab behavior
+    currentFolder = path;
+    checkedFiles.clear();
+    fileAclCache = {};
+    // Update path header
+    var ph = document.getElementById('path-header');
+    if (ph) {
+        var drive = path.match(/^[A-Za-z]:[\\\/]/);
+        if (drive) {
+            ph.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:4px;"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg><span class="path-drive">' + drive[0].replace(/\\/g, '/') + '</span><span class="path-rest">' + path.substring(drive[0].length).replace(/\\/g, ' \u203a ') + '</span>';
+        } else {
+            ph.textContent = path;
+        }
+        ph.style.display = 'block';
+    }
+    loadFolderAcl(path);
+    loadFiles(path);
+}
+
+// --- Folder ACL ---
+function loadFolderAcl(path) {
+    document.getElementById('no-folder-msg').style.display = 'none';
+    document.getElementById('folder-acl-section').style.display = 'block';
+    document.getElementById('files-section').style.display = 'flex';
+    document.getElementById('folderAclTitle').textContent = path.split('\\').pop() || path;
+    // Forget the previous folder's entries until this one's arrive, so the copy dialog never
+    // describes another folder's Deny permissions.
+    currentFolderEntries = [];
+    currentFolderEntriesPath = null;
+
+    api('/api/acl?path=' + encodeURIComponent(path)).then(function(data) {
+        document.getElementById('folderOwner').textContent = data.owner || '—';
+        var tbody = document.getElementById('folderAclBody');
+        tbody.innerHTML = '';
+        currentFolderEntries = data.entries || [];
+        currentFolderEntriesPath = path;
+        (data.entries || []).forEach(function(e) {
+            var tr = document.createElement('tr');
+            tr.innerHTML =
+                '<td>' + e.identity + '</td>' +
+                '<td>' + e.rights + '</td>' +
+                '<td><span class="badge badge-' + e.type.toLowerCase() + '">' + e.type + '</span></td>' +
+                '<td>' + (e.isInherited ? '<span class="badge badge-inherited" title="This permission was inherited from a parent folder">Inherited</span>' : '') + '</td>';
+            tbody.appendChild(tr);
+        });
+    }).catch(function(e) {
+        currentFolderEntries = [];
+        currentFolderEntriesPath = null;
+        setStatus('Failed to load ACL: ' + e.message, 'error');
+    });
+}
+
+// --- Files list ---
+function loadFiles(path) {
+    var list = document.getElementById('filesList');
+    list.innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:12px;">Loading...</div>';
+    api('/api/files?path=' + encodeURIComponent(path)).then(function(files) {
+        currentFiles = files;
+        renderFilesList();
+    }).catch(function(e) {
+        list.innerHTML = '<div style="padding:12px;color:var(--danger);font-size:12px;">Failed to load files: ' + e.message + '</div>';
+    });
+}
+
+function renderFilesList() {
+    var list = document.getElementById('filesList');
+    list.innerHTML = '';
+    if (!currentFiles || currentFiles.length === 0) {
+        list.innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:12px;">No files in this folder</div>';
+        updateActionBar();
+        return;
+    }
+    currentFiles.forEach(function(f) {
+        var row = document.createElement('div');
+        row.className = 'file-row' + (checkedFiles.has(f.path) ? ' checked' : '');
+        row.dataset.path = f.path;
+
+        var cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = checkedFiles.has(f.path);
+        cb.addEventListener('change', function() { toggleFileCheck(f.path, cb.checked, row); });
+
+        var nameEl = document.createElement('span');
+        nameEl.className = 'file-name';
+        nameEl.textContent = f.name;
+        nameEl.title = f.name;
+
+        var sizeEl = document.createElement('span');
+        sizeEl.className = 'file-size';
+        sizeEl.textContent = f.sizeDisplay;
+
+        var dateEl = document.createElement('span');
+        dateEl.className = 'file-date';
+        dateEl.textContent = f.lastModified;
+
+        var expandBtn = document.createElement('button');
+        expandBtn.className = 'expand-btn';
+        expandBtn.textContent = '▶';
+        expandBtn.title = 'Show ACL';
+        expandBtn.addEventListener('click', function(e) { e.stopPropagation(); toggleFileAcl(f.path, row, expandBtn); });
+
+        row.appendChild(cb);
+        row.appendChild(nameEl);
+        row.appendChild(sizeEl);
+        row.appendChild(dateEl);
+        row.appendChild(expandBtn);
+        list.appendChild(row);
+    });
+    updateActionBar();
+}
+
+function toggleFileCheck(path, checked, row) {
+    if (checked) { checkedFiles.add(path); } else { checkedFiles.delete(path); }
+    row.classList.toggle('checked', checked);
+    document.getElementById('selectAllFiles').checked = checkedFiles.size === currentFiles.length && currentFiles.length > 0;
+    updateActionBar();
+}
+
+function toggleSelectAll(checked) {
+    checkedFiles.clear();
+    if (checked) { currentFiles.forEach(function(f) { checkedFiles.add(f.path); }); }
+    renderFilesList();
+    document.getElementById('selectAllFiles').checked = checked;
+}
+
+function updateActionBar() {
+    var bar = document.getElementById('actionBar');
+    var count = checkedFiles.size;
+    document.getElementById('selectionCount').textContent = count + ' file' + (count === 1 ? '' : 's') + ' selected';
+    bar.classList.toggle('visible', count > 0);
+    // ACL diff check — only when 2+ files are checked and we have their ACLs cached
+    checkAclDiff();
+}
+
+// --- Inline file ACL expand ---
+function toggleFileAcl(path, row, btn) {
+    // If already expanded, collapse
+    var existing = row.nextSibling;
+    if (existing && existing.classList && existing.classList.contains('file-acl-row')) {
+        existing.remove();
+        btn.textContent = '▶';
+        return;
+    }
+    btn.textContent = '▼';
+    btn.disabled = true;
+    setStatus('Loading file ACL...', 'info');
+
+    api('/api/file-acl?path=' + encodeURIComponent(path)).then(function(data) {
+        fileAclCache[path] = data;
+        var aclRow = document.createElement('div');
+        aclRow.className = 'file-acl-row';
+        var html = '<strong style="font-size:11px;color:var(--text-muted);">Owner: ' + (data.owner || '—') + '</strong>';
+        (data.entries || []).forEach(function(e) {
+            html += '<div class="acl-entry"><span class="badge badge-' + e.type.toLowerCase() + '">' + e.type + '</span>' +
+                    '<span>' + e.identity + '</span><span style="color:var(--text-muted);">' + e.rights + '</span>' +
+                    (e.isInherited ? '<span class="badge badge-inherited" title="This permission was inherited from a parent folder">Inherited</span>' : '') + '</div>';
+        });
+        aclRow.innerHTML = html;
+        row.insertAdjacentElement('afterend', aclRow);
+        setStatus('Ready');
+        checkAclDiff();
+    }).catch(function(e) {
+        btn.textContent = '▶';
+        setStatus('Failed to load file ACL: ' + e.message, 'error');
+    }).finally(function() { btn.disabled = false; });
+}
+
+function checkAclDiff() {
+    var warning = document.getElementById('aclDiffWarning');
+    if (checkedFiles.size < 2) { warning.style.display = 'none'; return; }
+    var checkedCached = Array.from(checkedFiles).filter(function(p) { return fileAclCache[p]; });
+    if (checkedCached.length < 2) { warning.style.display = 'none'; return; }
+    var first = JSON.stringify((fileAclCache[checkedCached[0]].entries || []).map(function(e) { return e.identity + e.rights + e.type; }).sort());
+    var differs = checkedCached.slice(1).some(function(p) {
+        return JSON.stringify((fileAclCache[p].entries || []).map(function(e) { return e.identity + e.rights + e.type; }).sort()) !== first;
+    });
+    warning.style.display = differs ? 'block' : 'none';
+}
+
+// --- Folder ACL operations ---
+function showAddAceModal(target) {
+    addAceTarget = target;
+    document.getElementById('addAceModalTitle').textContent = target === 'files' ? 'Add Permission to Selected Files' : 'Add Permission Entry';
+    document.getElementById('addAceIdentity').value = '';
+    openModal('addAceModal');
+}
+
+function submitAddAce() {
+    var identity = document.getElementById('addAceIdentity').value.trim();
+    var rights   = document.getElementById('addAceRights').value;
+    var type     = document.getElementById('addAceType').value;
+    if (!identity) { setStatus('Identity is required', 'error'); return; }
+    if (changeIsBusy()) return;
+    closeModal('addAceModal');
+    ownershipBusy = true;
+
+    if (addAceTarget === 'files') {
+        var paths = Array.from(checkedFiles);
+        setStatus('Backing up and adding the permission to ' + paths.length + ' file(s)...', 'info');
+        api('/api/file-acl/add', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ paths: paths, identity: identity, rights: rights, type: type }) })
+            .then(function(r) { ownershipBusy = false; showChangeResult(r); })
+            .catch(function(e) { ownershipBusy = false; showChangeError(e); });
+    } else {
+        setStatus('Backing up and adding the permission...', 'info');
+        api('/api/add-ace', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: currentFolder, identity: identity, rights: rights, type: type }) })
+            .then(function(r) { ownershipBusy = false; showChangeResult(r); loadFolderAcl(currentFolder); })
+            .catch(function(e) { ownershipBusy = false; showChangeError(e); });
+    }
+}
+
+function showRemoveAceModal(target) {
+    removeAceTarget = target;
+    document.getElementById('removeAceModalTitle').textContent = target === 'files' ? 'Remove Permission from Selected Files' : 'Remove Permission Entry';
+    var select = document.getElementById('removeAceIdentity');
+    select.innerHTML = '';
+
+    if (target === 'files') {
+        // Populate from cached ACLs of checked files — combined unique identities
+        var identities = new Set();
+        Array.from(checkedFiles).forEach(function(p) {
+            if (fileAclCache[p]) {
+                (fileAclCache[p].entries || []).forEach(function(e) { identities.add(e.identity); });
+            }
+        });
+        if (identities.size === 0) { setStatus('Expand a file\'s permissions first (click ▶) to load available users and groups', 'warning'); return; }
+        identities.forEach(function(id) { var o = document.createElement('option'); o.value = id; o.textContent = id; select.appendChild(o); });
+    } else {
+        // Populate from current folder ACL table
+        var rows = document.querySelectorAll('#folderAclBody tr');
+        var seen = new Set();
+        rows.forEach(function(r) {
+            var id = r.cells[0] && r.cells[0].textContent;
+            if (id && !seen.has(id)) { seen.add(id); var o = document.createElement('option'); o.value = id; o.textContent = id; select.appendChild(o); }
+        });
+    }
+    openModal('removeAceModal');
+}
+
+function submitRemoveAce() {
+    var identity = document.getElementById('removeAceIdentity').value;
+    var rights   = document.getElementById('removeAceRights').value;
+    var type     = document.getElementById('removeAceType').value;
+    if (changeIsBusy()) return;
+    closeModal('removeAceModal');
+    ownershipBusy = true;
+
+    if (removeAceTarget === 'files') {
+        var paths = Array.from(checkedFiles);
+        setStatus('Backing up and removing the permission from ' + paths.length + ' file(s)...', 'info');
+        api('/api/file-acl/remove', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ paths: paths, identity: identity, rights: rights, type: type }) })
+            .then(function(r) { ownershipBusy = false; showChangeResult(r); })
+            .catch(function(e) { ownershipBusy = false; showChangeError(e); });
+    } else {
+        setStatus('Backing up and removing the permission...', 'info');
+        api('/api/remove-ace', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: currentFolder, identity: identity, rights: rights, type: type }) })
+            .then(function(r) { ownershipBusy = false; showChangeResult(r); loadFolderAcl(currentFolder); })
+            .catch(function(e) { ownershipBusy = false; showChangeError(e); });
+    }
+}
+
+// Uses the shared busy flag (ownershipBusy, see changeIsBusy) like every other change.
+function takeOwnership(recursive) {
+    if (!currentFolder) return;
+    if (ownershipBusy) {
+        setStatus('Still working on the previous change. Wait for it to finish, then try again.', 'warning');
+        return;
+    }
+    // takeown /D N skips a folder it cannot open, so that folder keeps its permissions (D-034;
+    // takeown page on Microsoft Learn). The root of a drive and the Windows system folders are
+    // refused by the server (D-036).
+    var msg = recursive
+        ? 'This will change ownership on ALL files and subfolders under:\n\n' + currentFolder + '\n\nYou become the owner. The current owners will be saved to a backup first.\n\n' +
+          'Any folder in it that cannot be opened is skipped and left alone; the result names those folders so you can escalate them.\n\nContinue?'
+        : 'Take ownership of:\n\n' + currentFolder + '?';
+    if (!confirm(msg)) return;
+    ownershipBusy = true;
+    setStatus(recursive ? 'Saving the current owners and taking ownership of everything in this folder. This can take a while...' : 'Backing up and taking ownership...', 'info');
+    api('/api/take-ownership', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: currentFolder, recursive: recursive }) })
+        .then(function(r) { ownershipBusy = false; showChangeResult(r); loadFolderAcl(currentFolder); })
+        .catch(function(e) { ownershipBusy = false; showChangeError(e); });
+}
+
+function showReplicateModal() {
+    document.getElementById('replicateTargets').value = '';
+    document.getElementById('replicateSource').textContent = currentFolder || '';
+    // Copy only copies the folder's own permissions, so only those Deny entries are copied.
+    var denies = currentFolderEntries.filter(function(e) { return !e.isInherited && e.type === 'Deny'; });
+    var note = document.getElementById('replicateDenyNote');
+    if (currentFolderEntriesPath !== currentFolder) {
+        // Still loading, failed to load, or a late reply for the folder opened before: say so
+        // rather than describe the wrong folder.
+        note.textContent = 'The permissions of this folder are not loaded, so it cannot be checked for Deny permissions of its own. Wait a moment or open the folder again before copying.';
+        note.style.display = 'block';
+    } else if (denies.length) {
+        note.textContent = 'This folder has ' + denies.length + ' Deny permission(s) of its own (' +
+            denies.map(function(e) { return e.identity; }).join(', ') +
+            '). They are copied too, and a Deny blocks access even where another permission allows it.';
+        note.style.display = 'block';
+    } else {
+        note.textContent = '';
+        note.style.display = 'none';
+    }
+    openModal('replicateModal');
+}
+
+function submitReplicate() {
+    var raw = document.getElementById('replicateTargets').value;
+    var targets = raw.split('\n').map(function(s) { return s.trim(); }).filter(Boolean);
+    if (!targets.length) { setStatus('Enter at least one folder to copy to, one per line.', 'error'); return; }
+    if (changeIsBusy()) return;
+    closeModal('replicateModal');
+    ownershipBusy = true;
+    setStatus('Backing up and copying permissions...', 'info');
+    api('/api/replicate', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ sourcePath: currentFolder, targetPaths: targets }) })
+        .then(function(r) { ownershipBusy = false; showChangeResult(r); })
+        .catch(function(e) { ownershipBusy = false; showChangeError(e); });
+}
+
+function exportReport() {
+    if (!currentFolder) return;
+    window.location.href = '/api/export?path=' + encodeURIComponent(currentFolder);
+}
+
+// --- File ownership ---
+function takeFileOwnership() {
+    var paths = Array.from(checkedFiles);
+    if (!paths.length) return;
+    if (changeIsBusy()) return;
+    if (!confirm('Take ownership of ' + paths.length + ' file(s)?')) return;
+    ownershipBusy = true;
+    setStatus('Backing up and taking ownership of ' + paths.length + ' file(s)...', 'info');
+    api('/api/file-acl/take-ownership', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ paths: paths }) })
+        .then(function(r) { ownershipBusy = false; showChangeResult(r); })
+        .catch(function(e) { ownershipBusy = false; showChangeError(e); });
+}
+
+// --- Copy files modal ---
+function showCopyFilesModal() {
+    document.getElementById('copyFilesDest').value = '';
+    document.getElementById('copyFilesExtra').value = '';
+    openModal('copyFilesModal');
+}
+
+function submitCopyFiles() {
+    var dest  = document.getElementById('copyFilesDest').value.trim();
+    var extra = document.getElementById('copyFilesExtra').value.trim();
+    var paths = Array.from(checkedFiles);
+    if (!dest) { setStatus('Destination folder is required', 'error'); return; }
+    if (!paths.length) { setStatus('No files selected', 'error'); return; }
+    closeModal('copyFilesModal');
+    // Filenames only — robocopy-files expects sourceDir + filenames
+    var filenames = paths.map(function(p) { return p.split('\\').pop(); });
+    setStatus('Copying ' + filenames.length + ' file(s)...', 'info');
+    api('/api/robocopy-files', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ sourceDir: currentFolder, destDir: dest, files: filenames, extraFlags: extra || null }) })
+        .then(function(r) {
+            var ok = r.exitCode === 0 || r.exitCode === 1;
+            setStatus((ok ? 'Copy complete: ' : 'Copy finished with warnings/errors: ') + (r.exitMeaning || r.status || ''), ok ? 'success' : 'warning');
+        }).catch(function(e) { setStatus('Failed: ' + e.message, 'error'); });
+}
+
+// --- Robocopy tab ---
+function updateMirrorWarning() {
+    var mode = document.getElementById('roboMode').value;
+    document.getElementById('mirrorWarning').style.display = mode === 'mirror' ? 'block' : 'none';
+}
+
+function setRoboMode(mode) {
+    document.getElementById('roboFolderForm').style.display = mode === 'folder' ? 'flex' : 'none';
+    document.getElementById('roboFileForm').style.display  = mode === 'file'   ? 'flex' : 'none';
+    document.getElementById('roboModeFolderCard').classList.toggle('active', mode === 'folder');
+    document.getElementById('roboModeFileCard').classList.toggle('active', mode === 'file');
+    // Hide mirror warning when switching modes
+    if (mode !== 'folder') document.getElementById('mirrorWarning').style.display = 'none';
+    // Reset output to placeholder state
+    var out = document.getElementById('roboOutput');
+    out.className = 'robo-output placeholder';
+    out.textContent = 'Run a copy to see output here';
+    document.getElementById('roboExitBadge').textContent = '';
+    document.getElementById('roboExitBadge').className = 'robo-exit-badge';
+}
+
+function loadRoboFileList() {
+    var src = document.getElementById('roboFileSrc').value.trim();
+    var list = document.getElementById('roboFileList');
+    if (!src) { list.innerHTML = '<span style="padding:8px;color:var(--text-muted);font-size:12px;display:block;">Enter a source folder above</span>'; return; }
+    list.innerHTML = '<span style="padding:8px;color:var(--text-muted);font-size:12px;display:block;">Loading...</span>';
+    api('/api/files?path=' + encodeURIComponent(src)).then(function(files) {
+        list.innerHTML = '';
+        if (!files || files.length === 0) { list.innerHTML = '<span style="padding:8px;color:var(--text-muted);font-size:12px;display:block;">No files found</span>'; return; }
+        files.forEach(function(f) {
+            var item = document.createElement('div');
+            item.className = 'robo-file-item';
+            var cb = document.createElement('input'); cb.type = 'checkbox'; cb.value = f.name; cb.id = 'rfl-' + f.name;
+            var lbl = document.createElement('label'); lbl.htmlFor = 'rfl-' + f.name; lbl.style.fontSize = '12px'; lbl.style.cursor = 'pointer';
+            lbl.textContent = f.name + ' (' + f.sizeDisplay + ')';
+            item.appendChild(cb); item.appendChild(lbl);
+            list.appendChild(item);
+        });
+    }).catch(function(e) { list.innerHTML = '<span style="padding:8px;color:var(--danger);font-size:12px;display:block;">Error: ' + e.message + '</span>'; });
+}
+
+function runRobocopy() {
+    var src     = document.getElementById('roboSrc').value.trim();
+    var dst     = document.getElementById('roboDst').value.trim();
+    var mode    = document.getElementById('roboMode').value;
+    var threads = parseInt(document.getElementById('roboThreads').value) || 8;
+    var retries = parseInt(document.getElementById('roboRetries').value) || 3;
+    var wait    = parseInt(document.getElementById('roboWait').value) || 5;
+    var extra   = document.getElementById('roboExtra').value.trim();
+    var log     = document.getElementById('roboLog').value.trim();
+    if (!src) { setStatus('Source folder is required', 'error'); return; }
+    if (!dst) { setStatus('Destination folder is required', 'error'); return; }
+    if (src.replace(/[\\\/]+$/, '').toLowerCase() === dst.replace(/[\\\/]+$/, '').toLowerCase()) {
+        setStatus('Source and destination cannot be the same folder', 'error'); return;
+    }
+    if (mode === 'mirror') {
+        showMirrorConfirm(src, dst, threads, retries, wait, extra, log);
+        return;
+    }
+    executeRobocopy(src, dst, mode, threads, retries, wait, extra, log);
+}
+
+function showMirrorConfirm(src, dst, threads, retries, wait, extra, log) {
+    document.getElementById('mirrorConfirmSrc').textContent = src;
+    document.getElementById('mirrorConfirmDst').textContent = dst;
+    document.getElementById('mirrorConfirmInput').value = '';
+    document.getElementById('mirrorConfirmError').style.display = 'none';
+    document.getElementById('btnMirrorConfirm').disabled = true;
+    // Store params for the confirmed callback
+    document.getElementById('btnMirrorConfirm').onclick = function() {
+        if (document.getElementById('mirrorConfirmInput').value !== 'MIRROR') {
+            document.getElementById('mirrorConfirmError').style.display = 'block';
+            return;
+        }
+        closeModal('mirrorConfirmModal');
+        executeRobocopy(src, dst, 'mirror', threads, retries, wait, extra, log);
+    };
+    document.getElementById('mirrorConfirmModal').classList.add('open');
+    setTimeout(function() { document.getElementById('mirrorConfirmInput').focus(); }, 50);
+}
+
+function executeRobocopy(src, dst, mode, threads, retries, wait, extra, log) {
+    var btn = document.getElementById('btnRobocopy');
+    var prevBtn = document.getElementById('btnRoboPreview');
+    btn.disabled = true;
+    prevBtn.disabled = true;
+    setStatus('Running copy...', 'info');
+    api('/api/robocopy', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ source: src, destination: dst, mode: mode, threads: threads, retries: retries, waitTime: wait, extraFlags: extra || null, logFile: log || null }) })
+        .then(function(r) {
+            showRoboOutput(r);
+            var ok = r.exitCode === 0 || r.exitCode === 1;
+            setStatus((ok ? 'Copy complete: ' : 'Copy finished with warnings/errors: ') + (r.exitMeaning || r.status || ''), ok ? 'success' : 'warning');
+        })
+        .catch(function(e) { setStatus('Copy failed: ' + e.message, 'error'); })
+        .finally(function() { btn.disabled = false; prevBtn.disabled = false; });
+}
+
+function roboPreview() {
+    var src = document.getElementById('roboSrc').value.trim();
+    var dst = document.getElementById('roboDst').value.trim();
+    if (!src) { setStatus('Source folder is required for preview', 'error'); return; }
+    document.getElementById('btnRoboPreview').disabled = true;
+    setStatus('Running preview...', 'info');
+    api('/api/robocopy-preview?source=' + encodeURIComponent(src) + '&destination=' + encodeURIComponent(dst))
+        .then(function(r) {
+            var out = document.getElementById('roboOutput');
+            out.className = 'robo-output';
+            out.textContent = 'Preview: ' + r.dirs + ' dirs, ' + r.files + ' files, ' + r.sizeDisplay + '\n\n' + (r.rawSummary || '');
+            var badge = document.getElementById('roboExitBadge');
+            badge.textContent = 'Preview';
+            badge.className = 'robo-exit-badge ok';
+            setStatus('Preview complete', 'success');
+        })
+        .catch(function(e) { setStatus('Preview failed: ' + e.message, 'error'); })
+        .finally(function() { document.getElementById('btnRoboPreview').disabled = false; });
+}
+
+function runRobocopyFiles() {
+    var src   = document.getElementById('roboFileSrc').value.trim();
+    var dst   = document.getElementById('roboFileDst').value.trim();
+    var extra = document.getElementById('roboFileExtra').value.trim();
+    if (!src) { setStatus('Source folder is required', 'error'); return; }
+    if (!dst) { setStatus('Destination folder is required', 'error'); return; }
+    if (src.replace(/[\\\/]+$/, '').toLowerCase() === dst.replace(/[\\\/]+$/, '').toLowerCase()) {
+        setStatus('Source and destination cannot be the same folder', 'error'); return;
+    }
+    var checked = Array.from(document.querySelectorAll('#roboFileList input[type=checkbox]:checked')).map(function(cb) { return cb.value; });
+    if (!checked.length) { setStatus('Select at least one file to copy', 'error'); return; }
+    document.getElementById('btnRobocopyFiles').disabled = true;
+    setStatus('Copying ' + checked.length + ' file(s)...', 'info');
+    api('/api/robocopy-files', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ sourceDir: src, destDir: dst, files: checked, extraFlags: extra || null }) })
+        .then(function(r) {
+            showRoboOutput(r);
+            var ok = r.exitCode === 0 || r.exitCode === 1;
+            setStatus((ok ? 'Copy complete: ' : 'Copy finished with warnings/errors: ') + (r.exitMeaning || r.status || ''), ok ? 'success' : 'warning');
+        })
+        .catch(function(e) { setStatus('Copy failed: ' + e.message, 'error'); })
+        .finally(function() { document.getElementById('btnRobocopyFiles').disabled = false; });
+}
+
+function showRoboOutput(r) {
+    var out = document.getElementById('roboOutput');
+    out.className = 'robo-output'; // remove placeholder class
+    out.textContent = 'Command: ' + r.command + '\nExit code: ' + r.exitCode + ' — ' + (r.exitMeaning || r.status || '') + '\n\n' + (r.output || '');
+    var ok = r.exitCode === 0 || r.exitCode === 1;
+    var badge = document.getElementById('roboExitBadge');
+    badge.textContent = 'Exit ' + r.exitCode + ' — ' + (r.exitMeaning || (ok ? 'Success' : 'Error'));
+    badge.className = 'robo-exit-badge ' + (ok ? 'ok' : 'warn');
+}
+
+// --- Init ---
+initTheme();
+loadDrives();
+</script>
+</body>
+</html>
+"@
+
+# --- Start HTTP Listener ---
+
+$listener = [System.Net.HttpListener]::new()
+$listener.Prefixes.Add($baseUrl)
+try {
+    $listener.Start()
+    Write-Host "[INFO] Folder Permission Manager running at $baseUrl" -ForegroundColor Cyan
+    foreach ($notice in @(Get-ChangeLogFolderNotice -LogFolder $LogFolder -ResolvedFolder $script:ChangeLogFolder -DefaultFolder $defaultLogFolder)) {
+        Write-Host "[WARN] $notice" -ForegroundColor Yellow
+    }
+    Write-Host "[INFO] Changes are backed up and logged to $($script:ChangeLogFolder)" -ForegroundColor Cyan
+    Write-Host "[INFO] Press Ctrl+C to stop." -ForegroundColor Cyan
+}
+catch {
+    Write-Error "Failed to start HTTP listener on port $Port. Is it already in use? Error: $_"
+    exit 1
+}
+
+if (-not $NoBrowserOpen) {
+    Start-Process $baseUrl
+}
+
+# --- Main Request Loop ---
+
+$script:running = $true
+try {
+    while ($script:running) {
+        $contextTask = $listener.GetContextAsync()
+        while (-not $contextTask.IsCompleted) {
+            Start-Sleep -Milliseconds 100
+        }
+        $context = $contextTask.Result
+        Invoke-Route -Context $context
+    }
+}
+finally {
+    $listener.Stop()
+    $listener.Close()
+    Write-Host "[INFO] Server stopped." -ForegroundColor Yellow
+}

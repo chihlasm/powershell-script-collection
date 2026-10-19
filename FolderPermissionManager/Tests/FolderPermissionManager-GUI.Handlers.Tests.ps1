@@ -22,7 +22,7 @@ BeforeAll {
         throw "Invoke-AclTool ($Tool) was called without a mock in a test."
     }
 
-    $guiPath = (Resolve-Path (Join-Path $folder 'FolderPermissionManager-GUI.ps1')).Path
+    $guiPath = (Resolve-Path (Join-Path $folder 'FolderPermissionManager-WebGUI.ps1')).Path
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($guiPath, [ref]$null, [ref]$null)
     $handlers = 'Resolve-MappedDrive', 'Complete-PermissionChange', 'ConvertTo-ChangeResultRow',
         'Send-SingleChangeResult', 'Send-BatchChangeResult', 'Invoke-AddAce', 'Invoke-RemoveAce',
