@@ -225,8 +225,7 @@ password problem, encryption type blocked") with the next step, in the report an
 (D-022, D-023, D-024). Per-DC gate says "can't tell" where a DC can't log the events. Read-only.
 
 ## SQ-007 · Mailbox check: the facts, with "do NOT reset yet" on takeover signs
-- status: needs-answers
-- waiting: parked for the folder-permissions run (owner, 2026-10-19, D-041); back to ready after that run
+- status: ready
 - revision: merge to main failed one test at review 2026-10-18 (see spec Revision notes)
 - priority: P2
 - type: feature
@@ -271,8 +270,7 @@ Invoke-Command (D-005), and log every change in the shared format (D-030). Fail 
 can't be written (D-029).
 
 ## SQ-012 · AVD host checks in Citrix-FSLogix-Triage
-- status: needs-answers
-- waiting: parked for the folder-permissions run (owner, 2026-10-19, D-041); back to ready after that run
+- status: ready
 - priority: P2
 - type: feature
 - branch:
@@ -284,8 +282,7 @@ documented event 3277 errors, events 3703/3019/3389 and the rdp-sxs listener, ea
 Learn fix. No new folder. Split from SQ-003 per D-004; P2 per D-016.
 
 ## SQ-005 · End-of-support section in AD-Audit
-- status: needs-answers
-- waiting: parked for the folder-permissions run (owner, 2026-10-19, D-041); back to ready after that run
+- status: ready
 - priority: P3
 - type: feature
 - branch:
