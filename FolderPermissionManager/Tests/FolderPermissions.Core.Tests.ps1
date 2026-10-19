@@ -24,6 +24,14 @@ BeforeAll {
         )
         throw "Invoke-AclTool ($Tool) was called without a mock in a test."
     }
+    # Guard: the real Get-DfsTarget asks the DFS client (NetDfsGetClientInfo) and reads the
+    # network path. Replaced here (same parameter) so a test that forgets to mock it never
+    # reaches a real share; the code under test treats the throw as "could not be found out".
+    $script:RealGetDfsTarget = ${function:Get-DfsTarget}
+    function Get-DfsTarget {
+        param([Parameter(Mandatory)][string]$Path)
+        throw "Get-DfsTarget ($Path) was called without a mock in a test."
+    }
 
     # The real cmdlet object: Pester mocks also intercept the module-qualified name.
     $script:RealGetAcl = Get-Command Get-Acl -CommandType Cmdlet

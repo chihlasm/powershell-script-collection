@@ -33,6 +33,14 @@ BeforeAll {
         )
         throw "Invoke-AclTool ($Tool) was called without a mock in a test."
     }
+    # Guard: the real Get-DfsTarget asks the DFS client (NetDfsGetClientInfo) and reads the
+    # network path. Replaced here (same parameter) so a test that forgets to mock it never
+    # reaches a real share; the code under test treats the throw as "could not be found out".
+    $script:RealGetDfsTarget = ${function:Get-DfsTarget}
+    function Get-DfsTarget {
+        param([Parameter(Mandatory)][string]$Path)
+        throw "Get-DfsTarget ($Path) was called without a mock in a test."
+    }
 }
 
 Describe 'FolderPermissionManager.ps1 (command line)' {
@@ -522,6 +530,222 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         $after = @($script:Lines | Select-Object -Skip ([array]::IndexOf($script:Lines.ToArray(), $result[0]) + 1))
         foreach ($p in $script:LockedSet) {
             @($after | Where-Object { $_.Trim() -eq $p }).Count | Should -Be 1 -Because "$p is printed on its own line after the result"
+        }
+    }
+}
+
+# --- Fix round 1 of the D-040 revision (SQ-014 review 2026-10-19) ------------------------------
+# Pinned: Get-DfsTarget is mocked everywhere (the file-level stub throws). A link whose
+# destination cannot be found out is refused with a [FAIL] line that does NOT suggest
+# -AllowSystemFolder but "Take ownership of the folders beside the link instead, or ask a senior
+# engineer."; a protected-folder refusal still suggests -AllowSystemFolder. A DFS link inside a
+# tree on a network path, and a chosen folder on a network path, are looked up with
+# Get-DfsTarget. The warning and the copy step name what kind of link was found.
+Describe 'FolderPermissionManager.ps1 (command line): DFS targets, unresolvable links, link kinds' {
+    BeforeAll {
+        $script:BesideTheLink = 'Take ownership of the folders beside the link instead, or ask a senior engineer.'
+        function New-FakeReparseChild {
+            param([string]$Path)
+            [PSCustomObject]@{
+                FullName = $Path; Name = (Split-Path -Leaf $Path); PSIsContainer = $true
+                Attributes = [System.IO.FileAttributes]'Directory, ReparsePoint'
+            }
+        }
+        # A folder tree on a network path, with nothing read from the network (see the same
+        # helper in FolderPermissions.Tree.Tests.ps1).
+        function Set-UncTreeMock {
+            param([string]$Top, [string]$Final, [string[]]$Links = @())
+            $script:UncTop = $Top
+            $script:UncFinal = $Final
+            $script:UncLinks = @($Links)
+            $script:SnapFile = Join-Path $TestDrive ('snap-' + [guid]::NewGuid().ToString('N') + '_TakeOwnership.csv')
+            Set-Content -LiteralPath $script:SnapFile -Value 'Path,ItemType,Owner,OwnerSid'
+            $script:LocalAcl = Get-Acl -LiteralPath $TestDrive
+            Mock Test-Path { $true } -ParameterFilter { "$LiteralPath" -like '\\*' }
+            Mock Get-Item { [PSCustomObject]@{ FullName = "$LiteralPath"; Attributes = [System.IO.FileAttributes]::Directory } } -ParameterFilter { "$LiteralPath" -like '\\*' }
+            Mock Get-Win32PathName { if ($Path -eq $script:UncTop -and $script:UncFinal) { $script:UncFinal } else { $Path } } -ParameterFilter { "$Path" -like '\\*' }
+            Mock Get-Acl { $script:LocalAcl } -ParameterFilter { "$LiteralPath" -like '\\*' }
+            Mock Get-OwnerTreeItem { [PSCustomObject]@{ Items = @([PSCustomObject]@{ Path = $script:UncTop; ItemType = 'Folder' }); Unlisted = @(); Links = @($script:UncLinks) } }
+            Mock Save-OwnerSnapshot {
+                [PSCustomObject]@{
+                    File = $script:SnapFile; Count = 1
+                    Items = @([PSCustomObject]@{ Path = $script:UncTop; ItemType = 'Folder'; Owner = 'CONTOSO\old.owner'; OwnerSid = 'S-1-5-21-1-2-3-1105' })
+                    Unreadable = 0; Unlisted = 0; UnlistedFolders = @(); Links = @($script:UncLinks).Count; LinkPaths = @($script:UncLinks)
+                }
+            }
+            Mock Get-OwnerReadBack { [PSCustomObject]@{ Mine = 1; NotMine = 0; Unchecked = 0; Changed = 1; AdministratorsOnly = $false; WatchedChanged = @(); WatchedUnchecked = @() } }
+        }
+    }
+    BeforeEach {
+        $root = Join-Path $TestDrive ('cli-d040-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path (Join-Path $root 'sub1') -Force | Out-Null
+        $script:Dir = $root
+        $script:Log = Join-Path $TestDrive ('cli-d040-logs-' + [guid]::NewGuid().ToString('N'))
+        $script:Lines = [System.Collections.Generic.List[string]]::new()
+        Mock Set-Acl { }
+        Mock takeown { }
+        Mock icacls { }
+        Mock Invoke-AclTool { [PSCustomObject]@{ ExitCode = 0; Output = '' } }
+        Mock Read-Host { 'n' }
+        Mock Write-Host { $script:Lines.Add("$Object") }
+        Mock Get-DfsTarget { }
+    }
+
+    Context 'A link inside the folder whose destination cannot be found out' {
+        BeforeEach {
+            $script:LinkPath = Join-Path $script:Dir 'redirected'
+            New-Item -ItemType Directory -Path $script:LinkPath | Out-Null
+            Mock Get-ChildItem { New-FakeReparseChild -Path $script:LinkPath } -ParameterFilter { $LiteralPath -eq $script:Dir }
+            Mock Get-ReparsePointTag { [uint32]'0x8000000A' } -ParameterFilter { $Path -eq $script:LinkPath }
+            Mock Get-Item { [PSCustomObject]@{ FullName = $script:LinkPath; Attributes = [System.IO.FileAttributes]::Directory } } -ParameterFilter { $LiteralPath -eq $script:LinkPath }
+        }
+
+        It 'AC20c_Cli_UnresolvableLink_FailLineSuggestsTheFoldersBesideTheLinkNotAllowSystemFolder_<Case>' -ForEach @(
+            @{ Case = 'final path unknown'; Final = 'none' }
+            @{ Case = 'final path is its own path'; Final = 'self' }
+        ) {
+            $script:FinalKind = $Final
+            Mock Get-Win32PathName { if ($script:FinalKind -eq 'self') { $Path } else { $null } } -ParameterFilter { $Path -eq $script:LinkPath }
+
+            $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log -Force
+
+            $code | Should -Be 1
+            $fail = @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' })
+            $fail.Count | Should -Be 1
+            $fail[0] | Should -Match ([regex]::Escape($script:LinkPath))
+            $fail[0] | Should -Match 'where it leads could not be found out'
+            $fail[0] | Should -Match 'DFS link'
+            $fail[0] | Should -Not -Match 'AllowSystemFolder'
+            $fail[0] | Should -Match ([regex]::Escape($script:BesideTheLink))
+            $fail[0] | Should -Match 'Nothing was changed\.'
+            Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+            Should -Invoke Get-Item -Times 0 -Exactly -Scope It -ParameterFilter { $LiteralPath -eq $script:LinkPath }
+        }
+
+        It 'AC20a_Cli_ProtectedFolderRefusal_StillSuggestsAllowSystemFolder' {
+            Mock Get-Win32PathName { '\\dc01\NETLOGON' } -ParameterFilter { $Path -eq $script:LinkPath }
+
+            $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log -Force
+
+            $code | Should -Be 1
+            $fail = @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' })
+            $fail.Count | Should -Be 1
+            $fail[0] | Should -Match '-AllowSystemFolder'
+            $fail[0] | Should -Not -Match ([regex]::Escape($script:BesideTheLink))
+        }
+    }
+
+    Context 'A DFS link inside a folder on a network path' {
+        BeforeEach {
+            $script:Top = '\\fs01\share\Dept'
+            $script:DfsLink = '\\fs01\share\Dept\Apps'
+            Set-UncTreeMock -Top $script:Top -Links @($script:DfsLink)
+            Mock Get-ReparsePointTag { [uint32]'0x8000000A' } -ParameterFilter { $Path -eq $script:DfsLink }
+        }
+
+        It 'AC20a_Cli_DfsLinkToNetlogon_IsRefusedWithAFailLine' {
+            Mock Get-DfsTarget { '\\dc01\NETLOGON' } -ParameterFilter { $Path -eq $script:DfsLink }
+
+            $code = Invoke-FolderPermissionCli -Path $script:Top -LogFolder $script:Log -Force
+
+            $code | Should -Be 1
+            $fail = @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' })
+            $fail.Count | Should -Be 1
+            $fail[0] | Should -Match ([regex]::Escape($script:DfsLink))
+            $fail[0] | Should -Match 'NETLOGON'
+            $fail[0] | Should -Match '-AllowSystemFolder'
+            Should -Invoke Save-OwnerSnapshot -Times 0 -Exactly -Scope It
+            Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        }
+
+        It 'AC20a_Cli_DfsLinkToAnOrdinaryShareFolder_IsAllowedAndTheWarningNamesItAsADfsLink' {
+            Mock Get-DfsTarget { '\\fs02\Apps$\Current' } -ParameterFilter { $Path -eq $script:DfsLink }
+
+            $null = Invoke-FolderPermissionCli -Path $script:Top -LogFolder $script:Log -Force
+
+            @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' }).Count | Should -Be 0
+            Should -Invoke Invoke-AclTool -Times 1 -Exactly -Scope It -ParameterFilter { $Tool -eq 'takeown' }
+            $scope = @($script:Lines | Where-Object { $_ -like '`[WARN`] Taking ownership makes *' })
+            $scope.Count | Should -Be 1
+            $scope[0] | Should -Match 'DFS link'
+            $scope[0] | Should -Match ([regex]::Escape($script:DfsLink))
+            $scope[0] | Should -Not -Match ([regex]::Escape('junction(s) or symbolic link(s)'))
+            $skipped = @($script:Lines | Where-Object { $_ -like '`[INFO`] *are skipped*' })
+            $skipped.Count | Should -Be 1
+            $skipped[0] | Should -Match 'DFS link'
+            $skipped[0] | Should -Not -Match ([regex]::Escape('junction(s) or symbolic link(s)'))
+        }
+
+        It 'AC20c_Cli_DfsLinkWhoseTargetCannotBeFound_IsRefusedWithoutTheAllowSystemFolderHint' {
+            Mock Get-DfsTarget { throw 'The network path was not found. (test)' } -ParameterFilter { $Path -eq $script:DfsLink }
+
+            $code = Invoke-FolderPermissionCli -Path $script:Top -LogFolder $script:Log -Force
+
+            $code | Should -Be 1
+            $fail = @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' })
+            $fail.Count | Should -Be 1
+            $fail[0] | Should -Match ([regex]::Escape($script:DfsLink))
+            $fail[0] | Should -Not -Match 'AllowSystemFolder'
+            $fail[0] | Should -Match ([regex]::Escape($script:BesideTheLink))
+            Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        }
+    }
+
+    Context 'The chosen folder is a DFS link or under a DFS namespace' {
+        BeforeEach {
+            $script:Top = '\\contoso.com\dfs\HR'
+        }
+
+        It 'AC20a_Cli_TopLevelDfsToNetlogon_IsRefused_FinalPathIs<FinalIs>' -ForEach @(
+            @{ FinalIs = 'the target' }
+            @{ FinalIs = 'the path as given' }
+        ) {
+            $script:Target = '\\dc01\NETLOGON\scripts'
+            Set-UncTreeMock -Top $script:Top -Final $(if ($FinalIs -eq 'the target') { $script:Target } else { '' })
+            Mock Get-DfsTarget { $script:Target } -ParameterFilter { $Path -eq $script:Top }
+
+            $code = Invoke-FolderPermissionCli -Path $script:Top -LogFolder $script:Log -Force
+
+            $code | Should -Be 1
+            $fail = @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' })
+            $fail.Count | Should -Be 1
+            $fail[0] | Should -Match ([regex]::Escape($script:Top))
+            $fail[0] | Should -Match 'NETLOGON'
+            $fail[0] | Should -Match '-AllowSystemFolder'
+            Should -Invoke Get-OwnerTreeItem -Times 0 -Exactly -Scope It
+            Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        }
+
+        It 'AC20a_Cli_TopLevelDfsToAnOrdinaryFolder_IsAllowed_FinalPathIs<FinalIs>' -ForEach @(
+            @{ FinalIs = 'the target' }
+            @{ FinalIs = 'the path as given' }
+        ) {
+            $script:Target = '\\fs02\HR$\Dept'
+            Set-UncTreeMock -Top $script:Top -Final $(if ($FinalIs -eq 'the target') { $script:Target } else { '' })
+            Mock Get-DfsTarget { $script:Target } -ParameterFilter { $Path -eq $script:Top }
+
+            $null = Invoke-FolderPermissionCli -Path $script:Top -LogFolder $script:Log -Force
+
+            @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' }).Count | Should -Be 0
+            Should -Invoke Invoke-AclTool -Times 1 -Exactly -Scope It -ParameterFilter { $Tool -eq 'takeown' }
+        }
+
+        It 'AC20c_Cli_TopLevelDfsThatCannotBeResolved_IsRefused_FinalPathIs<FinalIs>' -ForEach @(
+            @{ FinalIs = 'the target' }
+            @{ FinalIs = 'the path as given' }
+        ) {
+            Set-UncTreeMock -Top $script:Top -Final $(if ($FinalIs -eq 'the target') { '\\fs02\HR$\Dept' } else { '' })
+            Mock Get-DfsTarget { throw 'NetDfsGetClientInfo failed (test)' } -ParameterFilter { $Path -eq $script:Top }
+
+            $code = Invoke-FolderPermissionCli -Path $script:Top -LogFolder $script:Log -Force
+
+            $code | Should -Be 1
+            $fail = @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' })
+            $fail.Count | Should -Be 1
+            $fail[0] | Should -Match ([regex]::Escape($script:Top))
+            $fail[0] | Should -Match 'where it leads could not be found out'
+            $fail[0] | Should -Not -Match 'AllowSystemFolder'
+            Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
         }
     }
 }

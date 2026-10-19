@@ -30,8 +30,9 @@
     next to the snapshot. Afterwards it reads every owner back. It logs one row for the whole
     folder (ItemType 'Folder tree', Result Done, Partly done or Failed). The root of a drive,
     the Windows system folders and the SYSVOL, NETLOGON and PRINT$ shares are refused, under
-    any spelling and through junctions and symbolic links (also those inside the folder),
-    unless the caller passes -AllowSystemFolder.
+    any spelling and through junctions, symbolic links and DFS (also links inside the folder),
+    unless the caller passes -AllowSystemFolder. A link whose destination cannot be found out
+    is refused the same way, and DFS targets are looked up with NetDfsGetClientInfo.
 
     The change-log columns are shared with other tools that change things (LocalAdminManager):
     Time, Technician, Computer, Action, Target, ItemType, Detail, OldValue, NewValue, Result,
@@ -124,6 +125,24 @@
       https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-createfilew
       https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew
       https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-getlongpathnamew
+    - Where a DFS path really is (Get-DfsTarget): NetDfsGetClientInfo(DfsEntryPath, ServerName,
+      ShareName, Level, *Buffer) from netapi32.dll reads the DFS client's cache; level 3 returns
+      DFS_INFO_3 (EntryPath, Comment, State, NumberOfStorages, Storage) with one
+      DFS_STORAGE_INFO (State, ServerName, ShareName) per target, and "it is possible that no
+      targets will be marked active", so every target is checked; the buffer is freed with
+      NetApiBufferFree. NERR_DfsNoSuchVolume (2662), "There is no DFS name whose entry path
+      matches the input Entry Path", is the only answer read as "not in DFS"; any other error
+      refuses. IO_REPARSE_TAG_MOUNT_POINT 0xA0000003, IO_REPARSE_TAG_SYMLINK 0xA000000C and
+      IO_REPARSE_TAG_DFS 0x8000000A name the link in messages (MS-FSCC 2.1.2.1, above):
+      https://learn.microsoft.com/windows/win32/api/lmdfs/nf-lmdfs-netdfsgetclientinfo
+      https://learn.microsoft.com/windows/win32/api/lmdfs/ns-lmdfs-dfs_info_3
+      https://learn.microsoft.com/windows/win32/api/lmdfs/ns-lmdfs-dfs_storage_info
+      https://learn.microsoft.com/windows/win32/api/lmapibuf/nf-lmapibuf-netapibufferfree
+      https://learn.microsoft.com/windows/win32/netmgmt/network-management-error-codes
+      The DFS client only answers for a path it has used, so the path is touched first, and
+      a client returns EntryPath with a single leading backslash (Stack Overflow, not Learn):
+      https://stackoverflow.com/a/68071399
+      https://stackoverflow.com/a/21334006
     - An Excel cell holds at most 32,767 characters, so the change log's Detail names at most 20
       folders per list:
       https://support.microsoft.com/office/excel-specifications-and-limits-1672b34d-7043-467e-8e27-269d656771c3
@@ -910,6 +929,147 @@ public static extern bool FindClose(IntPtr hFindFile);
     }
 }
 
+function Get-DfsTarget {
+    <#
+    .SYNOPSIS
+        Where a network path in a DFS namespace really is: one path per DFS target, the
+        target's \\server\share plus the rest of the path below the DFS root or link. Outputs
+        nothing when the path is not a network path or Windows says it is in no DFS namespace.
+        Throws when the lookup fails, so callers can refuse.
+    .DESCRIPTION
+        NetDfsGetClientInfo (netapi32.dll, built into Windows, no RSAT) at level 3 returns a
+        DFS_INFO_3 "from the cache maintained by the DFS client" for the DFS root or link the
+        path is under: EntryPath and one DFS_STORAGE_INFO (ServerName, ShareName) "for each DFS
+        target". Every target is returned, not only the active one: "It is possible that no
+        targets will be marked active", and the client can move to another target. The buffer
+        "must be freed using the NetApiBufferFree function".
+        NERR_DfsNoSuchVolume (2662), "There is no DFS name whose entry path matches the input
+        Entry Path", means the path is in no DFS namespace; any other error is a failure.
+        The DFS client only knows a path it has used, so the folder is touched first
+        (Directory.Exists) to put its referral in the cache (https://stackoverflow.com/a/68071399).
+        A client returns EntryPath with one leading backslash (\contoso.com\dfs\HR), so both
+        forms are accepted (https://stackoverflow.com/a/21334006).
+        https://learn.microsoft.com/windows/win32/api/lmdfs/nf-lmdfs-netdfsgetclientinfo
+        https://learn.microsoft.com/windows/win32/api/lmdfs/ns-lmdfs-dfs_info_3
+        https://learn.microsoft.com/windows/win32/api/lmdfs/ns-lmdfs-dfs_storage_info
+        https://learn.microsoft.com/windows/win32/api/lmapibuf/nf-lmapibuf-netapibufferfree
+        https://learn.microsoft.com/windows/win32/netmgmt/network-management-error-codes
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not ('FolderPermissionManager.Win32Dfs' -as [type])) {
+        # NET_API_STATUS NetDfsGetClientInfo(LPWSTR DfsEntryPath, LPWSTR ServerName,
+        # LPWSTR ShareName, DWORD Level, LPBYTE *Buffer); DFS_INFO_3 { LPWSTR EntryPath;
+        # LPWSTR Comment; DWORD State; DWORD NumberOfStorages; LPDFS_STORAGE_INFO Storage; };
+        # DFS_STORAGE_INFO { ULONG State; LPWSTR ServerName; LPWSTR ShareName; }.
+        Add-Type -Namespace FolderPermissionManager -Name Win32Dfs -ErrorAction Stop -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+public struct DfsInfo3 {
+    [MarshalAs(UnmanagedType.LPWStr)] public string EntryPath;
+    [MarshalAs(UnmanagedType.LPWStr)] public string Comment;
+    public uint State;
+    public uint NumberOfStorages;
+    public IntPtr Storage;
+}
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+public struct DfsStorageInfo {
+    public uint State;
+    [MarshalAs(UnmanagedType.LPWStr)] public string ServerName;
+    [MarshalAs(UnmanagedType.LPWStr)] public string ShareName;
+}
+[DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
+private static extern uint NetDfsGetClientInfo(string DfsEntryPath, string ServerName, string ShareName, uint Level, out IntPtr Buffer);
+[DllImport("netapi32.dll")]
+public static extern uint NetApiBufferFree(IntPtr Buffer);
+public static uint GetClientInfo3(string dfsEntryPath, out IntPtr buffer) {
+    return NetDfsGetClientInfo(dfsEntryPath, null, null, 3, out buffer);
+}
+'@
+    }
+    $unc = ConvertTo-ComparablePath -Path $Path
+    if (-not $unc.StartsWith('\\')) { return }
+
+    $null = [System.IO.Directory]::Exists($unc)
+    $buffer = [IntPtr]::Zero
+    $status = [FolderPermissionManager.Win32Dfs]::GetClientInfo3($unc, [ref]$buffer)
+    try {
+        # NERR_DfsNoSuchVolume
+        if ($status -eq 2662) { return }
+        if ($status -ne 0) {
+            $why = (New-Object System.ComponentModel.Win32Exception -ArgumentList ([int]$status)).Message
+            throw "Windows could not look up the DFS target of $unc (error $($status): $why)"
+        }
+        $info = [System.Runtime.InteropServices.Marshal]::PtrToStructure($buffer, [type][FolderPermissionManager.Win32Dfs+DfsInfo3])
+        $entry = ConvertTo-ComparablePath -Path ('\\' + "$($info.EntryPath)".TrimStart('\'))
+        if (-not ($unc -ieq $entry -or $unc.StartsWith("$entry\", [System.StringComparison]::OrdinalIgnoreCase))) {
+            throw "Windows gave the DFS entry $entry for $unc, which is not above it"
+        }
+        if ($info.NumberOfStorages -eq 0) { throw "Windows reported no DFS target for $entry" }
+        $rest = $unc.Substring($entry.Length).TrimStart('\')
+        $size = [System.Runtime.InteropServices.Marshal]::SizeOf([type][FolderPermissionManager.Win32Dfs+DfsStorageInfo])
+        for ($i = 0; $i -lt $info.NumberOfStorages; $i++) {
+            $at = New-Object System.IntPtr -ArgumentList ($info.Storage.ToInt64() + $i * $size)
+            $storage = [System.Runtime.InteropServices.Marshal]::PtrToStructure($at, [type][FolderPermissionManager.Win32Dfs+DfsStorageInfo])
+            if (-not $storage.ServerName -or -not $storage.ShareName) { throw "Windows reported a DFS target of $entry with no server or share name" }
+            $target = "\\$($storage.ServerName)\$($storage.ShareName)"
+            if ($rest) { $target += "\$rest" }
+            $target
+        }
+    } finally {
+        if ($buffer -ne [IntPtr]::Zero) { $null = [FolderPermissionManager.Win32Dfs]::NetApiBufferFree($buffer) }
+    }
+}
+
+function Get-DfsTargetRefusal {
+    <#
+    .SYNOPSIS
+        Why a network path is refused because of where DFS sends it, or $null when it is
+        allowed: every DFS target (Get-DfsTarget) goes through the D-036 checks
+        (Get-TreeOwnershipRefusal: system and administrative shares, Windows folders). A target
+        that is itself in DFS is looked up again, at most four levels deep.
+    .DESCRIPTION
+        Fails closed: a lookup that fails is refused ("where it leads could not be found out").
+        With -IsDfsLink (the reparse tag says it is a DFS link), so is a link Windows reports no
+        DFS target for. Without it, a path Windows says is in no DFS namespace is allowed here
+        and goes on to the other checks. A target that is not protected is allowed (D-040: links
+        that lead out of the chosen folder to an ordinary place are allowed). The targets are
+        checked as text: they are on other servers, which this tool cannot see into.
+    .PARAMETER Label
+        How the path is named in the text (the link or the folder as the technician gave it).
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Label,
+        [switch]$IsDfsLink,
+        [int]$Depth = 0
+    )
+
+    $what = if ($IsDfsLink) { "$Label is a DFS link" } else { "$Label is on a network path that may be in a DFS namespace" }
+    $tail = 'so it cannot be checked against the Windows system folders.'
+    try {
+        $targets = @(Get-DfsTarget -Path $Path)
+    } catch {
+        return "$what, and $script:UnresolvedDestinationText, $tail $(Format-Sentence $_.Exception.Message)"
+    }
+    if ($targets.Count -eq 0) {
+        if ($IsDfsLink -and $Depth -eq 0) { return "$what, and $script:UnresolvedDestinationText (Windows reported no DFS target for it), $tail" }
+        return $null
+    }
+    $self = ConvertTo-ComparablePath -Path $Path
+    foreach ($target in $targets) {
+        $comparable = ConvertTo-ComparablePath -Path $target
+        $refusal = Get-TreeOwnershipRefusal -Path $comparable
+        if ($refusal) { return "$Label leads to $comparable through DFS. $refusal" }
+        if ($comparable -ieq $self) { continue }
+        if ($Depth -ge 3) {
+            return "$Label leads through more than four DFS links, and $script:UnresolvedDestinationText, $tail"
+        }
+        $refusal = Get-DfsTargetRefusal -Path $comparable -Label $Label -Depth ($Depth + 1)
+        if ($refusal) { return $refusal }
+    }
+    $null
+}
+
 # The only reparse tags that count as plain files in a whole-tree take ownership (owner
 # decision D-040): storage filters that keep the item's data somewhere else but do not send
 # the path anywhere (Data Deduplication, Windows Overlay, legacy HSM, single-instance storage,
@@ -976,47 +1136,124 @@ function Test-LinkReparsePoint {
     if (($Item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) { return $false }
     $tag = Get-ReparsePointTag -Path "$($Item.FullName)"
     if ($null -eq $tag) { return $true }
-    $tag = [uint32]$tag
+    # A tag that is not a number cannot be matched against the allowlist: a link.
+    try { $tag = [uint32]$tag } catch { return $true }
     foreach ($free in $script:RedirectFreeReparseTags.Values) {
         if ($tag -eq $free) { return $false }
     }
     $true
 }
 
-function Test-PathThroughLink {
-    # True when the folder or any folder above it is a junction or symbolic link
-    # (Test-LinkReparsePoint). Reads attributes only. -LiteralPath throughout, so a folder
-    # name with [ ] is read as it is; Split-Path -LiteralPath returns the parent ('' above
-    # the root).
+# Reparse tags that messages name in plain English (MS-FSCC 2.1.2.1 Reparse Tags):
+# IO_REPARSE_TAG_MOUNT_POINT 0xA0000003 (a junction), IO_REPARSE_TAG_SYMLINK 0xA000000C and
+# IO_REPARSE_TAG_DFS 0x8000000A.
+# https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+$script:JunctionReparseTag = [uint32]'0xA0000003'
+$script:SymbolicLinkReparseTag = [uint32]'0xA000000C'
+$script:DfsReparseTag = [uint32]'0x8000000A'
+
+function Get-LinkKindName {
+    <#
+    .SYNOPSIS
+        What a link is called in messages, from its reparse tag: 'junction', 'symbolic link',
+        'DFS link', or 'other redirect (reparse point 0x........)'. The one place this wording
+        comes from, so the GUI and the command line say the same.
+    #>
+    param([AllowNull()][object]$Tag)
+    $unknown = 'other redirect (reparse point tag could not be read)'
+    if ($null -eq $Tag) { return $unknown }
+    try { $value = [uint32]$Tag } catch { return $unknown }
+    if ($value -eq $script:JunctionReparseTag) { return 'junction' }
+    if ($value -eq $script:SymbolicLinkReparseTag) { return 'symbolic link' }
+    if ($value -eq $script:DfsReparseTag) { return 'DFS link' }
+    'other redirect (reparse point 0x{0:X8})' -f $value
+}
+
+function Get-LinkKind {
+    # Get-LinkKindName for an existing item, from its tag (Get-ReparsePointTag).
+    param([Parameter(Mandatory)][string]$Path)
+    Get-LinkKindName -Tag (Get-ReparsePointTag -Path $Path)
+}
+
+function Format-LinkKindWithArticle {
+    # "a junction", "a DFS link", "an other redirect (...)".
+    param([Parameter(Mandatory)][string]$Kind)
+    if ($Kind -match '^[aeiouAEIOU]') { "an $Kind" } else { "a $Kind" }
+}
+
+function Get-LinkListText {
+    <#
+    .SYNOPSIS
+        How the links found in a folder are counted and listed in messages: Noun ("2
+        junction(s) or symbolic link(s)", or "2 link(s)" when any is of another kind) and Items
+        (the paths, each named by its kind when the noun does not already say what they are:
+        "DFS link \\fs01\share\Apps").
+    #>
+    param([AllowEmptyCollection()][string[]]$LinkPaths = @())
+
+    $paths = @($LinkPaths | Where-Object { $_ })
+    $kinds = @($paths | ForEach-Object { Get-LinkKind -Path $_ })
+    $otherKinds = @($kinds | Where-Object { $_ -ne 'junction' -and $_ -ne 'symbolic link' })
+    if ($otherKinds.Count -eq 0) {
+        return [PSCustomObject]@{ Noun = "$($paths.Count) junction(s) or symbolic link(s)"; Items = $paths }
+    }
+    $items = @(for ($i = 0; $i -lt $paths.Count; $i++) { "$($kinds[$i]) $($paths[$i])" })
+    [PSCustomObject]@{ Noun = "$($paths.Count) link(s)"; Items = $items }
+}
+
+# The words every "where it leads could not be found out" refusal contains, so a caller can tell
+# it from a protected-folder refusal (Test-UnresolvedDestinationRefusal): -AllowSystemFolder is
+# the way past a protected folder, not past a destination nobody could check.
+$script:UnresolvedDestinationText = 'where it leads could not be found out'
+
+function Test-UnresolvedDestinationRefusal {
+    # True for a refusal given because where a link leads could not be found out.
+    param([AllowNull()][AllowEmptyString()][string]$Refusal)
+    "$Refusal" -match [regex]::Escape($script:UnresolvedDestinationText)
+}
+
+function Find-PathLink {
+    # The folder itself or the nearest folder above it that is a link (Test-LinkReparsePoint),
+    # or $null. Reads attributes only. -LiteralPath throughout, so a folder name with [ ] is
+    # read as it is; Split-Path -LiteralPath returns the parent ('' above the root).
     # https://learn.microsoft.com/dotnet/api/system.io.fileattributes
     # https://learn.microsoft.com/powershell/module/microsoft.powershell.management/split-path
     param([Parameter(Mandatory)][string]$Path)
     $current = $Path
     while ($current) {
         $item = Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue
-        if ($item -and (Test-LinkReparsePoint -Item $item)) { return $true }
+        if ($item -and (Test-LinkReparsePoint -Item $item)) { return $current }
         $parent = Split-Path -LiteralPath $current
         if (-not $parent -or $parent -eq $current) { break }
         $current = $parent
     }
-    $false
+    $null
+}
+
+function Test-PathThroughLink {
+    # True when the folder or any folder above it is a link (Find-PathLink).
+    param([Parameter(Mandatory)][string]$Path)
+    [bool](Find-PathLink -Path $Path)
 }
 
 function Get-TreeOwnershipTargetRefusal {
     <#
     .SYNOPSIS
         Get-TreeOwnershipRefusal for a folder as Windows will really reach it: also refused when
-        -Path leads into a protected folder through a junction or symbolic link (on the folder
-        or on any folder above it) or is spelt with 8.3 short names (C:\PROGRA~1). The text
-        names -Path as given. $null when it is allowed.
+        -Path leads into a protected folder through a junction, a symbolic link or DFS (on the
+        folder or on any folder above it) or is spelt with 8.3 short names (C:\PROGRA~1). The
+        text names -Path as given. $null when it is allowed.
     .DESCRIPTION
         Reads the disk (Get-Win32PathName, attributes only; nothing is opened for reading or
-        changed). A path that does not exist is checked as text only. Also refused, because
-        takeown and icacls would go to a place nobody checked:
-        - the folder is, or is inside, a junction or symbolic link, and its final path is
-          unknown or no different from the path as given. On a share the server follows its
-          own junctions, so the final path the client gets back is the path itself and where
-          the junction leads cannot be seen.
+        changed). A path that does not exist is checked as text only. A network path (and a
+        final path on the network, such as a mapped drive's) is looked up in DFS
+        (Get-DfsTargetRefusal): a DFS target in a protected place, or a lookup that fails,
+        refuses it; a path Windows says is in no DFS namespace goes on to the checks below.
+        Also refused, because takeown and icacls would go to a place nobody checked:
+        - the folder is, or is inside, a link (Find-PathLink), and its final path is unknown or
+          no different from the path as given. On a share the server follows its own
+          junctions, so the final path the client gets back is the path itself and where the
+          junction leads cannot be seen. A DFS link on a network path is looked up instead.
         - a segment looks like an 8.3 short name (~1) and neither the final nor the long path
           can be read, so the real path cannot be checked.
     #>
@@ -1029,6 +1266,19 @@ function Get-TreeOwnershipTargetRefusal {
     $final = Get-Win32PathName -Path $Path -Kind Final
     $long = Get-Win32PathName -Path $Path -Kind Long
     $given = ConvertTo-ComparablePath -Path $Path
+
+    # DFS: the client follows the referral itself, so neither the final path nor the folder's
+    # attributes show where a DFS folder really is (D-040).
+    $dfsChecked = @{}
+    foreach ($form in @($Path, $final)) {
+        if (-not $form) { continue }
+        $comparable = ConvertTo-ComparablePath -Path $form
+        if (-not $comparable.StartsWith('\\') -or $dfsChecked.ContainsKey($comparable)) { continue }
+        $dfsChecked[$comparable] = $true
+        $refusal = Get-DfsTargetRefusal -Path $comparable -Label $Path
+        if ($refusal) { return $refusal }
+    }
+
     $finalLeadsElsewhere = $false
     foreach ($form in @($final, $long)) {
         if (-not $form) { continue }
@@ -1043,8 +1293,18 @@ function Get-TreeOwnershipTargetRefusal {
     if (-not $final -and -not $long -and @($given -split '\\' | Where-Object { $_ -match '~\d' }).Count -gt 0) {
         return "$Path looks like a short (8.3) name and Windows could not tell its full name, so the tool could not check the real path against the Windows system folders. Type the folder's full name instead."
     }
-    if (-not $finalLeadsElsewhere -and (Test-PathThroughLink -Path $Path)) {
-        return "$Path is, or is inside, a junction or symbolic link, and where it leads could not be found out, so it cannot be checked against the Windows system folders. Choose the real folder it points to instead."
+    if (-not $finalLeadsElsewhere) {
+        $link = Find-PathLink -Path $Path
+        if ($link) {
+            $kindName = Get-LinkKind -Path $link
+            $comparableLink = ConvertTo-ComparablePath -Path $link
+            if ($kindName -eq 'DFS link' -and $comparableLink.StartsWith('\\')) {
+                return Get-DfsTargetRefusal -Path $comparableLink -Label $Path -IsDfsLink
+            }
+            $kind = Format-LinkKindWithArticle -Kind $kindName
+            $where = if ($comparableLink -ieq $given) { "$Path is $kind" } else { "$Path is inside $kind ($link)" }
+            return "$where, and $script:UnresolvedDestinationText, so it cannot be checked against the Windows system folders. Choose the real folder it points to instead."
+        }
     }
     $null
 }
@@ -1052,16 +1312,22 @@ function Get-TreeOwnershipTargetRefusal {
 function Get-TreeLinkRefusal {
     <#
     .SYNOPSIS
-        Why a junction or symbolic link found inside -Path (Save-OwnerSnapshot LinkPaths,
-        Get-OwnerTreeItem Links) stops taking ownership of the whole tree, or $null when none
-        does. A link is refused when it leads into a protected folder or where it leads cannot
-        be found out (Get-TreeOwnershipTargetRefusal, D-036).
+        Why a link found inside -Path (Save-OwnerSnapshot LinkPaths, Get-OwnerTreeItem Links)
+        stops taking ownership of the whole tree, or $null when none does. A link is refused
+        when it leads into a protected folder (D-036) or where it leads cannot be found out.
+        The text names what was found (Get-LinkKindName).
     .DESCRIPTION
         Microsoft's documentation does not say whether takeown /R or icacls /T follow links,
-        and icacls changes what a symbolic link points to unless /L is given, so a link inside
-        the tree is checked like the folder itself. A link whose final path cannot be read at
-        all (it points nowhere, or somewhere this account cannot open) is refused too. -Path
-        itself is skipped: the caller checks it.
+        and icacls changes what a symbolic link points to unless /L is given, so every link
+        is checked. These are already known to be links (the listing saw the reparse point and
+        its tag is not on the allowlist, D-040), so a link is refused when its final path
+        cannot be read or cannot be shown to differ from its own path: over SMB the server or
+        the DFS client follows the link itself and hands back the path as given, and asking
+        Get-Item again could show the destination's attributes instead of the link's. A DFS
+        link on a network path is looked up in DFS instead (Get-DfsTargetRefusal): every
+        target is checked, and no target or a failed lookup refuses. A link that leads to an
+        ordinary place outside the folder is allowed (D-040, option A). -Path itself is checked
+        too when the listing found it is a link.
         https://learn.microsoft.com/windows-server/administration/windows-commands/icacls
     #>
     param(
@@ -1069,14 +1335,34 @@ function Get-TreeLinkRefusal {
         [AllowEmptyCollection()][string[]]$LinkPaths = @()
     )
 
+    $tail = 'so it cannot be checked against the Windows system folders.'
     foreach ($link in @($LinkPaths)) {
-        if (-not $link -or $link -eq $Path) { continue }
-        $refusal = Get-TreeOwnershipTargetRefusal -Path $link
-        if (-not $refusal -and -not (Get-Win32PathName -Path $link -Kind Final)) {
-            $refusal = "$link is a junction or symbolic link, and where it leads could not be found out, so it cannot be checked against the Windows system folders."
+        if (-not $link) { continue }
+        $kindName = Get-LinkKind -Path $link
+        $kind = Format-LinkKindWithArticle -Kind $kindName
+        $comparableLink = ConvertTo-ComparablePath -Path $link
+        $refusal = Get-TreeOwnershipRefusal -Path $link
+        if (-not $refusal) {
+            if ($kindName -eq 'DFS link' -and $comparableLink.StartsWith('\\')) {
+                $refusal = Get-DfsTargetRefusal -Path $comparableLink -Label $link -IsDfsLink
+            } else {
+                $final = Get-Win32PathName -Path $link -Kind Final
+                $comparable = if ($final) { ConvertTo-ComparablePath -Path $final } else { '' }
+                if (-not $comparable -or $comparable -ieq $comparableLink) {
+                    $refusal = "$link is $kind, and $script:UnresolvedDestinationText, $tail"
+                } else {
+                    $refusal = Get-TreeOwnershipRefusal -Path $comparable
+                    if ($refusal) {
+                        $refusal = "$link is $kind that leads to $comparable. $refusal"
+                    } elseif ($comparable.StartsWith('\\')) {
+                        $refusal = Get-DfsTargetRefusal -Path $comparable -Label $link
+                    }
+                }
+            }
         }
         if ($refusal) {
-            return "$Path contains a junction or symbolic link that takeown and icacls may follow out of the folder. $refusal"
+            if ($comparableLink -ieq (ConvertTo-ComparablePath -Path $Path)) { return $refusal }
+            return "$Path contains $kind that takeown and icacls may follow out of the folder. $refusal"
         }
     }
     $null
@@ -1648,13 +1934,14 @@ function Invoke-TreeOwnershipChange {
     # that could not be opened is in its own file.
     # https://support.microsoft.com/office/excel-specifications-and-limits-1672b34d-7043-467e-8e27-269d656771c3
     $fullList = if ($notOpenedFile) { " (full list: $notOpenedFile)" } else { ' (the full list could not be saved to a file)' }
+    $linkText = Get-LinkListText -LinkPaths @($snapshot.LinkPaths)
     $notes = @(
         "$detail."
         $(if ($snapshot.Unreadable -gt 0) { "$($snapshot.Unreadable) item(s) had no readable owner before the change." })
         $(if ($snapshot.Unlisted -gt 0) { "$($snapshot.Unlisted) folder(s) could not be opened, so takeown /D N skipped them and the owners inside them are not in the backup: $(Format-PathList -Path @($snapshot.UnlistedFolders) -First 20 -More $fullList)." })
         $(if ($unlistedChanged.Count -gt 0) { "The owner of $($unlistedChanged.Count) of them was changed anyway (read back), but not their permissions: $(Format-PathList -Path $unlistedChanged -First 20)." })
         $(if ($unlistedUnchecked.Count -gt 0) { "The owner of $($unlistedUnchecked.Count) of them could not be read afterwards, so it is not known whether it changed: $(Format-PathList -Path $unlistedUnchecked -First 20)." })
-        $(if ($snapshot.Links -gt 0) { "$($snapshot.Links) junction(s) or symbolic link(s) were listed but not gone into: $(Format-PathList -Path @($snapshot.LinkPaths) -First 20)." })
+        $(if ($snapshot.Links -gt 0) { "$($linkText.Noun) were listed but not gone into: $(Format-PathList -Path @($linkText.Items) -First 20)." })
         "Ran: $(Format-AclToolCommand -Tool takeown -Arguments $takeownArgs); $(Format-AclToolCommand -Tool icacls -Arguments $icaclsArgs)"
     ) | Where-Object { $_ }
 
@@ -1672,6 +1959,8 @@ function Invoke-TreeOwnershipChange {
         NotOpenedFile            = $notOpenedFile
         Links                    = $snapshot.Links
         LinkPaths                = @($snapshot.LinkPaths)
+        LinkNoun                 = $linkText.Noun
+        LinkItems                = @($linkText.Items)
         Unchecked                = $check.Unchecked
         NotOwned                 = $check.NotMine
         Changed                  = $check.Changed
@@ -1993,9 +2282,13 @@ function Get-TreeChangeResultMessage {
         }
         $links = Get-TreeEntryCount $e 'Links'
         if ($links -gt 0) {
-            $linkNames = @($e.TreeCounts.LinkPaths | Select-Object -First 3)
+            # LinkNoun and LinkItems name each link's kind (Get-LinkListText); a row from before
+            # they were added only has the paths.
+            $noun = if ($e.TreeCounts.LinkNoun) { $e.TreeCounts.LinkNoun } else { "$links junction(s) or symbolic link(s)" }
+            $linkItems = if (@($e.TreeCounts.LinkItems).Count -gt 0) { @($e.TreeCounts.LinkItems) } else { @($e.TreeCounts.LinkPaths) }
+            $linkNames = @($linkItems | Select-Object -First 3)
             $linkMore = if ($links -gt $linkNames.Count) { " and $($links - $linkNames.Count) more" } else { '' }
-            $parts.Add("$links junction(s) or symbolic link(s) ($($linkNames -join '; ')$linkMore) were listed but not gone into. Microsoft's documentation does not say whether takeown and icacls follow them, and icacls changes what a symbolic link points to, so check them and what they point to.")
+            $parts.Add("$noun ($($linkNames -join '; ')$linkMore) were listed but not gone into. Microsoft's documentation does not say whether takeown and icacls follow them, and icacls changes what a symbolic link points to, so check them and what they point to.")
         }
         $unchecked = Get-TreeEntryCount $e 'Unchecked'
         if ($unchecked -gt 0 -and $e.Result -ne 'Skipped (WhatIf)') {

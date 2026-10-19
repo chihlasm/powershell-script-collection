@@ -122,7 +122,8 @@ link; and for another server's administrative shares: `ADMIN$`, a drive share su
 scripts and printer drivers for every computer that uses them. The root of an ordinary share
 (`\\fs01\share`, or a hidden one such as `\\fs01\Users$`) is allowed. A folder that is, or is
 inside, a junction or symbolic link is refused when the tool cannot see where it leads: on a
-share the server follows its own junctions, so the tool only sees the path you typed. A path
+share the server follows its own junctions, so the tool only sees the path you typed. A folder
+on a network path is also looked up in DFS (see "Refused" below). A path
 with a short name (`~1`) is refused when Windows cannot tell its full name. The GUI has no
 way around this; the command-line script takes `-AllowSystemFolder` for the rare case where it
 is really needed.
@@ -131,18 +132,32 @@ Junctions and symbolic links inside the folder are listed in the snapshot but no
 because they can point outside the folder. Microsoft's documentation does not say whether
 `takeown /R` and `icacls /T` go into them, and `icacls` changes what a symbolic link points to
 unless `/L` is given ([icacls](https://learn.microsoft.com/windows-server/administration/windows-commands/icacls)),
-so each one is checked like the folder itself. **A junction or symbolic link inside the folder
-that leads into one of the folders above, or somewhere the tool cannot check, refuses the whole
-folder**: the result is `Failed`, names the link, and nothing is changed. The command-line
-script says so before asking anything; the GUI finds out while saving the owner snapshot, and
-keeps that snapshot (the change log row names it, and nothing needs to be put back from it).
-Take ownership of the folders beside the link instead. Other links do not stop the change, but
-a folder containing any is never reported as a plain success: the result says how many there
-are and names them. Check them, and what they point to, after the change. Only a short list of
-storage features count as plain items and are changed like any other: deduplicated files,
-compressed (WOF) files, OneDrive and other cloud placeholders, and legacy HSM and
-single-instance storage files. Every other kind of reparse point, DFS links and anything the
-tool does not recognise included, is treated as a link and checked as above.
+so each one is checked like the folder itself. Messages say what was found: a `junction`, a
+`symbolic link`, a `DFS link`, or an `other redirect (reparse point 0x........)`.
+
+**Refused:** a junction or symbolic link inside the folder (or any other link: a DFS link, or a
+reparse point the tool does not recognise) that leads into one of the folders above, or
+somewhere the tool cannot check, refuses the whole folder. "Cannot check" includes a link whose
+destination Windows will not tell, or tells as the link's own path, which is what happens on a
+share where the server follows the link itself. **DFS targets are looked up**: for a DFS link
+on a network path, and for a chosen folder on a network path (`\\contoso.com\dfs\HR`), the tool
+asks the DFS client on this computer where the path really is (`NetDfsGetClientInfo`, built
+into Windows) and checks every target; a target such as `\\dc01\NETLOGON`, or a lookup that
+fails, refuses the folder. The result is `Failed`, names the link, and nothing is changed. The
+command-line script says so before asking anything; the GUI finds out while saving the owner
+snapshot, and keeps that snapshot (the change log row names it, and nothing needs to be put back
+from it). Take ownership of the folders beside the link instead, or ask a senior engineer. The
+command-line script offers `-AllowSystemFolder` only when the destination is a protected folder,
+not when it could not be found out.
+
+**Allowed:** a link that leads to an ordinary place, even outside the folder (a DFS target such
+as `\\fs02\Apps$`), does not stop the change, but a folder containing any link is never
+reported as a plain success: the result says how many there are and names them. Check them, and
+what they point to, after the change. A short list of storage features count as plain items and
+are changed like any other: deduplicated files, compressed (WOF) files, OneDrive and other cloud
+placeholders, and legacy HSM and single-instance storage files. Every other kind of reparse
+point, DFS links and anything the tool does not recognise included, is treated as a link and
+checked as above.
 
 `Could not read` means the tool could not read the item's permissions (or, in an owner
 snapshot, its owner) before the change. Add permission, Remove permission and Copy permissions
@@ -314,7 +329,9 @@ A drive root or a Windows folder is refused straight away, before any question, 
 `[FAIL]` line that names the folder and `-AllowSystemFolder`, and exit code `1`. Nothing is
 counted, saved or changed. A junction or symbolic link inside the folder that leads into one is
 refused the same way once the folder has been counted, before any question: the `[FAIL]` line
-names the link, and nothing is saved or changed.
+names the link, and nothing is saved or changed. When the folder or a link is refused because
+where it leads could not be found out, the `[FAIL]` line does not offer `-AllowSystemFolder`; it
+says to take ownership of the folders beside the link instead, or to ask a senior engineer.
 
 The script exits with `1` when a step `Failed` or was only `Partly done`, when taking ownership
 could not be checked everywhere (folders it could not open, owners it could not read back, or
