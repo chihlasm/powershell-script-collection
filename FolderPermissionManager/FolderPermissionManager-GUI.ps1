@@ -1287,6 +1287,20 @@ function Get-CoreFunctionNames {
     @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false) | ForEach-Object { $_.Name })
 }
 
+function Get-CoreScriptVariableNames {
+    # The $script: variables FolderPermissions.Core.ps1 assigns at its top level (the D-040 reparse
+    # allowlist, tag constants, message markers). The pool copies them next to the functions:
+    # without them a pool-run guard sees $null, and the allowlist would count every reparse point
+    # as a link.
+    param([Parameter(Mandatory)][string]$CorePath)
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($CorePath, [ref]$null, [ref]$null)
+    @($ast.EndBlock.Statements |
+        Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                       $_.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                       $_.Left.VariablePath.IsScript } |
+        ForEach-Object { $_.Left.VariablePath.UserPath -replace '^script:', '' } | Select-Object -Unique)
+}
+
 $script:DrivesWork = {
     param([hashtable]$DriveMap, [string]$CorePath)
     try {
@@ -1430,7 +1444,15 @@ function Initialize-BackgroundPool {
         $definition = (Get-Command -Name $name -CommandType Function -ErrorAction Stop).Definition
         $iss.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new($name, $definition))
     }
-    $script:BgPool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, 4, $iss, $Host)
+    # The core's top-level $script: variables, with the values this window loaded. In a pool
+    # runspace the copied functions' script scope is the session (global) scope, which is where
+    # SessionStateVariableEntry puts them.
+    # https://learn.microsoft.com/dotnet/api/system.management.automation.runspaces.sessionstatevariableentry
+    foreach ($varName in @(Get-CoreScriptVariableNames -CorePath $script:CorePath)) {
+        $value = (Get-Variable -Name $varName -Scope Script -ErrorAction Stop).Value
+        $iss.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new($varName, $value, ''))
+    }
+    $script:BgPool =[System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, 4, $iss, $Host)
     $script:BgPool.Open()
     $script:BgTasks = [System.Collections.Generic.List[object]]::new()
 }
