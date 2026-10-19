@@ -1644,7 +1644,7 @@ Describe 'D-040 reparse allowlist: links inside the tree' {
         It 'AC20c_ReparsePointWithOtherTag_<Name>_WhoseTargetCannotBeFound_RefusesTheTree' -ForEach @(
             @{ Name = 'unknown 0x8000ABCD'; Value = [uint32]'0x8000ABCD' }
             @{ Name = 'IO_REPARSE_TAG_DFS'; Value = [uint32]'0x8000000A' }
-            @{ Name = 'IO_REPARSE_TAG_APPEXECLINK'; Value = [uint32]'0x8000001B' }
+            @{ Name = 'IO_REPARSE_TAG_WCI'; Value = [uint32]'0x80000018' }
             @{ Name = 'IO_REPARSE_TAG_NFS'; Value = [uint32]'0x80000014' }
         ) {
             $script:Tag = $Value
