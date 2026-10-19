@@ -479,7 +479,9 @@ function Invoke-FolderPermissionCli {
     # it onto every item, also those that block inheritance. The folder is a placeholder, not
     # the top folder: a pasted command must not grant everything below by accident.
     # https://learn.microsoft.com/windows-server/administration/windows-commands/icacls
-    $grantExample = Join-Path $Path '<folder they need>'
+    # Built as a string, not with Join-Path: Join-Path checks that the drive exists, and a mapped
+    # letter may not exist in this session (an elevated window does not see the user's mappings).
+    $grantExample = $Path.TrimEnd('\') + '\<folder they need>'
     Write-Host "[INFO] Add it with Add Permission in FolderPermissionManager-GUI.ps1 or on Explorer's Security tab. Without a browser: icacls ""$grantExample"" /grant ""DOMAIN\user:(OI)(CI)RX"" (RX is read and execute; use M only if they must change or delete files. Do not add /T, which writes it onto every subfolder and file, including the ones that block inheritance)." -ForegroundColor Cyan
     $exitCode
 }
