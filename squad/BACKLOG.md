@@ -111,7 +111,7 @@ the shared change-log format (D-030), and SDDL backup plus logging for every sin
 in the GUI. A change whose backup can't be written is refused. Split per D-004.
 
 ## SQ-014 · FolderPermissionManager: whole-tree actions and the CLI script
-- status: review
+- status: done
 - revision: D-040 allowlist for reparse tags (spec SQ-008.md Revision notes 2026-10-18, AC20a-d)
 - priority: P1
 - type: fix
@@ -126,7 +126,8 @@ The copy-permissions tree backup is no longer needed (D-031). The old CLI
 ownership, `-Force` and a help block (D-010). Builds after SQ-008. Split per D-004.
 
 ## SQ-015 · FolderPermissionManager: fix recursive copy permissions
-- status: review
+- status: ready
+- revision: merge onto main failed 2 CLI tests at review 2026-10-19 (spec Revision notes, AC-R1..R3)
 - priority: P1
 - type: fix
 - branch: squad/SQ-015-fpm-recursive-copy (stacked on SQ-014; SQ-014's tip 33d09c5 merged in at 43ca5a3, owner 2026-10-19, D-041)
