@@ -23,11 +23,11 @@ BeforeAll {
 
 Describe 'FolderPermissionManager.ps1 has no copy-to-subfolders step (D-035)' {
     BeforeEach {
-        $root = Join-Path $TestDrive ('nocopy-' + [guid]::NewGuid().ToString('N'))
+        $root = Join-Path $TestDrive ('d035-' + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path (Join-Path $root 'sub1') -Force | Out-Null
         New-Item -ItemType Directory -Path (Join-Path $root 'sub2') -Force | Out-Null
         $script:Dir = $root
-        $script:Log = Join-Path $TestDrive ('nocopy-logs-' + [guid]::NewGuid().ToString('N'))
+        $script:Log = Join-Path $TestDrive ('d035-logs-' + [guid]::NewGuid().ToString('N'))
         $script:Prompts = [System.Collections.Generic.List[string]]::new()
         $script:Lines = [System.Collections.Generic.List[string]]::new()
 

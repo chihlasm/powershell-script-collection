@@ -11,8 +11,8 @@
       Invoke-FolderPermissionCli -Path <dir> [-LogFolder <dir>] [-Force] [-WhatIf] [-Confirm]
         [CmdletBinding(SupportsShouldProcess)]; never throws for a declined prompt.
       Confirmations are asked with Read-Host (as the old script did); 'y'/'Y' means yes, anything
-      else means no. Taking ownership asks BEFORE the take-ownership call, and copying the
-      top-level permissions to the subfolders asks again on its own. -Force asks nothing.
+      else means no. Taking ownership asks BEFORE the take-ownership call; there is no
+      copy-to-subfolders step (D-035). -Force asks nothing.
       -WhatIf never prompts. Changes go through the core (backups and change log).
       The script is #Requires -Version 4.0 or lower. If it adds -RunAsAdministrator, check
       elevation at run time instead: a #Requires -RunAsAdministrator line stops these tests
@@ -83,25 +83,11 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
 
         Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
 
-        # Two questions: ownership (declined), then the copy step (default answer: no).
-        Should -Invoke Read-Host -Times 2 -Exactly -Scope It
+        # One question: ownership (declined). There is no copy step to ask about (D-035).
+        Should -Invoke Read-Host -Times 1 -Exactly -Scope It
         Test-Path -LiteralPath (Join-Path $script:Log 'Backups') | Should -BeFalse -Because 'nothing was backed up, so nothing was about to change'
         Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It -Because 'ownership must not be taken before the user agrees'
         Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
-        Should -Invoke takeown -Times 0 -Exactly -Scope It
-        Should -Invoke icacls -Times 0 -Exactly -Scope It
-    }
-
-    It 'AC20_Cli_CopyConfirmationDeclined_PermissionsAreNotCopied' {
-        $script:Answers.Enqueue('y')   # take ownership: yes
-        $script:Answers.Enqueue('n')   # copy permissions to subfolders: no
-
-        Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
-
-        $script:Prompts.Count | Should -BeGreaterOrEqual 2
-        Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
-        # Ownership was agreed to, so it went through the wrapper (backed up first).
-        Should -Invoke Invoke-AclTool -Times 1 -Exactly -ParameterFilter { $Tool -eq 'takeown' } -Scope It
         Should -Invoke takeown -Times 0 -Exactly -Scope It
         Should -Invoke icacls -Times 0 -Exactly -Scope It
     }
@@ -132,30 +118,6 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
     }
 
     # --- Fix round 1 (SQ-014 review) ---------------------------------------------------------
-
-    It 'AC20_Cli_OwnershipDeclinedThenCopyAccepted_CopiesThroughTheCoreWithABackupAndLeavesOwnersAlone' {
-        # Fixture (SQ-015): copy only copies the top folder's own rules, and a new $TestDrive
-        # folder only inherits, so it gets one rule of its own (in memory, nothing is written).
-        $script:RealGetAcl = Get-Command Get-Acl -CommandType Cmdlet
-        Mock Get-Acl {
-            $acl = & $script:RealGetAcl -LiteralPath $LiteralPath
-            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule -ArgumentList 'BUILTIN\Users', 'Modify', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))
-            $acl
-        } -ParameterFilter { $LiteralPath -eq $script:Dir }
-        $script:Answers.Enqueue('n')   # take ownership: no
-        $script:Answers.Enqueue('y')   # copy permissions to subfolders: yes
-
-        $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
-
-        $code | Should -Be 0
-        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It -Because 'ownership was declined'
-        Should -Invoke Set-Acl -Times 2 -Exactly -Scope It -Because 'one write per subfolder (sub1, sub2), through Copy-FolderPermission'
-        @(Get-ChildItem -LiteralPath (Join-Path $script:Log 'Backups') -Filter '*_CopyPermissions.csv').Count | Should -Be 1
-        @(Get-ChildItem -LiteralPath (Join-Path $script:Log 'Backups') -Filter '*_TakeOwnership.csv').Count | Should -Be 0
-        @($script:Lines | Where-Object { $_ -like '`[INFO`] Copying permissions (next) does not depend on taking ownership*' }).Count | Should -Be 1
-        $log = @(Import-Csv -LiteralPath @(Get-ChildItem -LiteralPath $script:Log -Filter 'Changes_*.csv')[0].FullName)
-        @($log | ForEach-Object { $_.Action } | Sort-Object -Unique) | Should -Be @('Copy permissions')
-    }
 
     It 'AC20_Cli_ShowsTheItemCountBeforeAskingAndAsksYesNoWithNoAsTheDefault' {
         Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
@@ -258,21 +220,11 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         @($script:Lines | Where-Object { $_ -like '`[WARN`] Took ownership*' }).Count | Should -Be 1
     }
 
-    It 'AC16_Cli_JunctionIsCountedInTheWarningAndTheResultAndIsSkippedByTheCopy' {
-        # Fixture (SQ-015): copy only copies the top folder's own rules, and a new $TestDrive
-        # folder only inherits, so it gets one rule of its own (in memory, nothing is written).
-        $script:RealGetAcl = Get-Command Get-Acl -CommandType Cmdlet
-        Mock Get-Acl {
-            $acl = & $script:RealGetAcl -LiteralPath $LiteralPath
-            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule -ArgumentList 'BUILTIN\Users', 'Modify', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))
-            $acl
-        } -ParameterFilter { $LiteralPath -eq $script:Dir }
+    It 'AC16_Cli_JunctionIsCountedInTheWarningAndTheResult' {
         $elsewhere = Join-Path $TestDrive ('cli-junction-target-' + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path (Join-Path $elsewhere 'inside') -Force | Out-Null
         $link = Join-Path $script:Dir 'link'
         New-Item -ItemType Junction -Path $link -Target $elsewhere | Out-Null
-        $script:SetAclPaths = [System.Collections.Generic.List[string]]::new()
-        Mock Set-Acl { $script:SetAclPaths.Add("$LiteralPath") }
 
         $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log -Force
 
@@ -280,30 +232,6 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         $scope = @($script:Lines | Where-Object { $_ -like '`[WARN`] Taking ownership makes *' })
         $scope[0] | Should -BeLike "*It contains 1 junction(s) or symbolic link(s), which are listed but not gone into. Microsoft's documentation does not say whether takeown and icacls follow them*$link*"
         @($script:Lines | Where-Object { $_ -like '`[WARN`] Took ownership*1 junction(s) or symbolic link(s)*' }).Count | Should -Be 1
-        @($script:SetAclPaths | Sort-Object) | Should -Be @((Join-Path $script:Dir 'sub1'), (Join-Path $script:Dir 'sub2')) -Because 'the copy goes to real subfolders only, not into or onto the junction'
-        @($script:Lines | Where-Object { $_ -like '`[INFO`] 1 junction(s) or symbolic link(s) are skipped*' }).Count | Should -Be 1
-    }
-
-    It 'AC20_Cli_CopyStepListsSubfoldersWithoutRecursingGetChildItem' {
-        # Fixture (SQ-015): copy only copies the top folder's own rules, and a new $TestDrive
-        # folder only inherits, so it gets one rule of its own (in memory, nothing is written).
-        $script:RealGetAcl = Get-Command Get-Acl -CommandType Cmdlet
-        Mock Get-Acl {
-            $acl = & $script:RealGetAcl -LiteralPath $LiteralPath
-            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule -ArgumentList 'BUILTIN\Users', 'Modify', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))
-            $acl
-        } -ParameterFilter { $LiteralPath -eq $script:Dir }
-        New-Item -ItemType Directory -Path (Join-Path $script:Dir 'sub1\deeper') -Force | Out-Null
-        $script:Answers.Enqueue('n')   # take ownership: no
-        $script:Answers.Enqueue('y')   # copy: yes
-        # Whether Get-ChildItem -Recurse follows links depends on the PowerShell version; the CLI
-        # lists each folder on its own (Get-OwnerTreeItem) instead.
-        Mock Get-ChildItem { throw 'Get-ChildItem -Recurse must not be used (test)' } -ParameterFilter { $Recurse }
-
-        $null = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
-
-        Should -Invoke Get-ChildItem -Times 0 -Exactly -Scope It -ParameterFilter { $Recurse }
-        Should -Invoke Set-Acl -Times 3 -Exactly -Scope It -Because 'sub1, sub1\deeper and sub2'
     }
 
     It 'AC20_Cli_SaysHowToRecogniseAnInterruptedRunBeforeTakingOwnership' {
@@ -318,122 +246,6 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         $null = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log -Force
 
         $script:InterruptNoteBeforeTools | Should -BeTrue
-    }
-
-    # --- Fix round 1 (SQ-015 review) ---------------------------------------------------------
-
-    Context 'copy step over subfolders that inherit the top folder''s rule' {
-        BeforeEach {
-            # The top folder has Allow Modify for Users (S-1-5-32-545) as its own rule; sub1 and
-            # sub2 carry it as inherited (ID flag), as Windows puts it there. In memory only.
-            $script:RealGetAcl = Get-Command Get-Acl -CommandType Cmdlet
-            $script:Sddl = @{
-                $script:Dir                       = 'O:BAG:SYD:AI(A;OICI;0x1301bf;;;S-1-5-32-545)'
-                (Join-Path $script:Dir 'sub1')    = 'O:BAG:SYD:AI(A;OICIID;0x1301bf;;;S-1-5-32-545)'
-                (Join-Path $script:Dir 'sub2')    = 'O:BAG:SYD:AI(A;OICIID;0x1301bf;;;S-1-5-32-545)'
-            }
-            Mock Get-Acl {
-                $p = "$LiteralPath"   # -LiteralPath is a string array
-                $acl = & $script:RealGetAcl -LiteralPath $p
-                if ($script:Sddl.ContainsKey($p)) { $acl.SetSecurityDescriptorSddlForm($script:Sddl[$p]) }
-                $acl
-            }
-            $script:Answers.Enqueue('n')   # take ownership: no
-            $script:Answers.Enqueue('y')   # copy: yes
-        }
-
-        It 'Review1_Cli_SubfoldersThatInheritTheRule_AreNotWrittenAndTheResultIsInfo' {
-            # Regression: each subfolder got the rule again as its own, so removing it from the
-            # top folder later left it on every subfolder.
-            $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
-
-            $code | Should -Be 0
-            Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
-            $result = @($script:Lines | Where-Object { $_ -like '*2 folder(s) already had these permissions*' })
-            $result.Count | Should -Be 1
-            $result[0] | Should -BeLike '`[INFO`] *'
-        }
-
-        It 'Review1_Cli_OneSubfolderDoneAndOneUpToDate_IsAPass' {
-            $script:Sddl[(Join-Path $script:Dir 'sub2')] = 'O:BAG:SYD:AI'
-
-            $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
-
-            $code | Should -Be 0
-            Should -Invoke Set-Acl -Times 1 -Exactly -Scope It -ParameterFilter { $LiteralPath -eq (Join-Path $script:Dir 'sub2') }
-            $result = @($script:Lines | Where-Object { $_ -like '*Permissions copied from *' })
-            $result.Count | Should -Be 1
-            $result[0] | Should -BeLike '`[PASS`] *1 folder(s) already had these permissions*'
-        }
-
-        # --- Fix round 2 (SQ-015 review): subfolders that block inheritance (D-031) ----------
-
-        It 'Review2_Cli_SubfolderThatBlocksInheritance_IsNotWrittenAndIsNamedBeforeAndAfter' {
-            # Regression: the top folder's rules were written onto a subfolder with inheritance
-            # turned off (P flag), while the result said those were not changed.
-            $locked = Join-Path $script:Dir 'sub2'
-            $script:Sddl[$locked] = 'O:BAG:SYD:PAI(A;OICI;0x1f01ff;;;S-1-5-32-544)'
-
-            $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
-
-            $code | Should -Be 0
-            Should -Invoke Set-Acl -Times 0 -Exactly -Scope It -ParameterFilter { $LiteralPath -eq $locked }
-            Should -Invoke Set-Acl -Times 0 -Exactly -Scope It -Because 'sub1 inherits the rule already'
-            $scope = @($script:Lines | Where-Object { $_ -like '`[WARN`] Copying adds *' })
-            $scope.Count | Should -Be 1
-            $scope[0] | Should -BeLike "*Copying adds $([WildcardPattern]::Escape($script:Dir))'s own permissions to 1 subfolder(s).*"
-            $scope[0] | Should -BeLike "*1 subfolder(s) block inheritance and will not be changed: $([WildcardPattern]::Escape($locked)).*"
-            $after = @($script:Lines | Where-Object { $_ -like '*block inheritance and were not changed*' })
-            $after.Count | Should -Be 1
-            $after[0] | Should -Be "[INFO] 1 subfolder(s) block inheritance and were not changed: $locked."
-            $result = @($script:Lines | Where-Object { $_ -like "*$([WildcardPattern]::Escape((Join-Path $script:Dir 'sub1'))) already has these permissions*" })
-            $result.Count | Should -Be 1
-            $result[0] | Should -BeLike '`[INFO`] *' -Because 'sub1 was up to date and sub2 was left alone on purpose: nothing failed'
-        }
-
-        It 'Review2_Cli_DoneSubfolderNextToABlockedOne_ResultIsTrueAndAPass' {
-            $locked = Join-Path $script:Dir 'sub2'
-            $script:Sddl[(Join-Path $script:Dir 'sub1')] = 'O:BAG:SYD:AI'
-            $script:Sddl[$locked] = 'O:BAG:SYD:PAI(A;OICI;0x1f01ff;;;S-1-5-32-544)'
-
-            $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
-
-            $code | Should -Be 0
-            Should -Invoke Set-Acl -Times 1 -Exactly -Scope It
-            Should -Invoke Set-Acl -Times 1 -Exactly -Scope It -ParameterFilter { $LiteralPath -eq (Join-Path $script:Dir 'sub1') }
-            $result = @($script:Lines | Where-Object { $_ -like '*Permissions copied from *' })
-            $result.Count | Should -Be 1
-            $result[0] | Should -BeLike '`[PASS`] *Any that block inheritance were not changed.*'
-            @($script:Lines | Where-Object { $_ -eq "[INFO] 1 subfolder(s) block inheritance and were not changed: $locked." }).Count | Should -Be 1
-        }
-
-        It 'Review2_Cli_FolderInsideABlockedSubfolder_IsNotWrittenEither' {
-            # sub2\inner gets its permissions from sub2, which blocks inheritance: writing the top
-            # folder's rule there would open up what sub2 locks.
-            $locked = Join-Path $script:Dir 'sub2'
-            $inner = Join-Path $locked 'inner'
-            New-Item -ItemType Directory -Path $inner -Force | Out-Null
-            $script:Sddl[$locked] = 'O:BAG:SYD:PAI(A;OICI;0x1f01ff;;;S-1-5-32-544)'
-            $script:Sddl[$inner] = 'O:BAG:SYD:AI(A;OICIID;0x1f01ff;;;S-1-5-32-544)'
-
-            $null = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
-
-            Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
-            $scope = @($script:Lines | Where-Object { $_ -like '`[WARN`] Copying adds *' })
-            $scope[0] | Should -BeLike '*block inheritance and will not be changed: *. Nor will the 1 folder(s) inside them.'
-        }
-
-        It 'Review2_Cli_EverySubfolderBlocksInheritance_NothingIsAskedOrWritten' {
-            $script:Sddl[(Join-Path $script:Dir 'sub1')] = 'O:BAG:SYD:PAI(A;OICI;0x1f01ff;;;S-1-5-32-544)'
-            $script:Sddl[(Join-Path $script:Dir 'sub2')] = 'O:BAG:SYD:PAI(A;OICI;0x1f01ff;;;S-1-5-32-544)'
-
-            $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
-
-            $code | Should -Be 0
-            Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
-            Should -Invoke Read-Host -Times 1 -Exactly -Scope It -Because 'only ownership is asked; there is nothing to copy to'
-            @($script:Lines | Where-Object { $_ -like '`[INFO`] 2 subfolder(s) block inheritance and will not be changed: *There are no other subfolders to copy the permissions to.' }).Count | Should -Be 1
-        }
     }
 
     # --- Revision (SQ-014 review 2026-10-17): D-034 and D-036 -------------------------------
@@ -464,7 +276,6 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
             & $script:RealGetItemOwner -Path $Path
         }
         $script:Answers.Enqueue('y')   # take ownership: yes
-        $script:Answers.Enqueue('n')   # copy permissions to subfolders: no
 
         $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
 
@@ -618,7 +429,6 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         })
         Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $script:LockedSet -contains $LiteralPath }
         $script:Answers.Enqueue('y')   # take ownership: yes
-        $script:Answers.Enqueue('n')   # copy: no
 
         $null = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
 

@@ -2,8 +2,8 @@
 
 <#
 .SYNOPSIS
-    Takes ownership of a folder tree, shows its permissions, and copies the top folder's
-    permissions to every subfolder. Every change is backed up and logged first.
+    Takes ownership of a folder tree and shows its permissions. Every change is backed up and
+    logged first.
 
 .DESCRIPTION
     The command-line companion of FolderPermissionManager-GUI.ps1, for servers without a
@@ -19,24 +19,21 @@
        Windows system folders, the SYSVOL, NETLOGON and PRINT$ shares, and a folder with a
        junction or symbolic link inside that leads into one are refused unless
        -AllowSystemFolder is given.
-    2. Shows the top folder's owner and permissions, and the owner of each subfolder.
-    3. Copies the permissions set directly on the top folder (not the ones it inherits) to
-       every subfolder: entries a subfolder does not already have, as its own or inherited
-       from the top folder, are added; nothing is removed. A subfolder that already inherits
-       them is not changed. Subfolders that block inheritance (inheritance turned off), and the
-       folders inside them, are not changed either: they are named before asking and in the
-       result. If the top folder has no permissions of its own, nothing is copied.
-       The permissions of every subfolder that changes are saved to
-       <LogFolder>\Backups\<yyyy-MM-dd_HHmmss>_CopyPermissions.csv first.
+    2. Shows the top folder's owner and permissions, and the owner of each subfolder. This
+       is shown also when ownership was declined or failed.
 
-    Before each change it prints the scope with [WARN] (for ownership, the number of items,
-    counted read-only first) and asks "Continue? (y/N)". The copy step does not depend on
-    ownership, so it is still offered when ownership was declined or failed.
+    It does not change any permissions. To give someone access to the whole folder, add it
+    once on the top folder (Add Permission in FolderPermissionManager-GUI.ps1): the subfolders
+    inherit it from there. Subfolders that block inheritance (inheritance turned off) do not
+    get it, and are left that way on purpose.
+
+    Before taking ownership it prints the scope with [WARN] (the number of items, counted
+    read-only first) and asks "Continue? (y/N)".
 
     Every change is written to <LogFolder>\Changes_<yyyy-MM-dd>.csv, the same log the GUI
     writes. See "Undo a change" in README.md to put permissions or owners back.
 
-    Exit code: 1 when a change Failed or was only Partly done, when taking ownership could not
+    Exit code: 1 when taking ownership Failed or was only Partly done, when taking ownership could not
     be checked everywhere (folders that could not be opened, owners that could not be read
     back, junctions or symbolic links), or the folder or log folder could not be used; 0
     otherwise (done, -WhatIf, or declined).
@@ -45,7 +42,7 @@
     Backups folder with no matching row in the change log: the row is written when the run
     ends.
 
-    CHANGES ANYTHING? Yes: owners and permissions. Use -WhatIf first.
+    CHANGES ANYTHING? Yes: owners. Use -WhatIf first.
 
 .PARAMETER Path
     The top folder. If not given, the script asks for it. A relative path ('.\HR') is made a
@@ -59,7 +56,7 @@
     passed here is used as given (with a warning if it is on the network).
 
 .PARAMETER Force
-    Do not ask before taking ownership or copying permissions.
+    Do not ask before taking ownership.
 
 .PARAMETER AllowSystemFolder
     Take ownership even when the folder is the root of a drive (D:\) or is in %SystemRoot%,
@@ -82,13 +79,14 @@
 .EXAMPLE
     .\FolderPermissionManager.ps1 -Path 'D:\Shares\HR'
 
-    Asks before taking ownership and again before copying permissions to the subfolders.
+    Asks before taking ownership, then shows the permissions. To give someone access, add it
+    once on the top folder afterwards: the subfolders inherit it.
 
 .EXAMPLE
     .\FolderPermissionManager.ps1 -Path 'D:\Shares\HR' -Force -LogFolder 'C:\Tickets\12345'
 
-    Takes ownership and copies permissions without asking; backups and the log go to
-    C:\Tickets\12345.
+    Takes ownership without asking and shows the permissions; the owner backup and the log go
+    to C:\Tickets\12345.
 
 .NOTES
     Run in an elevated PowerShell window (checked at start; -WhatIf also runs without it).
@@ -104,9 +102,6 @@
     - takeown /R /A /D N: /D N skips a folder the account has no List Folder and Read
       permission on (/D Y would replace its permissions with full control for the user only):
       https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
-    - ObjectSecurity.AreAccessRulesProtected (true when the folder blocks inheritance; such
-      subfolders, and the folders inside them, are not copied to):
-      https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.objectsecurity.areaccessrulesprotected
     - #Requires and its PowerShell versions:
       https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_requires
     - WindowsPrincipal.IsInRole(WindowsBuiltInRole.Administrator) is true only in an elevated
@@ -148,10 +143,9 @@ function Write-CliChangeResult {
         returns $true when it needs the technician's attention (a row is Failed or Partly done,
         or a whole folder could not be checked everywhere: Test-TreeEntryIncomplete).
     .DESCRIPTION
-        [PASS] only when every row is Done (or already up to date: 'Skipped (nothing to
-        copy)'), was logged, can be restored from its backup, and (for a whole folder) every
-        folder could be opened and every owner read back. [INFO] when nothing was done because
-        every row is -WhatIf or already up to date.
+        [PASS] only when every row is Done, was logged, can be restored from its backup, and
+        (for a whole folder) every folder could be opened and every owner read back. [INFO]
+        when nothing was done because every row is -WhatIf.
     #>
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Entries,
@@ -162,11 +156,9 @@ function Write-CliChangeResult {
     $all = @($Entries | Where-Object { $null -ne $_ })
     $message = Get-ChangeResultMessage -Entries $all -LogPath $LogPath -LogFolder $LogFolder
     $results = @($all | ForEach-Object { $_.Result })
-    # A folder that already had the permissions needed nothing: not a shortfall.
-    $upToDate = 'Skipped (nothing to copy)'
-    $notDone = @($results | Where-Object { $_ -ne 'Done' -and $_ -ne $upToDate })
+    $notDone = @($results | Where-Object { $_ -ne 'Done' })
     $incomplete = @($all | Where-Object { Test-TreeEntryIncomplete $_ })
-    if ($all.Count -gt 0 -and @($results | Where-Object { $_ -ne 'Skipped (WhatIf)' -and $_ -ne $upToDate }).Count -eq 0) {
+    if ($all.Count -gt 0 -and @($results | Where-Object { $_ -ne 'Skipped (WhatIf)' }).Count -eq 0) {
         Write-Host "[INFO] $message" -ForegroundColor Cyan
     } elseif ($all.Count -gt 0 -and $notDone.Count -eq 0 -and $incomplete.Count -eq 0 -and $LogPath -and (Get-UnrestorableItemCount -Entries $all) -eq 0) {
         Write-Host "[PASS] $message" -ForegroundColor Green
@@ -176,25 +168,6 @@ function Write-CliChangeResult {
         Write-Host "[FAIL] $message" -ForegroundColor Red
     }
     @($results | Where-Object { $_ -eq 'Failed' -or $_ -eq 'Partly done' }).Count -gt 0 -or $incomplete.Count -gt 0
-}
-
-function Get-CliSubfolder {
-    <#
-    .SYNOPSIS
-        The subfolders to copy permissions to, listed with Get-OwnerTreeItem so junctions and
-        symbolic links are never gone into: Folders (paths), plus Unlisted (folders that could
-        not be opened) and Links (junctions and symbolic links, which can point outside the
-        folder), which are both skipped.
-    #>
-    param([Parameter(Mandatory)][string]$Path)
-
-    $tree = Get-OwnerTreeItem -Path $Path
-    $skip = @(@($tree.Unlisted) + @($tree.Links))
-    [PSCustomObject]@{
-        Folders  = @($tree.Items | Where-Object { $_.ItemType -eq 'Folder' -and $_.Path -ne $Path -and $skip -notcontains $_.Path } | ForEach-Object { $_.Path })
-        Unlisted = @($tree.Unlisted | Where-Object { $_ -ne $Path })
-        Links    = @($tree.Links | Where-Object { $_ -ne $Path })
-    }
 }
 
 function Confirm-CliStep {
@@ -208,13 +181,14 @@ function Confirm-CliStep {
 function Invoke-FolderPermissionCli {
     <#
     .SYNOPSIS
-        The script's work: take ownership, show permissions, copy them to the subfolders. Each
-        change shows its scope with [WARN], asks first (unless -Force), goes through the core
-        (backup, then change, then change log) and prints its result. Never throws for a
+        The script's work: take ownership, then show the permissions (D-035: there is no copy
+        to the subfolders; access is added once on the top folder and inherited). Taking
+        ownership shows its scope with [WARN], asks first (unless -Force), goes through the
+        core (backup, then change, then change log) and prints its result. Never throws for a
         declined prompt.
     .OUTPUTS
-        The exit code for the script: 1 when the folder could not be used, a change Failed or
-        was only Partly done, or taking ownership could not be checked everywhere; 0 otherwise
+        The exit code for the script: 1 when the folder could not be used, taking ownership
+        Failed or was only Partly done, or it could not be checked everywhere; 0 otherwise
         (done, -WhatIf, or declined).
     #>
     [CmdletBinding(SupportsShouldProcess)]
@@ -291,12 +265,10 @@ function Invoke-FolderPermissionCli {
     }
     Write-Host $warning -ForegroundColor Yellow
     $takeOwnership = $whatIf -or $Force -or (Confirm-CliStep)
-    $ownershipTaken = $false
     if ($takeOwnership) {
         if ($whatIf) {
             $rows = @(Set-ItemOwnerToCurrentUser -Path $Path -Recurse -AllowSystemFolder:$AllowSystemFolder -LogFolder $logFolderUsed -WhatIf)
             $null = Write-CliChangeResult -Entries $rows -LogFolder $logFolderUsed
-            $ownershipTaken = $true
         } else {
             Write-Host "[INFO] Saving the current owners and taking ownership. This can take a while on a large folder..." -ForegroundColor Cyan
             # The change-log row is written when the run ends; the Result values are fixed
@@ -312,20 +284,16 @@ function Invoke-FolderPermissionCli {
                 Write-Host "[WARN] Folders that could not be opened ($(Get-TreeEntryCount $entry 'Unlisted')):" -ForegroundColor Yellow
                 foreach ($folder in @($entry.TreeCounts.UnlistedFolders)) { Write-Host "  $folder" }
             }
-            $ownershipTaken = @($result.Entries | Where-Object { $_.Result -eq 'Done' -or $_.Result -eq 'Partly done' }).Count -gt 0
         }
     } else {
         Write-Host '[INFO] Ownership was not changed.' -ForegroundColor Cyan
-    }
-    if (-not $ownershipTaken) {
-        Write-Host '[INFO] Copying permissions (next) does not depend on taking ownership: it is offered on its own, and any subfolder you cannot change is reported as failed.' -ForegroundColor Cyan
     }
 
     # 2. Show the permissions.
     try {
         $topAcl = Get-Acl -LiteralPath $Path -ErrorAction Stop
     } catch {
-        Write-Host "[FAIL] Could not read the permissions of $($Path): $($_.Exception.Message) Permissions were not copied." -ForegroundColor Red
+        Write-Host "[FAIL] Could not read the permissions of $($Path): $($_.Exception.Message)" -ForegroundColor Red
         return 1
     }
     Write-Host ''
@@ -334,77 +302,22 @@ function Invoke-FolderPermissionCli {
     Write-Host 'Access rules:'
     $topAcl.Access | Format-Table IdentityReference, FileSystemRights, AccessControlType, IsInherited, InheritanceFlags -AutoSize | Out-Host
 
-    # Listed again: taking ownership may have opened folders that could not be opened before.
-    $listing = Get-CliSubfolder -Path $Path
-    $subFolders = @($listing.Folders)
+    # The folders counted in step 1 (takeown /D N opens none that could not be opened then).
+    # Junctions and symbolic links are not gone into, and a folder that could not be opened
+    # is already named in the ownership warning; their owners are not shown.
+    $notShown = @(@($tree.Unlisted) + @($tree.Links))
+    $subFolders = @($tree.Items | Where-Object { $_.ItemType -eq 'Folder' -and $_.Path -ne $Path -and $notShown -notcontains $_.Path } | ForEach-Object { $_.Path })
     Write-Host "Subfolders and their owners ($($subFolders.Count)):"
-    $blocked = New-Object System.Collections.Generic.List[string]
     foreach ($folder in $subFolders) {
         try {
             $folderAcl = Get-Acl -LiteralPath $folder -ErrorAction Stop
             Write-Host "  $folder - Owner: $($folderAcl.Owner)"
-            # A protected DACL (SE_DACL_PROTECTED, "inheritance turned off") is locked on
-            # purpose more often than not (HR\Confidential): D-031 leaves it as it is.
-            # https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.objectsecurity.areaccessrulesprotected
-            if ($folderAcl.AreAccessRulesProtected) { $blocked.Add($folder) }
         } catch {
             Write-Host "[WARN] Cannot read $($folder): $($_.Exception.Message)" -ForegroundColor Yellow
         }
     }
-    if (@($listing.Unlisted).Count -gt 0) {
-        Write-Host "[WARN] $(@($listing.Unlisted).Count) folder(s) could not be opened, so they and what is inside them are skipped: $(@($listing.Unlisted) -join '; ')" -ForegroundColor Yellow
-    }
-    if (@($listing.Links).Count -gt 0) {
-        Write-Host "[INFO] $(@($listing.Links).Count) junction(s) or symbolic link(s) are skipped, because they can point outside $($Path): $(@($listing.Links) -join '; ')" -ForegroundColor Cyan
-    }
-    if ($subFolders.Count -eq 0) {
-        Write-Host '[INFO] There are no subfolders to copy the permissions to.' -ForegroundColor Cyan
-        return $exitCode
-    }
-
-    # 3. Copy the top folder's permissions to every subfolder, except those that block
-    # inheritance and the folders inside them (which get their permissions from them, so
-    # writing the top folder's rules there would open up what was locked).
-    $inside = @($subFolders | Where-Object {
-        $f = $_
-        -not $blocked.Contains($f) -and @($blocked | Where-Object { Test-PathWithin -Path $f -Root $_ }).Count -gt 0
-    })
-    $targets = @($subFolders | Where-Object { -not $blocked.Contains($_) -and $inside -notcontains $_ })
-    $blockedText = ''
-    if ($blocked.Count -gt 0) {
-        $blockedText = "$($blocked.Count) subfolder(s) block inheritance and will not be changed: $(@($blocked) -join '; ')."
-        if ($inside.Count -gt 0) { $blockedText += " Nor will the $($inside.Count) folder(s) inside them." }
-    }
-    Write-Host ''
-    if ($targets.Count -eq 0) {
-        Write-Host "[INFO] $blockedText There are no other subfolders to copy the permissions to." -ForegroundColor Cyan
-        return $exitCode
-    }
-    $warning = "[WARN] Copying adds $Path's own permissions to $($targets.Count) subfolder(s). Their current permissions are saved to a backup first. Nothing is removed."
-    if ($blockedText) { $warning += " $blockedText" }
-    Write-Host $warning -ForegroundColor Yellow
-    $copy = $whatIf -or $Force -or (Confirm-CliStep)
-    if (-not $copy) {
-        Write-Host '[INFO] Permissions were not copied.' -ForegroundColor Cyan
-        return $exitCode
-    }
-    # The folders that block inheritance are left out of the targets, so the result's "Any that
-    # block inheritance were not changed" holds and -NoInheritanceNote is not needed.
-    if ($whatIf) {
-        $rows = @(Copy-FolderPermission -SourcePath $Path -TargetPath $targets -LogFolder $logFolderUsed -WhatIf)
-        $null = Write-CliChangeResult -Entries $rows -LogFolder $logFolderUsed
-    } else {
-        $result = Invoke-LoggedPermissionChange -LogFolder $logFolderUsed -Change {
-            Copy-FolderPermission -SourcePath $Path -TargetPath $targets -LogFolder $logFolderUsed -WhatIf:$false
-        }
-        if (Write-CliChangeResult -Entries $result.Entries -LogPath $result.LogPath -LogFolder $logFolderUsed) { $exitCode = 1 }
-    }
-    if ($blocked.Count -gt 0) {
-        # Informational: leaving them alone is the intended result, not a shortfall.
-        $notChanged = "[INFO] $($blocked.Count) subfolder(s) block inheritance and were not changed: $(@($blocked) -join '; ')."
-        if ($inside.Count -gt 0) { $notChanged += " Nor were the $($inside.Count) folder(s) inside them." }
-        Write-Host $notChanged -ForegroundColor Cyan
-    }
+    # D-035: there is no copy to the subfolders; access added once on the top folder is inherited.
+    Write-Host '[INFO] To give someone access to the whole folder, add it once on the top folder: the subfolders inherit it. Subfolders that block inheritance do not, on purpose.' -ForegroundColor Cyan
     $exitCode
 }
 

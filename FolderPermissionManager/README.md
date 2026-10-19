@@ -313,20 +313,20 @@ decides the result by reading the owners back and only shows the tools' output.
 
 ### FolderPermissionManager.ps1 (CLI)
 
-For servers without a browser. It takes ownership of a folder and everything under it, shows
-the permissions and the owner of each subfolder, and then copies the permissions set directly on
-the top folder (not the ones it inherits) to every subfolder (entries a subfolder has neither
-as its own nor inherited from the top folder are added, so a subfolder that inherits them is not
-changed; nothing is removed; nothing is copied when the top folder has none of its own). **It asks before
-taking ownership and again before copying**, and every change is backed up and logged exactly
-as in the GUI (owner snapshot before taking ownership, SDDL backup before copying, same
-`Changes_<yyyy-MM-dd>.csv`). Changes anything? **Yes**: owners and permissions.
+For servers without a browser. It takes ownership of a folder and everything under it, then
+shows the permissions and the owner of each subfolder. **It asks before taking ownership**, and
+the change is backed up and logged exactly as in the GUI (owner snapshot first, same
+`Changes_<yyyy-MM-dd>.csv`). Changes anything? **Yes**: owners. It does not change permissions.
+
+To give someone access to the whole folder, add it once on the top folder (Add Permission in the
+GUI): the subfolders inherit it from there. Subfolders that block inheritance (inheritance
+turned off, often locked down on purpose) do not get it and are left that way.
 
 ```powershell
 # Dry run: shows what would change; nothing is changed, backed up or logged
 .\FolderPermissionManager.ps1 -Path 'D:\Shares\HR' -WhatIf
 
-# Asks before each step
+# Asks before taking ownership
 .\FolderPermissionManager.ps1 -Path 'D:\Shares\HR'
 
 # No questions; backups and log in the ticket folder
@@ -337,15 +337,14 @@ as in the GUI (owner snapshot before taking ownership, SDDL backup before copyin
 |-----------|---------|-------------|
 | `-Path` | asks | The top folder |
 | `-LogFolder` | `Logs` next to the script | Where backups and the change log go (same rules as the GUI) |
-| `-Force` | — | Do not ask before taking ownership or copying permissions |
+| `-Force` | — | Do not ask before taking ownership |
 | `-AllowSystemFolder` | — | Take ownership even of a drive root or a folder in `%SystemRoot%`, `%ProgramFiles%`, `%ProgramFiles(x86)%` or `%ProgramData%`, on `SYSVOL`, `NETLOGON` or `PRINT$`, or with a junction or symbolic link inside that leads into one, which is refused otherwise (see above) |
 | `-WhatIf` | — | Show what would be changed and change nothing |
 
-Before each step it prints what will change with `[WARN]` (for ownership, how many items:
-the folder is counted first, read only, and `-WhatIf` shows the count too), then asks
-`Continue? (y/N)`. Answer `y` to go ahead; anything else (including Enter) skips that step.
-Declining ownership, or ownership failing, still shows the permissions and offers the copy: it
-does not depend on ownership. Run it in an elevated window: it stops with `[FAIL]` otherwise
+Before taking ownership it prints what will change with `[WARN]` (how many items: the folder is
+counted first, read only, and `-WhatIf` shows the count too), then asks `Continue? (y/N)`.
+Answer `y` to go ahead; anything else (including Enter) leaves the owners alone. Declining
+ownership, or ownership failing, still shows the permissions. Run it in an elevated window: it stops with `[FAIL]` otherwise
 (except with `-WhatIf`). See "Undo a change" above to put owners or permissions back.
 
 A drive root or a Windows folder is refused straight away, before any question, with one
@@ -354,18 +353,15 @@ counted, saved or changed. A junction or symbolic link inside the folder that le
 refused the same way once the folder has been counted, before any question: the `[FAIL]` line
 names the link, and nothing is saved or changed.
 
-The script exits with `1` when a step `Failed` or was only `Partly done`, when taking ownership
+The script exits with `1` when taking ownership `Failed` or was only `Partly done`, when taking ownership
 could not be checked everywhere (folders it could not open, owners it could not read back, or
 junctions and symbolic links in the folder), or when the folder or the log folder could not be
-used; and `0` otherwise, including `-WhatIf` and declined steps.
+used; and `0` otherwise, including `-WhatIf` and a declined question.
 
-The copy step lists the subfolders the same way as the owner snapshot: it does not go into
-junctions or symbolic links and skips them (they can point outside the folder), and it skips
-folders it cannot open; both are named in the console. Subfolders that block inheritance
-(inheritance turned off, often locked down on purpose) are not changed, and neither are the
-folders inside them: the `[WARN]` before the question names them, and the result lists them
-again with `[INFO]` (leaving them alone is not a failure). If taking ownership is interrupted, see
-the note on interrupted runs above.
+The owners of the subfolders are shown for the folders counted before taking ownership:
+junctions and symbolic links are not gone into, and folders that could not be opened are named
+in the `[WARN]` instead. If taking ownership is interrupted, see the note on interrupted runs
+above.
 
 ## Requirements
 
