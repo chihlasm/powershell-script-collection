@@ -318,9 +318,21 @@ shows the permissions and the owner of each subfolder. **It asks before taking o
 the change is backed up and logged exactly as in the GUI (owner snapshot first, same
 `Changes_<yyyy-MM-dd>.csv`). Changes anything? **Yes**: owners. It does not change permissions.
 
-To give someone access to the whole folder, add it once on the top folder (Add Permission in the
-GUI): the subfolders inherit it from there. Subfolders that block inheritance (inheritance
-turned off, often locked down on purpose) do not get it and are left that way.
+To give someone access: add it on the folder they need. Adding it on a folder gives them
+everything inside it that inherits, so adding it on a share or home-folder root gives them
+everything below. Subfolders that block inheritance (inheritance turned off, often locked down
+on purpose) do not get it, nor do the folders inside them; the script names them after the
+owner list. An explicit Deny on a subfolder still wins. Add it with Add Permission in the GUI
+or on Explorer's Security tab (Properties > Security > Edit > Add). Without a browser:
+
+```powershell
+icacls "D:\Shares\HR\Finance" /grant "DOMAIN\user:(OI)(CI)M"
+```
+
+`(OI)(CI)` lets the files and subfolders inherit it and `M` is Modify. Do not add /T: it
+writes the permission onto every subfolder and file, including the ones that block
+inheritance
+([icacls](https://learn.microsoft.com/windows-server/administration/windows-commands/icacls)).
 
 ```powershell
 # Dry run: shows what would change; nothing is changed, backed up or logged
@@ -337,15 +349,21 @@ turned off, often locked down on purpose) do not get it and are left that way.
 |-----------|---------|-------------|
 | `-Path` | asks | The top folder |
 | `-LogFolder` | `Logs` next to the script | Where backups and the change log go (same rules as the GUI) |
-| `-Force` | — | Do not ask before taking ownership |
+| `-Force` | — | Do not ask before taking ownership (needed, or `-WhatIf`, on a host that cannot ask) |
 | `-AllowSystemFolder` | — | Take ownership even of a drive root or a folder in `%SystemRoot%`, `%ProgramFiles%`, `%ProgramFiles(x86)%` or `%ProgramData%`, on `SYSVOL`, `NETLOGON` or `PRINT$`, or with a junction or symbolic link inside that leads into one, which is refused otherwise (see above) |
 | `-WhatIf` | — | Show what would be changed and change nothing |
 
 Before taking ownership it prints what will change with `[WARN]` (how many items: the folder is
 counted first, read only, and `-WhatIf` shows the count too), then asks `Continue? (y/N)`.
 Answer `y` to go ahead; anything else (including Enter) leaves the owners alone. Declining
-ownership, or ownership failing, still shows the permissions. Run it in an elevated window: it stops with `[FAIL]` otherwise
-(except with `-WhatIf`). See "Undo a change" above to put owners or permissions back.
+ownership, or ownership failing, still shows the permissions. Run it in an elevated window: it
+stops with `[FAIL]` otherwise (except with `-WhatIf`). See "Undo a change" above to put owners
+back.
+
+A host that cannot ask (a scheduled task, or PowerShell started with `-NonInteractive`) needs
+`-Force` or `-WhatIf`. Without either, the script stops with `[FAIL] Run with -Force, or
+-WhatIf for a dry run; this host cannot ask.` and exit code `1` before anything is counted,
+saved or changed. With `-Force` but no `-Path` it stops the same way and asks for `-Path`.
 
 A drive root or a Windows folder is refused straight away, before any question, with one
 `[FAIL]` line that names the folder and `-AllowSystemFolder`, and exit code `1`. Nothing is
@@ -353,15 +371,17 @@ counted, saved or changed. A junction or symbolic link inside the folder that le
 refused the same way once the folder has been counted, before any question: the `[FAIL]` line
 names the link, and nothing is saved or changed.
 
-The script exits with `1` when taking ownership `Failed` or was only `Partly done`, when taking ownership
-could not be checked everywhere (folders it could not open, owners it could not read back, or
-junctions and symbolic links in the folder), or when the folder or the log folder could not be
+The script exits with `1` when taking ownership `Failed`, was only `Partly done` or could not be
+checked everywhere (folders it could not open, owners it could not read back, or junctions and
+symbolic links in the folder), or when the folder, the log folder or the host could not be
 used; and `0` otherwise, including `-WhatIf` and a declined question.
 
 The owners of the subfolders are shown for the folders counted before taking ownership:
 junctions and symbolic links are not gone into, and folders that could not be opened are named
-in the `[WARN]` instead. If taking ownership is interrupted, see the note on interrupted runs
-above.
+in the `[WARN]` instead. The heading says how many it leaves out, for example
+`Subfolders and their owners (12, not counting 1 that could not be opened and 2 junctions or
+symbolic links, listed above):`. If taking ownership is interrupted, see the note on
+interrupted runs above.
 
 ## Requirements
 

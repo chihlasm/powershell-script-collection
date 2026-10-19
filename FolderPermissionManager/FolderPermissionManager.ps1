@@ -7,9 +7,9 @@
 
 .DESCRIPTION
     The command-line companion of FolderPermissionManager-GUI.ps1, for servers without a
-    browser. In order, after asking each time:
+    browser. It does two things:
 
-    1. Takes ownership of the folder and all its subfolders and files for the account running
+    1. After asking once, takes ownership of the folder and all its subfolders and files for the account running
        the script (takeown /R /A /D N, then icacls /setowner /T). The current owner of every
        item is saved to <LogFolder>\Backups\<yyyy-MM-dd_HHmmss>_TakeOwnership.csv first; if
        that file cannot be written, nothing is changed. A folder that cannot be opened is
@@ -19,24 +19,32 @@
        Windows system folders, the SYSVOL, NETLOGON and PRINT$ shares, and a folder with a
        junction or symbolic link inside that leads into one are refused unless
        -AllowSystemFolder is given.
-    2. Shows the top folder's owner and permissions, and the owner of each subfolder. This
-       is shown also when ownership was declined or failed.
+    2. Shows the top folder's owner and permissions, and the owner of each subfolder, and
+       names the subfolders that block inheritance. This is shown also when ownership was
+       declined or failed.
 
-    It does not change any permissions. To give someone access to the whole folder, add it
-    once on the top folder (Add Permission in FolderPermissionManager-GUI.ps1): the subfolders
-    inherit it from there. Subfolders that block inheritance (inheritance turned off) do not
-    get it, and are left that way on purpose.
+    It does not change any permissions. To give someone access: add it on the folder they
+    need. Adding it on the top folder gives them everything inside it that inherits, so on
+    a share or home-folder root that is everything below. Subfolders that block inheritance
+    (inheritance turned off) do not get it, nor do the folders inside them, and an explicit
+    Deny on a subfolder still wins. Add it with Add Permission in
+    FolderPermissionManager-GUI.ps1 or on Explorer's Security tab. Without a browser:
+        icacls "D:\Shares\HR\Finance" /grant "DOMAIN\user:(OI)(CI)M"
+    (M is Modify; do not add /T, which writes it onto every subfolder and file, including
+    the ones that block inheritance).
 
     Before taking ownership it prints the scope with [WARN] (the number of items, counted
-    read-only first) and asks "Continue? (y/N)".
+    read-only first) and asks "Continue? (y/N)". A host that cannot ask (a scheduled task,
+    or PowerShell started with -NonInteractive) needs -Force or -WhatIf; without either the
+    script stops with [FAIL] before anything is changed.
 
     Every change is written to <LogFolder>\Changes_<yyyy-MM-dd>.csv, the same log the GUI
-    writes. See "Undo a change" in README.md to put permissions or owners back.
+    writes. See "Undo a change" in README.md to put owners back.
 
-    Exit code: 1 when taking ownership Failed or was only Partly done, when taking ownership could not
-    be checked everywhere (folders that could not be opened, owners that could not be read
-    back, junctions or symbolic links), or the folder or log folder could not be used; 0
-    otherwise (done, -WhatIf, or declined).
+    Exit code: 1 when taking ownership Failed, was only Partly done or could not be checked
+    everywhere (folders that could not be opened, owners that could not be read back,
+    junctions or symbolic links), or when the folder, the log folder or the host could not
+    be used; 0 otherwise (done, -WhatIf, or declined).
 
     If taking ownership is interrupted, its owner snapshot (..._TakeOwnership.csv) is in the
     Backups folder with no matching row in the change log: the row is written when the run
@@ -56,7 +64,8 @@
     passed here is used as given (with a warning if it is on the network).
 
 .PARAMETER Force
-    Do not ask before taking ownership.
+    Do not ask before taking ownership. Needed (or -WhatIf) on a host that cannot ask, such as
+    a scheduled task or PowerShell started with -NonInteractive.
 
 .PARAMETER AllowSystemFolder
     Take ownership even when the folder is the root of a drive (D:\) or is in %SystemRoot%,
@@ -79,8 +88,9 @@
 .EXAMPLE
     .\FolderPermissionManager.ps1 -Path 'D:\Shares\HR'
 
-    Asks before taking ownership, then shows the permissions. To give someone access, add it
-    once on the top folder afterwards: the subfolders inherit it.
+    Asks before taking ownership, then shows the permissions. To give someone access
+    afterwards, add it on the folder they need; the folders inside it that inherit get it
+    too.
 
 .EXAMPLE
     .\FolderPermissionManager.ps1 -Path 'D:\Shares\HR' -Force -LogFolder 'C:\Tickets\12345'
@@ -107,6 +117,21 @@
     - WindowsPrincipal.IsInRole(WindowsBuiltInRole.Administrator) is true only in an elevated
       session when UAC is on:
       https://learn.microsoft.com/dotnet/api/system.security.principal.windowsprincipal.isinrole
+    - icacls /grant adds to the explicit permissions (without :r); (OI) and (CI) make files
+      and subfolders inherit it; /T performs the operation on every file and subfolder:
+      https://learn.microsoft.com/windows-server/administration/windows-commands/icacls
+    - Explicit ACEs come before inherited ones, and within them deny before allow, so a Deny
+      set on a subfolder wins over access it inherits:
+      https://learn.microsoft.com/windows/win32/secauthz/order-of-aces-in-a-dacl
+    - ObjectSecurity.AreAccessRulesProtected: the folder's permissions are protected from
+      inheritance:
+      https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.objectsecurity.areaccessrulesprotected
+    - Environment.UserInteractive is false for a process without a user interface:
+      https://learn.microsoft.com/dotnet/api/system.environment.userinteractive
+    - -NonInteractive (-noni in pwsh) makes Read-Host fail; parameters are case-insensitive,
+      may start with - or /, and everything after -File or -Command belongs to them:
+      https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_powershell_exe
+      https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_pwsh
 #>
 
 [CmdletBinding(SupportsShouldProcess)]
@@ -178,6 +203,38 @@ function Confirm-CliStep {
     $answer -eq 'y' -or $answer -eq 'Y'
 }
 
+function Test-CliHostInteractive {
+    <#
+    .SYNOPSIS
+        True when this host can ask the technician a question: the process has a user
+        interface (Environment.UserInteractive) and PowerShell was not started with
+        -NonInteractive (or -noni, any case, - or /). Arguments after -File, -Command,
+        -EncodedCommand or -CommandWithArgs belong to the script or command and are not read.
+    .NOTES
+        https://learn.microsoft.com/dotnet/api/system.environment.userinteractive
+        https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_powershell_exe
+        https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_pwsh
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [bool]$UserInteractive = [Environment]::UserInteractive,
+        [string[]]$CommandLineArgs = [Environment]::GetCommandLineArgs()
+    )
+
+    if (-not $UserInteractive) { return $false }
+    # The first argument is the program itself.
+    foreach ($arg in @($CommandLineArgs | Select-Object -Skip 1)) {
+        if ($arg -notmatch '^[-/](?<name>[A-Za-z]+)$') { continue }
+        $name = $Matches['name'].ToLowerInvariant()
+        if ($name.Length -ge 4 -and 'noninteractive'.StartsWith($name)) { return $false }
+        $endsOptions = 'command'.StartsWith($name) -or 'file'.StartsWith($name) -or
+            'encodedcommand'.StartsWith($name) -or $name -eq 'ec' -or $name -eq 'cwa' -or $name -eq 'commandwithargs'
+        if ($endsOptions) { break }
+    }
+    $true
+}
+
 function Invoke-FolderPermissionCli {
     <#
     .SYNOPSIS
@@ -203,7 +260,18 @@ function Invoke-FolderPermissionCli {
     $whatIf = [bool]$WhatIfPreference
     $exitCode = 0
 
+    # A scheduled task or a -NonInteractive session cannot answer "Continue? (y/N)": stop
+    # before anything is asked, counted or saved instead of failing halfway on Read-Host.
+    if (-not $Force -and -not $whatIf -and -not (Test-CliHostInteractive)) {
+        Write-Host '[FAIL] Run with -Force, or -WhatIf for a dry run; this host cannot ask. Nothing was changed.' -ForegroundColor Red
+        return 1
+    }
+
     if (-not $Path) {
+        if (-not (Test-CliHostInteractive)) {
+            Write-Host '[FAIL] Give the folder with -Path; this host cannot ask. Nothing was changed.' -ForegroundColor Red
+            return 1
+        }
         $Path = Read-Host 'Enter the path to the top-level folder'
     }
     # One full path for everything below: the snapshot, takeown, icacls and the log.
@@ -305,19 +373,46 @@ function Invoke-FolderPermissionCli {
     # The folders counted in step 1 (takeown /D N opens none that could not be opened then).
     # Junctions and symbolic links are not gone into, and a folder that could not be opened
     # is already named in the ownership warning; their owners are not shown.
-    $notShown = @(@($tree.Unlisted) + @($tree.Links))
-    $subFolders = @($tree.Items | Where-Object { $_.ItemType -eq 'Folder' -and $_.Path -ne $Path -and $notShown -notcontains $_.Path } | ForEach-Object { $_.Path })
-    Write-Host "Subfolders and their owners ($($subFolders.Count)):"
+    $allSubFolders = @($tree.Items | Where-Object { $_.ItemType -eq 'Folder' -and $_.Path -ne $Path } | ForEach-Object { $_.Path })
+    $unlistedShown = @($allSubFolders | Where-Object { @($tree.Unlisted) -contains $_ })
+    $linksShown = @($allSubFolders | Where-Object { @($tree.Links) -contains $_ -and $unlistedShown -notcontains $_ })
+    $subFolders = @($allSubFolders | Where-Object { $unlistedShown -notcontains $_ -and $linksShown -notcontains $_ })
+    $leftOut = @()
+    if ($unlistedShown.Count -gt 0) { $leftOut += "$($unlistedShown.Count) that could not be opened" }
+    if ($linksShown.Count -gt 0) {
+        $linkWord = if ($linksShown.Count -eq 1) { 'junction or symbolic link' } else { 'junctions or symbolic links' }
+        $leftOut += "$($linksShown.Count) $linkWord"
+    }
+    $heading = if ($leftOut.Count -gt 0) { "$($subFolders.Count), not counting $($leftOut -join ' and '), listed above" } else { "$($subFolders.Count)" }
+    Write-Host "Subfolders and their owners ($heading):"
+    # The folders that block inheritance do not get access added above them (D-031, D-035).
+    # https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.objectsecurity.areaccessrulesprotected
+    $blocking = New-Object System.Collections.Generic.List[string]
     foreach ($folder in $subFolders) {
         try {
             $folderAcl = Get-Acl -LiteralPath $folder -ErrorAction Stop
             Write-Host "  $folder - Owner: $($folderAcl.Owner)"
+            if ($folderAcl.AreAccessRulesProtected) { $blocking.Add($folder) }
         } catch {
             Write-Host "[WARN] Cannot read $($folder): $($_.Exception.Message)" -ForegroundColor Yellow
         }
     }
-    # D-035: there is no copy to the subfolders; access added once on the top folder is inherited.
-    Write-Host '[INFO] To give someone access to the whole folder, add it once on the top folder: the subfolders inherit it. Subfolders that block inheritance do not, on purpose.' -ForegroundColor Cyan
+
+    # D-035: there is no copy to the subfolders. Access is added on the folder the person
+    # needs and inherited from there, so adding it on a share root grants everything below.
+    Write-Host "[INFO] To give someone access: add it on the folder they need. Adding it on $Path gives them everything inside it that inherits." -ForegroundColor Cyan
+    if ($blocking.Count -gt 0) {
+        Write-Host "[INFO] $($blocking.Count) subfolder(s) block inheritance, so they and the folders inside them do not get it: $($blocking -join '; ')." -ForegroundColor Cyan
+    } else {
+        Write-Host '[INFO] None of the subfolders listed above block inheritance.' -ForegroundColor Cyan
+    }
+    # Explicit deny ACEs are checked before inherited allow ACEs.
+    # https://learn.microsoft.com/windows/win32/secauthz/order-of-aces-in-a-dacl
+    Write-Host '[INFO] An explicit Deny on a subfolder still wins.' -ForegroundColor Cyan
+    # icacls /grant without :r adds to the explicit permissions; (OI)(CI) lets files and
+    # subfolders inherit it. /T would write it onto every item, also those that block inheritance.
+    # https://learn.microsoft.com/windows-server/administration/windows-commands/icacls
+    Write-Host "[INFO] Add it with Add Permission in FolderPermissionManager-GUI.ps1 or on Explorer's Security tab. Without a browser, with the folder they need in place of $($Path): icacls ""$Path"" /grant ""DOMAIN\user:(OI)(CI)M"" (M is Modify; do not add /T, which writes it onto every subfolder and file, including the ones that block inheritance)." -ForegroundColor Cyan
     $exitCode
 }
 
@@ -325,7 +420,7 @@ if ($loadOnly) { return }
 
 $isAdmin = (New-Object Security.Principal.WindowsPrincipal -ArgumentList ([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin -and -not $WhatIfPreference) {
-    Write-Host '[FAIL] Run this script in an elevated PowerShell window (right-click PowerShell, "Run as administrator"). Taking ownership and changing permissions need administrator rights. Nothing was changed.' -ForegroundColor Red
+    Write-Host '[FAIL] Run this script in an elevated PowerShell window (right-click PowerShell, "Run as administrator"). Taking ownership needs administrator rights. Nothing was changed.' -ForegroundColor Red
     exit 1
 }
 

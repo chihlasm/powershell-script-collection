@@ -50,6 +50,8 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         Mock takeown { }
         Mock icacls { }
         Mock Invoke-AclTool { [PSCustomObject]@{ ExitCode = 0; Output = '' } }
+        # The test host may be non-interactive; these tests are about a technician at a console.
+        Mock Test-CliHostInteractive { $true }
         Mock Read-Host {
             $script:Prompts.Add("$Prompt")
             if ($script:Answers.Count -gt 0) { $script:Answers.Dequeue() } else { 'n' }

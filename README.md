@@ -510,12 +510,12 @@ For full documentation, see [Get-CitrixSessions/README.md](Get-CitrixSessions/RE
 
 ## FolderPermissionManager
 
-**Description**: A PowerShell script for managing permissions on folders and their sub-folders. It takes ownership of a folder and everything under it and shows the current permissions. It asks before taking ownership, and the change is backed up and logged (same change log as the GUI). It does not change permissions: to give someone access, add it once on the top folder and the sub-folders inherit it.
+**Description**: A PowerShell script for managing permissions on folders and their sub-folders. It takes ownership of a folder and everything under it and shows the current permissions. It asks before taking ownership, and the change is backed up and logged (same change log as the GUI). It does not change permissions. To give someone access, add it on the folder they need: everything inside it that inherits gets it too (on a share root, that is everything below). The script names the sub-folders that block inheritance, which do not get it; see [FolderPermissionManager/README.md](FolderPermissionManager/README.md) for the `icacls` command to use without a browser.
 
 **Parameters**:
 - `-Path <string>` (Optional): The path to the top-level folder. If not provided, the script will prompt for it.
 - `-LogFolder <string>` (Optional): Where backups and the change log go. Defaults to `Logs` next to the script.
-- `-Force` (Optional): Do not ask before taking ownership.
+- `-Force` (Optional): Do not ask before taking ownership. Needed, or `-WhatIf`, on a host that cannot ask (a scheduled task or `-NonInteractive`).
 - `-WhatIf` (Optional): Show what would be changed; nothing is changed, backed up or logged.
 
 **Usage Examples**:
