@@ -1,5 +1,6 @@
 <#
-    Tests for Get-FolderAccessCheck.ps1 (SQ-004: access evidence and hedged verdict, AC1-AC27).
+    Tests for Get-FolderAccessCheck.ps1 (SQ-004: access evidence and hedged verdict, AC1-AC27;
+    SQ-013: narrowest group, privileged warning, stale token, ticket note, AC28-AC36).
     Pester 5, run under pwsh:  Invoke-Pester .\FolderAccess-Check\Tests
 
     Nothing here touches a real domain, file server, share or ACL:
@@ -40,6 +41,10 @@ BeforeAll {
     foreach ($name in $script:GlobalStubs) {
         Set-Item -Path "function:global:$name" -Value ([scriptblock]::Create("throw 'Unexpected call to ${name}: the tool must not use it (or must never reach a real system).'"))
     }
+
+    # The replication-metadata stub carries the real parameter names so Mock ParameterFilters can
+    # use them (SQ-013); it still throws unless a test mocks it.
+    Set-Item -Path 'function:global:Get-ADReplicationAttributeMetadata' -Value ([scriptblock]::Create('[CmdletBinding()] param($Object, $Properties, $Server, $Credential, [switch]$ShowAllLinkedValues, [switch]$IncludeDeletedObjects) throw "Unexpected call to Get-ADReplicationAttributeMetadata: the tool must not reach a real system."'))
 
     . $script:ScriptPath -LoadFunctionsOnly
 
@@ -115,38 +120,40 @@ BeforeAll {
             LocalGroups = @{ $script:Sid.BuiltinAdmins = @{ Name = 'Administrators'; Members = @(@{ Name = 'Domain Admins'; Domain = 'CONTOSO'; SID = "$($script:Dom)-512" }) } }
             LocalUsers = @{}
         }
-        $env:FAC_OVERRIDE = ''; $env:FAC_DOWN = ''
+        $env:FAC_OVERRIDE = ''; $env:FAC_DOWN = ''; $env:FAC_FOREST = ''; $env:FAC_TRUSTS = ''
     }
     Reset-World
 
     # Default mocks for everything external. CIM cmdlets keep their real parameters, so the
     # CimSession / CimInstance parameter types are removed (the mocks hand back plain objects).
+    # The mocks read $World unqualified: while the script runs in-process (AC36) it has its own
+    # script: scope, where $script:World would be empty; the unqualified name still finds it.
     Mock Get-Acl {
-        if ($script:World.FolderThrow) { throw $script:World.FolderThrow }
-        [PSCustomObject]@{ Sddl = $script:World.FolderSddl; Path = $LiteralPath }
+        if ($World.FolderThrow) { throw $World.FolderThrow }
+        [PSCustomObject]@{ Sddl = $World.FolderSddl; Path = $LiteralPath }
     }
     Mock New-CimSession {
         $dcom = ($SessionOption -and $SessionOption.GetType().Name -match 'DCom')
-        if ($dcom -and $script:World.DcomFail) { throw $script:World.DcomFail }
-        if (-not $dcom -and $script:World.WsmanFail) { throw $script:World.WsmanFail }
+        if ($dcom -and $World.DcomFail) { throw $World.DcomFail }
+        if (-not $dcom -and $World.WsmanFail) { throw $World.WsmanFail }
         [PSCustomObject]@{ ComputerName = $ComputerName; Protocol = $(if ($dcom) { 'Dcom' } else { 'Wsman' }) }
     }
     Mock Remove-CimSession {} -RemoveParameterType 'CimSession'
     Mock Get-CimInstance {
         switch ($ClassName) {
             'Win32_ComputerSystem' {
-                if ($script:World.RoleThrow) { throw $script:World.RoleThrow }
-                [PSCustomObject]@{ DomainRole = $script:World.DomainRole; Name = 'FS01' }
+                if ($World.RoleThrow) { throw $World.RoleThrow }
+                [PSCustomObject]@{ DomainRole = $World.DomainRole; Name = 'FS01' }
             }
             'Win32_UserAccount' {
-                if ($Filter -match "SID\s*=\s*'([^']+)'" -and $script:World.LocalUsers.ContainsKey($Matches[1])) {
-                    [PSCustomObject]@{ Name = $script:World.LocalUsers[$Matches[1]]; Domain = 'FS01'; SID = $Matches[1]; LocalAccount = $true }
+                if ($Filter -match "SID\s*=\s*'([^']+)'" -and $World.LocalUsers.ContainsKey($Matches[1])) {
+                    [PSCustomObject]@{ Name = $World.LocalUsers[$Matches[1]]; Domain = 'FS01'; SID = $Matches[1]; LocalAccount = $true }
                 }
             }
             'Win32_LogicalShareSecuritySetting' { [PSCustomObject]@{ Name = 'Finance' } }
             'Win32_Group' {
-                if ($Filter -match "SID\s*=\s*'([^']+)'" -and $script:World.LocalGroups.ContainsKey($Matches[1])) {
-                    [PSCustomObject]@{ Name = $script:World.LocalGroups[$Matches[1]].Name; Domain = 'FS01'; SID = $Matches[1] }
+                if ($Filter -match "SID\s*=\s*'([^']+)'" -and $World.LocalGroups.ContainsKey($Matches[1])) {
+                    [PSCustomObject]@{ Name = $World.LocalGroups[$Matches[1]].Name; Domain = 'FS01'; SID = $Matches[1] }
                 }
             }
             default { throw "Unexpected Get-CimInstance class $ClassName" }
@@ -154,10 +161,10 @@ BeforeAll {
     } -RemoveParameterType 'CimSession'
     Mock Invoke-CimMethod {
         if ($MethodName -ne 'GetSecurityDescriptor') { throw "Unexpected CIM method $MethodName" }
-        $script:World.ShareSd
+        $World.ShareSd
     } -RemoveParameterType 'CimSession', 'InputObject'
     Mock Get-CimAssociatedInstance {
-        @($script:World.LocalGroups[$InputObject.SID].Members | ForEach-Object { [PSCustomObject]$_ })
+        @($World.LocalGroups[$InputObject.SID].Members | ForEach-Object { [PSCustomObject]$_ })
     } -RemoveParameterType 'CimSession', 'InputObject'
 
     function Invoke-Check {
@@ -173,7 +180,7 @@ BeforeAll {
 }
 
 AfterAll {
-    Remove-Item Env:\FAC_OVERRIDE, Env:\FAC_DOWN -ErrorAction SilentlyContinue
+    Remove-Item Env:\FAC_OVERRIDE, Env:\FAC_DOWN, Env:\FAC_FOREST, Env:\FAC_TRUSTS -ErrorAction SilentlyContinue
     # Leave the session as it was: the throwing stubs and the fake module would otherwise
     # shadow the real cmdlets for whatever runs next in this PowerShell process.
     foreach ($name in $script:GlobalStubs) { Remove-Item -Path "function:global:$name" -ErrorAction SilentlyContinue }
@@ -603,14 +610,25 @@ Describe 'verdict wording, exit codes, read-only, report (AC21-AC24)' {
                 'Get-ADUser', 'Get-ADGroup', 'Get-ADDomain', 'Import-Module',
                 'Get-Acl', 'New-CimSession', 'New-CimSessionOption', 'Get-CimInstance', 'Get-CimAssociatedInstance', 'Invoke-CimMethod', 'Remove-CimSession',
                 'Export-Csv', 'New-Item', 'Test-Path', 'Join-Path', 'Get-Date',
-                'ForEach-Object', 'Where-Object', 'Select-Object', 'New-Object', 'Write-Host', 'Write-Verbose'
+                'ForEach-Object', 'Where-Object', 'Select-Object', 'New-Object', 'Write-Host', 'Write-Verbose',
+                # SQ-013: read-only AD reads for the stale-token check, and ranking.
+                'Get-ADDomainController', 'Get-ADReplicationAttributeMetadata', 'Sort-Object',
+                # SQ-013: read-only forest and trust reads, so the privilege check fails closed
+                # where memberOf can't show every group (another domain or forest).
+                'Get-ADForest', 'Get-ADTrust',
+                # SQ-013: the ticket-note kit (CaseKit.ps1, dot-sourced; its writes are the note file in
+                # the ticket folder and the clipboard, covered by TicketNote\Tests\CaseKit.Tests.ps1).
+                'New-TicketNoteItem', 'New-TicketNoteStamp', 'New-TicketNote', 'Test-TicketNumber', 'Get-TicketNoteDefaultRoot',
+                'Resolve-TicketFolder', 'Save-TicketNote', 'Publish-TicketNote'
             )
             foreach ($c in $script:ExternalCommands) { $allowed | Should -Contain $c -Because "$c is not on the read-only allowlist" }
         }
         It 'calls only allowlisted .NET methods (no SetAccessControl, Delete, Put, ...)' {
             $allowed = @(
                 'Add', 'AppendLine', 'Contains', 'ContainsKey', 'Dequeue', 'Enqueue', 'Escape', 'GetType', 'HtmlEncode',
-                'IsNullOrEmpty', 'IsNullOrWhiteSpace', 'Replace', 'ToArray', 'ToString', 'Trim', 'TrimEnd', 'WriteAllText'
+                'IsNullOrEmpty', 'IsNullOrWhiteSpace', 'Replace', 'ToArray', 'ToString', 'Trim', 'TrimEnd', 'WriteAllText',
+                # SQ-013: lastLogon FILETIME conversion, and the ticket note's domain fallback.
+                'FromFileTime', 'ToLower'
             )
             foreach ($m in $script:Methods) { $allowed | Should -Contain $m -Because ".$m() is not on the read-only allowlist" }
             foreach ($bad in 'SetAccessControl', 'Delete', 'Put', 'Create', 'Remove', 'SetSecurityDescriptor', 'MoveTo', 'CopyTo') { $script:Methods | Should -Not -Contain $bad }
@@ -637,6 +655,78 @@ Describe 'verdict wording, exit codes, read-only, report (AC21-AC24)' {
             foreach ($w in $writers) {
                 ($w.Extent.StartOffset -ge $script:ReportFunction.Extent.StartOffset -and $w.Extent.EndOffset -le $script:ReportFunction.Extent.EndOffset) | Should -BeTrue -Because "$($w.Extent.Text) is outside Export-FolderAccessReport"
             }
+        }
+        It "calls the kit's writers (note file, ticket folder, clipboard) only from the main block, never from a function" {
+            # The main block is everything after "if ($LoadFunctionsOnly) { return }", outside any function.
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:ScriptPath, [ref]$null, [ref]$null)
+            $gate = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.IfStatementAst] -and $n.Extent.Text -match '^if \(\$LoadFunctionsOnly\)' }, $false)
+            $gate | Should -Not -BeNullOrEmpty
+            $functions = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true))
+            $kitWriters = @('Save-TicketNote', 'Save-TicketNoteLines', 'Publish-TicketNote', 'Resolve-TicketFolder', 'Copy-TicketNoteToClipboard', 'Invoke-WinFormsClipboard', 'Set-Clipboard')
+            $calls = @($script:CommandAsts | Where-Object { $kitWriters -contains $_.GetCommandName() })
+            $calls.Count | Should -BeGreaterThan 0
+            foreach ($c in $calls) {
+                $c.Extent.StartOffset | Should -BeGreaterThan $gate.Extent.EndOffset -Because "$($c.Extent.Text) runs before the -LoadFunctionsOnly return"
+                $inside = @($functions | Where-Object { $c.Extent.StartOffset -ge $_.Extent.StartOffset -and $c.Extent.EndOffset -le $_.Extent.EndOffset })
+                $inside.Count | Should -Be 0 -Because "$($c.Extent.Text) is inside function $(@($inside | ForEach-Object { $_.Name }) -join ', ')"
+            }
+        }
+    }
+
+    Context 'AC22 read-only by construction: the ticket-note kit this tool dot-sources (CaseKit.ps1)' {
+        BeforeAll {
+            $kitPath = Join-Path $script:Root 'CaseKit.ps1'
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($kitPath, [ref]$null, [ref]$null)
+            $defined = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) | ForEach-Object { $_.Name })
+            $script:KitCommandAsts = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true))
+            $script:KitCommands = @($script:KitCommandAsts | ForEach-Object { $_.GetCommandName() } | Where-Object { $_ -and $defined -notcontains $_ } | Sort-Object -Unique)
+            $script:KitMemberAsts = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))
+            $script:KitMethods = @($script:KitMemberAsts | ForEach-Object { $_.Member.Extent.Text } | Sort-Object -Unique)
+            $script:KitNewObjectTypes = @($script:KitCommandAsts | Where-Object { $_.GetCommandName() -eq 'New-Object' } | ForEach-Object { $_.CommandElements[1].Extent.Text.Trim("'") } | Sort-Object -Unique)
+        }
+        It 'calls only allowlisted commands; its only writers are New-Item -ItemType Directory and Set-Clipboard' {
+            $allowed = @(
+                'Add-Type', 'ForEach-Object', 'Get-Command', 'Get-Date', 'Join-Path', 'New-Item', 'New-Object', 'Set-Clipboard',
+                'Test-Path', 'Where-Object', 'Write-Host', 'Write-Verbose'
+            )
+            foreach ($c in $script:KitCommands) { $allowed | Should -Contain $c -Because "$c is not on the kit's allowlist" }
+            foreach ($bad in 'Remove-Item', 'Move-Item', 'Copy-Item', 'Rename-Item', 'Set-Acl', 'Set-Content', 'Add-Content', 'Out-File', 'Clear-Content', 'Set-ItemProperty', 'New-ItemProperty', 'Export-Csv', 'Start-Process', 'Invoke-Expression') {
+                $script:KitCommands | Should -Not -Contain $bad
+            }
+            $newItems = @($script:KitCommandAsts | Where-Object { $_.GetCommandName() -eq 'New-Item' })
+            $newItems.Count | Should -BeGreaterThan 0
+            foreach ($n in $newItems) {
+                $n.Extent.Text | Should -Match '-ItemType Directory\b' -Because 'the kit only creates folders with New-Item; files go through WriteAllLines'
+            }
+        }
+        It 'calls only allowlisted .NET methods; its only writers are File.WriteAllLines and Clipboard.SetDataObject' {
+            $allowed = @(
+                'Abs', 'Add', 'Contains', 'EndsWith', 'GetApartmentState', 'GetFileName', 'GetFolderPath', 'GetUtcOffset', 'IsNullOrEmpty',
+                'IsNullOrWhiteSpace', 'Replace', 'SetData', 'SetDataObject', 'Substring', 'ToArray', 'ToString', 'TryParse', 'WriteAllLines'
+            )
+            foreach ($m in $script:KitMethods) { $allowed | Should -Contain $m -Because ".$m() is not on the kit's allowlist" }
+            foreach ($bad in 'WriteAllText', 'AppendAllText', 'AppendAllLines', 'WriteAllBytes', 'Delete', 'Move', 'Copy', 'SetAccessControl', 'Create', 'OpenWrite', 'MoveTo', 'CopyTo') {
+                $script:KitMethods | Should -Not -Contain $bad
+            }
+            # Names alone can't tell String.Replace from File.Replace: every call on File or Directory is WriteAllLines.
+            $io = @($script:KitMemberAsts | Where-Object { $_.Expression.Extent.Text -match '(?i)IO\.(File|Directory)\]$' })
+            $io.Count | Should -BeGreaterThan 0
+            foreach ($m in $io) { $m.Member.Extent.Text | Should -Be 'WriteAllLines' -Because "$($m.Extent.Text) is a file-system call" }
+        }
+        It 'loads only framework assemblies with Add-Type -AssemblyName, never compiles code' {
+            $adds = @($script:KitCommandAsts | Where-Object { $_.GetCommandName() -eq 'Add-Type' })
+            $adds.Count | Should -BeGreaterThan 0
+            foreach ($a in $adds) {
+                $params = @($a.CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] } | ForEach-Object { $_.ParameterName })
+                $params | Should -Contain 'AssemblyName' -Because "$($a.Extent.Text) must load an assembly by name"
+                foreach ($p in $params) { @('AssemblyName', 'ErrorAction') | Should -Contain $p -Because "$($a.Extent.Text) may only name an assembly (no -TypeDefinition, -MemberDefinition, -Path or -LiteralPath)" }
+                $positional = @($a.CommandElements | Select-Object -Skip 1 | Where-Object { $_ -isnot [System.Management.Automation.Language.CommandParameterAst] })
+                $positional.Count | Should -Be $params.Count -Because "$($a.Extent.Text) passes nothing positionally (a bare string would be -TypeDefinition)"
+            }
+        }
+        It 'creates only allowlisted .NET types' {
+            $allowed = @('System.Collections.Generic.List[string]', 'System.IO.MemoryStream', 'System.Text.UTF8Encoding', 'System.Windows.Forms.DataObject')
+            foreach ($t in $script:KitNewObjectTypes) { $allowed | Should -Contain $t }
         }
     }
 
@@ -928,16 +1018,16 @@ Describe 'parameter names match the real ActiveDirectory module (SQUAD.md: mocks
         # drive is not created (ADPS_LoadDefaultDrive=0), so nothing connects to the domain.
         # If RSAT is not installed the child prints nothing and the checks are skipped.
         $cmd = '$env:ADPS_LoadDefaultDrive = 0; Import-Module ActiveDirectory -ErrorAction Stop; ' +
-            'foreach ($c in "Get-ADUser","Get-ADGroup","Get-ADDomain") { "$c|" + ((Get-Command $c).Parameters.Keys -join ",") }'
+            'foreach ($c in "Get-ADUser","Get-ADGroup","Get-ADDomain","Get-ADForest","Get-ADTrust") { "$c|" + ((Get-Command $c).Parameters.Keys -join ",") }'
         $lines = @(& pwsh -NoProfile -Command $cmd 2>$null)
         $script:RealParams = @{}
         foreach ($l in $lines) { if ($l -match '^(Get-AD\w+)\|(.*)$') { $script:RealParams[$Matches[1]] = @($Matches[2] -split ',') } }
         $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:ScriptPath, [ref]$null, [ref]$null)
-        $script:AdCalls = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and @('Get-ADUser', 'Get-ADGroup', 'Get-ADDomain') -contains $n.GetCommandName() }, $true))
+        $script:AdCalls = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and @('Get-ADUser', 'Get-ADGroup', 'Get-ADDomain', 'Get-ADForest', 'Get-ADTrust') -contains $n.GetCommandName() }, $true))
     }
     It 'the fake module only declares parameters the real cmdlets have' {
         if (-not $script:RealParams -or $script:RealParams.Count -eq 0) { Set-ItResult -Skipped -Because 'ActiveDirectory (RSAT) is not installed'; return }
-        foreach ($name in 'Get-ADUser', 'Get-ADGroup', 'Get-ADDomain') {
+        foreach ($name in 'Get-ADUser', 'Get-ADGroup', 'Get-ADDomain', 'Get-ADForest', 'Get-ADTrust') {
             $fake = @((Get-Command -Module ActiveDirectory -Name $name).Parameters.Keys | Where-Object { [System.Management.Automation.PSCmdlet]::CommonParameters -notcontains $_ })
             foreach ($p in $fake) { $script:RealParams[$name] | Should -Contain $p }
         }
@@ -996,5 +1086,858 @@ Describe 'parameter names match the real CIM cmdlets and Get-Acl (SQUAD.md: mock
     It 'Invoke-CimMethod is called with -CimSession and -InputObject together, which the real cmdlet allows' {
         $set = @($script:Sets['Invoke-CimMethod'] | Where-Object { $_ -contains 'CimSession' -and $_ -contains 'InputObject' -and $_ -contains 'MethodName' })
         $set.Count | Should -BeGreaterThan 0
+    }
+}
+
+# =============================================================================
+# SQ-013 (spec SQ-004, ACs 28-36): what to do about it
+#
+# Pinned interface (the implementer must match these):
+#   Get-FolderAccessAssessment gains three optional parameters:
+#     -CandidateGroups  object[]: one record per folder-layer Allow principal the collection
+#                       looked up: Sid, Name, ObjectClass ('group'|'user'), MemberCount (direct
+#                       `member` values), AdminCount (0/1), PrivilegedVia (string[]: names of the
+#                       well-known privileged groups it, or a group it is nested in, matches).
+#                       The assessment decides who is eligible (never Everyone, Authenticated
+#                       Users, Domain Users (513), Domain Computers (515), BUILTIN\*, INTERACTIVE,
+#                       NETWORK, a server-local entry, a user object) and whether the user would
+#                       pass both layers with the candidate's SID added (Deny / share skip).
+#     -MembershipLinks  hashtable: granting group SID -> [PSCustomObject]@{ Group; Added } where
+#                       Added is the [datetime] of the NEWEST link on the user's path to that
+#                       group (replication metadata FirstOriginatingCreateTime of the `member`
+#                       value; the primary group uses primaryGroupID LastOriginatingChangeTime),
+#                       or $null when it could not be read. Group is the group that link is in.
+#                       Granting paths = the folder-layer Allow rows that contributed rights.
+#     -LastLogon        the user's newest lastLogon across all DCs, or $null when unknown.
+#   It returns, in addition: Recommendation ($null or an object with Name, Sid, MemberCount,
+#   Warning), VerdictText ('PROBABLY YES after <user> signs out and back in' when the token is
+#   stale, otherwise equal to Verdict) and StaleToken ($null or Group, Added, LastLogon).
+#   Verdict stays one of the three phrases (ExitCode unchanged); Headline ends with VerdictText.
+#   Get-ADGroup is read with -Properties member, adminCount, memberOf (no Get-ADGroupMember).
+#   Stale-token links come from Get-ADReplicationAttributeMetadata -Object ... -Server ...
+#   -ShowAllLinkedValues (rows AttributeName / AttributeValue / FirstOriginatingCreateTime /
+#   LastOriginatingChangeTime); lastLogon from Get-ADUser -Server <each DC from
+#   Get-ADDomainController -Filter *>.
+#   The script gains -TicketNumber -NoClipboard -FullDetail -PassThru -Quiet (as
+#   AD-UserQuickCheck), dot-sources its own CaseKit.ps1 before the -LoadFunctionsOnly return and
+#   exposes ConvertTo-FolderAccessTicketNote -Result -EvidencePaths [-Credential]
+#   (kit tool name 'FolderAccess-Check'; the headline carries the full path, which the kit's
+#   paste-safe filter removes unless -FullDetail).
+# =============================================================================
+
+Describe 'narrowest group (AC28-AC32)' {
+    BeforeAll {
+        function New-Cand {
+            param([string]$Sid, [string]$Name, [int]$Members, [string]$Class = 'group', [int]$AdminCount = 0, [string[]]$Privileged = @(),
+                  [bool]$Incomplete = $false, [string[]]$Parents = @())
+            [PSCustomObject]@{ Sid = $Sid; Name = $Name; ObjectClass = $Class; MemberCount = $Members; AdminCount = $AdminCount; PrivilegedVia = @($Privileged)
+                Incomplete = $Incomplete; ParentSids = @($Parents) }
+        }
+        $script:AdminsSid = "$($script:Dom)-1109"
+        $script:OpsSid = "$($script:Dom)-1113"
+        $script:DomAdmins = "$($script:Dom)-512"
+        $script:FirstStep = 'Narrowest existing group that grants this: '
+        $script:NoGroupStep = 'No existing group grants this. Ask who owns the folder which group should have access, then add that group (not the user) with FolderPermissionManager, which logs the change.'
+        $script:EscalateStep = 'Only privileged groups grant this. Escalate to a senior engineer: '
+        $script:Approval = 'Get senior approval first, then add jdoe to '
+        # The add step for the recommended group, and where in it the approval condition sits.
+        function Get-AddStep($Result, [string]$Group) { @($Result.NextSteps | Where-Object { $_ -like "$($script:FirstStep)$Group*" }) }
+        function Assert-ApprovalInsideAddStep([string]$Text, [string]$Group) {
+            $line = @(($Text -split "`r?`n") | Where-Object { $_ -match ([regex]::Escape("$($script:FirstStep)$Group")) })
+            $line.Count | Should -Be 1 -Because "the add step for $Group appears once"
+            $line[0] | Should -Match ([regex]::Escape("$($script:Approval)$Group"))
+            $line[0].IndexOf('Get senior approval first') | Should -BeLessThan $line[0].IndexOf('add jdoe to') -Because 'the approval comes before the action, inside the same step'
+        }
+    }
+
+    It 'D017_AWellKnownPrivilegedGroupIsNeverRecommended_EvenWithoutPrivilegedVia: RID <_>' -ForEach @(512, 516, 518, 519, 520, 521) {
+        # Matched on the candidate's own SID (Find-PrivilegedGroupBySid), not on what the walk found.
+        $sid = "$($script:Dom)-$_"
+        $r = Invoke-Assess @{
+            FolderAces = @(New-Ace $sid "RID $_" $script:Mask.Full)
+            CandidateGroups = @(New-Cand $sid "RID $_" 2)
+        }
+        $r.Verdict | Should -Be 'PROBABLY NO'
+        $r.Recommendation | Should -BeNullOrEmpty
+        (@($r.NextSteps) -join "`n") | Should -Not -Match ([regex]::Escape($script:FirstStep))
+        @($r.NextSteps | Where-Object { $_ -like "$($script:EscalateStep)*" }).Count | Should -Be 1
+        $r.NextSteps | Should -Not -Contain $script:NoGroupStep
+        @($r.NextSteps)[-1] | Should -Be $script:EffectiveStep
+    }
+
+    It 'D017_EnterpriseReadOnlyDomainControllers_RID498_IsPrivileged_AndNeverRecommended' {
+        # S-1-5-21-<root domain>-498, a universal group of the forest root domain.
+        (Find-FolderAccessPrivilegedSid -Sid 'S-1-5-21-4444444444-5555555555-6666666666-498').Name | Should -Be 'Enterprise Read-only Domain Controllers'
+        $sid = "$($script:Dom)-498"
+        $r = Invoke-Assess @{ FolderAces = @(New-Ace $sid 'Enterprise Read-only Domain Controllers' $script:Mask.Read); CandidateGroups = @(New-Cand $sid 'Enterprise Read-only Domain Controllers' 2) }
+        $r.Recommendation | Should -BeNullOrEmpty
+        @($r.NextSteps | Where-Object { $_ -like "$($script:EscalateStep)*" }).Count | Should -Be 1
+    }
+
+    It 'D017_DomainAdminsTheOnlyAllow_TypicalHomeFolder_EscalateNamingTheGroup' {
+        $r = Invoke-Assess @{
+            FolderAces = @(
+                (New-Ace 'S-1-5-18' 'SYSTEM' $script:Mask.Full), (New-Ace $script:Sid.BuiltinAdmins 'BUILTIN\Administrators' $script:Mask.Full)
+                (New-Ace $script:DomAdmins 'Domain Admins' $script:Mask.Full)
+            )
+            LocalGroupExpansions = @{ $script:Sid.BuiltinAdmins = [PSCustomObject]@{ Readable = $true; Found = $true; Name = 'Administrators'; MemberSids = @($script:DomAdmins); Error = $null } }
+            CandidateGroups = @(New-Cand $script:DomAdmins 'Domain Admins' 3 'group' 1 @('Domain Admins'))
+        }
+        $r.Recommendation | Should -BeNullOrEmpty
+        $step = @($r.NextSteps | Where-Object { $_ -like "$($script:EscalateStep)*" })
+        $step.Count | Should -Be 1
+        $step[0] | Should -Match 'Domain Admins'
+        $r.NextSteps | Should -Not -Contain $script:NoGroupStep
+        (@($r.NextSteps) -join "`n") | Should -Not -Match ([regex]::Escape($script:FirstStep))
+    }
+
+    It 'D017_ACandidateThatIsItselfAPrivilegedGroupByName_IsNeverRecommended' {
+        # DnsAdmins has no well-known SID; the upward walk names it (Get-NameOnlyPrivilegedGroup).
+        $dns = "$($script:Dom)-1150"
+        $r = Invoke-Assess @{
+            FolderAces = @((New-Ace $dns 'DnsAdmins' $script:Mask.Read), (New-Ace $script:Sid.FinAll 'FIN-All' $script:Mask.Read))
+            CandidateGroups = @((New-Cand $dns 'DnsAdmins' 2 'group' 0 @('DnsAdmins')), (New-Cand $script:Sid.FinAll 'FIN-All' 80))
+        }
+        $r.Recommendation.Name | Should -Be 'FIN-All'
+        $only = Invoke-Assess @{ FolderAces = @(New-Ace $dns 'DnsAdmins' $script:Mask.Read); CandidateGroups = @(New-Cand $dns 'DnsAdmins' 2 'group' 0 @('DnsAdmins')) }
+        $only.Recommendation | Should -BeNullOrEmpty
+        @($only.NextSteps | Where-Object { $_ -like "$($script:EscalateStep)*DnsAdmins*" }).Count | Should -Be 1
+    }
+
+    It 'AC29_TheUserThemselfIsNeverACandidate' {
+        Test-FolderAccessCandidateEligible -Candidate (New-Cand $script:Sid.Jdoe 'jdoe' 0) -UserSid $script:Sid.Jdoe | Should -BeFalse
+        Test-FolderAccessCandidateEligible -Candidate (New-Cand $script:Sid.FinMgr 'FIN-Managers' 12) -UserSid $script:Sid.Jdoe | Should -BeTrue
+    }
+
+    It 'AC30_ACandidateWhoseParentGroupIsDenied_IsSkipped' {
+        # FIN-Managers is in FIN-Parent, and FIN-Parent is denied first: adding jdoe to FIN-Managers
+        # would put FIN-Parent in her token too, so it would not let her in.
+        $parent = "$($script:Dom)-1130"
+        $r = Invoke-Assess @{
+            FolderAces = @(
+                (New-Ace $parent 'FIN-Parent' $script:Mask.Read 'Deny')
+                (New-Ace $script:Sid.FinMgr 'FIN-Managers' $script:Mask.Read)
+                (New-Ace $script:Sid.FinAll 'FIN-All' $script:Mask.Read)
+            )
+            CandidateGroups = @((New-Cand $script:Sid.FinMgr 'FIN-Managers' 12 'group' 0 @() $false @($parent)), (New-Cand $script:Sid.FinAll 'FIN-All' 80))
+        }
+        $r.Recommendation.Name | Should -Be 'FIN-All'
+    }
+
+    It 'FailClosed_ACandidateWhosePrivilegeCheckIsIncomplete_RanksAfterAVerifiedOne_AndBeforeAPrivilegedOne' {
+        $aces = @((New-Ace $script:AdminsSid 'FIN-Admins' $script:Mask.Read), (New-Ace $script:Sid.FinMgr 'FIN-Managers' $script:Mask.Read), (New-Ace $script:Sid.FinAll 'FIN-All' $script:Mask.Read))
+        $r = Invoke-Assess @{
+            FolderAces = $aces
+            CandidateGroups = @((New-Cand $script:Sid.FinMgr 'FIN-Managers' 12 'group' 0 @() $true), (New-Cand $script:Sid.FinAll 'FIN-All' 80))
+        }
+        $r.Recommendation.Name | Should -Be 'FIN-All' -Because 'a verified non-privileged group outranks a smaller one that could not be checked'
+        $r2 = Invoke-Assess @{
+            FolderAces = $aces
+            CandidateGroups = @((New-Cand $script:AdminsSid 'FIN-Admins' 5 'group' 0 @('Domain Admins')), (New-Cand $script:Sid.FinMgr 'FIN-Managers' 12 'group' 0 @() $true))
+        }
+        $r2.Recommendation.Name | Should -Be 'FIN-Managers'
+        $warn = "Couldn't confirm FIN-Managers is not in a privileged group. Get senior approval first."
+        $r2.Recommendation.Warning | Should -Be $warn
+        $r2.NextSteps | Should -Contain $warn
+        Assert-ApprovalInsideAddStep (@($r2.NextSteps) -join "`n") 'FIN-Managers'
+    }
+
+    It 'AC28_RecommendsTheSmallestGroupThatGrantsAccess' {
+        $r = Invoke-Assess @{
+            ShareAces = @(New-Ace $script:Sid.AuthUsers 'Authenticated Users' $script:Mask.Change)
+            FolderAces = @((New-Ace $script:Sid.FinMgr 'FIN-Managers' $script:Mask.Read), (New-Ace $script:Sid.FinAll 'FIN-All' $script:Mask.Read))
+            CandidateGroups = @((New-Cand $script:Sid.FinAll 'FIN-All' 80), (New-Cand $script:Sid.FinMgr 'FIN-Managers' 12))
+        }
+        $r.Verdict | Should -Be 'PROBABLY NO'
+        $r.Recommendation.Name | Should -Be 'FIN-Managers'
+        @($r.NextSteps | Where-Object { $_ -like "$($script:FirstStep)FIN-Managers*" }).Count | Should -Be 1
+        @($r.NextSteps)[-1] | Should -Be $script:EffectiveStep
+    }
+
+    It 'AC29_NoGroupIsRecommendedWhenOnlyBroadOrNonGroupEntriesWouldGrant' {
+        # The user's token is just their own SID here, so none of these entries match them.
+        $mask = $script:Mask.Read
+        $r = Invoke-Assess @{
+            UserSids = @($script:Sid.Jdoe)
+            ShareAces = @(New-Ace $script:Sid.Jdoe 'CONTOSO\jdoe' $script:Mask.Change)
+            LocalGroupExpansions = @{ $script:Sid.Local = [PSCustomObject]@{ Readable = $true; Found = $true; Name = 'Finance Local'; MemberSids = @(); Error = $null } }
+            FolderAces = @(
+                (New-Ace $script:Sid.Everyone 'Everyone' $mask), (New-Ace $script:Sid.AuthUsers 'Authenticated Users' $mask)
+                (New-Ace $script:Sid.DomUsers 'Domain Users' $mask), (New-Ace "$($script:Dom)-515" 'Domain Computers' $mask)
+                (New-Ace $script:Sid.BuiltinUsers 'BUILTIN\Users' $mask), (New-Ace 'S-1-5-4' 'INTERACTIVE' $mask)
+                (New-Ace 'S-1-5-2' 'NETWORK' $mask), (New-Ace $script:Sid.Local 'FS01\Finance Local' $mask 'Allow' $false $false $false $true)
+                (New-Ace "$($script:Dom)-1111" 'CONTOSO\psmith' $mask)
+                # The user themself: an entry that matches her but doesn't include opening the folder.
+                (New-Ace $script:Sid.Jdoe 'CONTOSO\jdoe' $script:Mask.Traverse)
+            )
+            CandidateGroups = @(
+                (New-Cand $script:Sid.Jdoe 'jdoe' 0)
+                (New-Cand $script:Sid.Everyone 'Everyone' 1000), (New-Cand $script:Sid.AuthUsers 'Authenticated Users' 1000)
+                (New-Cand $script:Sid.DomUsers 'Domain Users' 400), (New-Cand "$($script:Dom)-515" 'Domain Computers' 90)
+                (New-Cand $script:Sid.BuiltinUsers 'BUILTIN\Users' 3), (New-Cand 'S-1-5-4' 'INTERACTIVE' 1)
+                (New-Cand 'S-1-5-2' 'NETWORK' 1), (New-Cand $script:Sid.Local 'FS01\Finance Local' 2)
+                (New-Cand "$($script:Dom)-1111" 'psmith' 0 'user')
+            )
+        }
+        $r.Verdict | Should -Be 'PROBABLY NO'
+        $r.Recommendation | Should -BeNullOrEmpty
+        $r.NextSteps | Should -Contain $script:NoGroupStep
+        (@($r.NextSteps) -join "`n") | Should -Not -Match ([regex]::Escape($script:FirstStep))
+        @($r.NextSteps)[-1] | Should -Be $script:EffectiveStep
+    }
+
+    It 'AC29_NoCandidatesAtAll_SameNextStep' {
+        $r = Invoke-Assess @{ FolderAces = @(New-Ace $script:Sid.FinMgr 'FIN-Managers' $script:Mask.Change 'Deny'); CandidateGroups = @() }
+        $r.Verdict | Should -Be 'PROBABLY NO'
+        $r.NextSteps | Should -Contain $script:NoGroupStep
+    }
+
+    It 'AC30_CandidateDeniedAtTheFolderIsSkipped' {
+        # FIN-Managers is smaller but a Deny for it comes first; FIN-All is the next candidate.
+        $r = Invoke-Assess @{
+            FolderAces = @(
+                (New-Ace $script:Sid.FinMgr 'FIN-Managers' $script:Mask.Read 'Deny')
+                (New-Ace $script:Sid.FinMgr 'FIN-Managers' $script:Mask.Read)
+                (New-Ace $script:Sid.FinAll 'FIN-All' $script:Mask.Read)
+            )
+            CandidateGroups = @((New-Cand $script:Sid.FinMgr 'FIN-Managers' 12), (New-Cand $script:Sid.FinAll 'FIN-All' 80))
+        }
+        $r.Verdict | Should -Be 'PROBABLY NO'
+        $r.Recommendation.Name | Should -Be 'FIN-All'
+    }
+
+    It 'AC30_CandidateTheShareLayerDoesNotAllowIsSkipped_WhenTheUserDoesNotPassTheShareEither' {
+        # The share only lets FIN-Managers in. FIN-All is smaller, but adding the user to it
+        # would still be stopped at the share.
+        $r = Invoke-Assess @{
+            ShareAces = @(New-Ace $script:Sid.FinMgr 'FIN-Managers' $script:Mask.Change)
+            FolderAces = @((New-Ace $script:Sid.FinAll 'FIN-All' $script:Mask.Read), (New-Ace $script:Sid.FinMgr 'FIN-Managers' $script:Mask.Read))
+            CandidateGroups = @((New-Cand $script:Sid.FinAll 'FIN-All' 5), (New-Cand $script:Sid.FinMgr 'FIN-Managers' 12))
+        }
+        $r.Verdict | Should -Be 'PROBABLY NO'
+        $r.Recommendation.Name | Should -Be 'FIN-Managers'
+    }
+
+    It 'AC30_OnlyCandidateIsSkipped_MeansNoGroupGrantsThis' {
+        $r = Invoke-Assess @{
+            FolderAces = @((New-Ace $script:Sid.FinMgr 'FIN-Managers' $script:Mask.Read 'Deny'), (New-Ace $script:Sid.FinMgr 'FIN-Managers' $script:Mask.Read))
+            CandidateGroups = @(New-Cand $script:Sid.FinMgr 'FIN-Managers' 12)
+        }
+        $r.Recommendation | Should -BeNullOrEmpty
+        $r.NextSteps | Should -Contain $script:NoGroupStep
+    }
+
+    It 'AC31_PrivilegedCandidateIsRankedAfterANonPrivilegedOne' {
+        $r = Invoke-Assess @{
+            FolderAces = @((New-Ace $script:AdminsSid 'FIN-Admins' $script:Mask.Read), (New-Ace $script:Sid.FinMgr 'FIN-Managers' $script:Mask.Read))
+            CandidateGroups = @((New-Cand $script:AdminsSid 'FIN-Admins' 5 'group' 0 @('Domain Admins')), (New-Cand $script:Sid.FinMgr 'FIN-Managers' 12))
+        }
+        $r.Recommendation.Name | Should -Be 'FIN-Managers'
+        $r.Recommendation.Warning | Should -BeNullOrEmpty
+        (@($r.NextSteps) -join "`n") | Should -Not -Match 'Warning:'
+    }
+
+    It 'AC31_PrivilegedOnlyCandidateIsNamedWithTheDomainAdminWarning' {
+        $r = Invoke-Assess @{
+            FolderAces = @(New-Ace $script:AdminsSid 'FIN-Admins' $script:Mask.Read)
+            CandidateGroups = @(New-Cand $script:AdminsSid 'FIN-Admins' 5 'group' 0 @('Domain Admins'))
+        }
+        $warn = 'Warning: FIN-Admins is also in Domain Admins. Adding jdoe gives them domain admin rights. Get senior approval first.'
+        $r.Recommendation.Name | Should -Be 'FIN-Admins'
+        $r.Recommendation.Warning | Should -Be $warn
+        $r.NextSteps | Should -Contain $warn
+        @($r.NextSteps | Where-Object { $_ -like "$($script:FirstStep)FIN-Admins*" }).Count | Should -Be 1
+        @($r.NextSteps)[-1] | Should -Be $script:EffectiveStep
+        # The approval is a condition of the action, so it sits inside the add step, first.
+        Assert-ApprovalInsideAddStep (@($r.NextSteps) -join "`n") 'FIN-Admins'
+    }
+
+    It 'AC31_ANonPrivilegedRecommendation_HasNoApprovalCondition' {
+        $r = Invoke-Assess @{
+            FolderAces = @(New-Ace $script:Sid.FinMgr 'FIN-Managers' $script:Mask.Read)
+            CandidateGroups = @(New-Cand $script:Sid.FinMgr 'FIN-Managers' 12)
+        }
+        (Get-AddStep $r 'FIN-Managers')[0] | Should -Not -Match 'senior approval'
+    }
+
+    It 'AC32_AdminCountOneCarriesThePrivilegedWarning' {
+        $r = Invoke-Assess @{
+            FolderAces = @(New-Ace $script:OpsSid 'FIN-Ops' $script:Mask.Read)
+            CandidateGroups = @(New-Cand $script:OpsSid 'FIN-Ops' 4 'group' 1)
+        }
+        $r.Recommendation.Name | Should -Be 'FIN-Ops'
+        $r.Recommendation.Warning | Should -Match 'FIN-Ops'
+        $r.Recommendation.Warning | Should -Match 'protected by AdminSDHolder'
+        (@($r.NextSteps) -join "`n") | Should -Match 'protected by AdminSDHolder'
+        Assert-ApprovalInsideAddStep (@($r.NextSteps) -join "`n") 'FIN-Ops'
+    }
+
+    Context 'end to end against FakeAD (member counts, adminCount and nesting come from Get-ADGroup)' {
+        BeforeEach { Reset-World }
+        It 'AC28_EndToEnd_SmallestNonPrivilegedGroupInTheFolderAclIsRecommended' {
+            $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:Sid.FinMgr; M = $script:Mask.Read; F = '' }, @{ T = 'A'; S = $script:AdminsSid; M = $script:Mask.Read; F = '' })
+            $script:World.ShareSd = New-ShareSd @(New-ShareAce 'S-1-5-11' 'Authenticated Users' $script:Mask.Change)
+            $r = Invoke-Check
+            $r.Assessment.Verdict | Should -Be 'PROBABLY NO'
+            # FIN-Admins (5 members, nested in Domain Admins) is privileged, so FIN-Managers (12) wins.
+            $r.Assessment.Recommendation.Name | Should -Be 'FIN-Managers'
+            $r.Assessment.Recommendation.MemberCount | Should -Be 12
+        }
+        It 'AC31_EndToEnd_NestingInDomainAdminsIsFoundByWalkingUp' {
+            $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:AdminsSid; M = $script:Mask.Read; F = '' })
+            $r = Invoke-Check
+            $r.Assessment.Recommendation.Name | Should -Be 'FIN-Admins'
+            $r.Assessment.Recommendation.Warning | Should -Be 'Warning: FIN-Admins is also in Domain Admins. Adding jdoe gives them domain admin rights. Get senior approval first.'
+        }
+        It 'AC31_EndToEnd_ApprovalComesFirstInsideTheAddStep_InConsoleHtmlAndTicketNote' {
+            $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:AdminsSid; M = $script:Mask.Read; F = '' })
+            $r = Invoke-Check
+            $warn = 'Warning: FIN-Admins is also in Domain Admins. Adding jdoe gives them domain admin rights. Get senior approval first.'
+            $console = Get-ConsoleText $r
+            Assert-ApprovalInsideAddStep $console 'FIN-Admins'
+            $console | Should -Match ([regex]::Escape($warn))
+            $html = [System.Net.WebUtility]::HtmlDecode((ConvertTo-FolderAccessHtml -Result $r))
+            Assert-ApprovalInsideAddStep $html 'FIN-Admins'
+            $html | Should -Match ([regex]::Escape($warn))
+            $lines = @(ConvertTo-TicketNoteText -Note (ConvertTo-FolderAccessTicketNote -Result $r -EvidencePaths @()) -PasteSafe)
+            $at = [array]::IndexOf($lines, 'Next step:')
+            $at | Should -BeGreaterThan 0
+            Assert-ApprovalInsideAddStep (@($lines[$at..($lines.Count - 1)]) -join "`n") 'FIN-Admins'
+            ($lines -join "`n") | Should -Match ([regex]::Escape($warn))
+        }
+        It 'D017_EndToEnd_HomeFolderWhereOnlyAdministratorsAndDomainAdminsGrant_Escalates' {
+            $script:World.FolderSddl = New-Sddl @(
+                @{ T = 'A'; S = 'S-1-5-18'; M = $script:Mask.Full; F = '' }
+                @{ T = 'A'; S = $script:Sid.BuiltinAdmins; M = $script:Mask.Full; F = '' }
+                @{ T = 'A'; S = $script:DomAdmins; M = $script:Mask.Full; F = '' }
+            )
+            $r = Invoke-Check
+            $r.Assessment.Verdict | Should -Be 'PROBABLY NO'
+            $r.Assessment.Recommendation | Should -BeNullOrEmpty
+            $step = @($r.Assessment.NextSteps | Where-Object { $_ -like "$($script:EscalateStep)*" })
+            $step.Count | Should -Be 1
+            $step[0] | Should -Match 'Domain Admins'
+            (Get-ConsoleText $r) | Should -Not -Match ([regex]::Escape($script:FirstStep))
+        }
+        It 'FailClosed_EndToEnd_AParentGroupThatCannotBeRead_MeansCouldNotConfirm' {
+            $daDn = 'CN=Domain Admins,OU=Groups,DC=contoso,DC=com'
+            Mock Get-ADGroup { throw 'The server has returned the following error: invalid enumeration context.' } -ParameterFilter { "$Identity" -eq $daDn }
+            $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:AdminsSid; M = $script:Mask.Read; F = '' })
+            $r = Invoke-Check
+            $r.Assessment.Recommendation.Name | Should -Be 'FIN-Admins'
+            $r.Assessment.Recommendation.Warning | Should -Be "Couldn't confirm FIN-Admins is not in a privileged group. Get senior approval first."
+            Assert-ApprovalInsideAddStep (@($r.Assessment.NextSteps) -join "`n") 'FIN-Admins'
+            # With a verified group alongside, that one wins.
+            $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:AdminsSid; M = $script:Mask.Read; F = '' }, @{ T = 'A'; S = $script:Sid.FinAll; M = $script:Mask.Read; F = '' })
+            $script:World.ShareSd = New-ShareSd @(New-ShareAce 'S-1-5-11' 'Authenticated Users' $script:Mask.Change)
+            $override = @{ jdoe = @{ memberOf = @() } } | ConvertTo-Json -Compress
+            $env:FAC_OVERRIDE = $override
+            $r2 = Invoke-Check
+            $r2.Assessment.Recommendation.Name | Should -Be 'FIN-All'
+        }
+        It 'FailClosed_TheNestingDepthLimitCutsTheWalkShort_MeansIncomplete' {
+            $ace = New-Ace $script:AdminsSid 'FIN-Admins' $script:Mask.Read
+            $cut = @(Get-FolderAccessCandidateGroup -FolderAces @($ace) -DomainSid $script:Dom -MaxNestingDepth 0)[0]
+            $cut.Incomplete | Should -BeTrue
+            @($cut.PrivilegedVia).Count | Should -Be 0
+            $full = @(Get-FolderAccessCandidateGroup -FolderAces @($ace) -DomainSid $script:Dom -MaxNestingDepth 10)[0]
+            $full.Incomplete | Should -BeFalse
+            $full.PrivilegedVia | Should -Contain 'Domain Admins'
+            $full.ParentSids | Should -Contain $script:DomAdmins
+        }
+        It 'FailClosed_AParentInAnotherDomain_IsLookedUpInThatDomain_OrMarksTheCandidateIncomplete' {
+            $sid = "$($script:Dom)-1140"
+            $eaDn = 'CN=Enterprise Admins,CN=Users,DC=fabrikam,DC=com'
+            Mock Get-ADGroup {
+                [PSCustomObject]@{ Name = 'FIN-Global'; DistinguishedName = 'CN=FIN-Global,OU=Groups,DC=contoso,DC=com'; SID = $sid; GroupCategory = 'Security'
+                    MemberOf = @($eaDn); member = @('CN=a,DC=contoso,DC=com'); adminCount = $null }
+            } -ParameterFilter { "$Identity" -eq $sid }
+            Mock Get-ADGroup {
+                [PSCustomObject]@{ Name = 'Enterprise Admins'; DistinguishedName = $eaDn; SID = 'S-1-5-21-4444444444-5555555555-6666666666-519'; MemberOf = @() }
+            } -ParameterFilter { "$Identity" -eq $eaDn -and $Server -eq 'fabrikam.com' }
+            $ace = New-Ace $sid 'FIN-Global' $script:Mask.Read
+            $c = @(Get-FolderAccessCandidateGroup -FolderAces @($ace) -DomainSid $script:Dom)[0]
+            $c.PrivilegedVia | Should -Contain 'Enterprise Admins'
+            $c.Incomplete | Should -BeFalse
+            Should -Invoke Get-ADGroup -Times 1 -Exactly -ParameterFilter { "$Identity" -eq $eaDn -and $Server -eq 'fabrikam.com' }
+
+            Mock Get-ADGroup { throw 'A referral was returned from the server.' } -ParameterFilter { "$Identity" -eq $eaDn -and $Server -eq 'fabrikam.com' }
+            $c2 = @(Get-FolderAccessCandidateGroup -FolderAces @($ace) -DomainSid $script:Dom)[0]
+            $c2.Incomplete | Should -BeTrue
+        }
+        It 'FailClosed_MultiDomainForest_EmptyMemberOfCanNotBeTrusted_CouldNotConfirm_ApprovalFirst' {
+            # memberOf read from a DC of the user's domain leaves out domain-local groups of other
+            # domains (the forest root's BUILTIN\Administrators) and other forests (through FSPs).
+            $env:FAC_FOREST = '["contoso.com","emea.contoso.com"]'
+            $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:Sid.FinMgr; M = $script:Mask.Read; F = '' })
+            $script:World.ShareSd = New-ShareSd @(New-ShareAce 'S-1-5-11' 'Authenticated Users' $script:Mask.Change)
+            $r = Invoke-Check
+            $r.Assessment.Verdict | Should -Be 'PROBABLY NO'
+            $r.Assessment.Recommendation.Name | Should -Be 'FIN-Managers'
+            $warn = "Couldn't confirm FIN-Managers is not in a privileged group. Get senior approval first."
+            $r.Assessment.Recommendation.Warning | Should -Be $warn
+            $r.Assessment.NextSteps | Should -Contain $warn
+            Assert-ApprovalInsideAddStep (@($r.Assessment.NextSteps) -join "`n") 'FIN-Managers'
+        }
+        It 'FailClosed_ATrustOrAnUnreadableForestOrTrustList_MeansCouldNotConfirm: <Case>' -ForEach @(
+            @{ Case = 'a trust to another forest'; Forest = ''; Trusts = '["fabrikam.com"]' }
+            @{ Case = 'the forest could not be read'; Forest = 'throw'; Trusts = '' }
+            @{ Case = 'the trusts could not be read'; Forest = ''; Trusts = 'throw' }
+        ) {
+            $env:FAC_FOREST = $Forest; $env:FAC_TRUSTS = $Trusts
+            $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:Sid.FinMgr; M = $script:Mask.Read; F = '' })
+            $script:World.ShareSd = New-ShareSd @(New-ShareAce 'S-1-5-11' 'Authenticated Users' $script:Mask.Change)
+            $r = Invoke-Check
+            $r.Assessment.Recommendation.Name | Should -Be 'FIN-Managers'
+            $r.Assessment.Recommendation.Warning | Should -Be "Couldn't confirm FIN-Managers is not in a privileged group. Get senior approval first."
+            Assert-ApprovalInsideAddStep (@($r.Assessment.NextSteps) -join "`n") 'FIN-Managers'
+        }
+        It 'FailClosed_SingleDomainForestWithNoTrusts_TheEmptyMemberOfIsTrusted' {
+            $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:Sid.FinMgr; M = $script:Mask.Read; F = '' })
+            $script:World.ShareSd = New-ShareSd @(New-ShareAce 'S-1-5-11' 'Authenticated Users' $script:Mask.Change)
+            $r = Invoke-Check
+            $r.Assessment.Recommendation.Name | Should -Be 'FIN-Managers'
+            $r.Assessment.Recommendation.Warning | Should -BeNullOrEmpty
+        }
+        It 'FailClosed_AnUncheckedCandidate_AlsoSaysADeniedParentGroupMayStopIt' {
+            $env:FAC_FOREST = '["contoso.com","emea.contoso.com"]'
+            $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:Sid.FinMgr; M = $script:Mask.Read; F = '' })
+            $script:World.ShareSd = New-ShareSd @(New-ShareAce 'S-1-5-11' 'Authenticated Users' $script:Mask.Change)
+            $r = Invoke-Check
+            $steps = @($r.Assessment.NextSteps) -join "`n"
+            $steps | Should -Match ([regex]::Escape('it may also not work if a group it belongs to is denied'))
+        }
+        It 'PrivilegedByName_ExchangeGroupsAreFoundByTheWalk: <_>' -ForEach @('Exchange Windows Permissions', 'Organization Management', 'Exchange Trusted Subsystem', 'DHCP Administrators') {
+            $name = $_
+            $sid = "$($script:Dom)-1160"
+            $parentDn = "CN=$name,OU=Microsoft Exchange Security Groups,DC=contoso,DC=com"
+            Mock Get-ADGroup {
+                [PSCustomObject]@{ Name = 'FIN-Mail'; DistinguishedName = 'CN=FIN-Mail,OU=Groups,DC=contoso,DC=com'; SID = $sid; GroupCategory = 'Security'
+                    MemberOf = @($parentDn); member = @('CN=a,DC=contoso,DC=com'); adminCount = $null }
+            } -ParameterFilter { "$Identity" -eq $sid }
+            Mock Get-ADGroup {
+                [PSCustomObject]@{ Name = $name; DistinguishedName = $parentDn; SID = "$($script:Dom)-1161"; MemberOf = @() }
+            } -ParameterFilter { "$Identity" -eq $parentDn }
+            $c = @(Get-FolderAccessCandidateGroup -FolderAces @(New-Ace $sid 'FIN-Mail' $script:Mask.Read) -DomainSid $script:Dom)[0]
+            $c.PrivilegedVia | Should -Contain $name
+        }
+        It 'AC32_EndToEnd_AdminCountIsReadFromTheGroup' {
+            $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:OpsSid; M = $script:Mask.Read; F = '' })
+            $r = Invoke-Check
+            $r.Assessment.Recommendation.Name | Should -Be 'FIN-Ops'
+            $r.Assessment.Recommendation.Warning | Should -Match 'protected by AdminSDHolder'
+        }
+        It 'AC29_EndToEnd_OnlyDomainComputersAndBuiltinUsers_NoGroupRecommended' {
+            $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = "$($script:Dom)-515"; M = $script:Mask.Read; F = '' }, @{ T = 'A'; S = $script:Sid.BuiltinUsers; M = $script:Mask.Read; F = '' })
+            $script:World.LocalGroups[$script:Sid.BuiltinUsers] = @{ Name = 'Users'; Members = @() }
+            $r = Invoke-Check
+            $r.Assessment.Verdict | Should -Be 'PROBABLY NO'
+            $r.Assessment.Recommendation | Should -BeNullOrEmpty
+            $r.Assessment.NextSteps | Should -Contain $script:NoGroupStep
+        }
+    }
+}
+
+Describe 'stale token: added to a group after the last sign-in (AC33-AC35)' {
+    BeforeAll {
+        $script:Added = [datetime]'2026-10-15T09:00:00'
+        $script:LoggedOn = [datetime]'2026-10-10T12:00:00'
+        function Get-StaleAssessment([object]$LastLogon, [hashtable]$Links) {
+            Invoke-Assess @{
+                ExtraSids = @($script:Sid.FinStaff, $script:Sid.FinAll)
+                GroupPaths = @{ $script:Sid.FinStaff = 'FIN-Staff'; $script:Sid.FinAll = 'FIN-Staff -> FIN-All' }
+                # two entries, each granting part of the Read bits, so both are granting paths
+                FolderAces = @((New-Ace $script:Sid.FinStaff 'FIN-Staff' 0x100081), (New-Ace $script:Sid.FinAll 'FIN-All' 0x020008))
+                LastLogon = $LastLogon; MembershipLinks = $Links
+            }
+        }
+        function New-Link([string]$Group, $When) { [PSCustomObject]@{ Group = $Group; Added = $When } }
+        function Get-OneGroupAssessment($LastLogon, $Link) {
+            Invoke-Assess @{
+                ExtraSids = @($script:Sid.FinStaff); GroupPaths = @{ $script:Sid.FinStaff = 'FIN-Staff' }
+                FolderAces = @(New-Ace $script:Sid.FinStaff 'FIN-Staff' $script:Mask.Read)
+                LastLogon = $LastLogon; MembershipLinks = @{ $script:Sid.FinStaff = $Link }
+            }
+        }
+        $script:SignOutStep = 'Ask them to sign out of Windows and any Citrix/RDS session, then sign in again (locking and unlocking is not enough)'
+    }
+
+    It 'AC33_OnlyGrantingPathIsNewerThanTheLastSignIn_SaysSignOutAndBackIn' {
+        $r = Get-OneGroupAssessment $script:LoggedOn (New-Link 'FIN-Staff' $script:Added)
+        $r.Verdict | Should -Be 'PROBABLY YES'
+        $r.ExitCode | Should -Be 0
+        $r.VerdictText | Should -Be 'PROBABLY YES after jdoe signs out and back in'
+        $r.Headline | Should -BeLike '*PROBABLY YES after jdoe signs out and back in'
+        (@($r.Reasons) -join "`n") | Should -Match ([regex]::Escape('added to FIN-Staff on 2026-10-15, after their last sign-in on 2026-10-10'))
+        $r.StaleToken.Group | Should -Be 'FIN-Staff'
+        $r.NextSteps | Should -Contain $script:SignOutStep
+        @($r.NextSteps)[-1] | Should -Be $script:EffectiveStep
+    }
+
+    It 'AC33_ALinkOlderThanTheLastSignIn_IsNotStale' {
+        $r = Get-OneGroupAssessment $script:Added (New-Link 'FIN-Staff' $script:LoggedOn)
+        $r.VerdictText | Should -Be 'PROBABLY YES'
+        $r.StaleToken | Should -BeNullOrEmpty
+        $r.NextSteps | Should -Not -Contain $script:SignOutStep
+    }
+
+    It 'AC34_OneStalePathAndOneNonStalePath_NoStaleFinding' {
+        $r = Get-StaleAssessment $script:LoggedOn @{
+            $script:Sid.FinStaff = (New-Link 'FIN-Staff' $script:Added)
+            $script:Sid.FinAll = (New-Link 'FIN-All' ([datetime]'2026-09-01'))
+        }
+        $r.Verdict | Should -Be 'PROBABLY YES'
+        @($r.EvidenceRows | Where-Object { $_.Layer -eq 'Folder' -and $_.Effect -like 'allows*' }).Count | Should -Be 2
+        $r.VerdictText | Should -Be 'PROBABLY YES'
+        $r.StaleToken | Should -BeNullOrEmpty
+        $r.NextSteps | Should -Not -Contain $script:SignOutStep
+        (@($r.Reasons) -join "`n") | Should -Not -Match 'after their last sign-in'
+    }
+
+    It 'AC34_BothPathsStale_IsStale' {
+        $r = Get-StaleAssessment $script:LoggedOn @{
+            $script:Sid.FinStaff = (New-Link 'FIN-Staff' $script:Added)
+            $script:Sid.FinAll = (New-Link 'FIN-All' ([datetime]'2026-10-12'))
+        }
+        $r.VerdictText | Should -Be 'PROBABLY YES after jdoe signs out and back in'
+    }
+
+    It 'AC35_LinkTimeUnknown_ListedAsCouldNotCheck_NoStaleClaim' {
+        $r = Get-OneGroupAssessment $script:LoggedOn (New-Link 'FIN-Staff' $null)
+        $r.Verdict | Should -Be 'PROBABLY YES'
+        $r.VerdictText | Should -Be 'PROBABLY YES'
+        $r.StaleToken | Should -BeNullOrEmpty
+        (@($r.CouldNotCheck) -join "`n") | Should -Match ([regex]::Escape('when jdoe was added to the group'))
+        $r.NextSteps | Should -Not -Contain $script:SignOutStep
+    }
+
+    It 'AC35_LastLogonUnknown_ListedAsCouldNotCheck_NoStaleClaim' {
+        $r = Get-OneGroupAssessment $null (New-Link 'FIN-Staff' $script:Added)
+        $r.VerdictText | Should -Be 'PROBABLY YES'
+        $r.StaleToken | Should -BeNullOrEmpty
+        (@($r.CouldNotCheck) -join "`n") | Should -Match ([regex]::Escape('when jdoe was added to the group'))
+    }
+
+    Context 'end to end against FakeAD and a mocked Get-ADReplicationAttributeMetadata' {
+        BeforeAll {
+            $script:UserDn = 'CN=Jane Doe (jdoe),OU=Staff,DC=contoso,DC=com'
+            $script:StaffDn = 'CN=FIN-Staff,OU=Groups,DC=contoso,DC=com'
+            function Set-Logons([datetime]$Dc01, [datetime]$Dc02) {
+                $ft1 = if ($Dc01 -gt [datetime]::MinValue) { $Dc01.ToUniversalTime().ToFileTimeUtc() } else { 0 }
+                $ft2 = if ($Dc02 -gt [datetime]::MinValue) { $Dc02.ToUniversalTime().ToFileTimeUtc() } else { 0 }
+                $env:FAC_OVERRIDE = '{"jdoe":{"lastLogon":"' + $ft1 + '","lastLogonDC02":"' + $ft2 + '"}}'
+            }
+            Mock Get-ADReplicationAttributeMetadata {
+                if ($script:Meta.Throw) { throw $script:Meta.Throw }
+                $o = if ($Object -and $Object.PSObject.Properties['DistinguishedName']) { [string]$Object.DistinguishedName } else { [string]$Object }
+                if ($script:Meta.Rows.ContainsKey($o)) { $script:Meta.Rows[$o] }
+            }
+        }
+        BeforeEach {
+            Reset-World
+            $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:Sid.FinStaff; M = $script:Mask.Read; F = '' })
+            $script:Meta = @{ Throw = $null; Rows = @{
+                    $script:StaffDn = @([PSCustomObject]@{ AttributeName = 'member'; AttributeValue = $script:UserDn; FirstOriginatingCreateTime = $script:Added; LastOriginatingChangeTime = $script:Added })
+                    $script:UserDn = @([PSCustomObject]@{ AttributeName = 'primaryGroupID'; AttributeValue = 513; FirstOriginatingCreateTime = [datetime]'2020-01-01'; LastOriginatingChangeTime = [datetime]'2020-01-01' })
+                } }
+        }
+        AfterAll { $env:FAC_OVERRIDE = '' }
+
+        It 'AC33_EndToEnd_MembershipNewerThanTheNewestLogonOnAnyDc_SignOutAndBackIn' {
+            Set-Logons ([datetime]'2026-10-05T08:00:00') ([datetime]'2026-10-10T12:00:00')
+            $r = Invoke-Check
+            $r.Assessment.Verdict | Should -Be 'PROBABLY YES'
+            $r.Assessment.VerdictText | Should -Be 'PROBABLY YES after jdoe signs out and back in'
+            (@($r.Assessment.Reasons) -join "`n") | Should -Match 'added to FIN-Staff on 2026-10-15, after their last sign-in on 2026-10-10'
+            $r.Assessment.NextSteps | Should -Contain 'Ask them to sign out of Windows and any Citrix/RDS session, then sign in again (locking and unlocking is not enough)'
+            Should -Invoke Get-ADReplicationAttributeMetadata -Times 1 -ParameterFilter { $ShowAllLinkedValues }
+        }
+        It 'AC33_EndToEnd_LastLogonIsTheNewestAcrossAllDcs_NotJustTheFirst' {
+            # Added 10-08: after DC01's 10-05 but before DC02's 10-10, so jdoe signed in since.
+            $script:Meta.Rows[$script:StaffDn][0].FirstOriginatingCreateTime = [datetime]'2026-10-08T09:00:00'
+            Set-Logons ([datetime]'2026-10-05T08:00:00') ([datetime]'2026-10-10T12:00:00')
+            $r = Invoke-Check
+            $r.Assessment.VerdictText | Should -Be 'PROBABLY YES'
+            $r.Assessment.StaleToken | Should -BeNullOrEmpty
+        }
+        It 'AC35_EndToEnd_MetadataCmdletThrows_CouldNotCheck_NoStaleClaim' {
+            Set-Logons ([datetime]'2026-10-05T08:00:00') ([datetime]'2026-10-10T12:00:00')
+            $script:Meta.Throw = 'Insufficient access rights to perform the operation.'
+            $r = Invoke-Check
+            $r.Assessment.Verdict | Should -Be 'PROBABLY YES'
+            $r.Assessment.VerdictText | Should -Be 'PROBABLY YES'
+            (@($r.Assessment.CouldNotCheck) -join "`n") | Should -Match ([regex]::Escape('when jdoe was added to the group'))
+            $r.ExitCode | Should -Be 0
+        }
+        It 'AC35_EndToEnd_NoDcReturnsALastLogon_CouldNotCheck_NoStaleClaim' {
+            Set-Logons ([datetime]::MinValue) ([datetime]::MinValue)
+            $r = Invoke-Check
+            $r.Assessment.VerdictText | Should -Be 'PROBABLY YES'
+            (@($r.Assessment.CouldNotCheck) -join "`n") | Should -Match ([regex]::Escape('when jdoe was added to the group'))
+        }
+        It 'AC34_EndToEnd_AnOlderRouteIntoTheGrantingGroup_IsNotStale' {
+            # FIN-All grants. jdoe was added to FIN-All directly on 10-15 (after her 10-10 sign-in),
+            # but she has held it through FIN-Staff since 2021: her token already has FIN-All.
+            # Several member rows per group, as the real cmdlet returns with -ShowAllLinkedValues.
+            $allDn = 'CN=FIN-All,OU=Groups,DC=contoso,DC=com'
+            $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:Sid.FinAll; M = $script:Mask.Read; F = '' })
+            $env:FAC_OVERRIDE = '{"jdoe":{"memberOf":["FIN-Staff","FIN-All"],"lastLogon":"' + ([datetime]'2026-10-10T12:00:00').ToUniversalTime().ToFileTimeUtc() + '"}}'
+            $script:Meta.Rows[$script:StaffDn] = @(
+                [PSCustomObject]@{ AttributeName = 'member'; AttributeValue = 'CN=Someone Else,OU=Staff,DC=contoso,DC=com'; FirstOriginatingCreateTime = [datetime]'2019-05-01'; LastOriginatingChangeTime = [datetime]'2019-05-01' }
+                [PSCustomObject]@{ AttributeName = 'member'; AttributeValue = $script:UserDn; FirstOriginatingCreateTime = [datetime]'2020-03-01'; LastOriginatingChangeTime = [datetime]'2020-03-01' }
+            )
+            $script:Meta.Rows[$allDn] = @(
+                [PSCustomObject]@{ AttributeName = 'member'; AttributeValue = $script:StaffDn; FirstOriginatingCreateTime = [datetime]'2021-01-01'; LastOriginatingChangeTime = [datetime]'2021-01-01' }
+                [PSCustomObject]@{ AttributeName = 'member'; AttributeValue = $script:UserDn; FirstOriginatingCreateTime = $script:Added; LastOriginatingChangeTime = $script:Added }
+            )
+            $r = Invoke-Check
+            $r.Assessment.Verdict | Should -Be 'PROBABLY YES'
+            $r.Assessment.VerdictText | Should -Be 'PROBABLY YES'
+            $r.Assessment.StaleToken | Should -BeNullOrEmpty
+            (@($r.Assessment.CouldNotCheck) -join "`n") | Should -Not -Match 'when jdoe was added'
+        }
+        It 'AC33_EndToEnd_PrimaryGroupUsesThePrimaryGroupIdChangeTime' {
+            $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:Sid.DomUsers; M = $script:Mask.Read; F = '' })
+            $script:Meta.Rows[$script:UserDn][0].LastOriginatingChangeTime = $script:Added
+            Set-Logons ([datetime]'2026-10-05T08:00:00') ([datetime]'2026-10-10T12:00:00')
+            $r = Invoke-Check
+            $r.Assessment.VerdictText | Should -Be 'PROBABLY YES after jdoe signs out and back in'
+        }
+    }
+}
+
+Describe 'ticket note (AC36)' {
+    BeforeAll {
+        function Get-NoteSection([string[]]$Lines, [string]$Header) {
+            $headers = 'Checked:', 'Ruled out:', 'Could not check:', 'Next step:'
+            $at = [array]::IndexOf($Lines, $Header)
+            if ($at -lt 0) { return @() }
+            $out = @()
+            for ($i = $at + 1; $i -lt $Lines.Count; $i++) {
+                if ($headers -contains $Lines[$i] -or -not $Lines[$i].Trim()) { break }
+                $out += $Lines[$i]
+            }
+            , $out
+        }
+        function Get-NoteFor($Result) {
+            $note = ConvertTo-FolderAccessTicketNote -Result $Result -EvidencePaths @()
+            [PSCustomObject]@{ Note = $note; Lines = @(ConvertTo-TicketNoteText -Note $note) }
+        }
+        # Runs the real script in-process (exit only leaves the script) with the fake AD module first.
+        function Invoke-ScriptInProcess([hashtable]$Splat) {
+            $saved = $env:PSModulePath
+            try {
+                $env:PSModulePath = "$($script:FakeRoot);$saved"
+                $global:LASTEXITCODE = 0
+                @(& $script:ScriptPath @Splat *>&1)
+            } finally { $env:PSModulePath = $saved }
+        }
+        $script:CanonicalKit = Join-Path (Split-Path -Parent $script:Root) 'TicketNote\CaseKit.ps1'
+    }
+    BeforeEach { Reset-World }
+
+    It 'AC36_KitCopyBesideTheScriptIsIdenticalToTheMaster' {
+        $copy = Join-Path $script:Root 'CaseKit.ps1'
+        Test-Path -LiteralPath $copy | Should -BeTrue -Because 'the tool folder must be self-contained'
+        $norm = { param($p) ([System.IO.File]::ReadAllText($p)) -replace "`r`n", "`n" }
+        (& $norm $copy) | Should -Be (& $norm $script:CanonicalKit)
+    }
+
+    It 'AC36_TicketNumberWritesTheNoteBesideTheHtmlAndCsv' {
+        $root = Join-Path $TestDrive 'ac36'
+        $null = New-Item -ItemType Directory -Path $root
+        $out = Invoke-ScriptInProcess @{ Identity = 'jdoe'; Path = $script:Unc; TicketNumber = '482113'; OutputPath = $root; NoClipboard = $true; PassThru = $true }
+        $res = @($out | Where-Object { $_ -is [PSCustomObject] -and $_.PSObject.Properties['TicketNote'] })[-1]
+        $res.TicketNote | Should -Not -BeNullOrEmpty
+        $dir = Join-Path $root 'Ticket_482113'
+        $html = @(Get-ChildItem -LiteralPath $dir -Filter 'FolderAccessCheck_jdoe_*.html' -ErrorAction SilentlyContinue)
+        $csv = @(Get-ChildItem -LiteralPath $dir -Filter 'FolderAccessCheck_jdoe_*.csv' -ErrorAction SilentlyContinue)
+        $note = @(Get-ChildItem -LiteralPath $dir -Filter 'Note_*_FolderAccess-Check.txt' -ErrorAction SilentlyContinue)
+        $html.Count | Should -Be 1
+        $csv.Count | Should -Be 1
+        $note.Count | Should -Be 1
+        $text = [System.IO.File]::ReadAllText($note[0].FullName)
+        $text | Should -Match ([regex]::Escape($html[0].Name))
+        $text | Should -Match ([regex]::Escape($csv[0].Name))
+        $text | Should -Match 'Can Jane Doe open .*PROBABLY NO'
+    }
+
+    It 'AC36_NoteIsPasteSafeByDefault_AndFullDetailKeepsThePath' {
+        $root = Join-Path $TestDrive 'ac36paste'
+        $null = New-Item -ItemType Directory -Path $root
+        $null = Invoke-ScriptInProcess @{ Identity = 'jdoe'; Path = $script:Unc; TicketNumber = '1'; OutputPath = $root; NoClipboard = $true; PassThru = $true }
+        $safe = [System.IO.File]::ReadAllText((@(Get-ChildItem -LiteralPath (Join-Path $root 'Ticket_1') -Filter 'Note_*_FolderAccess-Check.txt'))[0].FullName)
+        $safe | Should -Not -Match ([regex]::Escape('\\FS01\Finance'))
+        $null = Invoke-ScriptInProcess @{ Identity = 'jdoe'; Path = $script:Unc; TicketNumber = '2'; OutputPath = $root; NoClipboard = $true; FullDetail = $true; PassThru = $true }
+        $full = [System.IO.File]::ReadAllText((@(Get-ChildItem -LiteralPath (Join-Path $root 'Ticket_2') -Filter 'Note_*_FolderAccess-Check.txt'))[0].FullName)
+        $full | Should -Match ([regex]::Escape('\\FS01\Finance\Budgets 2027'))
+    }
+
+    It 'AC36_UnreadFolderPermissions_NeverRuledOut_AndListedAsCouldNotCheck' {
+        $script:World.FolderThrow = 'Attempted to perform an unauthorized operation.'
+        $r = Invoke-Check
+        $r.Assessment.Verdict | Should -Be "CAN'T TELL"
+        $n = Get-NoteFor $r
+        ((Get-NoteSection $n.Lines 'Ruled out:') -join "`n") | Should -Not -Match '(?i)folder|share|permission'
+        ((Get-NoteSection $n.Lines 'Could not check:') -join "`n") | Should -Match '(?i)folder permissions'
+    }
+
+    It 'AC36_UnreadSharePermissions_NeverRuledOut_AndListedAsCouldNotCheck' {
+        $script:World.WsmanFail = 'WinRM cannot process the request.'; $script:World.DcomFail = 'The RPC server is unavailable.'
+        $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:Sid.AuthUsers; M = $script:Mask.Read; F = '' })
+        $r = Invoke-Check
+        $r.Assessment.Verdict | Should -Be "CAN'T TELL"
+        $n = Get-NoteFor $r
+        ((Get-NoteSection $n.Lines 'Ruled out:') -join "`n") | Should -Not -Match '(?i)share|permission'
+        ((Get-NoteSection $n.Lines 'Could not check:') -join "`n") | Should -Match '(?i)share permissions'
+    }
+
+    It 'AC36_AdministrativeShare_NeverRuledOut' {
+        $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:Sid.AuthUsers; M = $script:Mask.Read; F = '' })
+        $r = Invoke-Check -Path '\\FS01\D$\Finance'
+        $n = Get-NoteFor $r
+        ((Get-NoteSection $n.Lines 'Ruled out:') -join "`n") | Should -Not -Match '(?i)share|permission'
+        ((Get-NoteSection $n.Lines 'Could not check:') -join "`n") | Should -Match '(?i)share permissions'
+    }
+
+    It 'AC36_ProbablyYesOrNo_TheLayersThatWereReadAreRuledOut' {
+        # PROBABLY NO: the share was read and lets her in; the folder was read and has no Deny for her.
+        $no = Invoke-Check
+        $no.Assessment.Verdict | Should -Be 'PROBABLY NO'
+        $ruled = (Get-NoteSection (Get-NoteFor $no).Lines 'Ruled out:') -join "`n"
+        $ruled | Should -Match ([regex]::Escape('Share permissions on FS01: they let jdoe in.'))
+        $ruled | Should -Match ([regex]::Escape('Deny entries: none in the folder permissions blocks jdoe.'))
+        # PROBABLY YES: both layers let her in.
+        $script:World.FolderSddl = New-Sddl @(@{ T = 'A'; S = $script:Sid.FinStaff; M = $script:Mask.Read; F = '' })
+        $yes = Invoke-Check
+        $yes.Assessment.Verdict | Should -Be 'PROBABLY YES'
+        $ruled = (Get-NoteSection (Get-NoteFor $yes).Lines 'Ruled out:') -join "`n"
+        $ruled | Should -Match ([regex]::Escape('Share permissions on FS01: they let jdoe in.'))
+        $ruled | Should -Match ([regex]::Escape('Folder permissions: they let jdoe open and list it.'))
+    }
+
+    It 'AC36_PasteSafe_AFolderNameWithAnApostropheLeavesNothingBehind' {
+        $path = "\\FS01\HR\Joe's Reviews"
+        $root = Join-Path $TestDrive 'ac36apos'
+        $null = New-Item -ItemType Directory -Path $root
+        # The scope line: in paste-safe mode the path is left out entirely.
+        $null = Invoke-ScriptInProcess @{ Identity = 'jdoe'; Path = $path; TicketNumber = '3'; OutputPath = $root; NoClipboard = $true; PassThru = $true }
+        $safe = [System.IO.File]::ReadAllText((@(Get-ChildItem -LiteralPath (Join-Path $root 'Ticket_3') -Filter 'Note_*_FolderAccess-Check.txt'))[0].FullName)
+        $safe | Should -Not -Match 'Reviews|Joe|\\\\FS01'
+        $safe | Should -Match 'Share and folder permissions of the folder for jdoe'
+        # Get-Acl's error quotes the path in single quotes, apostrophe and all.
+        $script:World.FolderThrow = "Cannot find path '$path' because it does not exist."
+        $null = Invoke-ScriptInProcess @{ Identity = 'jdoe'; Path = $path; TicketNumber = '4'; OutputPath = $root; NoClipboard = $true; PassThru = $true }
+        $safe = [System.IO.File]::ReadAllText((@(Get-ChildItem -LiteralPath (Join-Path $root 'Ticket_4') -Filter 'Note_*_FolderAccess-Check.txt'))[0].FullName)
+        $safe | Should -Match 'not read'
+        $safe | Should -Not -Match 'Reviews|Joe|\\\\FS01'
+        # -FullDetail keeps it.
+        $null = Invoke-ScriptInProcess @{ Identity = 'jdoe'; Path = $path; TicketNumber = '5'; OutputPath = $root; NoClipboard = $true; FullDetail = $true; PassThru = $true }
+        $full = [System.IO.File]::ReadAllText((@(Get-ChildItem -LiteralPath (Join-Path $root 'Ticket_5') -Filter 'Note_*_FolderAccess-Check.txt'))[0].FullName)
+        $full | Should -Match ([regex]::Escape($path))
+    }
+
+    It 'AC36_PasteSafe_AGetAclErrorQuotingAPossessiveFolderName_LeavesNothingBehind' {
+        # "Teachers' Resources": the apostrophe before a space looks like the closing quote.
+        $path = "\\FS01\Staff\Teachers' Resources\jdoe"
+        $script:World.FolderThrow = "Cannot find path '$path' because it does not exist."
+        $root = Join-Path $TestDrive 'ac36possessive'
+        $null = New-Item -ItemType Directory -Path $root
+        $null = Invoke-ScriptInProcess @{ Identity = 'jdoe'; Path = $path; TicketNumber = '7'; OutputPath = $root; NoClipboard = $true; PassThru = $true }
+        $safe = [System.IO.File]::ReadAllText((@(Get-ChildItem -LiteralPath (Join-Path $root 'Ticket_7') -Filter 'Note_*_FolderAccess-Check.txt'))[0].FullName)
+        $safe | Should -Match 'not read'
+        $safe | Should -Not -Match 'Teachers|Resources|Staff|\\\\FS01'
+    }
+
+    It 'AC36_PasteSafe_TheToolRemovesItsOwnPathsFromErrorText_WithoutRelyingOnTheKitFilter' {
+        # The note's own lines, before the kit's paste-safe filter runs, already hold no known path.
+        $path = "\\FS01\Teachers' Resources\jdoe"
+        $script:World.FolderThrow = "Cannot find path '$path' because it does not exist."
+        Mock Get-ShareSecurity { [PSCustomObject]@{ DaclState = 'Present'; Aces = @(); Error = "there is no share named 'Teachers' Resources' on FS01" } }
+        $r = Invoke-Check -Path $path
+        $lines = (Get-NoteFor $r).Lines -join "`n"
+        $lines | Should -Match 'not read'
+        $lines | Should -Not -Match 'Teachers|Resources'
+        # -FullDetail keeps the error text as it was.
+        $full = @(ConvertTo-TicketNoteText -Note (ConvertTo-FolderAccessTicketNote -Result $r -EvidencePaths @() -FullDetail)) -join "`n"
+        $full | Should -Match ([regex]::Escape("Cannot find path '$path'"))
+        $full | Should -Match ([regex]::Escape("there is no share named 'Teachers' Resources' on FS01"))
+    }
+
+    It 'AC36_Quiet_TheNoteIsOnTheResultEvenWhenSavingItFails_AndTheFailureIsRecorded' {
+        $root = Join-Path $TestDrive 'ac36quiet'
+        $null = New-Item -ItemType Directory -Path $root
+        # A global alias outranks the function the script dot-sources from the kit.
+        function global:FacFail-SaveTicketNote { throw 'The disk is full.' }
+        Set-Alias -Name Save-TicketNote -Value FacFail-SaveTicketNote -Scope Global
+        try {
+            (Get-Command Save-TicketNote).CommandType | Should -Be 'Alias'
+            $out = Invoke-ScriptInProcess @{ Identity = 'jdoe'; Path = $script:Unc; TicketNumber = '6'; OutputPath = $root; Quiet = $true; PassThru = $true }
+            $res = @($out | Where-Object { $_ -is [PSCustomObject] -and $_.PSObject.Properties['TicketNote'] })[-1]
+            $res.TicketNote | Should -Not -BeNullOrEmpty
+            $res.TicketNoteError | Should -Match 'The disk is full'
+            $res.ExitCode | Should -Be 1
+        } finally {
+            Remove-Item -LiteralPath Alias:\Save-TicketNote -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath Function:\FacFail-SaveTicketNote -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'AC36_NoteCarriesTheNextStepsEndingWithEffectiveAccess' {
+        $r = Invoke-Check
+        $n = Get-NoteFor $r
+        ((Get-NoteSection $n.Lines 'Next step:') -join "`n") | Should -Match ([regex]::Escape('Effective Access for jdoe'))
+    }
+
+    It 'AC36_ClipboardIsWinFormsFirst_NoClipboardSkipsIt_AndNothingTouchesTheRealOne' {
+        Mock Set-Clipboard { }
+        # A global alias outranks the function the script dot-sources from the kit.
+        $global:FacClipboard = New-Object System.Collections.Generic.List[string]
+        function global:FacFake-Clipboard { param($Text) $global:FacClipboard.Add($Text) }
+        Set-Alias -Name Invoke-WinFormsClipboard -Value FacFake-Clipboard -Scope Global
+        try {
+            # Without the alias in place the last run below would reach the real clipboard.
+            (Get-Command Invoke-WinFormsClipboard).CommandType | Should -Be 'Alias'
+            $null = Invoke-ScriptInProcess @{ Identity = 'jdoe'; Path = $script:Unc; NoClipboard = $true; PassThru = $true }
+            $global:FacClipboard.Count | Should -Be 0
+            $null = Invoke-ScriptInProcess @{ Identity = 'jdoe'; Path = $script:Unc; Quiet = $true; PassThru = $true }
+            $global:FacClipboard.Count | Should -Be 0
+            $null = Invoke-ScriptInProcess @{ Identity = 'jdoe'; Path = $script:Unc; PassThru = $true }
+            $global:FacClipboard.Count | Should -Be 1
+            $global:FacClipboard[0] | Should -Match '\[Ticket note\] FolderAccess-Check'
+            Should -Invoke Set-Clipboard -Times 0 -Exactly -Because 'the WinForms clipboard comes first (D-033)'
+        } finally {
+            Remove-Item -LiteralPath Alias:\Invoke-WinFormsClipboard -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath Function:\FacFake-Clipboard -ErrorAction SilentlyContinue
+            Remove-Variable -Name FacClipboard -Scope Global -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'parameter names match the real cmdlets used by SQ-013 (SQUAD.md: mocks can lie)' {
+    BeforeAll {
+        $script:Names13 = @('Get-ADReplicationAttributeMetadata', 'Get-ADDomainController')
+        $cmd = '$env:ADPS_LoadDefaultDrive = 0; Import-Module ActiveDirectory -ErrorAction Stop; ' +
+            'foreach ($c in "' + ($script:Names13 -join '","') + '") { "$c|" + ((Get-Command $c).Parameters.Keys -join ",") }'
+        $script:Real13 = @{}
+        foreach ($l in @(& pwsh -NoProfile -Command $cmd 2>$null)) { if ($l -match '^(Get-AD\w+)\|(.*)$') { $script:Real13[$Matches[1]] = @($Matches[2] -split ',') } }
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:ScriptPath, [ref]$null, [ref]$null)
+        $script:Calls13 = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $script:Names13 -contains $n.GetCommandName() }, $true))
+    }
+    It 'the script calls the replication-metadata and DC cmdlets, and only with real parameters' {
+        $script:Calls13.Count | Should -BeGreaterThan 0 -Because 'the stale-token check reads replication metadata and every DC'
+        if (-not $script:Real13 -or $script:Real13.Count -eq 0) { Set-ItResult -Skipped -Because 'ActiveDirectory (RSAT) is not installed'; return }
+        foreach ($c in $script:Calls13) {
+            foreach ($p in @($c.CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] })) {
+                $script:Real13[$c.GetCommandName()] | Should -Contain $p.ParameterName
+            }
+        }
+    }
+    It 'the stub and the fake only declare real parameters' {
+        if (-not $script:Real13 -or $script:Real13.Count -eq 0) { Set-ItResult -Skipped -Because 'ActiveDirectory (RSAT) is not installed'; return }
+        $stub = @((Get-Command Get-ADReplicationAttributeMetadata).Parameters.Keys | Where-Object { [System.Management.Automation.PSCmdlet]::CommonParameters -notcontains $_ })
+        foreach ($p in $stub) { $script:Real13['Get-ADReplicationAttributeMetadata'] | Should -Contain $p }
+        $fake = @((Get-Command -Module ActiveDirectory -Name Get-ADDomainController).Parameters.Keys | Where-Object { [System.Management.Automation.PSCmdlet]::CommonParameters -notcontains $_ })
+        foreach ($p in $fake) { $script:Real13['Get-ADDomainController'] | Should -Contain $p }
     }
 }

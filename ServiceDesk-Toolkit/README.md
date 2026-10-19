@@ -240,6 +240,15 @@ and a CSV for the ticket. Add `-Access Modify` to check "can they change files i
   share on the server, a DFS path, an admin share like `D$`) and what to do instead.
 - **Always finish in Effective Access**: the folder's *Properties → Security → Advanced →
   Effective Access* tab, for the user. It is Windows' final word.
+- **PROBABLY NO names the group to add them to**: the narrowest existing group that would let
+  them in. Never Everyone, Domain Users or a per-user entry. A group in Domain Admins (or another
+  privileged group) comes with a **Warning: get senior approval first**. If no group fits, ask
+  the folder's owner which group should have access and add that group with
+  FolderPermissionManager.
+- **"PROBABLY YES after jdoe signs out and back in"** means they were added to the group after
+  their last sign-in. Ask them to sign out of Windows and any Citrix/RDS session and sign in
+  again; locking and unlocking is not enough.
+- Add `-TicketNumber 482113` to save the report and the ticket note in the ticket folder.
 - **The saved report holds client data** (group memberships, servers, paths): attach it to the
   ticket, then delete the local copy.
 

@@ -11,7 +11,8 @@
 
     THIS FILE IS COPIED. The canonical copy is TicketNote\CaseKit.ps1. Identical copies live in
     every tool folder that writes a ticket note (AD-UserQuickCheck, Network-QuickCheck,
-    Citrix-FSLogix-Triage), so each folder still runs on its own. Edit the canonical copy, then
+    Citrix-FSLogix-Triage, M365-UserQuickCheck, FolderAccess-Check), so each folder still runs
+    on its own. Edit the canonical copy, then
     copy it over the others: Tests\CaseKitParity.Tests.ps1 fails the moment a copy drifts.
 
     THE GATE. A check only lands under "Ruled out" when the tool says it actually managed to
@@ -258,18 +259,39 @@ function Protect-TicketNoteText {
 
     # Share paths: \\host\share, //host/share and file://host/share (or file:\\host\share).
     # The // form needs a non-word, non-colon character before it, so http:// is left alone.
-    # A quoted path may contain spaces. In an unquoted path a folder name may contain spaces
-    # when another folder follows it (\\fs01\FSLogix Profiles\jdoe); the last part ends at
-    # whitespace, so the sentence after the path is kept. When in doubt this removes more,
-    # never less. Trailing sentence punctuation is kept outside the redaction.
+    # A quoted path may contain spaces and apostrophes (\\FS01\HR\Joe's Reviews: an apostrophe
+    # is a legal character in a share or folder name, MS-DTYP 2.2.57), even one followed by a
+    # space (\\FS01\Staff\Teachers' Resources\jdoe). So a quoted path runs to the LAST matching
+    # quote on the line that is followed by whitespace, punctuation or the end of the line. It
+    # never runs into the next quoted share path ('\\fs01\a' and '\\fs02\b' stay two: a path
+    # can not contain a quote followed by \\ or //), but ordinary quoted text after it goes
+    # with it: "Path '\\fs01\a', then 'b'." becomes "Path '[share path removed]'.".
+    # In an unquoted path a folder name may contain spaces when another
+    # folder follows it (\\fs01\FSLogix Profiles\jdoe); the last part ends at whitespace, so
+    # the sentence after the path is kept. When in doubt this removes more, never less.
+    # Trailing sentence punctuation is kept outside the redaction.
+    #   https://learn.microsoft.com/openspecs/windows_protocols/ms-dtyp/62e862f4-2a51-452e-8eeb-dc4ff5ee33cc
     $sharePrefix = '(?:(?i:file:)(?://|\\\\)|\\\\|(?<![\w:/\\])//)'
-    $text = [regex]::Replace($text, '(?<q>["''])' + $sharePrefix + '[^"''\r\n]+\k<q>', { param($m) $m.Groups['q'].Value + '[share path removed]' + $m.Groups['q'].Value })
-    $text = [regex]::Replace($text, $sharePrefix + '[^\\/\s"''<>|]+(?:[\\/][^\\/\r\n"''<>|,;()]+(?=[\\/](?![\\/])))*(?:[\\/][^\s"''<>|]*)?', {
+    $quoteEnd = '\k<q>(?=[\s.,;:!?)\]]|$)'
+    $text = [regex]::Replace($text, '(?<q>["''])' + $sharePrefix + '(?:(?!\k<q>' + $sharePrefix + ')[^\r\n])+' + $quoteEnd, { param($m) $m.Groups['q'].Value + '[share path removed]' + $m.Groups['q'].Value })
+    $text = [regex]::Replace($text, $sharePrefix + '[^\\/\s"''<>|]+(?:[\\/][^\\/\r\n"<>|,;()]+(?=[\\/](?![\\/])))*(?:[\\/][^\s"<>|]*)?', {
             param($m)
             $v = $m.Value
             $tail = ''
-            while ($v.Length -gt 2 -and '.,;:)]'.Contains([string]$v[$v.Length - 1])) { $tail = [string]$v[$v.Length - 1] + $tail; $v = $v.Substring(0, $v.Length - 1) }
+            while ($v.Length -gt 2 -and '.,;:)]'''.Contains([string]$v[$v.Length - 1])) { $tail = [string]$v[$v.Length - 1] + $tail; $v = $v.Substring(0, $v.Length - 1) }
             '[share path removed]' + $tail
+        })
+
+    # IPv6 literal host names: the address with hyphens for colons, plus ".ipv6-literal.net"
+    # (2001-DB8-D87-FFFF-CCAA-132B-1-221B.ipv6-literal.net), MS-DTYP 2.2.57 (link above). An
+    # "s<zone>" suffix stands for %<zone>; host names are case-insensitive, so "S<zone>" too.
+    # Confirmed by parsing the address back.
+    $text = [regex]::Replace($text, '(?<![\w.-])(?<a>[0-9A-Fa-f-]*-[0-9A-Fa-f-]*)(?:[sS](?<z>[0-9A-Za-z]+))?\.(?i:ipv6-literal\.net)(?![\w-]|\.\w)', {
+            param($m)
+            $candidate = $m.Groups['a'].Value.Replace('-', ':')
+            if ($m.Groups['z'].Success) { $candidate += '%' + $m.Groups['z'].Value }
+            $ip = $null
+            if ([System.Net.IPAddress]::TryParse($candidate, [ref]$ip) -and $ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6) { '[IP removed]' } else { $m.Value }
         })
 
     # Bracketed IPv6, optionally with a port: [::ffff:10.0.0.5]:445
