@@ -44,6 +44,9 @@
     ownership of this folder only, copy permissions without "apply recursively"), the current
     permissions are saved to <LogFolder>\Backups. If that fails, nothing is changed. Each
     change is then logged to <LogFolder>\Changes_<yyyy-MM-dd>.csv. See README "Undo a change".
+    Taking ownership of all subfolders and files first saves the owner of every item to
+    <LogFolder>\Backups\<yyyy-MM-dd_HHmmss>_TakeOwnership.csv and logs one row for the folder.
+    Copying permissions with "apply recursively" is still not backed up or logged.
     The logic lives in FolderPermissions.Core.ps1, which must stay next to this script.
 
     REFERENCES
@@ -167,7 +170,7 @@ function Complete-PermissionChange {
             message      = Get-ChangeResultMessage -Entries $entries -LogPath $result.LogPath -LogFolder $script:ChangeLogFolder
             logPath      = $result.LogPath
             backupPath   = $(if ($backup.Count -gt 0) { $backup[0].BackupFile } else { $null })
-            unrestorable = @($entries | Where-Object { $_.Result -eq 'Done' -and $_.OldValue -eq 'Could not read' }).Count
+            unrestorable = Get-UnrestorableItemCount -Entries $entries
         }
     }
 }
@@ -185,15 +188,21 @@ function ConvertTo-ChangeResultRow {
     })
 }
 
-# Sends the result of a change to ONE folder: 200 with status 'success', or the existing error
-# shape (400 when the folder does not exist, 500 otherwise) with the same added fields.
+# Sends the result of a change to ONE folder: 200 with status 'success', 200 with status
+# 'partial' when a whole-tree change was only partly done or could not be checked everywhere
+# (folders it could not open, owners it could not read back; the page shows it as a warning),
+# or the existing error shape (400 when the folder does not exist, 500 otherwise) with the same
+# added fields.
 function Send-SingleChangeResult {
     param([System.Net.HttpListenerResponse]$Response, [scriptblock]$Change)
     $completed = Complete-PermissionChange -Change $Change
     $entries = @($completed.Entries)
     $data = $completed.Data
-    if ($entries.Count -gt 0 -and @($entries | Where-Object { $_.Result -ne 'Done' }).Count -eq 0) {
+    $incomplete = @($entries | Where-Object { Test-TreeEntryIncomplete $_ })
+    if ($entries.Count -gt 0 -and $incomplete.Count -eq 0 -and @($entries | Where-Object { $_.Result -ne 'Done' }).Count -eq 0) {
         $data['status'] = 'success'
+    } elseif ($entries.Count -gt 0 -and @($entries | Where-Object { $_.Result -ne 'Done' -and $_.Result -ne 'Partly done' }).Count -eq 0) {
+        $data['status'] = 'partial'
     } else {
         $Response.StatusCode = if (@($entries | Where-Object { $_.Result -eq 'Skipped (not found)' }).Count -gt 0) { 400 } else { 500 }
         $data['error'] = $data.message
@@ -435,21 +444,11 @@ function Invoke-TakeOwnership {
         return
     }
 
-    # All subfolders and files: unchanged here; backup and logging come with SQ-014.
-    try {
-        # takeown first to force ownership on folders and files (uses SE_TAKE_OWNERSHIP privilege)
-        $takeownOutput = takeown /F $folderPath /R /A /D Y 2>&1
-        # Then set the current user as owner via icacls on all files and folders
-        $icaclsOutput = icacls $folderPath /setowner $env:USERNAME /T /C /Q 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            throw "icacls failed: $icaclsOutput"
-        }
-        Send-Json $Response @{ status = 'success'; message = "Ownership taken recursively on all folders and files in $folderPath" }
-    }
-    catch {
-        $Response.StatusCode = 500
-        Send-Json $Response @{ error = "Take ownership failed: $($_.Exception.Message)" }
-    }
+    # All subfolders and files: the core saves every item's owner first, then runs takeown /R
+    # and icacls /setowner /T, and logs one row for the whole folder. The root of a drive and
+    # the Windows system folders are refused by the core with a plain message (D-036); the GUI
+    # has no override, so nothing from the request can turn that check off.
+    Send-SingleChangeResult $Response { Set-ItemOwnerToCurrentUser -Path $folderPath -Recurse -LogFolder $script:ChangeLogFolder }
 }
 
 function Invoke-ReplicatePermissions {
@@ -1138,7 +1137,9 @@ body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* Status bar */
-.status-bar { padding: 6px 16px; font-size: 12px; background: var(--bg-card); border-top: 1px solid var(--border); flex-shrink: 0; min-height: 34px; line-height: 1.5; display: flex; align-items: center; overflow-wrap: anywhere; }
+/* A long result (folders to escalate) scrolls inside the bar instead of pushing the panel up.
+   Block, not flex: a centred flex line that overflows cannot be scrolled to its start. */
+.status-bar { padding: 8px 16px; font-size: 12px; background: var(--bg-card); border-top: 1px solid var(--border); flex-shrink: 0; min-height: 34px; max-height: 30vh; overflow-y: auto; line-height: 1.5; overflow-wrap: anywhere; }
 .status-bar.success { color: var(--success); }
 .status-bar.error   { color: var(--danger); }
 .status-bar.info    { color: var(--accent); }
@@ -1596,6 +1597,18 @@ function api(url, opts) {
     });
 }
 
+// True while any permission change (add, remove, copy permissions, take ownership; folders or
+// files) is running. One flag for all of them: a second click must not start another change
+// on the same items before the first one has finished and been logged. (The name is older
+// than the sharing.)
+var ownershipBusy = false;
+// Says so and returns true when a change is still running; the caller then does nothing.
+function changeIsBusy() {
+    if (!ownershipBusy) return false;
+    setStatus('Still working on the previous change. Wait for it to finish, then try again.', 'warning');
+    return true;
+}
+
 // Permission changes: the server's message already says what was done, where it was backed up
 // and logged, or why nothing was changed.
 function showChangeError(e) {
@@ -1610,6 +1623,8 @@ function changeStatusType(r) {
     var res = r.results || [];
     var failed = res.filter(function(x) { return x.status === 'error'; }).length;
     var done = res.filter(function(x) { return x.status === 'success'; }).length;
+    // 'partial': a whole-tree change partly done, or not checked everywhere.
+    if (r.status === 'partial') return 'warning';
     if (res.length && failed && !done) return 'error';
     if (failed || done < res.length || !r.logPath || r.unrestorable) return 'warning';
     return 'success';
@@ -1617,11 +1632,12 @@ function changeStatusType(r) {
 // Shows a change result; a warning is also spelled out in words, not only in colour.
 function showChangeResult(r) {
     var type = changeStatusType(r);
-    var msg = r.message;
-    if (type === 'warning') {
+    var msg = r.message || '';
+    // A partly done whole-tree change already starts "Partly done:"; never say it twice.
+    if (type === 'warning' && msg.indexOf('Partly done:') !== 0) {
         var res = r.results || [];
         var partial = res.some(function(x) { return x.status !== 'success'; });
-        msg = (partial ? 'Partly done: ' : 'Check this: ') + msg;
+        msg = (partial ? 'Partly done: ' : 'Done, with items to check: ') + msg;
     }
     setStatus(msg, type);
 }
@@ -1971,19 +1987,21 @@ function submitAddAce() {
     var rights   = document.getElementById('addAceRights').value;
     var type     = document.getElementById('addAceType').value;
     if (!identity) { setStatus('Identity is required', 'error'); return; }
+    if (changeIsBusy()) return;
     closeModal('addAceModal');
+    ownershipBusy = true;
 
     if (addAceTarget === 'files') {
         var paths = Array.from(checkedFiles);
         setStatus('Backing up and adding the permission to ' + paths.length + ' file(s)...', 'info');
         api('/api/file-acl/add', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ paths: paths, identity: identity, rights: rights, type: type }) })
-            .then(function(r) { showChangeResult(r); })
-            .catch(showChangeError);
+            .then(function(r) { ownershipBusy = false; showChangeResult(r); })
+            .catch(function(e) { ownershipBusy = false; showChangeError(e); });
     } else {
         setStatus('Backing up and adding the permission...', 'info');
         api('/api/add-ace', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: currentFolder, identity: identity, rights: rights, type: type }) })
-            .then(function(r) { showChangeResult(r); loadFolderAcl(currentFolder); loadFiles(currentFolder); refreshTreeEntry(currentFolder); })
-            .catch(showChangeError);
+            .then(function(r) { ownershipBusy = false; showChangeResult(r); loadFolderAcl(currentFolder); loadFiles(currentFolder); refreshTreeEntry(currentFolder); })
+            .catch(function(e) { ownershipBusy = false; showChangeError(e); });
     }
 }
 
@@ -2019,43 +2037,51 @@ function submitRemoveAce() {
     var identity = document.getElementById('removeAceIdentity').value;
     var rights   = document.getElementById('removeAceRights').value;
     var type     = document.getElementById('removeAceType').value;
+    if (changeIsBusy()) return;
     closeModal('removeAceModal');
+    ownershipBusy = true;
 
     if (removeAceTarget === 'files') {
         var paths = Array.from(checkedFiles);
         setStatus('Backing up and removing the permission from ' + paths.length + ' file(s)...', 'info');
         api('/api/file-acl/remove', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ paths: paths, identity: identity, rights: rights, type: type }) })
-            .then(function(r) { showChangeResult(r); })
-            .catch(showChangeError);
+            .then(function(r) { ownershipBusy = false; showChangeResult(r); })
+            .catch(function(e) { ownershipBusy = false; showChangeError(e); });
     } else {
         setStatus('Backing up and removing the permission...', 'info');
         api('/api/remove-ace', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: currentFolder, identity: identity, rights: rights, type: type }) })
-            .then(function(r) { showChangeResult(r); loadFolderAcl(currentFolder); loadFiles(currentFolder); refreshTreeEntry(currentFolder); })
-            .catch(showChangeError);
+            .then(function(r) { ownershipBusy = false; showChangeResult(r); loadFolderAcl(currentFolder); loadFiles(currentFolder); refreshTreeEntry(currentFolder); })
+            .catch(function(e) { ownershipBusy = false; showChangeError(e); });
     }
 }
 
+// Uses the shared busy flag (ownershipBusy, see changeIsBusy) like every other change.
 function takeOwnership(recursive) {
     if (!currentFolder) return;
+    if (ownershipBusy) {
+        setStatus('Still working on the previous change. Wait for it to finish, then try again.', 'warning');
+        return;
+    }
+    // takeown /D N skips a folder it cannot open, so that folder keeps its permissions (D-034;
+    // takeown page on Microsoft Learn). The root of a drive and the Windows system folders are
+    // refused by the server (D-036).
     var msg = recursive
-        ? 'This will change ownership on ALL files and subfolders under:\n\n' + currentFolder + '\n\nThis cannot be undone. Continue?'
+        ? 'This will change ownership on ALL files and subfolders under:\n\n' + currentFolder + '\n\nYou become the owner. The current owners will be saved to a backup first.\n\n' +
+          'Any folder in it that cannot be opened is skipped and left alone; the result names those folders so you can escalate them.\n\nContinue?'
         : 'Take ownership of:\n\n' + currentFolder + '?';
     if (!confirm(msg)) return;
-    setStatus(recursive ? 'Taking ownership...' : 'Backing up and taking ownership...', 'info');
+    ownershipBusy = true;
+    setStatus(recursive ? 'Saving the current owners and taking ownership of everything in this folder. This can take a while...' : 'Backing up and taking ownership...', 'info');
     api('/api/take-ownership', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: currentFolder, recursive: recursive }) })
         .then(function(r) {
-            // The whole-tree action is not backed up or logged yet (SQ-014), and says so.
-            if (recursive) { setStatus((r.message || 'Ownership taken') + '. Not backed up or logged.', 'success'); }
-            else { showChangeResult(r); }
+            ownershipBusy = false;
+            showChangeResult(r);
             // Ownership changes what can be listed, so reload everything shown for this folder.
             loadFolderAcl(currentFolder);
             loadFiles(currentFolder);
             refreshTreeEntry(currentFolder);
         })
-        .catch(function(e) {
-            if (recursive) { setStatus('Failed: ' + e.message, 'error'); }
-            else { showChangeError(e); }
-        });
+        .catch(function(e) { ownershipBusy = false; showChangeError(e); });
 }
 
 function showReplicateModal() {
@@ -2068,17 +2094,21 @@ function submitReplicate() {
     var raw = document.getElementById('replicateTargets').value;
     var targets = raw.split('\n').map(function(s) { return s.trim(); }).filter(Boolean);
     if (!targets.length) { setStatus('Enter at least one target path', 'error'); return; }
+    if (changeIsBusy()) return;
     closeModal('replicateModal');
+    ownershipBusy = true;
     var recursive = document.getElementById('replicateRecursive').checked;
     setStatus(recursive ? 'Replicating permissions...' : 'Backing up and copying permissions...', 'info');
     api('/api/replicate', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ sourcePath: currentFolder, targetPaths: targets, recursive: recursive }) })
         .then(function(r) {
+            ownershipBusy = false;
             // This folder only: backed up and logged, and the server's message says so.
             if (!recursive) { showChangeResult(r); return; }
             var failed = (r.results || []).filter(function(x) { return x.status === 'error'; });
             if (failed.length) { setStatus(failed.length + ' target(s) failed. First: ' + failed[0].message, 'error'); }
             else { setStatus('Permissions replicated to ' + targets.length + ' target(s). Not backed up or logged.', 'success'); }
         }).catch(function(e) {
+            ownershipBusy = false;
             if (recursive) { setStatus('Failed: ' + e.message, 'error'); }
             else { showChangeError(e); }
         });
@@ -2093,11 +2123,13 @@ function exportReport() {
 function takeFileOwnership() {
     var paths = Array.from(checkedFiles);
     if (!paths.length) return;
+    if (changeIsBusy()) return;
     if (!confirm('Take ownership of ' + paths.length + ' file(s)?')) return;
+    ownershipBusy = true;
     setStatus('Backing up and taking ownership of ' + paths.length + ' file(s)...', 'info');
     api('/api/file-acl/take-ownership', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ paths: paths }) })
-        .then(function(r) { showChangeResult(r); })
-        .catch(showChangeError);
+        .then(function(r) { ownershipBusy = false; showChangeResult(r); })
+        .catch(function(e) { ownershipBusy = false; showChangeError(e); });
 }
 
 // --- Copy files modal ---

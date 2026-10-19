@@ -518,20 +518,23 @@ For full documentation, see [Get-CitrixSessions/README.md](Get-CitrixSessions/RE
 
 ## FolderPermissionManager
 
-**Description**: A PowerShell script for managing permissions on folders and their sub-folders. It allows taking ownership of sub-folders, reviewing current permissions, and replicating permissions from the top-level folder to all sub-folders.
+**Description**: A PowerShell script for managing permissions on folders and their sub-folders. It takes ownership of a folder and everything under it, shows the current permissions, and copies the top-level folder's permissions to all sub-folders. It asks before each change, and every change is backed up and logged (same change log as the GUI).
 
 **Parameters**:
 - `-Path <string>` (Optional): The path to the top-level folder. If not provided, the script will prompt for it.
+- `-LogFolder <string>` (Optional): Where backups and the change log go. Defaults to `Logs` next to the script.
+- `-Force` (Optional): Do not ask before taking ownership or copying permissions.
+- `-WhatIf` (Optional): Show what would be changed; nothing is changed, backed up or logged.
 
 **Usage Examples**:
-- Run with path: `.\FolderPermissionManager\FolderPermissionManager.ps1 -Path "C:\SharedFolder"`
+- Dry run: `.\FolderPermissionManager\FolderPermissionManager.ps1 -Path "C:\SharedFolder" -WhatIf`
+- Run with path (asks before each step): `.\FolderPermissionManager\FolderPermissionManager.ps1 -Path "C:\SharedFolder"`
 - Run without path (prompts): `.\FolderPermissionManager\FolderPermissionManager.ps1`
 
 **Notes**:
-- Requires administrative privileges to modify ownership and permissions.
-- Run the script from an elevated PowerShell session.
-- Taking ownership uses `icacls` and may fail without proper permissions.
-- Replicating permissions adds the top-level folder's access rules to sub-folders without removing existing permissions (ownership is taken at the beginning).
+- Run from an elevated PowerShell session (checked at start). PowerShell 3.0 or later.
+- The owner of every item is saved before ownership is taken, and the permissions of every sub-folder before they are copied; see "Undo a change" in [FolderPermissionManager/README.md](FolderPermissionManager/README.md).
+- Copying permissions adds the top-level folder's access rules to sub-folders without removing existing permissions.
 - Test on a small folder first to understand the behavior.
 
 ## FSLogix-Profile-Backup
