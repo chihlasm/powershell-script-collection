@@ -470,6 +470,40 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         Test-Path -LiteralPath (Join-Path $script:Log 'Backups') | Should -BeFalse
     }
 
+    # --- Revision (SQ-014 review 2026-10-18, D-040) --------------------------------------------
+    # Pinned: a DFS reparse point (tag 0x8000000A, no name-surrogate bit) inside the folder counts
+    # as a link, so one that leads to a protected folder or a system share is refused with one
+    # [FAIL] line naming the link and -AllowSystemFolder, before anything is asked or saved.
+
+    It 'AC20a_Cli_DfsReparsePointInsideTheFolderToASystemShare_IsRefusedWithAFailLine' -ForEach @(
+        @{ Name = 'NETLOGON share'; Target = '\\dc01\NETLOGON' }
+        @{ Name = 'Windows folder'; Target = (Join-Path $env:SystemRoot 'System32') }
+    ) {
+        $script:DfsLink = Join-Path $script:Dir 'dfs'
+        New-Item -ItemType Directory -Path $script:DfsLink | Out-Null
+        $script:DfsTarget = $Target
+        Mock Get-ChildItem {
+            [PSCustomObject]@{
+                FullName = $script:DfsLink; Name = 'dfs'; PSIsContainer = $true
+                Attributes = [System.IO.FileAttributes]'Directory, ReparsePoint'
+            }
+        } -ParameterFilter { $LiteralPath -eq $script:Dir }
+        Mock Get-ReparsePointTag { [uint32]'0x8000000A' } -ParameterFilter { $Path -eq $script:DfsLink }
+        Mock Get-Win32PathName { $script:DfsTarget } -ParameterFilter { $Path -eq $script:DfsLink }
+
+        $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log -Force
+
+        $code | Should -Be 1
+        $fail = @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' })
+        $fail.Count | Should -Be 1
+        $fail[0] | Should -Match ([regex]::Escape($script:DfsLink))
+        $fail[0] | Should -Match '-AllowSystemFolder'
+        $fail[0] | Should -Match 'Nothing was changed\.'
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
+        Test-Path -LiteralPath (Join-Path $script:Log 'Backups') | Should -BeFalse
+    }
+
     It 'AC16c_Cli_PrintsEveryFolderThatCouldNotBeOpened' {
         $script:LockedSet = @(1..5 | ForEach-Object {
             $p = Join-Path $script:Dir ('locked{0}' -f $_)

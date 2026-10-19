@@ -1473,3 +1473,218 @@ Describe 'README after fix round 2' {
         $readme | Should -Match ([regex]::Escape('PRINT$'))
     }
 }
+
+# --- Revision (SQ-014 review 2026-10-18, Q-005 -> D-040): reparse allowlist -------------------
+#
+# Pinned for the implementer:
+#   $script:RedirectFreeReparseTags  an [ordered] hashtable in FolderPermissions.Core.ps1,
+#          tag name (IO_REPARSE_TAG_*) -> [uint32] value. The ONLY reparse tags that count as
+#          plain files in Test-LinkReparsePoint. Every other tag (DFS 0x8000000A included, and
+#          a tag that cannot be read) counts as a link and goes through Get-TreeLinkRefusal.
+#          Each entry has a learn.microsoft.com citation on its own line or in the two lines
+#          above it. Values from MS-FSCC 2.1.2.1 "Reparse Tags":
+#          https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+#   The OneDrive tag IO_REPARSE_TAG_ONEDRIVE (0x80000021) is NOT pinned: D-040 names the
+#          IO_REPARSE_TAG_CLOUD* family only (see the report for the open question).
+Describe 'D-040 reparse allowlist: links inside the tree' {
+    BeforeAll {
+        # Learn MS-FSCC 2.1.2.1 values. Do not edit without owner approval (AC20d).
+        $script:AllowedTags = [ordered]@{
+            IO_REPARSE_TAG_DEDUP   = [uint32]'0x80000013'
+            IO_REPARSE_TAG_WOF     = [uint32]'0x80000017'
+            IO_REPARSE_TAG_HSM     = [uint32]'0xC0000004'
+            IO_REPARSE_TAG_HSM2    = [uint32]'0x80000006'
+            IO_REPARSE_TAG_SIS     = [uint32]'0x80000007'
+            IO_REPARSE_TAG_CLOUD   = [uint32]'0x9000001A'
+            IO_REPARSE_TAG_CLOUD_1 = [uint32]'0x9000101A'
+            IO_REPARSE_TAG_CLOUD_2 = [uint32]'0x9000201A'
+            IO_REPARSE_TAG_CLOUD_3 = [uint32]'0x9000301A'
+            IO_REPARSE_TAG_CLOUD_4 = [uint32]'0x9000401A'
+            IO_REPARSE_TAG_CLOUD_5 = [uint32]'0x9000501A'
+            IO_REPARSE_TAG_CLOUD_6 = [uint32]'0x9000601A'
+            IO_REPARSE_TAG_CLOUD_7 = [uint32]'0x9000701A'
+            IO_REPARSE_TAG_CLOUD_8 = [uint32]'0x9000801A'
+            IO_REPARSE_TAG_CLOUD_9 = [uint32]'0x9000901A'
+            IO_REPARSE_TAG_CLOUD_A = [uint32]'0x9000A01A'
+            IO_REPARSE_TAG_CLOUD_B = [uint32]'0x9000B01A'
+            IO_REPARSE_TAG_CLOUD_C = [uint32]'0x9000C01A'
+            IO_REPARSE_TAG_CLOUD_D = [uint32]'0x9000D01A'
+            IO_REPARSE_TAG_CLOUD_E = [uint32]'0x9000E01A'
+            IO_REPARSE_TAG_CLOUD_F = [uint32]'0x9000F01A'
+        }
+        # A reparse point as Get-ChildItem returns it. The folder is real (inside $TestDrive)
+        # so Test-Path and Get-ItemOwner work; the reparse tag and the destination are faked.
+        function New-FakeReparseChild {
+            param([string]$Path)
+            [PSCustomObject]@{
+                FullName = $Path; Name = (Split-Path -Leaf $Path); PSIsContainer = $true
+                Attributes = [System.IO.FileAttributes]'Directory, ReparsePoint'
+            }
+        }
+    }
+    BeforeEach {
+        $script:Log = Join-Path $TestDrive ('logs-' + [guid]::NewGuid().ToString('N'))
+        Mock Set-Acl { }
+        Mock takeown { }
+        Mock icacls { }
+        Mock Invoke-AclTool { [PSCustomObject]@{ ExitCode = 0; Output = '' } }
+        $script:Dir = Join-Path $TestDrive ('d040-' + [guid]::NewGuid().ToString('N'))
+        $script:LinkPath = Join-Path $script:Dir 'redirected'
+        New-Item -ItemType Directory -Path $script:LinkPath -Force | Out-Null
+        Mock Get-ChildItem { New-FakeReparseChild -Path $script:LinkPath } -ParameterFilter { $LiteralPath -eq $script:Dir }
+        Mock Get-ReparsePointTag { $script:Tag } -ParameterFilter { $Path -eq $script:LinkPath }
+    }
+
+    Context 'AC20a: a DFS reparse point to a protected folder or system share' {
+        It 'AC20a_DfsReparsePointToAProtectedTarget_RefusesTheWholeTree_<Name>' -ForEach @(
+            @{ Name = 'NETLOGON share'; Target = '\\dc01\NETLOGON' }
+            @{ Name = 'SYSVOL share'; Target = '\\dc01\SYSVOL\contoso.com' }
+            @{ Name = 'Windows folder'; Target = (Join-Path $env:SystemRoot 'System32') }
+        ) {
+            $script:Tag = [uint32]'0x8000000A'
+            $script:Target = $Target
+            Mock Get-Win32PathName { $script:Target } -ParameterFilter { $Path -eq $script:LinkPath }
+
+            $rows = @(Set-ItemOwnerToCurrentUser -Path $script:Dir -Recurse -LogFolder $script:Log)
+
+            $rows.Count | Should -Be 1
+            $rows[0].Result | Should -Be 'Failed'
+            $rows[0].Error | Should -Match ([regex]::Escape($script:LinkPath))
+            $rows[0].Error | Should -Match 'Nothing was changed\.$'
+            Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        }
+
+        It 'AC20a_DfsReparsePointInsideTheTree_IsListedAsALink' {
+            $script:Tag = [uint32]'0x8000000A'
+
+            $tree = Get-OwnerTreeItem -Path $script:Dir
+
+            @($tree.Links) | Should -Be @($script:LinkPath)
+        }
+    }
+
+    Context 'AC20b: allowlisted tags are plain files' {
+        It 'AC20b_ReparsePointWithTag_<Name>_IsNotALinkAndDoesNotRefuseTheTree' -ForEach @(
+            @{ Name = 'IO_REPARSE_TAG_DEDUP'; Value = [uint32]'0x80000013' }
+            @{ Name = 'IO_REPARSE_TAG_WOF'; Value = [uint32]'0x80000017' }
+            @{ Name = 'IO_REPARSE_TAG_HSM'; Value = [uint32]'0xC0000004' }
+            @{ Name = 'IO_REPARSE_TAG_HSM2'; Value = [uint32]'0x80000006' }
+            @{ Name = 'IO_REPARSE_TAG_SIS'; Value = [uint32]'0x80000007' }
+            @{ Name = 'IO_REPARSE_TAG_CLOUD'; Value = [uint32]'0x9000001A' }
+            @{ Name = 'IO_REPARSE_TAG_CLOUD_1'; Value = [uint32]'0x9000101A' }
+            @{ Name = 'IO_REPARSE_TAG_CLOUD_2'; Value = [uint32]'0x9000201A' }
+            @{ Name = 'IO_REPARSE_TAG_CLOUD_3'; Value = [uint32]'0x9000301A' }
+            @{ Name = 'IO_REPARSE_TAG_CLOUD_4'; Value = [uint32]'0x9000401A' }
+            @{ Name = 'IO_REPARSE_TAG_CLOUD_5'; Value = [uint32]'0x9000501A' }
+            @{ Name = 'IO_REPARSE_TAG_CLOUD_6'; Value = [uint32]'0x9000601A' }
+            @{ Name = 'IO_REPARSE_TAG_CLOUD_7'; Value = [uint32]'0x9000701A' }
+            @{ Name = 'IO_REPARSE_TAG_CLOUD_8'; Value = [uint32]'0x9000801A' }
+            @{ Name = 'IO_REPARSE_TAG_CLOUD_9'; Value = [uint32]'0x9000901A' }
+            @{ Name = 'IO_REPARSE_TAG_CLOUD_A'; Value = [uint32]'0x9000A01A' }
+            @{ Name = 'IO_REPARSE_TAG_CLOUD_B'; Value = [uint32]'0x9000B01A' }
+            @{ Name = 'IO_REPARSE_TAG_CLOUD_C'; Value = [uint32]'0x9000C01A' }
+            @{ Name = 'IO_REPARSE_TAG_CLOUD_D'; Value = [uint32]'0x9000D01A' }
+            @{ Name = 'IO_REPARSE_TAG_CLOUD_E'; Value = [uint32]'0x9000E01A' }
+            @{ Name = 'IO_REPARSE_TAG_CLOUD_F'; Value = [uint32]'0x9000F01A' }
+        ) {
+            $script:Tag = $Value
+            # If the tag were treated as a link, this destination would refuse the tree.
+            Mock Get-Win32PathName { '\\dc01\NETLOGON' } -ParameterFilter { $Path -eq $script:LinkPath }
+
+            $tree = Get-OwnerTreeItem -Path $script:Dir
+            @($tree.Links).Count | Should -Be 0
+            Get-TreeLinkRefusal -Path $script:Dir -LinkPaths @($tree.Links) | Should -BeNullOrEmpty
+
+            $rows = @(Set-ItemOwnerToCurrentUser -Path $script:Dir -Recurse -LogFolder $script:Log)
+            $rows[0].Result | Should -Not -Be 'Failed'
+            Should -Invoke Invoke-AclTool -Times 1 -Exactly -Scope It -ParameterFilter { $Tool -eq 'takeown' }
+        }
+    }
+
+    Context 'AC20c: any other tag is a link, and an unresolvable link fails closed' {
+        It 'AC20c_ReparsePointWithOtherTag_<Name>_WhoseTargetCannotBeFound_RefusesTheTree' -ForEach @(
+            @{ Name = 'unknown 0x8000ABCD'; Value = [uint32]'0x8000ABCD' }
+            @{ Name = 'IO_REPARSE_TAG_DFS'; Value = [uint32]'0x8000000A' }
+            @{ Name = 'IO_REPARSE_TAG_APPEXECLINK'; Value = [uint32]'0x8000001B' }
+            @{ Name = 'IO_REPARSE_TAG_NFS'; Value = [uint32]'0x80000014' }
+        ) {
+            $script:Tag = $Value
+            Mock Get-Win32PathName { $null } -ParameterFilter { $Path -eq $script:LinkPath }
+
+            $rows = @(Set-ItemOwnerToCurrentUser -Path $script:Dir -Recurse -LogFolder $script:Log)
+
+            $rows[0].Result | Should -Be 'Failed'
+            $rows[0].Error | Should -Match ([regex]::Escape($script:LinkPath))
+            $rows[0].Error | Should -Match 'where it leads could not be found out'
+            $rows[0].Error | Should -Match 'Nothing was changed\.$'
+            Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        }
+
+        It 'AC20c_ReparsePointWithUnknownTag_IsListedAsALink' {
+            $script:Tag = [uint32]'0x8000ABCD'
+
+            @((Get-OwnerTreeItem -Path $script:Dir).Links) | Should -Be @($script:LinkPath)
+        }
+
+        It 'AC20c_ReparsePointWithUnknownTag_ToAnOrdinaryFolderOutsideTheTree_IsStillAllowed' {
+            $plain = Join-Path $TestDrive ('d040-plain-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $plain | Out-Null
+            $script:Plain = $plain
+            $script:Tag = [uint32]'0x8000ABCD'
+            Mock Get-Win32PathName { $script:Plain } -ParameterFilter { $Path -eq $script:LinkPath }
+
+            $rows = @(Set-ItemOwnerToCurrentUser -Path $script:Dir -Recurse -LogFolder $script:Log)
+
+            $rows[0].Result | Should -Not -Be 'Failed'
+            Should -Invoke Invoke-AclTool -Times 1 -Exactly -Scope It -ParameterFilter { $Tool -eq 'takeown' }
+        }
+    }
+
+    Context 'AC20d: one allowlist, cited, pinned' {
+        It 'AC20d_AllowlistExistsAsOneOrderedTableOfNameToValue' {
+            $script:RedirectFreeReparseTags | Should -Not -BeNullOrEmpty
+            $script:RedirectFreeReparseTags.Keys.Count | Should -Be $script:AllowedTags.Keys.Count
+        }
+
+        It 'AC20d_AllowlistHoldsExactlyTheApprovedTags' {
+            @($script:RedirectFreeReparseTags.Keys | Sort-Object) | Should -Be @($script:AllowedTags.Keys | Sort-Object)
+        }
+
+        It 'AC20d_AllowlistValue_<Name>' -ForEach @(
+            @{ Name = 'IO_REPARSE_TAG_DEDUP'; Value = [uint32]'0x80000013' }
+            @{ Name = 'IO_REPARSE_TAG_WOF'; Value = [uint32]'0x80000017' }
+            @{ Name = 'IO_REPARSE_TAG_HSM'; Value = [uint32]'0xC0000004' }
+            @{ Name = 'IO_REPARSE_TAG_HSM2'; Value = [uint32]'0x80000006' }
+            @{ Name = 'IO_REPARSE_TAG_SIS'; Value = [uint32]'0x80000007' }
+            @{ Name = 'IO_REPARSE_TAG_CLOUD'; Value = [uint32]'0x9000001A' }
+            @{ Name = 'IO_REPARSE_TAG_CLOUD_F'; Value = [uint32]'0x9000F01A' }
+        ) {
+            [uint32]$script:RedirectFreeReparseTags[$Name] | Should -Be $Value
+        }
+
+        It 'AC20d_AllowlistValues_MatchTheApprovedTableForEveryEntry' {
+            foreach ($name in $script:AllowedTags.Keys) {
+                $script:RedirectFreeReparseTags.Contains($name) | Should -BeTrue -Because "$name is approved"
+                [uint32]$script:RedirectFreeReparseTags[$name] | Should -Be $script:AllowedTags[$name] -Because $name
+            }
+        }
+
+        It 'AC20d_EveryEntryHasALearnCitationOnItsLineOrTheTwoAbove' {
+            $lines = @(Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\FolderPermissions.Core.ps1'))
+            foreach ($name in $script:AllowedTags.Keys) {
+                $hit = @(0..($lines.Count - 1) | Where-Object { $lines[$_] -match "^\s*['""]?$([regex]::Escape($name))['""]?\s*=" })
+                $hit.Count | Should -Be 1 -Because "$name is defined once in the allowlist"
+                $window = @($lines[([Math]::Max(0, $hit[0] - 2))..$hit[0]]) -join "`n"
+                $window | Should -Match 'learn\.microsoft\.com' -Because "$name needs a Learn citation next to it"
+            }
+        }
+
+        It 'AC20d_TestLinkReparsePoint_NoLongerUsesTheNameSurrogateBitInCode' {
+            $text = (Get-Command Test-LinkReparsePoint).ScriptBlock.ToString()
+            $tokens = $null
+            [void][System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$null)
+            @($tokens | Where-Object { $_.Kind -eq 'Number' -and $_.Text -match '(?i)^0x20000000$' }).Count | Should -Be 0
+            $text | Should -Match 'RedirectFreeReparseTags'
+        }
+    }
+}

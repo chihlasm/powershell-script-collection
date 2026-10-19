@@ -200,6 +200,42 @@ Describe 'GUI recursive take ownership' {
         }
     }
 
+    # --- Revision (SQ-014 review 2026-10-18, D-040) --------------------------------------------
+    # Pinned: a DFS reparse point (tag 0x8000000A, no name-surrogate bit) inside the folder counts
+    # as a link, so one that leads to a protected folder or a system share answers 500 with the
+    # refusal naming the link, and nothing is saved or changed.
+
+    It 'AC20a_GuiRecursiveTakeOwnership_DfsReparsePointToASystemShare_IsRefusedAndNothingIsDone' -ForEach @(
+        @{ Name = 'NETLOGON share'; Target = '\\dc01\NETLOGON' }
+        @{ Name = 'Windows folder'; Target = (Join-Path $env:SystemRoot 'System32') }
+    ) {
+        $script:DfsLink = Join-Path $script:Dir 'dfs'
+        New-Item -ItemType Directory -Path $script:DfsLink | Out-Null
+        $script:DfsTarget = $Target
+        Mock Get-ChildItem {
+            [PSCustomObject]@{
+                FullName = $script:DfsLink; Name = 'dfs'; PSIsContainer = $true
+                Attributes = [System.IO.FileAttributes]'Directory, ReparsePoint'
+            }
+        } -ParameterFilter { $LiteralPath -eq $script:Dir }
+        Mock Get-ReparsePointTag { [uint32]'0x8000000A' } -ParameterFilter { $Path -eq $script:DfsLink }
+        Mock Get-Win32PathName { $script:DfsTarget } -ParameterFilter { $Path -eq $script:DfsLink }
+        $script:Body = [PSCustomObject]@{ path = $script:Dir; recursive = $true }
+        $script:Sent = $null
+        $response = [PSCustomObject]@{ StatusCode = 200 }
+
+        Invoke-TakeOwnership $null $response
+
+        $response.StatusCode | Should -Be 500
+        $script:Sent.error | Should -Not -BeNullOrEmpty
+        $script:Sent.error | Should -Be $script:Sent.message
+        $script:Sent.error | Should -Match ([regex]::Escape($script:DfsLink))
+        $script:Sent.error | Should -Match 'Nothing was changed'
+        $script:Sent.error | Should -Not -Match 'AllowSystemFolder'
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
+    }
+
     It 'AC16_GuiPage_EveryChangeActionSharesTheBusyFlag' {
         $raw = Get-Content -LiteralPath $script:GuiPath -Raw
         foreach ($name in 'submitAddAce', 'submitRemoveAce', 'submitReplicate', 'takeFileOwnership') {
