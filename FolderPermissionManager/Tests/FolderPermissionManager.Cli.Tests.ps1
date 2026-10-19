@@ -637,10 +637,8 @@ Describe 'FolderPermissionManager.ps1 (command line): DFS targets, unresolvable 
             $scope[0] | Should -Match 'DFS link'
             $scope[0] | Should -Match ([regex]::Escape($script:DfsLink))
             $scope[0] | Should -Not -Match ([regex]::Escape('junction(s) or symbolic link(s)'))
-            $skipped = @($script:Lines | Where-Object { $_ -like '`[INFO`] *are skipped*' })
-            $skipped.Count | Should -Be 1
-            $skipped[0] | Should -Match 'DFS link'
-            $skipped[0] | Should -Not -Match ([regex]::Escape('junction(s) or symbolic link(s)'))
+            # The "[INFO] ... are skipped" line came from the copy-to-subfolders step, which D-035
+            # removed from the CLI, so it is no longer asserted here.
         }
 
         It 'AC20c_Cli_DfsLinkWhoseTargetCannotBeFound_IsRefusedWithoutTheAllowSystemFolderHint' {

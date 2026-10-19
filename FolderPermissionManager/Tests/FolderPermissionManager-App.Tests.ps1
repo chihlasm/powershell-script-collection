@@ -464,9 +464,37 @@ Describe 'Script shape' {
         $ast.BeginBlock | Should -BeNullOrEmpty
         $ast.ProcessBlock | Should -BeNullOrEmpty
         $ast.DynamicParamBlock | Should -BeNullOrEmpty
-        $other = @($ast.EndBlock.Statements | Where-Object { $_ -isnot [System.Management.Automation.Language.FunctionDefinitionAst] })
-        $other.Count | Should -Be 1 -Because 'only the -LoadFunctionsOnly guard may sit beside the functions'
+        # Since SQ-014 (D-040) the core also assigns $script: variables at top level (the reparse
+        # allowlist, tag constants, message markers). Those are allowed only because the pool
+        # copies every one of them (Get-CoreScriptVariableNames); anything else is not.
+        $copied = @(Get-CoreScriptVariableNames -CorePath $script:CorePath)
+        $other = @($ast.EndBlock.Statements | Where-Object {
+            $_ -isnot [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            -not ($_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                  $_.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                  $_.Left.VariablePath.IsScript -and
+                  $copied -contains ($_.Left.VariablePath.UserPath -replace '^script:', '')) })
+        $other.Count | Should -Be 1 -Because 'only the -LoadFunctionsOnly guard and the copied $script: variables may sit beside the functions'
         $other[0].Extent.Text | Should -Match '^if \(\$LoadFunctionsOnly\) \{ return \}$'
+        $copied | Should -Contain 'RedirectFreeReparseTags'
+    }
+
+    It 'AC8e_PoolSeesTheCoreScriptVariables' {
+        # The pool must see the same reparse allowlist the window loaded, or every dedup or
+        # OneDrive file would count as a link in a pool-run guard.
+        Initialize-BackgroundPool
+        try {
+            $ps = [System.Management.Automation.PowerShell]::Create()
+            $ps.RunspacePool = $script:BgPool
+            [void]$ps.AddScript({ [PSCustomObject]@{ Count = @($RedirectFreeReparseTags.Keys).Count; Dfs = $DfsReparseTag; Dedup = $RedirectFreeReparseTags['IO_REPARSE_TAG_DEDUP'] } }.ToString())
+            $r = $ps.Invoke() | Select-Object -Last 1
+            $ps.Dispose()
+            $r.Count | Should -Be @($script:RedirectFreeReparseTags.Keys).Count
+            $r.Count | Should -BeGreaterThan 0
+            $r.Dfs | Should -Be ([uint32]'0x8000000A')
+            $r.Dedup | Should -Be ([uint32]'0x80000013')
+        }
+        finally { $script:BgPool.Close(); $script:BgPool = $null }
     }
 }
 

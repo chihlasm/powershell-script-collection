@@ -141,7 +141,8 @@ turns inherited rules into explicit ones, and handlers use `-Path`, which breaks
 subfolders untouched (D-031). Fix with a regression test for each. Builds after SQ-014 (D-011).
 
 ## SQ-017 · FolderPermissionManager as a WPF app: the window, browsing and viewing (read-only)
-- status: review
+- status: ready
+- revision: pool must copy core top-level variables (AC8d after the stack refresh; spec Revision notes 2026-10-19)
 - priority: P1
 - type: feature
 - branch: squad/SQ-017-fpm-wpf-window (stacked: create it from squad/SQ-015-fpm-recursive-copy as SQ-015 finishes this run, not from main; D-041)
