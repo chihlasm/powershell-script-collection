@@ -111,3 +111,22 @@ Format:
   on dedup volumes. C) Like A, and it also closes the two-hop case (a link to an allowed folder
   that contains a link to C:\Windows). It also refuses harmless links that point elsewhere on the
   same share.
+
+### Q-006 · SQ-014 · Should app-execution links and Azure File Sync tiered files count as plain files?
+- status: open
+- blocks: nothing. SQ-014 continues and refuses these trees safely (fail closed) until you answer.
+- context: Under D-040 only the allowlisted reparse types are plain files. The run's
+  destructive-operations reviewer pointed out two common types that don't redirect anywhere but
+  now refuse whole-tree take ownership:
+  - `IO_REPARSE_TAG_APPEXECLINK` (0x8000001B): the app-execution aliases under
+    `AppData\Local\Microsoft\WindowsApps` in every local profile, so taking ownership of a profile
+    folder is refused.
+  - `IO_REPARSE_TAG_STORAGE_SYNC` (0x8000001E): Azure File Sync files tiered to the cloud, so any
+    folder on an Azure File Sync server with cloud tiering is refused.
+  The refusal now names the reparse type and no longer suggests `-AllowSystemFolder` for these.
+- options: A) Add both to the allowlist, with Learn citations and one test each (recommended).
+  B) Add only STORAGE_SYNC; profile folders stay refused, which suits "don't take ownership of
+  profiles". C) Leave both refused.
+- consequence: A) Profile folders and Azure File Sync shares work; the aliases are taken over like
+  any file, which is harmless. B) Azure File Sync works; profiles are refused with a clear message.
+  C) Both are refused; techs fix those folders one level down or escalate.
