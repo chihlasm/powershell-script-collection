@@ -373,6 +373,20 @@ Describe 'Script shape' {
         $script:InstanceMutex | Should -BeNullOrEmpty
     }
 
+    It 'AC8_StartedWithoutLoadFunctionsOnlyGetsPastTheGuard' {
+        # Regression: dot-sourcing the core with -LoadFunctionsOnly binds the core's param() in the
+        # app's scope, which set the app's own $LoadFunctionsOnly too. The guard then returned on
+        # every normal start: no window, no UAC prompt, exit code 0.
+        # Mocks are aliases, so they win over the functions the app defines when it runs.
+        Mock Get-StartupAction { 'RelaunchSta' }
+        Mock Start-Process { }
+        Mock Get-LocalAppDataFolder { Join-Path $TestDrive 'appdata' }
+        Mock Get-LiveDriveMap { @{} }
+        Mock Get-RememberedDriveMap { @{} }
+        & $script:AppPath -LogFolder (Join-Path $TestDrive 'logs')
+        Should -Invoke Start-Process -Times 1 -Exactly
+    }
+
     It 'AC8b_CloseNeverHangs' {
         $order = [System.Collections.Generic.List[string]]::new()
         $mutex = [PSCustomObject]@{}

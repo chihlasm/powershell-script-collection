@@ -210,7 +210,11 @@ if (-not (Test-Path -LiteralPath $script:CorePath -PathType Leaf)) {
     catch { }
     exit 1
 }
+# Dot-sourcing the core binds its own -LoadFunctionsOnly in this scope, which would set ours
+# too and make the guard below end every normal start; keep ours across it.
+$loadOnly = $LoadFunctionsOnly.IsPresent
 . $script:CorePath -LoadFunctionsOnly
+$LoadFunctionsOnly = [switch]$loadOnly
 
 $script:AppDataFolder = Get-LocalAppDataFolder
 if (-not $script:AppDataFolder) { $script:AppDataFolder = $env:TEMP }
