@@ -170,7 +170,10 @@ permissions, a themed confirm dialog (verb on the button, Cancel default), one c
 closing blocked while a change runs, result-status parity with the browser GUI, -WhatIf end to
 end, README and root README. Destructive-operations checklist applies in full. Builds after
 SQ-017. Split from SQ-017 per D-039. Follow-up after the owner's lab test (not planned): remove
-FolderPermissionManager-WebGUI.ps1 and its two test files.
+FolderPermissionManager-WebGUI.ps1 and its two test files, then add FolderPermissionManager
+(GUI, CLI, core, README; no Tests/Logs) to the ServiceDesk-Toolkit bundle manifest and its
+README as "Changes anything? Yes" (owner, 2026-10-19: distribute only once the WPF app can
+make changes, via the toolkit bundle).
 
 ## SQ-020 · Whole-tree take ownership: WindowsApps aliases and Azure File Sync files count as plain files (D-042)
 - status: ready
