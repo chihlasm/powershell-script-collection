@@ -1516,7 +1516,7 @@ Describe 'README after fix round 2' {
 #          above it. Values from MS-FSCC 2.1.2.1 "Reparse Tags":
 #          https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
 #   IO_REPARSE_TAG_ONEDRIVE (0x80000021) is allowlisted too (lead decision: D-040 says the
-#          cloud/OneDrive family). 22 entries in all.
+#          cloud/OneDrive family). 22 entries, 24 with the two SQ-020 / D-042 additions.
 Describe 'D-040 reparse allowlist: links inside the tree' {
     BeforeAll {
         # Learn MS-FSCC 2.1.2.1 values. Do not edit without owner approval (AC20d).
@@ -1543,6 +1543,11 @@ Describe 'D-040 reparse allowlist: links inside the tree' {
             IO_REPARSE_TAG_CLOUD_D = [uint32]'0x9000D01A'
             IO_REPARSE_TAG_CLOUD_E = [uint32]'0x9000E01A'
             IO_REPARSE_TAG_CLOUD_F = [uint32]'0x9000F01A'
+            # SQ-020 / D-042 (AC2): app-execution aliases and Azure File Sync tiered files. 24 in all.
+            # MS-FSCC 2.1.2.1 Reparse Tags (verified on Learn 2026-10-19):
+            # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+            IO_REPARSE_TAG_APPEXECLINK  = [uint32]'0x8000001B'
+            IO_REPARSE_TAG_STORAGE_SYNC = [uint32]'0x8000001E'
         }
         # A reparse point as Get-ChildItem returns it. The folder is real (inside $TestDrive)
         # so Test-Path and Get-ItemOwner work; the reparse tag and the destination are faked.
@@ -1677,6 +1682,7 @@ Describe 'D-040 reparse allowlist: links inside the tree' {
     Context 'AC20d: one allowlist, cited, pinned' {
         It 'AC20d_AllowlistExistsAsOneOrderedTableOfNameToValue' {
             $script:RedirectFreeReparseTags | Should -Not -BeNullOrEmpty
+            $script:AllowedTags.Keys.Count | Should -Be 24
             $script:RedirectFreeReparseTags.Keys.Count | Should -Be $script:AllowedTags.Keys.Count
         }
 
@@ -1693,6 +1699,8 @@ Describe 'D-040 reparse allowlist: links inside the tree' {
             @{ Name = 'IO_REPARSE_TAG_ONEDRIVE'; Value = [uint32]'0x80000021' }
             @{ Name = 'IO_REPARSE_TAG_CLOUD'; Value = [uint32]'0x9000001A' }
             @{ Name = 'IO_REPARSE_TAG_CLOUD_F'; Value = [uint32]'0x9000F01A' }
+            @{ Name = 'IO_REPARSE_TAG_APPEXECLINK'; Value = [uint32]'0x8000001B' }
+            @{ Name = 'IO_REPARSE_TAG_STORAGE_SYNC'; Value = [uint32]'0x8000001E' }
         ) {
             [uint32]$script:RedirectFreeReparseTags[$Name] | Should -Be $Value
         }
@@ -2074,6 +2082,84 @@ Describe 'D-040 fix round 1 (review 2026-10-19): DFS targets, unresolvable links
     }
 }
 
+# --- SQ-020 (D-042): app-execution aliases and Azure File Sync files are plain files ----------
+#
+# MS-FSCC 2.1.2.1 Reparse Tags (verified on Learn 2026-10-19): IO_REPARSE_TAG_APPEXECLINK
+# 0x8000001B and IO_REPARSE_TAG_STORAGE_SYNC 0x8000001E.
+# https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+Describe 'SQ-020 (D-042): WindowsApps aliases and Azure File Sync tiered files' {
+    BeforeAll {
+        function New-FakeReparseChild {
+            param([string]$Path)
+            [PSCustomObject]@{
+                FullName = $Path; Name = (Split-Path -Leaf $Path); PSIsContainer = $true
+                Attributes = [System.IO.FileAttributes]'Directory, ReparsePoint'
+            }
+        }
+    }
+    BeforeEach {
+        $script:Log = Join-Path $TestDrive ('logs-' + [guid]::NewGuid().ToString('N'))
+        Mock Set-Acl { }
+        Mock takeown { }
+        Mock icacls { }
+        Mock Invoke-AclTool { [PSCustomObject]@{ ExitCode = 0; Output = '' } }
+        $script:Dir = Join-Path $TestDrive ('sq020-' + [guid]::NewGuid().ToString('N'))
+        $script:LinkPath = Join-Path $script:Dir 'alias'
+        New-Item -ItemType Directory -Path $script:LinkPath -Force | Out-Null
+        Mock Get-ChildItem { New-FakeReparseChild -Path $script:LinkPath } -ParameterFilter { $LiteralPath -eq $script:Dir }
+        Mock Get-ReparsePointTag { $script:Tag } -ParameterFilter { $Path -eq $script:LinkPath }
+        Mock Get-DfsTarget { }
+    }
+
+    It 'AC1_AllowlistHasAppExecLinkAndStorageSync' {
+        $script:RedirectFreeReparseTags.Contains('IO_REPARSE_TAG_APPEXECLINK') | Should -BeTrue
+        $script:RedirectFreeReparseTags.Contains('IO_REPARSE_TAG_STORAGE_SYNC') | Should -BeTrue
+        [uint32]$script:RedirectFreeReparseTags['IO_REPARSE_TAG_APPEXECLINK'] | Should -Be ([uint32]'0x8000001B')
+        [uint32]$script:RedirectFreeReparseTags['IO_REPARSE_TAG_STORAGE_SYNC'] | Should -Be ([uint32]'0x8000001E')
+        $lines = @(Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\FolderPermissions.Core.ps1'))
+        foreach ($name in 'IO_REPARSE_TAG_APPEXECLINK', 'IO_REPARSE_TAG_STORAGE_SYNC') {
+            $hit = @(0..($lines.Count - 1) | Where-Object { $lines[$_] -match "^\s*['""]?$name['""]?\s*=" })
+            $hit.Count | Should -Be 1 -Because "$name is defined once in the allowlist"
+            $window = @($lines[([Math]::Max(0, $hit[0] - 2))..$hit[0]]) -join "`n"
+            $window | Should -Match 'learn\.microsoft\.com' -Because "$name needs a Learn citation next to it"
+        }
+    }
+
+    It 'AC2_PinnedTableUpdated' {
+        # The pin tests above (AC20d_*) hold the table; this checks it grew by exactly the two.
+        $script:RedirectFreeReparseTags.Keys.Count | Should -Be 24
+    }
+
+    It '<Ac>_<Name>TreeIsNotRefused_Core' -ForEach @(
+        @{ Ac = 'AC3'; Name = 'AppExecLink'; Value = [uint32]'0x8000001B' }
+        @{ Ac = 'AC4'; Name = 'StorageSync'; Value = [uint32]'0x8000001E' }
+    ) {
+        $script:Tag = $Value
+        # If the tag were treated as a link, this destination would refuse the tree.
+        Mock Get-Win32PathName { '\dc01\NETLOGON' } -ParameterFilter { $Path -eq $script:LinkPath }
+
+        $tree = Get-OwnerTreeItem -Path $script:Dir
+        @($tree.Links).Count | Should -Be 0
+        Get-TreeLinkRefusal -Path $script:Dir -LinkPaths @($tree.Links) | Should -BeNullOrEmpty
+
+        $rows = @(Set-ItemOwnerToCurrentUser -Path $script:Dir -Recurse -LogFolder $script:Log)
+        $rows[0].Result | Should -Not -Be 'Failed'
+        Should -Invoke Invoke-AclTool -Times 1 -Exactly -Scope It -ParameterFilter { $Tool -eq 'takeown' }
+    }
+
+    It 'AC5_OtherTagsStillLinks_<Name>' -ForEach @(
+        @{ Name = 'DFS'; Tag = [uint32]'0x8000000A' }
+        @{ Name = 'NFS'; Tag = [uint32]'0x80000014' }
+        @{ Name = 'unknown'; Tag = [uint32]'0x8000ABCD' }
+    ) {
+        $script:Tag = $Tag
+        $item = New-FakeReparseChild -Path $script:LinkPath
+
+        Test-LinkReparsePoint -Item $item | Should -BeTrue
+        $script:RedirectFreeReparseTags.Values | Should -Not -Contain $Tag
+    }
+}
+
 Describe 'Windows PowerShell 5.1 reads the reparse allowlist the same way (D-040)' {
     It 'AC20d_UnderWindowsPowerShell51_AllowlistValuesAndLinkDecisionsMatch' {
         $exe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -2122,6 +2208,16 @@ Import-Win32NetworkDriveType
         $parts[5] | Should -Be '0' -Because 'a local path is in no DFS namespace'
         $parts[6] | Should -Be 'True' -Because 'the NetDfsGetClientInfo declaration compiles under Windows PowerShell 5.1'
         $parts[7] | Should -Be 'True' -Because 'the WNetGetConnection declaration compiles under Windows PowerShell 5.1'
+    }
+}
+
+Describe 'README after SQ-020 (D-042)' {
+    It 'AC6_ReadmeNamesThem' {
+        $readme = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\README.md') -Raw -Encoding UTF8
+        $allowed = [regex]::Match($readme, '(?s)\*\*Allowed[^*]*\*\*.*?\r?\n\r?\n')
+        $allowed.Success | Should -BeTrue
+        $allowed.Value | Should -Match 'WindowsApps'
+        $allowed.Value | Should -Match '(?i)Azure File Sync'
     }
 }
 

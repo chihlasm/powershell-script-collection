@@ -259,6 +259,38 @@ Describe 'GUI recursive take ownership' {
         Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
     }
 
+    # --- SQ-020 (D-042) ------------------------------------------------------------------------
+    # IO_REPARSE_TAG_APPEXECLINK 0x8000001B and IO_REPARSE_TAG_STORAGE_SYNC 0x8000001E are plain
+    # files (MS-FSCC 2.1.2.1 Reparse Tags). Even with the destination faked as \\dc01\NETLOGON,
+    # the GUI's endpoint does not refuse the tree because of such a reparse point.
+    # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+
+    It '<Ac>_Gui<Name>TreeIsNotRefused' -ForEach @(
+        @{ Ac = 'AC3'; Name = 'AppExecLink'; Tag = [uint32]'0x8000001B' }
+        @{ Ac = 'AC4'; Name = 'StorageSync'; Tag = [uint32]'0x8000001E' }
+    ) {
+        $script:AliasLink = Join-Path $script:Dir 'alias'
+        New-Item -ItemType Directory -Path $script:AliasLink -Force | Out-Null
+        $script:AliasTag = $Tag
+        Mock Get-ChildItem {
+            [PSCustomObject]@{
+                FullName = $script:AliasLink; Name = 'alias'; PSIsContainer = $true
+                Attributes = [System.IO.FileAttributes]'Directory, ReparsePoint'
+            }
+        } -ParameterFilter { $LiteralPath -eq $script:Dir }
+        Mock Get-ReparsePointTag { $script:AliasTag } -ParameterFilter { $Path -eq $script:AliasLink }
+        Mock Get-Win32PathName { '\\dc01\NETLOGON' } -ParameterFilter { $Path -eq $script:AliasLink }
+        $script:Body = [PSCustomObject]@{ path = $script:Dir; recursive = $true }
+        $script:Sent = $null
+        $response = [PSCustomObject]@{ StatusCode = 200 }
+
+        Invoke-TakeOwnership $null $response
+
+        "$($script:Sent.error)" | Should -Not -Match 'NETLOGON'
+        $response.StatusCode | Should -Not -Be 500
+        Should -Invoke Invoke-AclTool -Times 1 -Exactly -Scope It -ParameterFilter { $Tool -eq 'takeown' -and $Arguments -contains '/R' }
+    }
+
     It 'AC16_GuiPage_EveryChangeActionSharesTheBusyFlag' {
         $raw = Get-Content -LiteralPath $script:GuiPath -Raw
         foreach ($name in 'submitAddAce', 'submitRemoveAce', 'submitReplicate', 'takeFileOwnership') {
