@@ -630,7 +630,9 @@ Describe 'Take ownership and copy permissions (AC32-AC38)' {
     It 'AC36_ConfirmSpecs' {
         $one = New-FakeTarget -Display 'D:\Data\HR'
         $files = @('D:\Data\a.txt', 'D:\Data\b.txt', 'D:\Data\c.txt') | ForEach-Object { New-FakeTarget -Display $_ }
-        $copyTargets = @('\\fs01\A', '\\fs01\B') | ForEach-Object { New-FakeTarget -Display $_ }
+        # Folders inside a share: a share root (\\fs01\A) is destructive since D-044 amended AC36
+        # (AC49_CopyOntoARoot_DestructiveConfirmWithRealLocation covers that).
+        $copyTargets = @('\\fs01\Data\A', '\\fs01\Data\B') | ForEach-Object { New-FakeTarget -Display $_ }
         $cases = @(
             @{ Action = 'AddPermission'; Targets = @($one); Detail = 'Allow Modify for CONTOSO\HR'; Destructive = $false; Count = $null; Verb = '^Add' }
             @{ Action = 'RemovePermission'; Targets = @($one); Detail = 'Allow Modify for CONTOSO\HR'; Destructive = $true; Count = $null; Verb = '^Remove' }
@@ -1224,7 +1226,9 @@ Describe 'Review 1-2: target lookups run in the background, real locations in th
         Mock Show-PermissionDialog { $script:Dialogs.Add(@{ Mode = $Mode; Scope = $Scope; TargetText = $TargetText; Choices = $Choices }); $script:DialogAnswer }
         $script:CopyDialogs = [System.Collections.Generic.List[object]]::new()
         $script:CopyText = "\\fs01\A`n\\fs01\B"
-        Mock Show-CopyPermissionsDialog { $script:CopyDialogs.Add(@{ Source = $Source }); $script:CopyText }
+        # The dialog opens again with what was typed after a refused folder (AC53d); that second
+        # dialog is cancelled here.
+        Mock Show-CopyPermissionsDialog { $script:CopyDialogs.Add(@{ Source = $Source }); if ($TypedText) { $null } else { $script:CopyText } }
         $script:MappedDrives = @{ H = '\\fs01\home' }
         $script:MappedDriveSources = @{ H = 'Live' }
         $script:Current = [PSCustomObject]@{ DisplayPath = 'H:\Data'; RealPath = '\\fs01\home\Data' }
@@ -2027,7 +2031,8 @@ Describe 'Review round 2: remove by the matched SID' {
         $r = & $script:RemovePermissionWork -Paths @($script:Dir12) -Identity $sid -Rights 'Modify' -Type 'Allow' -LogFolder $script:Log12 -WhatIf $false -Sid $sid -CorePath $null
         $r.Ok | Should -BeFalse
         $r.NotStarted | Should -BeTrue
-        $r.Error | Should -Match ([regex]::Escape("This entry belongs to an account that no longer exists ($sid). This tool can't remove orphaned entries yet; ask a senior admin"))
+        # Wording changed by AC53b (owner decision, review 2026-10-19).
+        $r.Error | Should -Match ([regex]::Escape("Windows can't look up this account from here (it may be deleted, or local to the server): $sid. This tool can't remove entries for an account it can't look up; ask a senior admin"))
         $r.Error | Should -Match ([regex]::Escape("icacls `"$($script:Dir12)`" /remove:g *$sid"))
         $script:RemoveCalls | Should -Be 0
 
@@ -2660,8 +2665,9 @@ Describe 'Revision 2026-10-19: Deny, roots, protected Copy targets, server-side 
         $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -LogFolder $log -Recurse -Confirm:$false)
         $row = $rows | Where-Object { $_ } | Select-Object -Last 1
         $row.Result | Should -Be 'Failed' -Because 'the late re-check must refuse a high-impact root'
-        $row.ErrorText | Should -Match 'user profile'
-        $row.ErrorText | Should -Match 'Nothing was changed'
+        # The row's column is Error (New-PermissionChangeEntry -ErrorText fills it).
+        $row.Error | Should -Match 'user profile'
+        $row.Error | Should -Match 'Nothing was changed'
         $script:ToolCalls.Count | Should -Be 0 -Because 'takeown and icacls must not run'
     }
 

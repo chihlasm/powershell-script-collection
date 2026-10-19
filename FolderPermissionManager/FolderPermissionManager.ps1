@@ -16,9 +16,10 @@
        skipped and its permissions are left as they were; the result is Partly done, names it
        so it can be escalated, and lists every such folder (also saved to
        <LogFolder>\Backups\<yyyy-MM-dd_HHmmss>_NotOpened.txt). The root of a drive, the
-       Windows system folders, the SYSVOL, NETLOGON and PRINT$ shares, and a folder with a
-       junction or symbolic link inside that leads into one are refused unless
-       -AllowSystemFolder is given.
+       Windows system folders, the SYSVOL, NETLOGON and PRINT$ shares, a folder with a
+       junction or symbolic link inside that leads into one, a Users folder (C:\Users, or this
+       computer's profiles folder) and anything in System Volume Information or $Recycle.Bin
+       are refused unless -AllowSystemFolder is given.
     2. Shows the top folder's owner and permissions, and the owner of each subfolder, and
        names the subfolders that block inheritance. This is shown also when ownership was
        declined or failed.
@@ -75,9 +76,11 @@
     drive share (\\fs01\D$, \\fs01\C$\Windows), also when the folder leads there through a
     junction, a symbolic link or a short name, or is on a SYSVOL, NETLOGON or PRINT$ share, or
     has a junction or symbolic link inside it that leads into one of these (or somewhere that
-    cannot be checked). Without it such a folder is refused and nothing
-    is changed, because changing every owner in it can stop Windows or installed programs from
-    working. The root of an ordinary share (\\fs01\share) is never refused.
+    cannot be checked), or is a Users folder (C:\Users, \\fs01\D$\Users, this computer's
+    profiles folder) or in System Volume Information or $Recycle.Bin. Without it such a folder
+    is refused and nothing is changed, because changing every owner in it can stop Windows or
+    installed programs from working, or lock users out of their own profiles. The root of an
+    ordinary share (\\fs01\share) is never refused.
 
 .PARAMETER LoadFunctionsOnly
     Define the functions and return without doing anything (used by the tests).
@@ -325,8 +328,10 @@ function Invoke-FolderPermissionCli {
     }
     # D-036: a drive root or a Windows system folder is refused before anything is asked,
     # counted or saved, also when the folder leads there through a junction, a symbolic link
-    # or a short name.
+    # or a short name. So are the high-impact roots (a Users folder, System Volume Information,
+    # $Recycle.Bin), which the core refuses too.
     $refusal = if ($AllowSystemFolder) { $null } else { Get-TreeOwnershipTargetRefusal -Path $Path }
+    if (-not $refusal -and -not $AllowSystemFolder) { $refusal = Get-HighImpactRootRefusal -Path $Path }
     if ($refusal) {
         Write-Host "[FAIL] $refusal $(Get-CliRefusalNextStep -Refusal $refusal) Nothing was changed." -ForegroundColor Red
         return 1

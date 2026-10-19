@@ -84,22 +84,35 @@ change is refused with "Another change is still running on `<path>`. Wait for it
   the change buttons stay off (their tooltip says why) and other change clicks are refused.
   The dialogs show the **Real location**. For Copy Permissions, the folders you type are
   checked after the dialog; the status line names their real locations, and a folder that
-  cannot be checked is refused before anything starts.
+  cannot be checked is refused before anything starts. When a typed folder is refused, the
+  reason is shown and the Copy dialog opens again with your list still in it.
 - **Remove Permission** lists only the entries set on the folder or file itself (an
   inherited entry is removed on the folder above), once per account, with Allow or Deny
   already set to the type it has. Every explicit entry of that type for the account goes,
   whatever its level, so no level is asked. Just before the change, the account's name is
   looked up again: if it now stands for a different account than the entry you chose (after a
   domain migration, or a rename and a new account with the old name), nothing is changed and
-  the status line says so. An entry whose account no longer exists (shown as `S-1-...`, an
-  orphaned SID) cannot be removed here yet: the status line gives the command for a senior
-  admin, for example `icacls "D:\Data" /remove:g *S-1-5-21-...` (`:d` for a Deny entry).
+  the status line says so. An entry whose account Windows can't look up from here (shown as
+  `S-1-...`: the account may be deleted, or local to the server) cannot be removed here yet:
+  the status line gives the commands for a senior admin, a backup first and then the removal
+  by SID, for example `icacls "D:\Data" /save acl-backup.txt`, then
+  `icacls "D:\Data" /remove:g *S-1-5-21-...` (`:d` for a Deny entry).
 - **It asks first.** Remove Permission and every Take Ownership open a dialog that names the
   path, its real location and how many items, with the action on the button ("Take ownership
   of 12,408 items") and **Cancel** as the default (Enter and Esc both cancel). For the whole
-  tree, the folders, files and junctions in it are counted in the background first. Add
-  Permission and Copy Permissions ask through their own dialog, as in the browser version
-  (Enter submits there).
+  tree, the folders, files and junctions in it are counted in the background first. A plain
+  Allow added, or permissions copied, onto ordinary folders that are where you typed them ask
+  through their own dialog, as in the browser version (Enter submits there). These ask again
+  in the confirm dialog, with the real locations, and the button is red and never the default:
+  - **Add a Deny** (the Add dialog's button turns red and Enter no longer submits it).
+  - **Add or copy onto the top of a drive or share** (`D:\`, `\\fs01\Data`, `\\fs01\D$`,
+    also behind a mapped drive such as `H:\` or a DFS path): it reaches everything on it that
+    inherits.
+  - **Copy from a folder with Deny permissions of its own**: the confirm lists them. When the
+    folder's permissions are not loaded, it says they could not be checked.
+  - **Copy to a folder that is really somewhere else** than what you typed (a mapped drive,
+    DFS, this computer's own share): the confirm lists what you typed and where it really is
+    (not red unless one of the cases above applies).
 - **Remembered mappings.** When the folder is on a drive letter that only Windows' remembered
   mappings explain, every change (Add and Copy included) asks first and warns that the real
   location may be out of date. A `-LogFolder` on such a letter gets a warning in the bar under
@@ -117,7 +130,11 @@ change is refused with "Another change is still running on `<path>`. Wait for it
   (`\\<this computer>\C$\Windows`) are resolved first, and for an ordinary share on a server
   (`\\fs01\Data`) the tool asks that server which folder the share is (it needs administrator
   rights there) and checks that folder; when the server does not say, the whole-tree change
-  is refused. Then the same checks run on where Windows really reaches the folder: through a
+  is refused. Each folder on the way to it on the server (`\\fs01\D$\Shares`,
+  `\\fs01\D$\Shares\Data`, ...) is then checked over the administrative share: when one is a
+  junction or symbolic link, or cannot be checked (not found, or access denied), the
+  whole-tree change is refused before anything is counted, because the server follows its own
+  junctions and the tool cannot see where the change would really land. Then the same checks run on where Windows really reaches the folder: through a
   junction or symbolic link on it or above it, and with 8.3 short names (`D:\USERPR~1`)
   expanded; when Windows cannot tell where the folder really is, the change is refused. Every
   junction and symbolic link found inside the tree while counting is checked the same way,
@@ -127,8 +144,11 @@ change is refused with "Another change is still running on `<path>`. Wait for it
   detected, so check the folder before taking ownership of everything in it. Any change on a path that points at hidden data inside a file (an alternate data
   stream, `file.txt:stream`), on a DFS path Windows cannot look up, or on a DFS folder that
   points to several servers (open the one you mean) is refused too, and so is a DFS folder of
-  a namespace this computer hosts that cannot be looked up. A refusal shows in the status line
-  and in a message box.
+  a namespace this computer hosts that cannot be looked up. Copy Permissions refuses a target
+  that is an administrative share (`\\fs01\D$`, `ADMIN$`, `IPC$`, `PRINT$`), `SYSVOL` or
+  `NETLOGON`, the root of a drive (`D:\`), a Windows folder, a `Users` folder or anything in
+  `System Volume Information` or `$Recycle.Bin` (a folder inside `\\fs01\D$` is fine). A
+  refusal shows in the status line and in a message box.
 - **The result** shows in the status line, as in the browser version: what was done and where
   it was backed up and logged, "Partly done: ..." when some items failed, "Done, with items to
   check: ..." when the log could not be written or items cannot be restored from the backup,
@@ -286,7 +306,12 @@ to each folder you list. Nothing already on a target folder is removed.
   added again as the target's own, so removing it from the current folder later still removes
   it everywhere below.
 - If the current folder has a Deny permission of its own, the dialog says so before you copy:
-  a Deny is copied too and blocks access even where another permission allows it.
+  a Deny is copied too and blocks access even where another permission allows it. The GUI
+  then asks again in a red confirm that lists the Deny permissions and every target's real
+  location.
+- In the GUI, a target that is an administrative share, `SYSVOL`, `NETLOGON`, the root of a
+  drive, a Windows folder, a `Users` folder, `System Volume Information` or `$Recycle.Bin` is
+  refused, and nothing is copied to any of the folders listed.
 - Each target folder is changed once. **Subfolders and files under it that inherit permissions
   get the new ones automatically**, as they would in Explorer.
 - A target that is a file is refused: "<path> is a file. Copy permissions copies to folders only."
@@ -600,7 +625,7 @@ permission onto every subfolder and file, including the ones that block inherita
 | `-Path` | asks | The top folder |
 | `-LogFolder` | `Logs` next to the script | Where backups and the change log go (same rules as the GUI) |
 | `-Force` | — | Do not ask before taking ownership (needed, or `-WhatIf`, on a host that cannot ask) |
-| `-AllowSystemFolder` | — | Take ownership even of a drive root or a folder in `%SystemRoot%`, `%ProgramFiles%`, `%ProgramFiles(x86)%` or `%ProgramData%`, on `SYSVOL`, `NETLOGON` or `PRINT$`, or with a junction or symbolic link inside that leads into one, which is refused otherwise (see above) |
+| `-AllowSystemFolder` | — | Take ownership even of a drive root or a folder in `%SystemRoot%`, `%ProgramFiles%`, `%ProgramFiles(x86)%` or `%ProgramData%`, on `SYSVOL`, `NETLOGON` or `PRINT$`, or with a junction or symbolic link inside that leads into one, or of a `Users` folder (or this computer's profiles folder) or anything in `System Volume Information` or `$Recycle.Bin`, which is refused otherwise (see above) |
 | `-WhatIf` | — | Show what would be changed and change nothing |
 
 Before taking ownership it prints what will change with `[WARN]` (how many items: the folder is
@@ -623,7 +648,8 @@ After the owner list the script names the subfolders that block inheritance. A s
 permissions it cannot read is counted as "could not be checked" (it may block inheritance too),
 so check those by hand.
 
-A drive root or a Windows folder is refused straight away, before any question, with one
+A drive root, a Windows folder, a `Users` folder, or anything in `System Volume Information` or
+`$Recycle.Bin` is refused straight away, before any question, with one
 `[FAIL]` line that names the folder and `-AllowSystemFolder`, and exit code `1`. Nothing is
 counted, saved or changed. A junction or symbolic link inside the folder that leads into one is
 refused the same way once the folder has been counted, before any question: the `[FAIL]` line

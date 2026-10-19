@@ -231,9 +231,20 @@
       https://learn.microsoft.com/windows/win32/api/lmshare/nf-lmshare-netsharegetinfo
       https://learn.microsoft.com/windows/win32/api/lmshare/ns-lmshare-share_info_2
       https://learn.microsoft.com/windows/win32/api/lmapibuf/nf-lmapibuf-netapibufferfree
-    - The folder that holds every user profile: GetProfilesDirectory ("C:\Users" on Windows 7
-      and later) and the ProfilesDirectory setting ("normally C:\Users", %SYSTEMDRIVE%\Users,
-      can be moved to another volume). The registry value behind it
+      Each folder on the way to that server-side folder is then read over the administrative
+      share (FindFirstFileW); FILE_ATTRIBUTE_REPARSE_POINT (0x400) is "A file or directory that
+      has an associated reparse point, or a file that is a symbolic link" (D-045):
+      https://learn.microsoft.com/windows/win32/fileio/file-attribute-constants
+    - An entry whose SID cannot be looked up: icacls /save <ACLfile> "Stores DACLs for all
+      matching files into an access control list (ACL) file for later use with /restore", then
+      /remove[:g|:d] *SID removes it:
+      https://learn.microsoft.com/windows-server/administration/windows-commands/icacls
+    - Button.IsDefault (Enter presses it); a Deny add and Remove are never the default:
+      https://learn.microsoft.com/dotnet/api/system.windows.controls.button.isdefault
+    - The folder that holds every user profile (Get-AppProfilesDirectory, in the core):
+      GetProfilesDirectory ("C:\Users" on Windows 7 and later) and the ProfilesDirectory
+      setting ("normally C:\Users", %SYSTEMDRIVE%\Users, can be moved to another volume). The
+      registry value behind it
       (HKLM\...\ProfileList\ProfilesDirectory) is NOT documented on Learn (searched 2026-10-19),
       so the documented function is used:
       https://learn.microsoft.com/windows/win32/api/userenv/nf-userenv-getprofilesdirectoryw
@@ -1542,7 +1553,8 @@ $script:WorkHelperFunctions = 'Get-InnermostErrorText', 'Test-AccessDeniedError'
 'Resolve-ChangeTargetSet', 'Get-ChangeTarget', 'New-ChangeTarget', 'Get-StreamRefusal', 'Resolve-MappedDrive',
 'Test-ThisComputerName', 'Get-ThisComputerNames', 'ConvertFrom-Ipv6LiteralName', 'Test-SameIPAddress',
 'Get-LocalSharePath', 'Get-AppDfsTarget', 'Get-DfsClientTarget', 'Find-DfsReparsePoint', 'Get-AppReparseInfo',
-'Get-RemoteShareLocalPath', 'Get-HighImpactRootRefusal', 'Get-AppProfilesDirectory', 'Get-ShareTreeRefusal', 'Complete-AppChangeWork'
+'Get-RemoteShareLocalPath', 'Get-ShareTreeRefusal', 'Get-ServerSideLinkRefusal', 'Get-CopyTargetRefusal', 'Get-TargetRootKind',
+'Complete-AppChangeWork'
 
 function Write-ChangeStartedLog {
     # One 'Started' row per item in the change log before the change runs, so a change that is
@@ -1641,11 +1653,17 @@ function Get-RemoveIdentityProblem {
     # dialog: "the change acts on the same identifier it matched (the SID), not a name that could
     # resolve differently" (destructive-operations profile). Returns Problem (the text, or $null)
     # and Sid (the SID the name stands for).
-    #   - The entry's account no longer exists (an orphaned SID, shown as S-1-...): refused; the
-    #     core cannot remove it by name. icacls removes it by SID: "/remove[:g|:d] Sid" removes
-    #     all occurrences of the SID's granted (g) or denied (d) rights, and "If you use a
-    #     numerical form, affix the wildcard character * to the beginning of the SID".
+    #   - The entry's SID cannot be looked up from here (shown as S-1-...): refused; the core
+    #     cannot remove it by name. That does not prove the account is gone: it may be deleted,
+    #     or local to the server (another computer's local group, which this computer cannot
+    #     translate). icacls removes it by SID: "/remove[:g|:d] Sid" removes all occurrences of
+    #     the SID's granted (g) or denied (d) rights, and "If you use a numerical form, affix
+    #     the wildcard character * to the beginning of the SID". The hint starts with
+    #     "/save <ACLfile>", which "Stores DACLs for all matching files into an access control
+    #     list (ACL) file for later use with /restore", so the entry can be put back.
     #     https://learn.microsoft.com/windows-server/administration/windows-commands/icacls
+    #   - The name no longer looks up, though the SID does under another name (renamed, or the
+    #     name is local to the server): refused, with the same wording.
     #   - The name now stands for another SID (a domain migration, a rename and a new account
     #     with the old name): refused.
     # Without -Sid (no entry was chosen) only the name is translated.
@@ -1656,13 +1674,14 @@ function Get-RemoveIdentityProblem {
         [AllowEmptyCollection()][string[]]$Path,
         [string]$Type
     )
+    $lookUp = "Windows can't look up this account from here (it may be deleted, or local to the server)"
     $orphan = {
         param($sidText)
         $switch = if ($Type -eq 'Deny') { '/remove:d' } else { '/remove:g' }
         $first = @($Path | Where-Object { $_ })[0]
-        $command = "icacls `"$first`" $switch *$sidText"
+        $command = "icacls `"$first`" /save acl-backup.txt, then icacls `"$first`" $switch *$sidText"
         $howTo = if (@($Path).Count -gt 1) { "for each item, for example $command" } else { $command }
-        "This entry belongs to an account that no longer exists ($sidText). This tool can't remove orphaned entries yet; ask a senior admin ($howTo). Nothing was changed."
+        "${lookUp}: $sidText. This tool can't remove entries for an account it can't look up; ask a senior admin to back up the permissions and remove it by SID ($howTo). Nothing was changed."
     }
     $id = $Identity.Trim()
     if ($id -match '^S-1-\d+(-\d+)+$') { return [PSCustomObject]@{ Problem = (& $orphan $(if ($Sid) { $Sid } else { $id })); Sid = $null } }
@@ -1674,7 +1693,7 @@ function Get-RemoveIdentityProblem {
     if (-not $now) {
         $current = ConvertTo-SidAccountName -Sid $Sid
         if (-not $current) { return [PSCustomObject]@{ Problem = (& $orphan $Sid); Sid = $null } }
-        return [PSCustomObject]@{ Problem = "Windows can no longer find $id, though the account of the entry you chose ($Sid) is now called $current (it was renamed), so nothing was changed. Press Refresh and choose it again."; Sid = $null }
+        return [PSCustomObject]@{ Problem = "${lookUp}: $id. The account of the entry you chose ($Sid) is now called $current (it may have been renamed), so nothing was changed. Press Refresh and choose it again."; Sid = $null }
     }
     if ($now -ne $Sid) {
         return [PSCustomObject]@{ Problem = "$id now resolves to a different account than the entry you chose (for example after a domain migration or rename), so nothing was changed. Ask a senior admin. (The entry is $Sid; the name is now $now.)"; Sid = $null }
@@ -2137,15 +2156,17 @@ $script:CopyPermissionsWork = {
 
 # Read only, before any change: where the change would land and whether it is refused
 # (Resolve-ChangeTargetSet: mapped drives, this computer's own names and shares, DFS, D-036 and
-# the high-impact roots for a whole tree). Its lookups (DFS, Win32_Share, NetShareGetInfo, this
+# the high-impact roots for a whole tree, the protected folders for a Copy target). Its lookups (DFS, Win32_Share, NetShareGetInfo, this
 # computer's addresses, reparse points) can wait on the network, so they never run on the
 # window's thread.
 $script:ChangeTargetWork = {
-    param([string[]]$Paths, [hashtable]$DriveMap, [hashtable]$DriveMapSource, [bool]$WholeTree, [string]$FolderDisplayPath, [string]$FolderRealPath, [string]$CorePath)
+    # $RefuseProtected comes after $CorePath so callers that pass the first seven keep working.
+    param([string[]]$Paths, [hashtable]$DriveMap, [hashtable]$DriveMapSource, [bool]$WholeTree, [string]$FolderDisplayPath, [string]$FolderRealPath,
+        [string]$CorePath, [bool]$RefuseProtected = $false)
     try {
         if ($CorePath -and -not (Get-Command -Name Get-ItemOwner -CommandType Function -ErrorAction SilentlyContinue)) { . $CorePath -LoadFunctionsOnly }
         Resolve-ChangeTargetSet -Path $Paths -DriveMap $DriveMap -DriveMapSource $DriveMapSource -WholeTree:$WholeTree `
-            -FolderDisplayPath $FolderDisplayPath -FolderRealPath $FolderRealPath
+            -FolderDisplayPath $FolderDisplayPath -FolderRealPath $FolderRealPath -RefuseProtected:$RefuseProtected
     }
     catch {
         [PSCustomObject]@{ Ok = $false; Targets = @(); Refusal = "Could not work out where the change would land, so nothing was changed: $(Get-InnermostErrorText $_)" }
@@ -2302,11 +2323,10 @@ $script:Themes = @{
     }
 }
 
-# XAML namespace names, with ':' written as the XML character reference &#58;. They are
-# identifiers that only look like web addresses (nothing is fetched from them), and writing
-# them this way keeps the source free of any web-address text, which the no-network test
-# (AC6) checks for. https://learn.microsoft.com/dotnet/desktop/xaml-services/namespaces
-$script:XamlNamespaces = 'xmlns="http&#58;//schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http&#58;//schemas.microsoft.com/winfx/2006/xaml"'
+# The WPF and XAML namespace names. They are identifiers that only look like web addresses:
+# nothing is fetched from them. The no-network test (AC6) exempts exactly these two strings.
+# https://learn.microsoft.com/dotnet/desktop/xaml-services/namespaces
+$script:XamlNamespaces = 'xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"'
 
 $script:StylesXaml = @'
 <FontFamily x:Key="Mono">Cascadia Mono, Consolas</FontFamily>
@@ -2963,7 +2983,8 @@ $res
 
 function Get-PermissionDialogXaml {
     # Add and remove permission (folder or selected files). Remove mode hides the level and lists
-    # only explicit entries (Show-PermissionDialog). Submit is the default button only for Add.
+    # only explicit entries (Show-PermissionDialog). Submit is the default button only for an
+    # Allow add (Set-PermissionSubmitStyle).
     $ns = $script:XamlNamespaces
     $res = Get-AppResourcesXaml
     @"
@@ -4280,60 +4301,70 @@ public static uint GetInfo2(string server, string share, out IntPtr buffer) {
     }
 }
 
-function Get-AppProfilesDirectory {
-    # This computer's folder for user profiles: GetProfilesDirectory ("C:\Users" on Windows 7
-    # and later; the ProfilesDirectory setting can move it to another volume). $null when it
-    # cannot be read. The registry value behind it is not documented on Learn, so the function
-    # is used. Tests replace it.
-    # https://learn.microsoft.com/windows/win32/api/userenv/nf-userenv-getprofilesdirectoryw
-    # https://learn.microsoft.com/windows-hardware/customize/desktop/unattend/microsoft-windows-shell-setup-folderlocations-profilesdirectory
-    try {
-        if (-not ('FolderPermissionManager.AppProfiles' -as [type])) {
-            Add-Type -Namespace FolderPermissionManager -Name AppProfiles -ErrorAction Stop -MemberDefinition @'
-[DllImport("userenv.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-public static extern bool GetProfilesDirectoryW(System.Text.StringBuilder lpProfileDir, ref uint lpcchSize);
-'@
+function Get-ServerSideLinkRefusal {
+    # D-045: a whole-tree change on a share reaches the folder the share is on its server, and the
+    # server follows its own junctions and symbolic links before this computer sees anything, so
+    # Get-ResolvedRootRefusal cannot see them. Each folder of -ServerPath (the share's folder on
+    # the server, \\server\<letter>$\..., Get-ShareTreeRefusal) is read over the administrative
+    # share with Get-AppReparseInfo, from the top of the drive down: one that is a reparse point
+    # (FILE_ATTRIBUTE_REPARSE_POINT 0x400, "A file or directory that has an associated reparse
+    # point, or a file that is a symbolic link") is refused, and so is one that is not there or
+    # cannot be read ("a guard that cannot resolve the path fails closed", destructive-operations
+    # profile). $null when every folder on the way is an ordinary folder.
+    # https://learn.microsoft.com/windows/win32/fileio/file-attribute-constants
+    param([Parameter(Mandatory)][string]$Server, [Parameter(Mandatory)][string]$ServerPath)
+    $next = 'Nothing was changed. Run the tool on the server itself, or ask a senior admin.'
+    if ($ServerPath -notmatch '^(\\\\[^\\]+\\[A-Za-z]\$)((?:\\[^\\]+)+)$') { return $null }
+    $current = $Matches[1]
+    foreach ($name in ($Matches[2].TrimStart('\') -split '\\')) {
+        $current += "\$name"
+        try { $info = Get-AppReparseInfo -Path $current }
+        catch {
+            $why = (Get-InnermostErrorText $_).TrimEnd('.')
+            return "Windows could not check whether $current on $Server is a junction or symbolic link ($why), so it cannot tell where the change would really land. $next"
         }
-        $size = [uint32]1024
-        $sb = New-Object System.Text.StringBuilder -ArgumentList 1024
-        if (-not [FolderPermissionManager.AppProfiles]::GetProfilesDirectoryW($sb, [ref]$size)) { return $null }
-        $sb.ToString()
-    }
-    catch { $null }
-}
-
-function Get-HighImpactRootRefusal {
-    # Why a whole-tree change is refused on a high-impact root ("C:\Users, System Volume
-    # Information and $Recycle.Bin on data volumes", destructive-operations profile), or $null:
-    #   - a folder that holds user profiles: the Users folder at the top of any drive, here
-    #     (<letter>:\Users) and on another computer (\\server\<letter>$\Users), and this
-    #     computer's profiles folder wherever it is (Get-AppProfilesDirectory). Another
-    #     computer's profiles folder cannot be read from here, so one it has moved elsewhere is
-    #     not detected. One profile folder below it (C:\Users\bob) is allowed;
-    #   - anything in System Volume Information or $Recycle.Bin, on any drive.
-    # Text only, apart from reading this computer's profiles folder. Get-ResolvedRootRefusal
-    # applies it to where a path really leads (junctions, symbolic links, 8.3 names).
-    param([Parameter(Mandatory)][string]$Path)
-    $p = ConvertTo-ComparablePath -Path $Path
-    if (-not $p) { return $null }
-    $tail = 'Taking ownership of everything in it cannot easily be undone. Choose the one folder that needs fixing instead.'
-    foreach ($segment in $p.Split('\')) {
-        if ($segment -ieq 'System Volume Information') { return "$Path is in System Volume Information, where Windows keeps restore points and volume data. $tail" }
-        if ($segment -ieq '$Recycle.Bin') { return "$Path is in `$Recycle.Bin, the Recycle Bin of every user of that drive. $tail" }
-    }
-    $profileTail = 'Taking ownership of everything in it changes the owner of every user profile, so users can lose access to their own files, and it cannot easily be undone. Choose the one profile folder that needs fixing instead (for example ...\Users\<name>).'
-    if ($p -match '^\\\\([^\\]+)\\([A-Za-z])\$\\Users$') {
-        return "$Path is the Users folder of drive $($Matches[2].ToUpper()): on $($Matches[1]), where Windows keeps every user profile. $profileTail"
-    }
-    if ($p -match '^([A-Za-z]):\\Users$') {
-        return "$Path is the Users folder of drive $($Matches[1].ToUpper()):, where Windows keeps user profiles. $profileTail"
-    }
-    if ($p -match '^[A-Za-z]:\\') {
-        $profiles = Get-AppProfilesDirectory
-        $c = if ($profiles) { (ConvertTo-ComparablePath -Path $profiles).TrimEnd('\') } else { '' }
-        if ($c -and $p.TrimEnd('\') -ieq $c) { return "$Path is the folder that holds every user profile on this computer ($profiles). $profileTail" }
+        if (-not ($info -and $info.Exists)) {
+            return "$current was not found on $Server, so it could not be checked for junctions and symbolic links, and where the change would really land is not known. $next"
+        }
+        if ($info.IsReparsePoint) {
+            $kind = Format-LinkKindWithArticle -Kind (Get-LinkKindName -Tag $info.Tag)
+            return "$current on $Server is $kind, so the folder may really be somewhere else on that server, where it cannot be checked against the root of a drive, the Windows system folders and the user profiles folder. $next"
+        }
     }
     $null
+}
+
+function Get-CopyTargetRefusal {
+    # D-044 (AC50): why a folder cannot be a Copy permissions target, or $null. -Path is where the
+    # copy really lands (ResolvedPath). Refused: the administrative shares (\\server\X$ itself,
+    # ADMIN$, IPC$, PRINT$), SYSVOL and NETLOGON, the D-036 folders (the root of a drive, the
+    # Windows folders, here and through \\server\X$; Get-TreeOwnershipRefusal) and the high-impact
+    # roots (a Users folder or this computer's profiles folder, System Volume Information,
+    # $Recycle.Bin; Get-HighImpactRootRefusal). A folder inside \\server\X$ and the root of an
+    # ordinary share are allowed (the root gets the destructive confirm, AC49). Text only, apart
+    # from reading this computer's profiles folder.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Path)
+    $p = ConvertTo-ComparablePath -Path $Path
+    if (-not $p) { return $null }
+    $what = $null
+    if ($p -match '^\\\\([^\\]+)\\([^\\]+)(?:\\(.*))?$') {
+        $server = $Matches[1]; $share = $Matches[2]; $rest = "$($Matches[3])"
+        if ($share -ieq 'IPC$') { $what = "the IPC`$ share of $server, which Windows uses for remote administration; it is not a folder" }
+        elseif ($share -ieq 'ADMIN$') { $what = "on the ADMIN`$ administrative share of $server, which is used to administer Windows remotely" }
+        elseif ($share -ieq 'PRINT$') { $what = "on the PRINT`$ share of $server, which holds the printer drivers it hands out" }
+        elseif ($share -ieq 'SYSVOL' -or $share -ieq 'NETLOGON') { $what = "on the $($share.ToUpperInvariant()) share of $server, which domain controllers use for Group Policy and logon scripts" }
+        elseif ($share -match '^[A-Za-z]\$$' -and -not $rest) { $what = "the $($share.ToUpperInvariant()) administrative share of $server, the root of a whole drive" }
+    }
+    if (-not $what) {
+        if ((Get-TargetRootKind -Path $p) -eq 'DriveRoot') { $what = 'the root of a whole drive' }
+        elseif (Get-TreeOwnershipRefusal -Path $p) { $what = 'in a Windows system folder' }
+        elseif (Get-HighImpactRootRefusal -Path $p) {
+            $what = if ($p -match '(?i)(^|\\)(System Volume Information|\$Recycle\.Bin)(\\|$)') { 'in System Volume Information or $Recycle.Bin, which Windows keeps for itself' }
+            else { 'a folder that holds every user profile' }
+        }
+    }
+    if (-not $what) { return $null }
+    "Permissions can't be copied to ${Path}: it is $what, and adding permissions there could let people into it who should not have access. Choose the folder that needs these permissions instead. Nothing was changed."
 }
 
 function Get-ResolvedRootRefusal {
@@ -4348,7 +4379,7 @@ function Get-ResolvedRootRefusal {
     param([Parameter(Mandatory)][string]$Path)
     $final = Get-Win32PathName -Path $Path -Kind Final
     if (-not $final) {
-        return "Windows could not tell where $Path really is (it may have been moved or deleted, or this account cannot open it), so it cannot be checked against the root of a drive, the Windows system folders and the user profiles folder. Nothing was changed. Press Refresh and try again, or ask a senior admin."
+        return "Windows could not tell where $Path really is (it may have been moved or deleted, or this account cannot open it), so it cannot be checked against the root of a drive, the Windows system folders and the user profiles folder. Nothing was changed. If the folder is on a server, run the tool on the server itself, or ask a senior admin."
     }
     $long = Get-Win32PathName -Path $Path -Kind Long
     $given = ConvertTo-ComparablePath -Path $Path
@@ -4386,9 +4417,10 @@ function Get-ShareTreeRefusal {
     # A whole-tree change on \\server\share\... (not an administrative share): the share's folder
     # on the server (Get-RemoteShareLocalPath), checked as the server's own path
     # \\server\<letter>$\..., so D-036 (the root of a drive, the Windows folders) and the
-    # high-impact roots see where it really is. A share whose folder cannot be found out is
-    # refused: "a guard that cannot resolve the path fails closed" (destructive-operations
-    # profile). $null when it is allowed.
+    # high-impact roots see where it really is, and every folder on the way there is checked for
+    # a junction or symbolic link on the server (Get-ServerSideLinkRefusal, D-045). A share whose
+    # folder cannot be found out is refused: "a guard that cannot resolve the path fails closed"
+    # (destructive-operations profile). $null when it is allowed.
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Server, [Parameter(Mandatory)][string]$Share, [string]$Rest)
     $instead = "Open it by its administrative share path instead (for example \\$Server\D`$\...), or ask a senior admin."
     try { $local = Get-RemoteShareLocalPath -Server $Server -Share $Share }
@@ -4403,6 +4435,8 @@ function Get-ShareTreeRefusal {
     if ($Rest) { $serverPath += "\$Rest" }
     $refusal = Get-TreeOwnershipRefusal -Path $serverPath
     if (-not $refusal) { $refusal = Get-HighImpactRootRefusal -Path $serverPath }
+    # D-045: a junction or symbolic link on the server, on the way to that folder.
+    if (-not $refusal) { $refusal = Get-ServerSideLinkRefusal -Server $Server -ServerPath $serverPath }
     if ($refusal) { return "$Path is $local on $Server ($serverPath). $refusal" }
     $null
 }
@@ -4439,13 +4473,15 @@ function Get-ChangeTarget {
           Get-TreeOwnershipRefusal: drive roots, X$ roots, ADMIN$, SYSVOL, NETLOGON, PRINT$,
           Windows folders) plus IPC$, which is not a folder at all; the high-impact roots
           (Get-HighImpactRootRefusal); for an ordinary share on a server, the same checks on
-          the folder it is on that server (Get-ShareTreeRefusal); then both again on where
-          Windows really reaches the path, through junctions, symbolic links and 8.3 names
+          the folder it is on that server, and no junction or symbolic link on the way there
+          on the server (Get-ShareTreeRefusal, D-045); then both again on where Windows really
+          reaches the path, through junctions, symbolic links and 8.3 names
           (Get-ResolvedRootRefusal). That last check reads the disk and needs the folder to
           exist.
+        - With -RefuseProtected (a Copy permissions target, D-044), on the resolved path: the
+          administrative shares, SYSVOL, NETLOGON, the D-036 folders and the high-impact roots
+          (Get-CopyTargetRefusal).
     #>
-    # -RefuseProtected (SQ-018 AC50, D-044; stub, not built yet): for a Copy permissions target,
-    # refuse admin shares, SYSVOL, NETLOGON, D-036 folders and the high-impact roots.
     param([Parameter(Mandatory)][string]$Path, [hashtable]$DriveMap, [hashtable]$DriveMapSource, [switch]$WholeTree, [switch]$RefuseProtected)
     if (-not $PSBoundParameters.ContainsKey('DriveMap')) { $DriveMap = $script:MappedDrives }
     if (-not $PSBoundParameters.ContainsKey('DriveMapSource')) { $DriveMapSource = $script:MappedDriveSources }
@@ -4525,6 +4561,13 @@ function Get-ChangeTarget {
         }
     }
 
+    if ($RefuseProtected) {
+        $refusal = Get-CopyTargetRefusal -Path $resolved
+        if ($refusal) {
+            if ($resolved -ne $display) { $refusal = "$display is $resolved. $refusal" }
+            return (& $refuse $refusal $resolved $local)
+        }
+    }
     if ($WholeTree) {
         $refusal = $null
         if ($resolved -match '^\\\\([^\\]+)\\IPC\$(\\|$)') {
@@ -4560,7 +4603,7 @@ function Resolve-ChangeTargetSet {
         [switch]$WholeTree,
         [string]$FolderDisplayPath,
         [string]$FolderRealPath,
-        # SQ-018 AC50 (stub, not built yet): passed on to Get-ChangeTarget.
+        # Copy permissions targets (D-044): passed on to Get-ChangeTarget.
         [switch]$RefuseProtected
     )
     $paths = @($Path | Where-Object { "$_".Trim() })
@@ -4581,7 +4624,7 @@ function Resolve-ChangeTargetSet {
                         -IsRemembered $folder.IsRemembered -IsLocal $folder.IsLocal))
             continue
         }
-        $t = Get-ChangeTarget -Path $p -DriveMap $DriveMap -DriveMapSource $DriveMapSource -WholeTree:$WholeTree
+        $t = Get-ChangeTarget -Path $p -DriveMap $DriveMap -DriveMapSource $DriveMapSource -WholeTree:$WholeTree -RefuseProtected:$RefuseProtected
         if ($t.Ok) { $targets.Add($t) } else { $refusals.Add("$($t.Refusal)") }
     }
     if ($refusals.Count -gt 0) {
@@ -4658,7 +4701,9 @@ function Get-ConfirmSpec {
     # What the confirm dialog says for a change: a title, a body that names every path (and the
     # real location behind a mapped drive or DFS path) and how many items, a button label with a
     # verb, and whether it is destructive (danger style). A target on a remembered mapping adds
-    # a warning.
+    # a warning. Add and Copy are destructive (D-044) for a Deny add, a copy of a folder with
+    # explicit Deny entries (or whose entries could not be checked), and a target that is the
+    # root of a drive or share (Get-TargetRootKind).
     param(
         [Parameter(Mandatory)][ValidateSet('AddPermission', 'RemovePermission', 'TakeOwnershipFolder', 'TakeOwnershipFiles', 'TakeOwnershipTree', 'CopyPermissions')][string]$Action,
         [Parameter(Mandatory)][object[]]$Targets,
@@ -4666,21 +4711,29 @@ function Get-ConfirmSpec {
         [string]$Detail,
         # Copy permissions: the folder copied from.
         $Source,
-        # SQ-018 AC47 (stub, not built yet): the type of the permission being added; Deny is destructive.
+        # Add permission: the type of the permission being added; Deny is destructive (AC47).
         [ValidateSet('Allow', 'Deny')][string]$Type = 'Allow',
-        # SQ-018 AC48 (stub, not built yet): the source folder's explicit Deny entries, one text per entry.
-        [string[]]$DenyEntries = @()
+        # Copy permissions: the source folder's explicit Deny entries, one text per entry (AC48).
+        [string[]]$DenyEntries = @(),
+        # Copy permissions: the source folder's entries could not be checked for Deny entries.
+        [switch]$DenyUnchecked
     )
     $n = @($Targets).Count
     $where = Get-ConfirmTargetText -Targets $Targets
     $backup = 'The current permissions are saved to a backup first.'
+    $denyNote = 'A Deny blocks access even where another permission allows it, and it reaches every subfolder and file that inherits from there.'
+    $rootNote = if ($Action -eq 'AddPermission' -or $Action -eq 'CopyPermissions') { Get-ConfirmRootText -Targets $Targets } else { $null }
     switch ($Action) {
         'AddPermission' {
-            $title = 'Add a permission?'
+            $title = if ($Type -eq 'Deny') { 'Add a Deny permission?' } else { 'Add a permission?' }
             $what = if ($n -eq 1) { 'to:' } else { "to these $(Format-ItemCount $n 'item' 'items'):" }
-            $body = "Add this permission:`n  $Detail`n`n$what`n$where`n`n$backup"
-            $label = if ($n -eq 1) { 'Add permission' } else { "Add permission to $(Format-ItemCount $n 'item' 'items')" }
-            $destructive = $false
+            $body = "Add this permission:`n  $Detail`n`n$what`n$where"
+            if ($Type -eq 'Deny') { $body += "`n`n$denyNote" }
+            if ($rootNote) { $body += "`n`n$rootNote" }
+            $body += "`n`n$backup"
+            $verb = if ($Type -eq 'Deny') { 'Add Deny permission' } else { 'Add permission' }
+            $label = if ($n -eq 1) { $verb } else { "$verb to $(Format-ItemCount $n 'item' 'items')" }
+            $destructive = ($Type -eq 'Deny') -or [bool]$rootNote
         }
         'RemovePermission' {
             $title = 'Remove a permission?'
@@ -4741,10 +4794,19 @@ function Get-ConfirmSpec {
             $title = 'Copy permissions?'
             $from = "  $Detail"
             if ($Source -and $Source.ResolvedPath -and $Source.ResolvedPath -ne $Source.DisplayPath) { $from += "`n    real location: $($Source.ResolvedPath)" }
-            $body = "Add the permissions set directly on:`n$from`n`nto $(if ($n -eq 1) { 'this folder' } else { "these $folders" }):`n$where`n`n" +
-            'Nothing is removed. Subfolders that inherit permissions get them too; subfolders that block inheritance are not changed. The current permissions of each folder are saved to a backup first.'
+            $body = "Add the permissions set directly on:`n$from`n`nto $(if ($n -eq 1) { 'this folder' } else { "these $folders" }):`n$where"
+            $denies = @($DenyEntries | Where-Object { "$_".Trim() })
+            if ($denies.Count -gt 0) {
+                $body += "`n`nThe folder you copy from has $(Format-ItemCount $denies.Count 'Deny permission' 'Deny permissions') of its own, and they are copied too:`n" +
+                (@($denies | ForEach-Object { "  $_" }) -join "`n") + "`n$denyNote"
+            }
+            elseif ($DenyUnchecked) {
+                $body += "`n`nThe permissions of the folder you copy from are not loaded in this window, so it could not be checked for Deny permissions of its own. Any it has are copied too. $denyNote"
+            }
+            if ($rootNote) { $body += "`n`n$rootNote" }
+            $body += "`n`n" + 'Nothing is removed. Subfolders that inherit permissions get them too; subfolders that block inheritance are not changed. The current permissions of each folder are saved to a backup first.'
             $label = "Copy permissions to $folders"
-            $destructive = $false
+            $destructive = ($denies.Count -gt 0) -or [bool]$DenyUnchecked -or [bool]$rootNote
         }
     }
     $rememberedTargets = @(@($Targets) + @($Source) | Where-Object { $_ -and $_.IsRemembered })
@@ -4755,16 +4817,72 @@ function Get-ConfirmSpec {
     [PSCustomObject]@{ Title = $title; Body = $body; ActionLabel = $label; IsDestructive = $destructive }
 }
 function Get-TargetRootKind {
-    # SQ-018 AC49 (stub, not built yet): 'DriveRoot' (X:\), 'AdminShareRoot' (\\server\X$) or
-    # 'ShareRoot' (\\server\share) for a resolved path that is exactly one of those, else $null.
+    # Whether a path is the very top of a drive or a share (D-044, AC49): 'DriveRoot' (X:\, or a
+    # volume GUID path's root), 'AdminShareRoot' (\\server\X$) or 'ShareRoot' (\\server\share),
+    # else $null. A permission set there reaches everything on the drive or share that inherits.
+    # Text only, in the spelling ConvertTo-ComparablePath gives (\\?\ dropped, trailing \ too).
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Path)
-    throw 'Not implemented: Get-TargetRootKind (SQ-018 AC49).'
+    $p = ConvertTo-ComparablePath -Path $Path
+    if (-not $p) { return $null }
+    if ($p -match '^[A-Za-z]:\\$' -or $p -match '^Volume\{[^\\]*\}$') { return 'DriveRoot' }
+    if ($p -match '^\\\\[^\\]+\\([^\\]+)$') {
+        if ($Matches[1] -match '^[A-Za-z]\$$') { return 'AdminShareRoot' }
+        return 'ShareRoot'
+    }
+    $null
+}
+
+function Get-ConfirmRootText {
+    # The confirm's warning for targets that are the root of a drive or share (AC49), naming each
+    # one's real location; $null when there is none. The typed path is checked too, so a mapped
+    # letter's root (H:\) is caught whatever it points at.
+    param([Parameter(Mandatory)][object[]]$Targets)
+    $lines = [System.Collections.Generic.List[string]]::new()
+    foreach ($t in @($Targets | Where-Object { $_ })) {
+        $kind = Get-TargetRootKind -Path "$($t.ResolvedPath)"
+        if (-not $kind) { $kind = Get-TargetRootKind -Path "$($t.DisplayPath)" }
+        if (-not $kind) { continue }
+        $what = switch ($kind) {
+            'DriveRoot' { 'the root of a whole drive' }
+            'AdminShareRoot' { 'the root of a whole drive (an administrative share)' }
+            default { 'the top of a share' }
+        }
+        $real = if ($t.ResolvedPath) { "$($t.ResolvedPath)" } else { "$($t.DisplayPath)" }
+        $lines.Add("  $real is $what")
+    }
+    if ($lines.Count -eq 0) { return $null }
+    "Warning: a permission set at the top of a drive or share reaches every folder and file on it that inherits permissions.`n" + ($lines -join "`n")
+}
+
+function Get-CopySourceDenyEntries {
+    # The explicit (not inherited) Deny entries of the folder a copy reads from, as the window
+    # loaded them for the chosen folder ($script:ViewState.FolderPermissions, the rows the copy
+    # dialog's note uses): Only the folder's own entries are copied (Copy-FolderPermission), so
+    # inherited ones are left out. Checked $false when those rows are not loaded, could not be
+    # read, or are for another folder than -Source: the caller then confirms as if it had some.
+    param([Parameter(Mandatory)]$Source)
+    $v = $script:ViewState.FolderPermissions
+    $known = $v -and $v.Ok -and $script:Current -and "$($v.Path)" -eq "$($script:Current.RealPath)" -and
+    "$($script:Current.DisplayPath)" -eq "$($Source.DisplayPath)"
+    if (-not $known) { return [PSCustomObject]@{ Checked = $false; Entries = @() } }
+    $entries = @($v.Rows | Where-Object { -not $_.IsInherited -and "$($_.Type)" -eq 'Deny' } | ForEach-Object { "$($_.Identity) (Deny, $($_.Rights))" })
+    [PSCustomObject]@{ Checked = $true; Entries = $entries }
+}
+
+function Test-TargetResolvedElsewhere {
+    # $true when a change target really lands somewhere other than the typed path (a mapped drive,
+    # DFS, this computer's own share or admin share), compared in one spelling (AC51).
+    param([Parameter(Mandatory)]$Target)
+    if (-not $Target.ResolvedPath) { return $false }
+    (ConvertTo-ComparablePath -Path "$($Target.ResolvedPath)") -ine (ConvertTo-ComparablePath -Path "$($Target.DisplayPath)")
 }
 
 function Set-PermissionSubmitStyle {
-    # SQ-018 AC47 (stub, not built yet): the add/remove dialog's submit button. Remove, and Add
-    # with type Deny: danger style and never the default button; Add with Allow: normal style,
-    # default button.
+    # The add/remove dialog's submit button (AC47, D-044). Remove, and Add with type Deny: the
+    # danger style and never the default button, so Enter does not submit them. Add with Allow:
+    # the normal style and the default button. Show-PermissionDialog calls it when the dialog
+    # opens and whenever the Allow/Deny choice changes.
+    # https://learn.microsoft.com/dotnet/api/system.windows.controls.button.isdefault
     param(
         [Parameter(Mandatory)][ValidateSet('Add', 'Remove')][string]$Mode,
         [Parameter(Mandatory)][ValidateSet('Allow', 'Deny')][string]$Type,
@@ -4772,7 +4890,9 @@ function Set-PermissionSubmitStyle {
         $DangerStyle,
         $NormalStyle
     )
-    throw 'Not implemented: Set-PermissionSubmitStyle (SQ-018 AC47).'
+    $danger = $Mode -eq 'Remove' -or $Type -eq 'Deny'
+    $Button.Style = if ($danger) { $DangerStyle } else { $NormalStyle }
+    $Button.IsDefault = -not $danger
 }
 
 function Set-ConfirmDialog {
@@ -5054,9 +5174,11 @@ function Test-NoOtherChangePending {
 }
 
 function Invoke-AddPermission {
-    # Adds a permission to the chosen folder or the selected files. The add dialog is the
-    # confirmation (as in the browser version), unless a target is on a remembered mapping:
-    # then the confirm dialog warns first. -Targets: where the change lands, worked out in the
+    # Adds a permission to the chosen folder or the selected files. For a plain Allow on ordinary
+    # folders the add dialog is the confirmation (as in the browser version). The confirm dialog
+    # opens first, with the real locations, for a Deny (AC47) or a target that is the root of a
+    # drive or share (AC49), both destructive (D-044), and for a target on a remembered mapping.
+    # -Targets: where the change lands, worked out in the
     # background before the dialog opened (Open-AddPermission), with -Label and -RefreshState
     # fixed at the click. Without -Targets they are worked out here, on this thread: only the
     # tests call it that way.
@@ -5080,8 +5202,9 @@ function Invoke-AddPermission {
     if (-not $Label) { $Label = Get-ChangeLabel -Scope $Scope -Targets $Targets }
     if (-not $RefreshState) { $RefreshState = Get-ScopeRefreshState -Scope $Scope -Targets $Targets }
     $detail = "$Type $Rights for $Identity"
-    if (@($Targets | Where-Object { $_.IsRemembered }).Count -gt 0) {
-        if (-not (Show-ConfirmDialog -Spec (Get-ConfirmSpec -Action AddPermission -Targets $Targets -Detail $detail))) {
+    $remembered = @($Targets | Where-Object { $_.IsRemembered }).Count -gt 0
+    if ($remembered -or $Type -eq 'Deny' -or (Get-ConfirmRootText -Targets $Targets)) {
+        if (-not (Show-ConfirmDialog -Spec (Get-ConfirmSpec -Action AddPermission -Targets $Targets -Detail $detail -Type $Type))) {
             Set-Status -Text 'Cancelled: nothing was changed.'
             return
         }
@@ -5231,11 +5354,17 @@ function ConvertTo-TargetPathList {
 }
 
 function Invoke-CopyPermissions {
-    # Copies the chosen folder's own permissions to each folder listed (adds only, D-031). The
-    # copy dialog is the confirmation, unless a folder is on a remembered mapping. -Source and
-    # -Targets: where the change lands, worked out in the background (Open-CopyPermissions: the
-    # source before the dialog, the typed folders after it); the status line names their real
-    # locations. Without them they are worked out here from -TargetText: only the tests do that.
+    # Copies the chosen folder's own permissions to each folder listed (adds only, D-031).
+    # Refused, before anything is asked, when a target is an administrative share, SYSVOL,
+    # NETLOGON, a D-036 folder or a high-impact root (AC50, Get-CopyTargetRefusal). The copy
+    # dialog is the confirmation only when every target resolves to itself and nothing below
+    # applies; otherwise the confirm dialog opens first with the real locations (D-044): the
+    # source has explicit Deny entries or they could not be checked (AC48), a target is the root
+    # of a drive or share (AC49), a target really lands somewhere other than what was typed
+    # (AC51), or a folder is on a remembered mapping. -Source and -Targets: where the change
+    # lands, worked out in the background (Open-CopyPermissions: the source before the dialog,
+    # the typed folders after it); the status line names their real locations. Without them
+    # they are worked out here from -TargetText: only the tests do that.
     param([AllowNull()][AllowEmptyString()][string]$TargetText, $Source, [object[]]$Targets)
     if (-not $PSBoundParameters.ContainsKey('Targets')) {
         $lines = ConvertTo-TargetPathList -Text $TargetText
@@ -5243,13 +5372,24 @@ function Invoke-CopyPermissions {
         if (-not (Test-NoOtherChangePending)) { return }
         $Source = Get-CurrentChangeTarget
         if (-not $Source) { return }
-        $set = Resolve-ChangeTargetSet -Path $lines -DriveMap $script:MappedDrives -DriveMapSource $script:MappedDriveSources
+        $set = Resolve-ChangeTargetSet -Path $lines -DriveMap $script:MappedDrives -DriveMapSource $script:MappedDriveSources -RefuseProtected
         if (-not $set.Ok) { Show-ChangeRefusal -Text $set.Refusal; return }
         $Targets = @($set.Targets)
     }
     if (@($Targets).Count -eq 0) { Set-Status -Kind Warning -Text $script:NoTargetPathText; return }
-    if (@(@($Source) + @($Targets) | Where-Object { $_.IsRemembered }).Count -gt 0) {
-        if (-not (Show-ConfirmDialog -Spec (Get-ConfirmSpec -Action CopyPermissions -Targets $Targets -Detail $Source.DisplayPath -Source $Source))) {
+    # The lookup refused these already; checked again on what is about to be changed (text only).
+    $refused = @(foreach ($t in @($Targets)) {
+            $r = Get-CopyTargetRefusal -Path "$($t.ResolvedPath)"
+            if ($r) { if ($t.ResolvedPath -ne $t.DisplayPath) { "$($t.DisplayPath) is $($t.ResolvedPath). $r" } else { $r } }
+        })
+    if ($refused.Count -gt 0) { Show-ChangeRefusal -Text (@($refused | Select-Object -First 3) -join "`n"); return }
+    $deny = Get-CopySourceDenyEntries -Source $Source
+    $remembered = @(@($Source) + @($Targets) | Where-Object { $_.IsRemembered }).Count -gt 0
+    $elsewhere = @($Targets | Where-Object { Test-TargetResolvedElsewhere -Target $_ }).Count -gt 0
+    if ($remembered -or $elsewhere -or -not $deny.Checked -or @($deny.Entries).Count -gt 0 -or (Get-ConfirmRootText -Targets $Targets)) {
+        $spec = Get-ConfirmSpec -Action CopyPermissions -Targets $Targets -Detail $Source.DisplayPath -Source $Source `
+            -DenyEntries @($deny.Entries) -DenyUnchecked:(-not $deny.Checked)
+        if (-not (Show-ConfirmDialog -Spec $spec)) {
             Set-Status -Text 'Cancelled: nothing was changed.'
             return
         }
@@ -5364,7 +5504,7 @@ function Set-RemoveTypeCombo {
 function Show-PermissionDialog {
     # The add or remove dialog. Returns Identity, Rights (a FileSystemRights name), Type and Sid,
     # or $null when cancelled. Add: a typed user or group, checked before the dialog closes;
-    # Enter submits. Remove: one of -Choices (Get-RemoveIdentityChoices: explicit entries, by
+    # Enter submits an Allow, never a Deny (Set-PermissionSubmitStyle). Remove: one of -Choices (Get-RemoveIdentityChoices: explicit entries, by
     # SID), with only the types it has offered and the level not asked (every explicit entry of
     # the type goes); Remove is never the default button.
     param(
@@ -5405,6 +5545,17 @@ function Show-PermissionDialog {
     }
     else {
         $dlg.FindName('PermIdentityBox').Add_TextChanged({ param($s, $e) $w = [System.Windows.Window]::GetWindow($s); if ($w) { $w.FindName('PermDialogError').Visibility = 'Collapsed' } })
+        # A Deny is destructive (D-044): danger style, and Enter no longer submits it.
+        $typeCombo = $dlg.FindName('PermTypeCombo')
+        $type = if ("$($typeCombo.SelectedItem.Tag)" -eq 'Deny') { 'Deny' } else { 'Allow' }
+        Set-PermissionSubmitStyle -Mode Add -Type $type -Button $submit -DangerStyle $dlg.Resources['DangerBtn'] -NormalStyle $dlg.Resources['PrimaryBtn']
+        $typeCombo.Add_SelectionChanged({
+                param($s, $e)
+                $w = [System.Windows.Window]::GetWindow($s)
+                if (-not $w) { return }
+                $chosen = if ("$($s.SelectedItem.Tag)" -eq 'Deny') { 'Deny' } else { 'Allow' }
+                Set-PermissionSubmitStyle -Mode Add -Type $chosen -Button $w.FindName('PermSubmitBtn') -DangerStyle $w.Resources['DangerBtn'] -NormalStyle $w.Resources['PrimaryBtn']
+            })
     }
     $submit.Add_Click({
             param($s, $e)
@@ -5539,22 +5690,26 @@ function Start-ChangeLookup {
     # -OnResolved ($targets, $State) runs on the window's thread to open the dialog or the
     # confirm; a refusal or a failed lookup is shown instead and nothing goes ahead. With
     # -Request (Get-ChangeRequest), a result that comes back after the tech moved to another
-    # folder is dropped (Test-ChangeRequestCurrent).
+    # folder is dropped (Test-ChangeRequestCurrent). -RefuseProtected: the paths are Copy
+    # permissions targets (Get-CopyTargetRefusal). -OnRefused ($State) runs after a refusal or a
+    # failed lookup has been shown (the copy dialog opens again with what was typed).
     param(
         [Parameter(Mandatory)][string[]]$Paths,
         [Parameter(Mandatory)][string]$Label,
         [switch]$WholeTree,
+        [switch]$RefuseProtected,
         [string]$FolderDisplayPath,
         [string]$FolderRealPath,
         [hashtable]$Request,
         [Parameter(Mandatory)][scriptblock]$OnResolved,
+        [scriptblock]$OnRefused,
         $State
     )
     $verb = if (@($Paths).Count -gt 1) { 'are' } else { 'is' }
     Set-Status -Text "Checking where $Label really $verb. Nothing has been changed yet."
     Start-ChangePrepRead -Action 'Checking where' -Path "$Label really $verb" -Work $script:ChangeTargetWork `
-        -ArgumentList @([string[]]$Paths, $script:MappedDrives, $script:MappedDriveSources, [bool]$WholeTree, $FolderDisplayPath, $FolderRealPath, $script:CorePath) `
-        -State @{ OnResolved = $OnResolved; State = $State; Label = $Label; Verb = $verb; Request = $Request } -OnDone {
+        -ArgumentList @([string[]]$Paths, $script:MappedDrives, $script:MappedDriveSources, [bool]$WholeTree, $FolderDisplayPath, $FolderRealPath, $script:CorePath, [bool]$RefuseProtected) `
+        -State @{ OnResolved = $OnResolved; OnRefused = $OnRefused; State = $State; Label = $Label; Verb = $verb; Request = $Request } -OnDone {
         param($result, $s)
         $stale = if ($s.Request) { Get-ChangeRequestStaleReason -Request $s.Request } else { $null }
         if ($stale -eq 'Files') {
@@ -5572,6 +5727,7 @@ function Start-ChangeLookup {
                 "Could not check where $($s.Label) really $($s.Verb), so nothing was changed.$why Press Refresh and try again."
             }
             Show-ChangeRefusal -Text $text
+            if ($s.OnRefused) { & $s.OnRefused $s.State }
             return
         }
         & $s.OnResolved @($result.Targets) $s.State
@@ -5580,7 +5736,8 @@ function Start-ChangeLookup {
 
 function Open-AddPermission {
     # Add Permission: where it lands is looked up in the background first, then the dialog
-    # shows the real location; its submit is the confirmation.
+    # shows the real location; its submit is the confirmation for a plain Allow on ordinary
+    # folders (Invoke-AddPermission asks again for the rest).
     param([Parameter(Mandatory)][ValidateSet('Folder', 'Files')][string]$Scope)
     if (-not (Test-ReadyForChange -Scope $Scope)) { return }
     $request = Get-ChangeRequest -Scope $Scope
@@ -5671,12 +5828,13 @@ function Open-TakeOwnership {
 
 function Show-CopyPermissionsDialog {
     # The copy dialog, for -Source (looked up before it opened). Returns the typed text, or
-    # $null when cancelled. Blank input is caught before the dialog closes.
-    # -TypedText (SQ-018 AC53, stub, not built yet): the list the tech typed last time, put back
-    # in the box when the dialog opens again after a refused target.
+    # $null when cancelled. Blank input is caught before the dialog closes. -TypedText: the list
+    # the tech typed last time, put back in the box when the dialog opens again after a typed
+    # folder was refused (Open-CopyTargets), so it does not have to be typed again.
     param([Parameter(Mandatory)]$Source, [AllowNull()][AllowEmptyString()][string]$TypedText)
     $dlg = New-AppDialog -Xaml (Get-CopyPermissionsDialogXaml)
     $dlg.FindName('CopySourceText').Text = Get-CopyDialogSourceText -Source $Source
+    if ($TypedText) { $dlg.FindName('CopyTargetsBox').Text = $TypedText }
     try { [void](Enable-LiveRegion -Element $dlg.FindName('CopyError') -Setting Assertive) } catch { }
     # Only the folder's own permissions are copied, so only its own Deny entries are copied.
     $note = $dlg.FindName('CopyDenyNote')
@@ -5688,7 +5846,7 @@ function Show-CopyPermissionsDialog {
     else {
         $denies = @($v.Rows | Where-Object { -not $_.IsInherited -and $_.Type -eq 'Deny' })
         if ($denies.Count -gt 0) {
-            $note.Text = "This folder has $($denies.Count) Deny permission(s) of its own ($(@($denies | ForEach-Object { $_.Identity }) -join ', ')). They are copied too, and a Deny blocks access even where another permission allows it."
+            $note.Text = "This folder has $($denies.Count) Deny permission(s) of its own ($(@($denies | ForEach-Object { $_.Identity }) -join ', ')). They are copied too, and a Deny blocks access even where another permission allows it. You are asked to confirm before anything is copied."
             $note.Visibility = 'Visible'
         }
     }
@@ -5711,22 +5869,34 @@ function Show-CopyPermissionsDialog {
 
 function Open-CopyPermissions {
     # Copy Permissions To...: the source is looked up in the background first (the dialog shows
-    # its real location), then the typed folders after the dialog, then the change.
+    # its real location), then the typed folders after the dialog (Open-CopyTargets), then the
+    # change.
     if (-not (Test-ReadyForChange -Scope Folder)) { return }
     $request = Get-ChangeRequest -Scope Folder
     if (-not (Enter-ChangePending -Action 'Copy Permissions' -Path $request.Label)) { return }
     [void](Start-ChangeLookup -Paths $request.Paths -Label $request.Label -Request $request -State @{ Request = $request } -OnResolved {
             param($targets, $s)
-            $source = @($targets)[0]
-            $text = Show-CopyPermissionsDialog -Source $source
-            if ($null -eq $text) { Set-Status -Text 'Cancelled: nothing was changed.'; return }
-            $lines = ConvertTo-TargetPathList -Text $text
-            if ($lines.Count -eq 0) { Set-Status -Kind Warning -Text $script:NoTargetPathText; return }
-            $label = if ($lines.Count -eq 1) { $lines[0] } else { "the $($lines.Count) folders you listed" }
-            [void](Start-ChangeLookup -Paths $lines -Label $label -State @{ Source = $source } -OnResolved {
-                    param($copyTargets, $s2)
-                    Invoke-CopyPermissions -Source $s2.Source -Targets $copyTargets
-                })
+            Open-CopyTargets -Source @($targets)[0]
+        })
+}
+
+function Open-CopyTargets {
+    # The copy dialog for -Source, then the typed folders looked up in the background, the
+    # protected ones refused (-RefuseProtected, AC50). When one is refused, or the lookup fails,
+    # the reason is shown and the dialog opens again with what was typed (-TypedText, AC53), still
+    # the same pending change; Cancel ends it.
+    param([Parameter(Mandatory)]$Source, [AllowNull()][AllowEmptyString()][string]$TypedText)
+    $text = Show-CopyPermissionsDialog -Source $Source -TypedText $TypedText
+    if ($null -eq $text) { Set-Status -Text 'Cancelled: nothing was changed.'; return }
+    $lines = ConvertTo-TargetPathList -Text $text
+    if ($lines.Count -eq 0) { Set-Status -Kind Warning -Text $script:NoTargetPathText; return }
+    $label = if ($lines.Count -eq 1) { $lines[0] } else { "the $($lines.Count) folders you listed" }
+    [void](Start-ChangeLookup -Paths $lines -Label $label -RefuseProtected -State @{ Source = $Source; Text = $text } -OnResolved {
+            param($copyTargets, $s2)
+            Invoke-CopyPermissions -Source $s2.Source -Targets $copyTargets
+        } -OnRefused {
+            param($s2)
+            Open-CopyTargets -Source $s2.Source -TypedText $s2.Text
         })
 }
 #endregion
