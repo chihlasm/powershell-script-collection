@@ -15,6 +15,7 @@ handed out, so it always matches this repository.
 | Folder | What it does |
 |---|---|
 | [ServiceDesk-Toolkit](ServiceDesk-Toolkit/) | Builds the service desk bundle and its START HERE page |
+| [TicketNote](TicketNote/) | Joins every quick check's ticket note for one ticket into a single note to paste, and holds the shared note kit (`CaseKit.ps1`) |
 
 ### Active Directory and Group Policy
 
@@ -31,13 +32,14 @@ handed out, so it always matches this repository.
 | [DC-Diagnostics](DC-Diagnostics/) | Run on a DC: health and events lined up against an outage window |
 | [DHCP-Audit](DHCP-Audit/) | DHCP failover health across every authorized DHCP server |
 | [Search-DNSRecords](Search-DNSRecords/) | Browser GUI to search and audit DNS records |
-| [LocalAdminManager](LocalAdminManager/) | Add or remove domain users/groups in local Administrators |
+| [LocalAdminManager](LocalAdminManager/) | **Changes local Administrators.** Add or remove a domain user/group, locally or over WinRM; every attempt logged with before/after members |
 | [M365-SyncedUserFixes](M365-SyncedUserFixes/) | **Changes AD.** Block Microsoft 365 sign-in or hide someone from the address book when the account is synced from AD, and build the Entra Connect rules both need |
 
 ### Microsoft Entra ID and Microsoft 365
 
 | Folder | What it does |
 |---|---|
+| [M365-UserQuickCheck](M365-UserQuickCheck/) | Can this user sign in to Microsoft 365? Plain-English answer with the sign-in error, licence, MFA and risk, read-only |
 | [Get-EntraPasswordPolicy](Get-EntraPasswordPolicy/) | Tenant password policy, smart lockout and per-user expiry |
 | [Get-M365SecurityEvidence](Get-M365SecurityEvidence/) | MFA, password policy and privileged-account evidence for audits |
 | [Entra-DeviceActivityTimeline](Entra-DeviceActivityTimeline/) | When was this Entra-joined device on, asleep, locked and signed in to? |
@@ -46,7 +48,7 @@ handed out, so it always matches this repository.
 
 | Folder | What it does |
 |---|---|
-| [Citrix-FSLogix-Triage](Citrix-FSLogix-Triage/) | Profile won't load? Plain-English FSLogix check of one session host, with next steps |
+| [Citrix-FSLogix-Triage](Citrix-FSLogix-Triage/) | Temporary profile? Why one user got it (lock holder, FSLogix log, service, settings) with one next step, plus a plain-English FSLogix check of one session host |
 | [Citrix-FSLogix-HealthCollector](Citrix-FSLogix-HealthCollector/) | Health verdict per session host: performance plus event logs |
 | [Citrix-PerfTriage](Citrix-PerfTriage/) | One-command performance triage on a session host |
 | [CitrixVDADiagnostics](CitrixVDADiagnostics/) | Deeper VDA and FSLogix performance diagnostics |
@@ -68,6 +70,7 @@ handed out, so it always matches this repository.
 
 | Folder | What it does |
 |---|---|
+| [FolderAccess-Check](FolderAccess-Check/) | Can this user open this folder? Share and folder permissions walked the way Windows does, with a hedged verdict and next steps |
 | [FolderPermissionManager](FolderPermissionManager/) | Browser GUI for NTFS permissions |
 | [RobocopyMigration](RobocopyMigration/) | GUI for server-to-server file migrations |
 | [CopyFileToServer](CopyFileToServer/) | GUI to copy files to many servers |
@@ -355,21 +358,26 @@ For a combined performance *and* event view across a fleet, use [Citrix-FSLogix-
 
 ## LocalAdminManager
 
-**Description**: A PowerShell script for managing the local Administrators group on Windows computers by adding or removing domain users and groups.
+**Description**: Adds or removes a domain user or group in the local Administrators group of a computer, locally or on a remote computer through PowerShell remoting (WinRM), and logs every attempt with the member list before and after. Changes anything? Yes.
 
 **Parameters**:
 - `-Action <string>` (Required): Action to perform ('Add' or 'Remove').
-- `-Member <string>` (Required): Domain user or group in 'DOMAIN\Username' format.
-- `-ComputerName <string>` (Optional): Target computer name (defaults to localhost).
+- `-Member <string>` (Required): Domain user or group in 'DOMAIN\Username' format, or a SID (to remove a deleted account). User principal names are refused.
+- `-ComputerName <string>` (Optional): Target computer name (defaults to this computer). Remote computers need WinRM enabled.
+- `-LogFolder <string>` (Optional): Folder for the daily change log (defaults to `LocalAdminManager\Logs`, or `%LOCALAPPDATA%\LocalAdminManager\Logs` when the script runs from a share or removable disk).
+- `-Force` (Optional): Make the change without the confirmation prompt (batch files).
+- `-WhatIf` (Optional): Show what would change and change nothing.
 
 **Usage Examples**:
 - Add user locally: `.\LocalAdminManager\LocalAdminManager.ps1 -Action Add -Member "CONTOSO\JohnDoe"`
-- Remove group remotely: `.\LocalAdminManager\LocalAdminManager.ps1 -Action Remove -Member "CONTOSO\DomainAdmins" -ComputerName "RemotePC01"`
+- Remove group remotely: `.\LocalAdminManager\LocalAdminManager.ps1 -Action Remove -Member "CONTOSO\TempAdmins" -ComputerName "RemotePC01"`
+- Dry run: `.\LocalAdminManager\LocalAdminManager.ps1 -Action Add -Member "CONTOSO\ITSupport" -ComputerName "RemotePC01" -WhatIf`
 
 **Notes**:
-- Requires administrator privileges.
-- Supports local and remote computer management.
-- Domain users/groups must exist in Active Directory.
+- Run from an elevated prompt. Works on PowerShell 3.0 and later.
+- Finds the group by its SID, so it also works on non-English Windows ("Administratoren").
+- Every attempt is a row in `Logs\Changes_<yyyy-MM-dd>.csv`. The log holds client account names and is gitignored; it is never deleted automatically and inherits its folder's permissions, so keep the tool in an admin-only folder. If the log cannot be written, nothing is changed; if the write fails after the change, the `[FAIL]` line says the change was made and the row is saved to `%TEMP%`.
+- Exit code 1 when the change failed, so batch files can detect it.
 
 ## DriveMap-Diagnostics
 

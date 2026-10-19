@@ -1,7 +1,7 @@
 # Service Desk Escalation Toolkit — START HERE
 
 A small set of tested PowerShell tools for the escalation tickets we see most: account
-lockouts, "who has access to what", missing mapped drives, slow or broken Citrix/RDS sessions, FSLogix profile
+lockouts, "who has access to what", "Access denied" on a folder, missing mapped drives, slow or broken Citrix/RDS sessions, FSLogix profile
 problems, hiding people from the address book, and blocking Microsoft 365 sign-in.
 
 Every tool writes a report (HTML and/or CSV) you can attach to the ticket.
@@ -13,16 +13,19 @@ Every tool writes a report (HTML and/or CSV) you can attach to the ticket.
 | The ticket says...                                                  | Go to                                                        | Changes anything? |
 |---------------------------------------------------------------------|--------------------------------------------------------------|-------------------|
 | "I can't sign in" / "Is my account OK?" (start here)               | [AD-UserQuickCheck](#cant-sign-in)                           | No                |
+| "I can't sign in to Microsoft 365 / Outlook / Teams"                | [M365-UserQuickCheck](#cant-sign-in-to-microsoft-365)        | No                |
 | "My account keeps locking out"                                      | [AD-LockoutDiagnostics](#account-keeps-locking-out)          | No                |
 | "Who has access to what?" / "Who is in Domain Admins?" / offboarding check | [AD-GroupMembership-Export](#who-has-access-to-what)  | No                |
+| "I get 'Access denied' on a folder" / "Can this user open this folder?" | [FolderAccess-Check](#access-denied-on-a-folder)        | No                |
 | "My H: / S: / X: drive is missing" (or only shows up sometimes)     | [DriveMap-Diagnostics](#mapped-drive-is-missing)             | No                |
 | "Citrix is slow" — for one server or the whole farm                 | [Citrix-FSLogix-HealthCollector](#citrix-or-rds-is-slow)     | No                |
 | "Which Citrix servers are overloaded / low on disk?"                | [Get-CitrixVDAResources](#citrix-or-rds-is-slow)             | No                |
 | "The server's memory is maxed out — who is using it?"               | [Get-RAM-Usage](#server-memory-is-high--who-is-using-it)      | No                |
-| "My profile didn't load" / "temp profile" / "I got logged straight back out" | [Citrix-FSLogix-Triage](#profile-or-logon-problems-on-citrix-or-rds), then [RDS-FSLogix-EventExport](#profile-or-logon-problems-on-citrix-or-rds) | No                |
+| "My profile didn't load" / "temp profile" / "I got logged straight back out" | [Invoke-TempProfileInvestigation](#profile-or-logon-problems-on-citrix-or-rds) (in Citrix-FSLogix-Triage) | No                |
 | "I can't reach the server" / "the app won't connect" / "is port 445 open?" | [Network-QuickCheck](#cant-reach-a-server-or-app)            | No                |
 | "Hide this person from the address book (GAL)"                      | [M365-SyncedUserFixes](#hide-someone-from-the-address-book)  | **Yes — AD**      |
 | "Block this user from Microsoft 365 but keep their PC login"        | [M365-SyncedUserFixes](#block-someone-from-microsoft-365)    | **Yes — AD**      |
+| Ran several checks on one ticket and want one note to paste         | [TicketNote](#one-note-for-the-whole-ticket)                 | No                |
 
 Each folder has its own `README.md` with the full detail. This page covers when to use
 each tool and the one command to start with.
@@ -84,13 +87,70 @@ person can sign in.
 
 Add `-OutputPath C:\Temp` to save an HTML report you can attach to the ticket.
 
+When it finishes, a **ticket note** is on your clipboard, ready to paste into the ticket:
+what was checked, what is ruled out, what it could not check, and the next step. Add
+`-TicketNumber 482113` to save the report and the note in that ticket's folder
+(`Documents\TicketNotes\Ticket_482113`). See [One note for the whole ticket](#one-note-for-the-whole-ticket).
+
 **Things to know:**
 - If it says the account is **locked out** and the user keeps getting locked again, go to
   [Account keeps locking out](#account-keeps-locking-out) to find the device causing it.
 - It checks the **on-premises** account only. A user who can sign in to their PC but not to
-  Microsoft 365 needs a cloud-side check (MFA, Conditional Access, cloud password).
+  Microsoft 365 needs the cloud-side check: see
+  [Can't sign in to Microsoft 365](#cant-sign-in-to-microsoft-365).
 - If it warns that it **couldn't reach a domain controller**, the last-sign-in and
   bad-password numbers may be incomplete. Don't treat them as final.
+
+---
+
+## Can't sign in to Microsoft 365
+
+**Folder:** `M365-UserQuickCheck`  **Run from:** your own workstation (or a client server) with
+the `Microsoft.Graph.Authentication` module. It only reads; it changes nothing, even when you
+sign in as the client's Global Administrator. Install the module once with
+`Install-Module Microsoft.Graph.Authentication -Scope CurrentUser`.
+
+Run this when Outlook, Teams or the Microsoft 365 portal will not let someone in. It answers
+**"Can this person sign in to Microsoft 365?"** with the reason in plain English and what to
+do next:
+
+```powershell
+.\Get-M365UserQuickCheck.ps1 -UserPrincipalName jdoe@contoso.com -TenantId contoso.onmicrosoft.com
+```
+
+A browser window opens: **sign in to the client's tenant**. At the permissions prompt, consent
+for yourself only and **leave "Consent on behalf of your organization" unticked**.
+
+Before the answer it prints which tenant and account you are signed in as. **Check that it is
+the right client.** If the sign-in name's domain does not belong to that tenant, it stops with
+"Wrong tenant?" instead of guessing.
+
+It checks whether sign-in is blocked, whether a licence is assigned and working, the user's
+latest sign-in (the error code, Microsoft's own reason, and which Conditional Access policy
+blocked it), MFA methods, and whether ID Protection flags the user as risky.
+
+For a synced user it also asks **"is it a sync problem?"**: does the on-premises AD account
+agree, did sync report an error, does another user, group or contact already hold their
+address, has sync run in the last 3 hours, and was the account blocked on purpose with
+M365-SyncedUserFixes. If the user is not in Microsoft 365 at all but is in AD, it says so
+("exists in AD but not in Microsoft 365"). This part needs RSAT and a domain controller: run
+it on a client server, or add `-Server <domain controller> -Credential <client admin>`.
+Without them the answer still comes, with "On-premises AD: could not check".
+
+Add `-TicketNumber 482113` to save the [ticket note](#one-note-for-the-whole-ticket) in the
+ticket's folder, and `-OutputPath C:\Temp` to also save an HTML report and a CSV (with both, all
+three go into `C:\Temp\Ticket_482113`). Without `-OutputPath` no report is written.
+
+**Things to know:**
+- **PROBABLY YES** means nothing blocking was found, but the tenant has no Entra ID P1, so
+  Microsoft does not let tools read sign-in history. Look at the user's sign-ins in the Entra
+  admin center (it keeps seven days of them). This is normal for about half of our clients.
+- Anything listed under **Could not check** was not checked, so it is not ruled out.
+- If Windows signs you in with your own work account instead of the client's, run it again
+  with `-DisableWam` (it then uses a device code, where you choose the account).
+- It compares the AD account with Microsoft 365 but does not check its state in depth (locked
+  out, password expired). For a synced user who is blocked, run
+  [AD-UserQuickCheck](#cant-sign-in) too.
 
 ---
 
@@ -163,6 +223,43 @@ read the report. It has four tabs: **People**, **Groups**, **Overlap** and **Nes
 - It shows group membership, **not** folder or file-share permissions.
 - **New to it?** Read `AD Access Report - Quick Guide.docx` (one page) or the illustrated
   `AD Access Report - User Guide.docx` in the folder.
+
+---
+
+## Access denied on a folder
+
+**Folder:** `FolderAccess-Check`  **Run from:** any domain-joined machine with RSAT (Active
+Directory). It only reads; it changes nothing. To read the **share** permissions you need to be
+an administrator on the file server.
+
+Use the **full network path** of the folder, not the drive letter:
+
+```powershell
+.\Get-FolderAccessCheck.ps1 -Identity jdoe -Path '\\FS01\Finance\Budgets 2027'
+```
+
+The first line is the answer: **PROBABLY YES**, **PROBABLY NO** or **CAN'T TELL**, with the
+reason, whether the share or the folder permissions are what stops them, and the next steps.
+Below that are the share and folder permission entries in the order Windows checks them, and
+which of the user's groups matches each one. Add `-OutputPath C:\Temp` to save an HTML report
+and a CSV for the ticket. Add `-Access Modify` to check "can they change files in it?".
+
+**Things to know:**
+- **CAN'T TELL is a normal answer.** It always says what couldn't be read (your rights, the
+  share on the server, a DFS path, an admin share like `D$`) and what to do instead.
+- **Always finish in Effective Access**: the folder's *Properties → Security → Advanced →
+  Effective Access* tab, for the user. It is Windows' final word.
+- **PROBABLY NO names the group to add them to**: the narrowest existing group that would let
+  them in. Never Everyone, Domain Users or a per-user entry. A group in Domain Admins (or another
+  privileged group) comes with a **Warning: get senior approval first**. If no group fits, ask
+  the folder's owner which group should have access and add that group with
+  FolderPermissionManager.
+- **"PROBABLY YES after jdoe signs out and back in"** means they were added to the group after
+  their last sign-in. Ask them to sign out of Windows and any Citrix/RDS session and sign in
+  again; locking and unlocking is not enough.
+- Add `-TicketNumber 482113` to save the report and the ticket note in the ticket folder.
+- **The saved report holds client data** (group memberships, servers, paths): attach it to the
+  ticket, then delete the local copy.
 
 ---
 
@@ -261,11 +358,47 @@ Use it when one of the Citrix tools above flags a server for memory, or when a u
 
 ## Profile or logon problems on Citrix or RDS
 
-**Start with:** `Citrix-FSLogix-Triage`
+**Start with:** `Invoke-TempProfileInvestigation` (in the `Citrix-FSLogix-Triage` folder)
+
+Answers "why did this user get a temporary profile?" for one user. Give it the user and the
+server they were on, or your Citrix Delivery Controller and it finds the server. It checks
+FSLogix on that server, reads that user's FSLogix log, and asks the profile file server which
+computer has the user's profile disk open. The first line is the answer, then the cause in one
+sentence and the next step:
+
+```
+Temporary profile check for jdoe on CTX07:  CAUSE FOUND
+======================================================================
+The Citrix session on CTX04 is disconnected and still holds jdoe's profile disk open on FS01, so FSLogix could not attach it on CTX07.
+Next step: Log off jdoe's disconnected session on CTX04 in Citrix Director or Studio, then have jdoe sign out of CTX07 and sign in again.
+```
+
+```powershell
+.\Invoke-TempProfileInvestigation.ps1 -UserName jdoe -ComputerName CTXVDA01
+
+# Let Citrix find the server, and see the state of jdoe's other sessions
+.\Invoke-TempProfileInvestigation.ps1 -UserName jdoe -DeliveryController CTX-DDC01
+
+# Save the report and the ticket note in the ticket's folder
+.\Invoke-TempProfileInvestigation.ps1 -UserName jdoe -ComputerName CTXVDA01 -TicketNumber 482113
+```
+
+**Things to know:**
+- It **only reports.** It never logs anyone off. If it tells you to log a session off, do that
+  in Citrix Director or Studio yourself.
+- **CAN'T TELL** means a check could not run (listed under "Could not check", with why). It is
+  not an all-clear. The usual one: the profile disk check needs you to be an administrator of
+  the file server.
+- When it says **Escalate**, attach the ticket note. Removing an old local profile deletes
+  data, so that is for an engineer.
+- A ticket note is on your clipboard when it finishes, like the other quick checks.
+
+**For the server only:** `Invoke-CitrixFSLogixTriage` (same folder)
 
 Checks the server the user signs in to and tells you in plain English whether FSLogix is
 healthy there: services running, profiles switched on, the profile share setting correct and
 reachable, recent FSLogix errors, and free disk space. Every finding comes with a "What to do".
+Use it when there is no single user to look at, for example after a server change.
 
 ```powershell
 .\Invoke-CitrixFSLogixTriage.ps1 -ComputerName CTXVDA01 -UserName jdoe
@@ -273,9 +406,6 @@ reachable, recent FSLogix errors, and free disk space. Every finding comes with 
 # Save a text report you can paste into the ticket
 .\Invoke-CitrixFSLogixTriage.ps1 -ComputerName CTXVDA01 -UserName jdoe -OutputPath C:\Temp
 ```
-
-If it says **LOOKS HEALTHY**, the problem is more likely the user's own profile disk. Escalate
-with the report.
 
 **Then, for the detail:** `RDS-FSLogix-EventExport`
 
@@ -357,6 +487,30 @@ and the default gateway.
 Common ports: **445** file shares, **3389** Remote Desktop, **443** websites and most cloud
 apps, **1494 / 2598** Citrix, **1433** SQL Server. A failed **ping** on its own is usually
 fine, because many servers block it. A failed **port** is what matters.
+
+---
+
+## One note for the whole ticket
+
+**Folder:** `TicketNote`  It only writes one text file in the ticket folder; it changes nothing.
+
+Run the quick checks with the same `-TicketNumber`, then join their notes:
+
+```powershell
+..\AD-UserQuickCheck\Get-ADUserQuickCheck.ps1 -Identity jdoe -TicketNumber 482113
+.\Join-TicketNotes.ps1 -TicketNumber 482113
+```
+
+It asks "What did the user report?" and "What did you already try by hand?" (press Enter to
+skip), then saves `TicketNotes_Combined_<date>_<time>.txt` in
+`Documents\TicketNotes\Ticket_482113` and copies it to the clipboard.
+
+**Things to know:**
+- Read **Could not check** before closing the ticket. Those checks did not happen, so they
+  are not ruled out.
+- IP addresses and share paths are removed from the note by default, so it is safe to paste.
+  Add `-FullDetail` to the tool to keep them.
+- Add `-NoClipboard` to leave your clipboard alone.
 
 ---
 

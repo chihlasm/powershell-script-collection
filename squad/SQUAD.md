@@ -86,6 +86,15 @@ cleanups). `ServiceDesk-Toolkit` builds the bundle handed to the service desk.
   (`AD-GroupMembership-Export/Tests/Compatibility.Tests.ps1`); `Tests/ScriptEncoding.Tests.ps1`
   enforces UTF-8 with BOM for non-ASCII files.
 - When documentation contradicts existing code, fix the code and add a regression test.
+- **Tests never touch real user-facing state or real modules.** No real clipboard,
+  `%USERPROFILE%`/Documents default folders (point default output roots at `$TestDrive`), and
+  no autoloading of a real RSAT module or connecting to a DC, including in child processes
+  (set `ADPS_LoadDefaultDrive=0`; give every AD cmdlet the code calls a throwing stub).
+  Tests that replace functions with globals remove them by name in `AfterEach`/`AfterAll`.
+  Suites for tools that change things carry a backstop mock of the write/transport layer
+  (ADSI, `Invoke-Command`, native tools) and never target `$env:COMPUTERNAME`.
+- **Agents do not read this machine while building**: no real reads of local groups, ACLs,
+  registry or services to "check" behaviour; only `Get-Command`/`Get-Help` introspection.
 
 ## Conventions
 

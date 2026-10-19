@@ -72,12 +72,15 @@ $manifest = @(
     @{ Source = 'Citrix-FSLogix-HealthCollector';                        Destination = 'Citrix-FSLogix-HealthCollector' }
     @{ Source = 'Citrix-FSLogix-Triage';                                 Destination = 'Citrix-FSLogix-Triage' }
     @{ Source = 'DriveMap-Diagnostics';                                  Destination = 'DriveMap-Diagnostics' }
+    @{ Source = 'FolderAccess-Check';                                    Destination = 'FolderAccess-Check' }
     @{ Source = 'Get-AzureFilesFSLogixProfiles';                         Destination = 'Get-AzureFilesFSLogixProfiles' }
     @{ Source = 'Get-CitrixVDAResources';                                Destination = 'Get-CitrixVDAResources' }
     @{ Source = 'Get-RAM-Usage';                                         Destination = 'Get-RAM-Usage' }
     @{ Source = 'M365-SyncedUserFixes';                                  Destination = 'M365-SyncedUserFixes' }
+    @{ Source = 'M365-UserQuickCheck';                                   Destination = 'M365-UserQuickCheck' }
     @{ Source = 'Network-QuickCheck';                                    Destination = 'Network-QuickCheck' }
     @{ Source = 'RDS-FSLogix-EventExport';                               Destination = 'RDS-FSLogix-EventExport' }
+    @{ Source = 'TicketNote';                                            Destination = 'TicketNote' }
     @{ Source = 'ServiceDesk-Toolkit/README.md';                         Destination = 'README.md' }
 )
 

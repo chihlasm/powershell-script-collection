@@ -5,6 +5,27 @@ work-in-progress/
 Get-M365SecurityEvidence/*_SecurityEvidence_*/
 AD-GroupMembership-Export/Uploads/
 AD-LockoutDiagnostics/**/Case_*/
+# Diagnose-ADAccountLockout's encryption-type findings (account names, client IPs) when
+# written outside a case folder, e.g. to its default Reports\ folder.
+**/ADLockoutEtype_*.csv
+# The lockout tools' default output folder (HTML reports name accounts, hosts and IPs).
+AD-LockoutDiagnostics/Reports/
+# Ticket folders from -TicketNumber (ticket notes and reports; same reason as Case_*).
+**/Ticket_*/
+# Notes and reports saved outside a Ticket_* folder (-OutputPath without -TicketNumber).
+**/Note_*_*.txt
+**/TicketNotes_Combined_*.txt
+**/UserQuickCheck_*.html
+**/UserQuickCheck_*.csv
+**/M365UserCheck_*.html
+**/M365UserCheck_*.csv
+**/TempProfile_*.txt
+**/TempProfile_*.csv
+**/FSLogixTriage_*.txt
+**/FSLogixTriage_*.csv
+**/NetworkQuickCheck_*.txt
+**/NetworkQuickCheck_*.csv
+**/FolderAccessCheck_*
 
 # --- Runtime artifacts from running the tools ---
 Entra-DeviceActivityTimeline/Reports/
@@ -51,6 +72,9 @@ M365-SyncedUserFixes/Logs/
 
 # FolderPermissionManager: permission backups and the change log (client paths, accounts, SIDs)
 FolderPermissionManager/Logs/
+
+# LocalAdminManager: change log of local Administrators adds and removes (client account names)
+LocalAdminManager/Logs/
 
 # Squad plugin (runtime state and logs)
 squad/.state/
