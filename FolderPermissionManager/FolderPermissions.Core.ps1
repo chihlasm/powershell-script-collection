@@ -97,16 +97,18 @@
     - S-1-5-32-544 is the built-in Administrators group (what takeown /A sets):
       https://learn.microsoft.com/windows-server/identity/ad-ds/manage/understand-security-identifiers
     - Get-ChildItem -Force (hidden and system items too, no security override); each folder is
-      listed on its own and FileAttributes.ReparsePoint marks reparse points; those whose tag
-      has the name surrogate bit (junctions, symbolic links, mounted folders) are links, which
-      the owner snapshot lists but does not go into. FindFirstFile's dwReserved0 holds the tag
-      when the item is a reparse point; Data Deduplication (0x80000013) and cloud placeholder
-      tags are not name surrogates:
+      listed on its own and FileAttributes.ReparsePoint marks reparse points. FindFirstFile's
+      dwReserved0 holds the tag when the item is a reparse point. Only the tags in
+      $RedirectFreeReparseTags count as plain files (D-040): IO_REPARSE_TAG_DEDUP 0x80000013,
+      WOF 0x80000017, HSM 0xC0000004, HSM2 0x80000006, SIS 0x80000007, ONEDRIVE 0x80000021,
+      CLOUD 0x9000001A and CLOUD_1..CLOUD_F 0x9000101A..0x9000F01A (MS-FSCC 2.1.2.1). Every
+      other reparse point, IO_REPARSE_TAG_DFS 0x8000000A and unknown tags included, is a link,
+      which the owner snapshot lists but does not go into:
       https://learn.microsoft.com/powershell/module/microsoft.powershell.management/get-childitem
       https://learn.microsoft.com/dotnet/api/system.io.fileattributes
+      https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
       https://learn.microsoft.com/windows/win32/fileio/reparse-point-tags
       https://learn.microsoft.com/windows/win32/api/minwinbase/ns-minwinbase-win32_find_dataw
-      https://learn.microsoft.com/windows/win32/api/winnt/nf-winnt-isreparsetagnamesurrogate
     - PathIntrinsics.GetUnresolvedProviderPathFromPSPath (a relative path made full against the
       PowerShell location, without wildcard expansion):
       https://learn.microsoft.com/dotnet/api/system.management.automation.pathintrinsics.getunresolvedproviderpathfrompspath
@@ -513,8 +515,9 @@ function Get-OwnerTreeItem {
         not say whether takeown /R or icacls /T go into them, and icacls changes what a
         symbolic link points to unless /L is given.
         A folder that cannot be opened is listed, but what is inside it is not.
-        Only reparse points that stand for another name are links (Test-LinkReparsePoint): a
-        deduplicated file or a cloud placeholder folder is an ordinary item.
+        Every reparse point is a link except the redirect-free tags in
+        $script:RedirectFreeReparseTags (Test-LinkReparsePoint): a deduplicated file or a
+        cloud placeholder folder is an ordinary item, a DFS link is a link.
         https://learn.microsoft.com/powershell/module/microsoft.powershell.management/get-childitem
         https://learn.microsoft.com/dotnet/api/system.io.fileattributes
         https://learn.microsoft.com/windows-server/administration/windows-commands/icacls
@@ -907,27 +910,77 @@ public static extern bool FindClose(IntPtr hFindFile);
     }
 }
 
+# The only reparse tags that count as plain files in a whole-tree take ownership (owner
+# decision D-040): storage filters that keep the item's data somewhere else but do not send
+# the path anywhere (Data Deduplication, Windows Overlay, legacy HSM, single-instance storage,
+# Cloud Files / OneDrive placeholders). Every other tag, IO_REPARSE_TAG_DFS (0x8000000A) and
+# tags not known here included, is treated as a link (Test-LinkReparsePoint). Add a tag only
+# with the owner's approval; a test pins this list. Values from MS-FSCC 2.1.2.1 Reparse Tags.
+# The values are cast from strings: a 0x8... literal is a negative [int] in Windows PowerShell.
+$script:RedirectFreeReparseTags = [ordered]@{
+    # Data Deduplication filter:
+    # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+    IO_REPARSE_TAG_DEDUP    = [uint32]'0x80000013'
+    # Windows Overlay filter (WIMBoot, single-file compression):
+    # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+    IO_REPARSE_TAG_WOF      = [uint32]'0x80000017'
+    # Legacy Hierarchical Storage Management (obsolete):
+    # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+    IO_REPARSE_TAG_HSM      = [uint32]'0xC0000004'
+    IO_REPARSE_TAG_HSM2     = [uint32]'0x80000006'  # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+    # Single-instance storage filter:
+    # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+    IO_REPARSE_TAG_SIS      = [uint32]'0x80000007'
+    # OneDrive ("Not used" in MS-FSCC; OneDrive placeholders use the CLOUD tags below):
+    # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+    IO_REPARSE_TAG_ONEDRIVE = [uint32]'0x80000021'
+    # Cloud Files filter, "for files managed by a sync engine such as Microsoft OneDrive":
+    # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+    IO_REPARSE_TAG_CLOUD    = [uint32]'0x9000001A'
+    IO_REPARSE_TAG_CLOUD_1  = [uint32]'0x9000101A'  # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+    IO_REPARSE_TAG_CLOUD_2  = [uint32]'0x9000201A'  # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+    IO_REPARSE_TAG_CLOUD_3  = [uint32]'0x9000301A'  # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+    IO_REPARSE_TAG_CLOUD_4  = [uint32]'0x9000401A'  # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+    IO_REPARSE_TAG_CLOUD_5  = [uint32]'0x9000501A'  # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+    IO_REPARSE_TAG_CLOUD_6  = [uint32]'0x9000601A'  # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+    IO_REPARSE_TAG_CLOUD_7  = [uint32]'0x9000701A'  # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+    IO_REPARSE_TAG_CLOUD_8  = [uint32]'0x9000801A'  # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+    IO_REPARSE_TAG_CLOUD_9  = [uint32]'0x9000901A'  # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+    IO_REPARSE_TAG_CLOUD_A  = [uint32]'0x9000A01A'  # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+    IO_REPARSE_TAG_CLOUD_B  = [uint32]'0x9000B01A'  # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+    IO_REPARSE_TAG_CLOUD_C  = [uint32]'0x9000C01A'  # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+    IO_REPARSE_TAG_CLOUD_D  = [uint32]'0x9000D01A'  # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+    IO_REPARSE_TAG_CLOUD_E  = [uint32]'0x9000E01A'  # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+    IO_REPARSE_TAG_CLOUD_F  = [uint32]'0x9000F01A'  # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+}
+
 function Test-LinkReparsePoint {
     <#
     .SYNOPSIS
-        True when an item (from Get-Item or Get-ChildItem) is a junction, a symbolic link or
-        another reparse point that stands for a different name, which takeown and icacls may
-        follow. False for an ordinary item and for reparse points that do not (Data
-        Deduplication, OneDrive and other cloud placeholders). A reparse point whose tag cannot
-        be read counts as a link.
+        True when an item (from Get-Item or Get-ChildItem) is a reparse point that may send
+        takeown and icacls somewhere else: a junction, a symbolic link, a DFS link, or any
+        reparse point whose tag is not in $script:RedirectFreeReparseTags. False for an
+        ordinary item and for the allowlisted tags (Data Deduplication, Windows Overlay, HSM,
+        single-instance storage, Cloud Files / OneDrive placeholders). A reparse point whose
+        tag cannot be read counts as a link.
     .DESCRIPTION
-        "Name surrogate bit. If this bit is set, the file or directory represents another named
-        entity in the system" (bit 29, 0x20000000; IsReparseTagNameSurrogate). It is set in
-        IO_REPARSE_TAG_MOUNT_POINT (0xA0000003, junctions and mounted folders) and
-        IO_REPARSE_TAG_SYMLINK (0xA000000C), not in IO_REPARSE_TAG_DEDUP (0x80000013).
+        An allowlist, not the name surrogate bit (owner decision D-040): IO_REPARSE_TAG_DFS
+        (0x8000000A) does not have the name surrogate bit but stands for a DFS target, and a tag
+        this tool does not know about is not assumed harmless. A link then goes through the
+        destination checks (Get-TreeLinkRefusal), which refuse the tree when the destination is
+        protected or cannot be found out.
+        https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
         https://learn.microsoft.com/windows/win32/fileio/reparse-point-tags
-        https://learn.microsoft.com/windows/win32/api/winnt/nf-winnt-isreparsetagnamesurrogate
     #>
     param([Parameter(Mandatory)][object]$Item)
     if (($Item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) { return $false }
     $tag = Get-ReparsePointTag -Path "$($Item.FullName)"
     if ($null -eq $tag) { return $true }
-    ($tag -band 0x20000000) -ne 0
+    $tag = [uint32]$tag
+    foreach ($free in $script:RedirectFreeReparseTags.Values) {
+        if ($tag -eq $free) { return $false }
+    }
+    $true
 }
 
 function Test-PathThroughLink {

@@ -210,7 +210,7 @@ Describe 'GUI recursive take ownership' {
         @{ Name = 'Windows folder'; Target = (Join-Path $env:SystemRoot 'System32') }
     ) {
         $script:DfsLink = Join-Path $script:Dir 'dfs'
-        New-Item -ItemType Directory -Path $script:DfsLink | Out-Null
+        New-Item -ItemType Directory -Path $script:DfsLink -Force | Out-Null
         $script:DfsTarget = $Target
         Mock Get-ChildItem {
             [PSCustomObject]@{

@@ -138,8 +138,11 @@ script says so before asking anything; the GUI finds out while saving the owner 
 keeps that snapshot (the change log row names it, and nothing needs to be put back from it).
 Take ownership of the folders beside the link instead. Other links do not stop the change, but
 a folder containing any is never reported as a plain success: the result says how many there
-are and names them. Check them, and what they point to, after the change. Deduplicated files
-and OneDrive placeholders are not links and are changed like any other item.
+are and names them. Check them, and what they point to, after the change. Only a short list of
+storage features count as plain items and are changed like any other: deduplicated files,
+compressed (WOF) files, OneDrive and other cloud placeholders, and legacy HSM and
+single-instance storage files. Every other kind of reparse point, DFS links and anything the
+tool does not recognise included, is treated as a link and checked as above.
 
 `Could not read` means the tool could not read the item's permissions (or, in an owner
 snapshot, its owner) before the change. Add permission, Remove permission and Copy permissions
