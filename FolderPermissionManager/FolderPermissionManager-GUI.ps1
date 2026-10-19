@@ -237,8 +237,15 @@
       https://learn.microsoft.com/windows/win32/fileio/file-attribute-constants
     - An entry whose SID cannot be looked up: icacls /save <ACLfile> "Stores DACLs for all
       matching files into an access control list (ACL) file for later use with /restore", then
-      /remove[:g|:d] *SID removes it:
+      /remove[:g|:d] *SID removes it; "icacls <directory> /restore <ACLfile>" "Applies stored
+      DACLs from <ACLfile> to files in the specified directory" (the parent folder):
       https://learn.microsoft.com/windows-server/administration/windows-commands/icacls
+      A backslash right before a closing quote ("D:\") is read as an escaped quote, so a drive
+      root is written D:\. in that hint:
+      https://learn.microsoft.com/cpp/c-language/parsing-c-command-line-arguments
+    - A Deny beats an Allow on the same folder, but an Allow set directly on a subfolder comes
+      before an inherited Deny (canonical ACE order):
+      https://learn.microsoft.com/windows/win32/secauthz/order-of-aces-in-a-dacl
     - Button.IsDefault (Enter presses it); a Deny add and Remove are never the default:
       https://learn.microsoft.com/dotnet/api/system.windows.controls.button.isdefault
     - The folder that holds every user profile (Get-AppProfilesDirectory, in the core):
@@ -1547,14 +1554,14 @@ $script:WorkHelperFunctions = 'Get-InnermostErrorText', 'Test-AccessDeniedError'
 'Get-AclOwnerName', 'ConvertTo-AclViewModel', 'Read-ItemAclModel', 'Format-FileSize', 'ConvertTo-FileRows',
 'Get-DriveListModel', 'Get-ValidDriveMap', 'Test-UncSharePath', 'Write-ChangeStartedLog', 'New-ChangeWorkResult',
 'New-ChangeNotStartedResult', 'Invoke-AppChange', 'Add-ChangeReadBack', 'Get-ReadBackProblem', 'ConvertTo-IdentitySid',
-'Save-UnloggedChangeRows', 'ConvertTo-SidAccountName', 'Get-RemoveIdentityProblem', 'New-ChangeRefusedResult',
+'Save-UnloggedChangeRows', 'ConvertTo-SidAccountName', 'Format-IcaclsPathArgument', 'Get-RemoveIdentityProblem', 'New-ChangeRefusedResult',
 'Get-ResolvedRootRefusal', 'Get-TreeLinkTargetRefusal',
 # Where a change lands (Resolve-ChangeTargetSet and everything it calls), looked up in the pool.
 'Resolve-ChangeTargetSet', 'Get-ChangeTarget', 'New-ChangeTarget', 'Get-StreamRefusal', 'Resolve-MappedDrive',
 'Test-ThisComputerName', 'Get-ThisComputerNames', 'ConvertFrom-Ipv6LiteralName', 'Test-SameIPAddress',
 'Get-LocalSharePath', 'Get-AppDfsTarget', 'Get-DfsClientTarget', 'Find-DfsReparsePoint', 'Get-AppReparseInfo',
 'Get-RemoteShareLocalPath', 'Get-ShareTreeRefusal', 'Get-ServerSideLinkRefusal', 'Get-CopyTargetRefusal', 'Get-TargetRootKind',
-'Complete-AppChangeWork'
+'Get-CopyTargetResolvedRefusal', 'Complete-AppChangeWork'
 
 function Write-ChangeStartedLog {
     # One 'Started' row per item in the change log before the change runs, so a change that is
@@ -1646,6 +1653,18 @@ function ConvertTo-SidAccountName {
     catch { $null }
 }
 
+function Format-IcaclsPathArgument {
+    # A path as it goes between quotes in an icacls command the tech is told to run: no trailing
+    # backslash, because "D:\Data\" ends in \" and "a double quote mark preceded by a backslash
+    # (\") is interpreted as a literal double quote mark". A drive root keeps a folder to name,
+    # D:\. (D: alone means the current folder on drive D).
+    # https://learn.microsoft.com/cpp/c-language/parsing-c-command-line-arguments
+    param([AllowNull()][AllowEmptyString()][string]$Path)
+    $p = "$Path".TrimEnd('\')
+    if ($p -match '^[A-Za-z]:$') { return "$p\." }
+    $p
+}
+
 function Get-RemoveIdentityProblem {
     # The core removes by name (Remove-FolderPermission builds an NTAccount from -Identity and
     # calls RemoveAccessRuleAll), so the name is looked up again when the change runs. Before it
@@ -1656,14 +1675,18 @@ function Get-RemoveIdentityProblem {
     #   - The entry's SID cannot be looked up from here (shown as S-1-...): refused; the core
     #     cannot remove it by name. That does not prove the account is gone: it may be deleted,
     #     or local to the server (another computer's local group, which this computer cannot
-    #     translate). icacls removes it by SID: "/remove[:g|:d] Sid" removes all occurrences of
-    #     the SID's granted (g) or denied (d) rights, and "If you use a numerical form, affix
-    #     the wildcard character * to the beginning of the SID". The hint starts with
-    #     "/save <ACLfile>", which "Stores DACLs for all matching files into an access control
-    #     list (ACL) file for later use with /restore", so the entry can be put back.
+    #     translate). So the next step is to look at the entry on the server first: a name
+    #     there means a live account of that server, which must not be removed. Only an entry
+    #     that is S-1-... there too is removed by SID: "/remove[:g|:d] Sid" removes all
+    #     occurrences of the SID's granted (g) or denied (d) rights, and "If you use a numerical
+    #     form, affix the wildcard character * to the beginning of the SID". The hint starts
+    #     with "/save <ACLfile>", which "Stores DACLs for all matching files into an access
+    #     control list (ACL) file for later use with /restore", to a full, per-item, timestamped
+    #     file, and says how to put it back ("icacls <directory> /restore <ACLfile>" on the
+    #     parent folder).
     #     https://learn.microsoft.com/windows-server/administration/windows-commands/icacls
-    #   - The name no longer looks up, though the SID does under another name (renamed, or the
-    #     name is local to the server): refused, with the same wording.
+    #   - The name no longer looks up, though the SID does under another name (renamed): refused,
+    #     naming the account's current name.
     #   - The name now stands for another SID (a domain migration, a rename and a new account
     #     with the old name): refused.
     # Without -Sid (no entry was chosen) only the name is translated.
@@ -1678,10 +1701,22 @@ function Get-RemoveIdentityProblem {
     $orphan = {
         param($sidText)
         $switch = if ($Type -eq 'Deny') { '/remove:d' } else { '/remove:g' }
-        $first = @($Path | Where-Object { $_ })[0]
-        $command = "icacls `"$first`" /save acl-backup.txt, then icacls `"$first`" $switch *$sidText"
-        $howTo = if (@($Path).Count -gt 1) { "for each item, for example $command" } else { $command }
-        "${lookUp}: $sidText. This tool can't remove entries for an account it can't look up; ask a senior admin to back up the permissions and remove it by SID ($howTo). Nothing was changed."
+        $first = "$(@($Path | Where-Object { $_ })[0])"
+        $target = Format-IcaclsPathArgument -Path $first
+        # The parent folder: /restore applies the saved permissions to items in a folder. The
+        # root of a drive or share has none, so it names itself.
+        $parentPath = try { [System.IO.Path]::GetDirectoryName($first.TrimEnd('\')) } catch { $null }
+        $parent = if ($parentPath) { Format-IcaclsPathArgument -Path $parentPath } else { $target }
+        # One backup file per item and per run, at a full path, so it does not land in whatever
+        # folder the prompt is in and a second item does not overwrite the first.
+        $leaf = ($first.TrimEnd('\') -split '\\')[-1] -replace '[\\/:*?"<>|%\s]+', '_'
+        if (-not $leaf) { $leaf = 'folder' }
+        $file = "%USERPROFILE%\acl-backup-$leaf-$(Get-Date -Format 'yyyy-MM-dd_HHmmss').txt"
+        $command = "icacls `"$target`" /save `"$file`", then icacls `"$target`" $switch *$sidText (to put the permissions back: icacls `"$parent`" /restore `"$file`")"
+        $howTo = if (@($Path).Count -gt 1) { "for each item, with its own backup file, for example $command" } else { $command }
+        # A server's own local group cannot be looked up from another computer, yet it is a live
+        # permission: it is checked on the server before anything is removed.
+        "${lookUp}: $sidText. This tool can't remove entries for an account it can't look up; ask a senior admin to check the entry on the server itself first (run this tool there, or icacls `"$target`" in a Command Prompt there). If it shows an account name there, it is an account of that server and still in use: do not remove it. Only if it still shows as $sidText there, back up the permissions and remove it by SID, in a Command Prompt on the server: $howTo. Nothing was changed."
     }
     $id = $Identity.Trim()
     if ($id -match '^S-1-\d+(-\d+)+$') { return [PSCustomObject]@{ Problem = (& $orphan $(if ($Sid) { $Sid } else { $id })); Sid = $null } }
@@ -1693,7 +1728,7 @@ function Get-RemoveIdentityProblem {
     if (-not $now) {
         $current = ConvertTo-SidAccountName -Sid $Sid
         if (-not $current) { return [PSCustomObject]@{ Problem = (& $orphan $Sid); Sid = $null } }
-        return [PSCustomObject]@{ Problem = "${lookUp}: $id. The account of the entry you chose ($Sid) is now called $current (it may have been renamed), so nothing was changed. Press Refresh and choose it again."; Sid = $null }
+        return [PSCustomObject]@{ Problem = "Windows can't find $id any more; the account of the entry you chose ($Sid) is now called $current (it may have been renamed), so nothing was changed. Press Refresh and choose it again."; Sid = $null }
     }
     if ($now -ne $Sid) {
         return [PSCustomObject]@{ Problem = "$id now resolves to a different account than the entry you chose (for example after a domain migration or rename), so nothing was changed. Ask a senior admin. (The entry is $Sid; the name is now $now.)"; Sid = $null }
@@ -4310,11 +4345,18 @@ function Get-ServerSideLinkRefusal {
     # (FILE_ATTRIBUTE_REPARSE_POINT 0x400, "A file or directory that has an associated reparse
     # point, or a file that is a symbolic link") is refused, and so is one that is not there or
     # cannot be read ("a guard that cannot resolve the path fails closed", destructive-operations
-    # profile). $null when every folder on the way is an ordinary folder.
+    # profile). $null when every folder on the way is an ordinary folder. -ServerPath is first
+    # put in one spelling (ConvertTo-ComparablePath: a trailing or doubled \ and . or ..
+    # segments do not skip the check); one that is still not \\server\X$\folder... is refused,
+    # except the bare \\server\X$, which has no folder to check (D-036 refuses it already).
     # https://learn.microsoft.com/windows/win32/fileio/file-attribute-constants
     param([Parameter(Mandatory)][string]$Server, [Parameter(Mandatory)][string]$ServerPath)
     $next = 'Nothing was changed. Run the tool on the server itself, or ask a senior admin.'
-    if ($ServerPath -notmatch '^(\\\\[^\\]+\\[A-Za-z]\$)((?:\\[^\\]+)+)$') { return $null }
+    $p = ConvertTo-ComparablePath -Path $ServerPath
+    if ($p -match '^\\\\[^\\]+\\[A-Za-z]\$$') { return $null }
+    if ($p -notmatch '^(\\\\[^\\]+\\[A-Za-z]\$)((?:\\[^\\]+)+)$') {
+        return "Windows could not read $ServerPath as a folder on a drive of $Server, so it could not be checked for junctions and symbolic links, and where the change would really land is not known. $next"
+    }
     $current = $Matches[1]
     foreach ($name in ($Matches[2].TrimStart('\') -split '\\')) {
         $current += "\$name"
@@ -4349,8 +4391,11 @@ function Get-CopyTargetRefusal {
     $what = $null
     if ($p -match '^\\\\([^\\]+)\\([^\\]+)(?:\\(.*))?$') {
         $server = $Matches[1]; $share = $Matches[2]; $rest = "$($Matches[3])"
-        if ($share -ieq 'IPC$') { $what = "the IPC`$ share of $server, which Windows uses for remote administration; it is not a folder" }
-        elseif ($share -ieq 'ADMIN$') { $what = "on the ADMIN`$ administrative share of $server, which is used to administer Windows remotely" }
+        if ($share -ieq 'IPC$') {
+            # IPC$ is not a folder at all, so "could let people into it" does not fit.
+            return "Permissions can't be copied to ${Path}: it is the IPC`$ share of $server, which Windows uses for remote administration, and it is not a folder. Choose the folder that needs these permissions instead. Nothing was changed."
+        }
+        if ($share -ieq 'ADMIN$') { $what = "on the ADMIN`$ administrative share of $server, which is used to administer Windows remotely" }
         elseif ($share -ieq 'PRINT$') { $what = "on the PRINT`$ share of $server, which holds the printer drivers it hands out" }
         elseif ($share -ieq 'SYSVOL' -or $share -ieq 'NETLOGON') { $what = "on the $($share.ToUpperInvariant()) share of $server, which domain controllers use for Group Policy and logon scripts" }
         elseif ($share -match '^[A-Za-z]\$$' -and -not $rest) { $what = "the $($share.ToUpperInvariant()) administrative share of $server, the root of a whole drive" }
@@ -4365,6 +4410,31 @@ function Get-CopyTargetRefusal {
     }
     if (-not $what) { return $null }
     "Permissions can't be copied to ${Path}: it is $what, and adding permissions there could let people into it who should not have access. Choose the folder that needs these permissions instead. Nothing was changed."
+}
+
+function Get-CopyTargetResolvedRefusal {
+    # Get-CopyTargetRefusal on where Windows really reaches a Copy permissions target (D-044,
+    # AC50): the final path (the core's Get-Win32PathName -Kind Final follows every junction and
+    # symbolic link on the way) and the long-name form (-Kind Long expands 8.3 short names such
+    # as PROGRA~1). A local junction to C:\Users or C:\PROGRA~1 resolves to itself as text, so
+    # only these show it. A final path that cannot be told is refused: "a guard that cannot
+    # resolve the path fails closed" (destructive-operations profile). Reads the disk, so it runs
+    # in the background lookup (Get-ChangeTarget -RefuseProtected). $null when it is allowed.
+    param([Parameter(Mandatory)][string]$Path)
+    $final = Get-Win32PathName -Path $Path -Kind Final
+    if (-not $final) {
+        return "Windows could not tell where $Path really is (it may not exist, or this account cannot open it), so it cannot be checked against the root of a drive, the Windows system folders and the user profiles folder. Check that the folder exists and try again, or ask a senior admin. Nothing was changed."
+    }
+    $long = Get-Win32PathName -Path $Path -Kind Long
+    $given = ConvertTo-ComparablePath -Path $Path
+    foreach ($form in @($final, $long)) {
+        if (-not $form) { continue }
+        $c = ConvertTo-ComparablePath -Path $form
+        if (-not $c -or $c -ieq $given) { continue }
+        $refusal = Get-CopyTargetRefusal -Path $c
+        if ($refusal) { return "$Path leads to $c (through a junction, a symbolic link or a short name). $refusal" }
+    }
+    $null
 }
 
 function Get-ResolvedRootRefusal {
@@ -4433,6 +4503,9 @@ function Get-ShareTreeRefusal {
     }
     $serverPath = "\\$Server\$($Matches[1].ToUpper())`$" + "$($Matches[2])".TrimEnd('\')
     if ($Rest) { $serverPath += "\$Rest" }
+    # One spelling, so a trailing or doubled \ (or a . or .. segment) in what was typed is
+    # checked as the folder Windows reaches.
+    $serverPath = ConvertTo-ComparablePath -Path $serverPath
     $refusal = Get-TreeOwnershipRefusal -Path $serverPath
     if (-not $refusal) { $refusal = Get-HighImpactRootRefusal -Path $serverPath }
     # D-045: a junction or symbolic link on the server, on the way to that folder.
@@ -4480,7 +4553,9 @@ function Get-ChangeTarget {
           exist.
         - With -RefuseProtected (a Copy permissions target, D-044), on the resolved path: the
           administrative shares, SYSVOL, NETLOGON, the D-036 folders and the high-impact roots
-          (Get-CopyTargetRefusal).
+          (Get-CopyTargetRefusal), then the same on where Windows really reaches it, through
+          junctions, symbolic links and 8.3 names (Get-CopyTargetResolvedRefusal). That last
+          check reads the disk and needs the folder to exist.
     #>
     param([Parameter(Mandatory)][string]$Path, [hashtable]$DriveMap, [hashtable]$DriveMapSource, [switch]$WholeTree, [switch]$RefuseProtected)
     if (-not $PSBoundParameters.ContainsKey('DriveMap')) { $DriveMap = $script:MappedDrives }
@@ -4563,6 +4638,7 @@ function Get-ChangeTarget {
 
     if ($RefuseProtected) {
         $refusal = Get-CopyTargetRefusal -Path $resolved
+        if (-not $refusal) { $refusal = Get-CopyTargetResolvedRefusal -Path $resolved }
         if ($refusal) {
             if ($resolved -ne $display) { $refusal = "$display is $resolved. $refusal" }
             return (& $refuse $refusal $resolved $local)
@@ -4721,7 +4797,12 @@ function Get-ConfirmSpec {
     $n = @($Targets).Count
     $where = Get-ConfirmTargetText -Targets $Targets
     $backup = 'The current permissions are saved to a backup first.'
-    $denyNote = 'A Deny blocks access even where another permission allows it, and it reaches every subfolder and file that inherits from there.'
+    # Canonical order: "All explicit ACEs are placed in a group before any inherited ACEs" and,
+    # within each group, "access-denied ACEs are placed before access-allowed ACEs". So a Deny
+    # beats an Allow on the same folder, but an Allow set directly on a subfolder comes before
+    # the Deny it inherits and still grants access there.
+    # https://learn.microsoft.com/windows/win32/secauthz/order-of-aces-in-a-dacl
+    $denyNote = 'A Deny blocks access even where another permission on the same folder allows it. Subfolders and files that inherit get it too, but a permission set directly on a subfolder can still allow access there.'
     $rootNote = if ($Action -eq 'AddPermission' -or $Action -eq 'CopyPermissions') { Get-ConfirmRootText -Targets $Targets } else { $null }
     switch ($Action) {
         'AddPermission' {
@@ -4837,18 +4918,26 @@ function Get-ConfirmRootText {
     # one's real location; $null when there is none. The typed path is checked too, so a mapped
     # letter's root (H:\) is caught whatever it points at.
     param([Parameter(Mandatory)][object[]]$Targets)
+    # When only the typed path is a root (H:\ mapped to \\fs01\Data\Dept), the line says so and
+    # does not call the real folder the root of a drive.
     $lines = [System.Collections.Generic.List[string]]::new()
     foreach ($t in @($Targets | Where-Object { $_ })) {
-        $kind = Get-TargetRootKind -Path "$($t.ResolvedPath)"
-        if (-not $kind) { $kind = Get-TargetRootKind -Path "$($t.DisplayPath)" }
-        if (-not $kind) { continue }
-        $what = switch ($kind) {
-            'DriveRoot' { 'the root of a whole drive' }
-            'AdminShareRoot' { 'the root of a whole drive (an administrative share)' }
-            default { 'the top of a share' }
+        $display = "$($t.DisplayPath)"
+        $real = if ($t.ResolvedPath) { "$($t.ResolvedPath)" } else { $display }
+        $kind = Get-TargetRootKind -Path $real
+        if ($kind) {
+            $what = switch ($kind) {
+                'DriveRoot' { 'the root of a whole drive' }
+                'AdminShareRoot' { 'the root of a whole drive (an administrative share)' }
+                default { 'the top of a share' }
+            }
+            $lines.Add("  $real is $what")
+            continue
         }
-        $real = if ($t.ResolvedPath) { "$($t.ResolvedPath)" } else { "$($t.DisplayPath)" }
-        $lines.Add("  $real is $what")
+        $kind = Get-TargetRootKind -Path $display
+        if (-not $kind) { continue }
+        $top = if ($kind -eq 'DriveRoot' -and $display -match '^([A-Za-z]):') { "the top of the mapped drive $($Matches[1].ToUpper()):" } else { "the top of the share $($display.TrimEnd('\'))" }
+        $lines.Add("  $display ($top, really $real)")
     }
     if ($lines.Count -eq 0) { return $null }
     "Warning: a permission set at the top of a drive or share reaches every folder and file on it that inherits permissions.`n" + ($lines -join "`n")
@@ -5382,7 +5471,13 @@ function Invoke-CopyPermissions {
             $r = Get-CopyTargetRefusal -Path "$($t.ResolvedPath)"
             if ($r) { if ($t.ResolvedPath -ne $t.DisplayPath) { "$($t.DisplayPath) is $($t.ResolvedPath). $r" } else { $r } }
         })
-    if ($refused.Count -gt 0) { Show-ChangeRefusal -Text (@($refused | Select-Object -First 3) -join "`n"); return }
+    if ($refused.Count -gt 0) {
+        # As Resolve-ChangeTargetSet words it: the first three, then how many more.
+        $text = @($refused | Select-Object -First 3) -join "`n"
+        if ($refused.Count -gt 3) { $text += "`n... and $($refused.Count - 3) more were refused too." }
+        Show-ChangeRefusal -Text $text
+        return
+    }
     $deny = Get-CopySourceDenyEntries -Source $Source
     $remembered = @(@($Source) + @($Targets) | Where-Object { $_.IsRemembered }).Count -gt 0
     $elsewhere = @($Targets | Where-Object { Test-TargetResolvedElsewhere -Target $_ }).Count -gt 0

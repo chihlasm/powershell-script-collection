@@ -56,6 +56,10 @@ BeforeAll {
         throw "Get-NetworkDriveRemoteName ($Letter) was called without a mock in a test."
     }
     Mock Resolve-NetworkDrivePath { $Path }
+    # Backstop: the high-impact-root check reads this computer's profiles folder
+    # (GetProfilesDirectoryW). Tests never read the real machine, so it is always C:\Users
+    # here unless a test mocks it otherwise.
+    Mock Get-AppProfilesDirectory { 'C:\Users' }
 }
 
 Describe 'FolderPermissionManager.ps1 (command line)' {
@@ -370,6 +374,54 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         $refusedCode | Should -Be 1
         $refusedLines.Count | Should -Be 1
         $refusedLines[0] | Should -Match ([regex]::Escape($dir))
+        $refusedLines[0] | Should -Match '-AllowSystemFolder'
+        $allowedCode | Should -Be 0
+        Should -Invoke Invoke-AclTool -Times 1 -Exactly -Scope It -ParameterFilter { $Tool -eq 'takeown' }
+    }
+
+    # SQ-018 revision (AC53a): the CLI refuses the high-impact roots before asking.
+    It 'SQ018_Cli_HighImpactRoot_<Path>_IsRefusedWithAFailLine' -ForEach @(
+        @{ Path = 'C:\Users' }
+        @{ Path = '\\fs01\D$\Users' }
+    ) {
+        # Only the high-impact check is under test: nothing about the real folder is read.
+        $script:HighImpactPath = $Path
+        Mock Test-Path { $true } -ParameterFilter { $LiteralPath -eq $script:HighImpactPath }
+        Mock Get-TreeOwnershipTargetRefusal { $null }
+        Mock Get-OwnerTreeItem { throw 'the folder must not be counted (test)' }
+        Mock Save-OwnerSnapshot { throw 'snapshot must not be taken (test)' }
+
+        $code = Invoke-FolderPermissionCli -Path $Path -LogFolder $script:Log -Force
+
+        $code | Should -Be 1
+        $fail = @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' })
+        $fail.Count | Should -Be 1
+        $fail[0] | Should -Match ([regex]::Escape($Path))
+        $fail[0] | Should -Match 'user profile'
+        $fail[0] | Should -Match '-AllowSystemFolder'
+        $fail[0] | Should -Match 'Nothing was changed'
+        Should -Invoke Get-OwnerTreeItem -Times 0 -Exactly -Scope It
+        Should -Invoke Save-OwnerSnapshot -Times 0 -Exactly -Scope It
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+    }
+
+    It 'SQ018_Cli_FolderIn<Name>_IsRefusedUnlessAllowSystemFolder' -ForEach @(
+        @{ Name = 'System Volume Information' }
+        @{ Name = '$Recycle.Bin' }
+    ) {
+        $dir = Join-Path (Join-Path (Join-Path $TestDrive ('cli-hi-' + [guid]::NewGuid().ToString('N'))) $Name) 'S-1-5-21-1-2-3-1001'
+        New-Item -ItemType Directory -Path (Join-Path $dir 'sub') -Force | Out-Null
+
+        $refusedCode = Invoke-FolderPermissionCli -Path $dir -LogFolder $script:Log -Force
+        $refusedLines = @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' })
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        $script:Lines.Clear()
+
+        $allowedCode = Invoke-FolderPermissionCli -Path $dir -LogFolder $script:Log -Force -AllowSystemFolder
+
+        $refusedCode | Should -Be 1
+        $refusedLines.Count | Should -Be 1
+        $refusedLines[0] | Should -Match ([regex]::Escape($Name))
         $refusedLines[0] | Should -Match '-AllowSystemFolder'
         $allowedCode | Should -Be 0
         Should -Invoke Invoke-AclTool -Times 1 -Exactly -Scope It -ParameterFilter { $Tool -eq 'takeown' }

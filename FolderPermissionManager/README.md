@@ -93,10 +93,17 @@ change is refused with "Another change is still running on `<path>`. Wait for it
   looked up again: if it now stands for a different account than the entry you chose (after a
   domain migration, or a rename and a new account with the old name), nothing is changed and
   the status line says so. An entry whose account Windows can't look up from here (shown as
-  `S-1-...`: the account may be deleted, or local to the server) cannot be removed here yet:
-  the status line gives the commands for a senior admin, a backup first and then the removal
-  by SID, for example `icacls "D:\Data" /save acl-backup.txt`, then
-  `icacls "D:\Data" /remove:g *S-1-5-21-...` (`:d` for a Deny entry).
+  `S-1-...`: the account may be deleted, or local to the server) cannot be removed here yet.
+  The status line tells a senior admin to look at the entry on the server itself first (run
+  the tool there, or `icacls "<path>"` there): if it shows a name there, it is an account of
+  that server and still in use, so it must not be removed. Only if it is still `S-1-...` there,
+  it gives the commands, a backup first and then the removal by SID, for example
+  `icacls "D:\Data" /save "%USERPROFILE%\acl-backup-Data-2026-10-19_143000.txt"`, then
+  `icacls "D:\Data" /remove:g *S-1-5-21-...` (`:d` for a Deny entry), and how to put it back:
+  `icacls "D:\." /restore "<that file>"` on the folder above (the top of a drive is written
+  `D:\.`, because `"D:\"` would end in `\"`, which Windows reads as a quote).
+  Each item gets its own file, named after the folder and the time. The file holds the
+  folder's permissions (account SIDs and paths): delete it once the ticket is closed.
 - **It asks first.** Remove Permission and every Take Ownership open a dialog that names the
   path, its real location and how many items, with the action on the button ("Take ownership
   of 12,408 items") and **Cancel** as the default (Enter and Esc both cancel). For the whole
@@ -147,8 +154,10 @@ change is refused with "Another change is still running on `<path>`. Wait for it
   a namespace this computer hosts that cannot be looked up. Copy Permissions refuses a target
   that is an administrative share (`\\fs01\D$`, `ADMIN$`, `IPC$`, `PRINT$`), `SYSVOL` or
   `NETLOGON`, the root of a drive (`D:\`), a Windows folder, a `Users` folder or anything in
-  `System Volume Information` or `$Recycle.Bin` (a folder inside `\\fs01\D$` is fine). A
-  refusal shows in the status line and in a message box.
+  `System Volume Information` or `$Recycle.Bin` (a folder inside `\\fs01\D$` is fine), also
+  when the folder leads there through a junction, a symbolic link or a short name
+  (`C:\PROGRA~1`); a target whose real location Windows cannot tell (it does not exist, or
+  cannot be opened) is refused too. A refusal shows in the status line and in a message box.
 - **The result** shows in the status line, as in the browser version: what was done and where
   it was backed up and logged, "Partly done: ..." when some items failed, "Done, with items to
   check: ..." when the log could not be written or items cannot be restored from the backup,

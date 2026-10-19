@@ -60,6 +60,10 @@ BeforeAll {
         throw "Get-NetworkDriveRemoteName ($Letter) was called without a mock in a test."
     }
     Mock Resolve-NetworkDrivePath { $Path }
+    # Backstop: the high-impact-root check reads this computer's profiles folder
+    # (GetProfilesDirectoryW). Tests never read the real machine, so it is always C:\Users
+    # here unless a test mocks it otherwise.
+    Mock Get-AppProfilesDirectory { 'C:\Users' }
     $script:RealGetAcl = Get-Command Get-Acl -CommandType Cmdlet
     $script:RealGetItemOwner = ${function:Get-ItemOwner}
     $script:MySid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -706,6 +710,64 @@ Describe 'Recursive take ownership: skip folders it cannot open (D-034) and refu
         $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
 
         $rows[0].Result | Should -Be 'Done'
+    }
+
+    # SQ-018 revision (AC53a): the high-impact roots are refused by the core's first check too.
+    It 'SQ018_HighImpactRoot_<Path>_IsRefusedWithNoSnapshotAndNoToolCall' -ForEach @(
+        @{ Path = 'C:\Users' }
+        @{ Path = '\\fs01\D$\Users' }
+    ) {
+        # Only the high-impact check is under test: nothing about the real folder is read.
+        Mock Get-AclItemType { 'Folder' }
+        Mock Get-TreeOwnershipTargetRefusal { $null }
+        Mock Save-OwnerSnapshot { throw 'snapshot must not be taken (test)' }
+
+        $rows = @(Set-ItemOwnerToCurrentUser -Path $Path -Recurse -LogFolder $script:Log)
+
+        $rows.Count | Should -Be 1
+        $rows[0].Result | Should -Be 'Failed'
+        $rows[0].Error | Should -Match ([regex]::Escape($Path))
+        $rows[0].Error | Should -Match 'user profile'
+        $rows[0].Error | Should -Match 'Nothing was changed\.$'
+        Should -Invoke Save-OwnerSnapshot -Times 0 -Exactly -Scope It
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        Test-Path -LiteralPath (Join-Path $script:Log 'Backups') | Should -BeFalse
+    }
+
+    It 'SQ018_FolderIn<Name>_IsRefusedUnlessAllowSystemFolder' -ForEach @(
+        @{ Name = 'System Volume Information' }
+        @{ Name = '$Recycle.Bin' }
+    ) {
+        $dir = Join-Path (Join-Path (Join-Path $TestDrive ('hi-' + [guid]::NewGuid().ToString('N'))) $Name) 'S-1-5-21-1-2-3-1001'
+        New-Item -ItemType Directory -Path (Join-Path $dir 'sub') -Force | Out-Null
+
+        $refused = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+        $refused[0].Result | Should -Be 'Failed'
+        $refused[0].Error | Should -Match ([regex]::Escape($Name))
+        $refused[0].Error | Should -Match 'Nothing was changed\.$'
+        $script:ToolCalls.Count | Should -Be 0 -Because 'takeown and icacls must not run'
+        Test-Path -LiteralPath (Join-Path $script:Log 'Backups') | Should -BeFalse
+
+        # -AllowSystemFolder is the command line's way past it.
+        $allowed = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -AllowSystemFolder -LogFolder $script:Log)
+        $allowed[0].Result | Should -Be 'Done'
+        @($script:ToolCalls | Where-Object { $_.Tool -eq 'takeown' }).Count | Should -Be 1
+    }
+
+    It 'SQ018_ThisComputersProfilesFolder_IsRefusedUnlessAllowSystemFolder' {
+        $dir = New-TestTree ('profiles-' + [guid]::NewGuid().ToString('N'))
+        $script:ProfilesDir = $dir
+        Mock Get-AppProfilesDirectory { $script:ProfilesDir }
+
+        $refused = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+        $refused[0].Result | Should -Be 'Failed'
+        $refused[0].Error | Should -Match 'every user profile on this computer'
+        $script:ToolCalls.Count | Should -Be 0
+
+        $allowed = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -AllowSystemFolder -LogFolder $script:Log)
+        $allowed[0].Result | Should -Be 'Done'
     }
 }
 

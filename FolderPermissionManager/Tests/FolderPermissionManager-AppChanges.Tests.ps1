@@ -1662,6 +1662,9 @@ Describe 'Review 8: -WhatIf writes no change log' {
         foreach ($n in 'Set-Acl', 'Invoke-AclTool', 'takeown', 'icacls') { $override[$n] = & $stub $n }
         # Records any change-log write instead of making it.
         $override['Write-PermissionChangeLog'] = "param(`$Entries, `$LogFolder) Add-Content -LiteralPath '$marker' -Value 'log'; `$null"
+        # The whole-tree run checks the high-impact roots; the pool must not read this computer's
+        # profiles folder either.
+        $override['Get-AppProfilesDirectory'] = "'C:\Users'"
         $dir = New-Folder 'WhatIfPool'
         $dest = New-Folder 'WhatIfPoolDest'
         $log = Join-Path $TestDrive 'whatif-pool-log'
@@ -2733,6 +2736,223 @@ Describe 'Revision 2026-10-19: Deny, roots, protected Copy targets, server-side 
         $uses = @($fn.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.VariableExpressionAst] -and $n.VariablePath.UserPath -eq 'TypedText' -and $n.Extent.StartOffset -gt $afterParams }, $true))
         $uses.Count | Should -BeGreaterThan 0 -Because 'the body must use -TypedText to fill CopyTargetsBox'
         $fn.Extent.Text | Should -Match 'CopyTargetsBox'
+    }
+
+    # ---- Review round 1 of the revision (2026-10-19) ---------------------------------------------
+    # M1: the late re-check must see where the folder really leads, not only the text of the path.
+    It 'AC53a_LateRecheckSeesAJunctionSwappedInAfterTheConfirm' {
+        $dir = New-Folder 'Late53Swap'
+        $script:Dir53 = $dir
+        $log = Join-Path $TestDrive ('late-swap-log-' + [guid]::NewGuid().ToString('N'))
+        $script:SnapshotTaken = $false
+        $script:ToolCalls = [System.Collections.Generic.List[string]]::new()
+        Mock Save-OwnerSnapshot {
+            $script:SnapshotTaken = $true
+            [PSCustomObject]@{ File = (Join-Path $TestDrive 'snap-swap.csv'); Count = 1; Items = @(); Unreadable = 0; Unlisted = 0; UnlistedFolders = @(); Links = 0; LinkPaths = @() }
+        }
+        Mock Get-OwnerReadBack { [PSCustomObject]@{ Mine = 1; NotMine = 0; Changed = 1; Unchecked = 0; AdministratorsOnly = $false; WatchedChanged = @(); WatchedUnchecked = @() } }
+        Mock Invoke-AclTool { $script:ToolCalls.Add("$Tool"); [PSCustomObject]@{ ExitCode = 0; Output = @() } }
+        # Nothing about this computer's drives or folders above $TestDrive is read.
+        Mock Resolve-NetworkDrivePath { $Path }
+        Mock Find-PathLink { $null }
+        # The folder is itself at the first check; by the late check it has become a junction to C:\Users.
+        Mock Get-Win32PathName { if ($script:SnapshotTaken -and $Kind -eq 'Final' -and $Path -eq $script:Dir53) { '\\?\C:\Users' } else { $Path } }
+        $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -LogFolder $log -Recurse -Confirm:$false)
+        $row = $rows | Where-Object { $_ } | Select-Object -Last 1
+        $row.Result | Should -Be 'Failed' -Because 'the late re-check runs the high-impact check on the final path'
+        $row.Error | Should -Match ([regex]::Escape('C:\Users'))
+        $row.Error | Should -Match 'user profile'
+        $row.Error | Should -Match 'Nothing was changed'
+        $script:ToolCalls.Count | Should -Be 0 -Because 'takeown and icacls must not run'
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly
+        Should -Invoke Get-Win32PathName -ParameterFilter { $Kind -eq 'Final' -and $Path -eq $script:Dir53 }
+    }
+
+    It 'AC53a_LateRecheckSeesALinkInsideTheTreeThatLeadsToUsers' {
+        $dir = New-Folder 'Late53Link'
+        $link = New-Folder 'Late53Link\Profiles'
+        $script:Link53 = $link
+        $log = Join-Path $TestDrive ('late-link-log-' + [guid]::NewGuid().ToString('N'))
+        $script:ToolCalls = [System.Collections.Generic.List[string]]::new()
+        Mock Save-OwnerSnapshot {
+            [PSCustomObject]@{ File = (Join-Path $TestDrive 'snap-link.csv'); Count = 2; Items = @(); Unreadable = 0; Unlisted = 0; UnlistedFolders = @(); Links = 1; LinkPaths = @($script:Link53) }
+        }
+        Mock Invoke-AclTool { $script:ToolCalls.Add("$Tool"); [PSCustomObject]@{ ExitCode = 0; Output = @() } }
+        Mock Resolve-NetworkDrivePath { $Path }
+        Mock Find-PathLink { $null }
+        Mock Get-LinkKind { 'junction' }
+        Mock Get-Win32PathName { if ($Kind -eq 'Final' -and $Path -eq $script:Link53) { '\\?\C:\Users' } else { $Path } }
+        $row = @(Set-ItemOwnerToCurrentUser -Path $dir -LogFolder $log -Recurse -Confirm:$false) | Where-Object { $_ } | Select-Object -Last 1
+        $row.Result | Should -Be 'Failed'
+        $row.Error | Should -Match ([regex]::Escape($link))
+        $row.Error | Should -Match 'user profile'
+        $row.Error | Should -Match 'Nothing was changed'
+        $script:ToolCalls.Count | Should -Be 0
+    }
+
+    # M2: a trailing or doubled backslash must not skip the D-045 check.
+    It 'AC52_TrailingOrDoubledBackslashStillChecksTheServerSidePath' {
+        Mock Get-RemoteShareLocalPath { 'D:\Shares\Data' }
+        Mock Get-AppReparseInfo { [PSCustomObject]@{ Exists = $true; IsReparsePoint = ($Path -eq '\\fs01\D$\Shares'); Tag = $(if ($Path -eq '\\fs01\D$\Shares') { [uint32]2684354563 } else { $null }) } }
+        foreach ($typed in '\\fs01\Data\HR\', '\\fs01\Data\HR\\Sub', '\\fs01\Data\\HR') {
+            $t = Get-ChangeTarget -Path $typed -WholeTree
+            $t.Ok | Should -BeFalse -Because "$typed is behind the junction \\fs01\D$\Shares on the server"
+            $t.Refusal | Should -Match ([regex]::Escape('\\fs01\D$\Shares'))
+            $t.Refusal | Should -Match '(?i)junction'
+        }
+    }
+
+    It 'AC52_AServerPathThatIsNotAFolderOnADriveIsRefusedNotAllowed' {
+        Mock Get-AppReparseInfo { [PSCustomObject]@{ Exists = $true; IsReparsePoint = $false; Tag = $null } }
+        Get-ServerSideLinkRefusal -Server 'fs01' -ServerPath '\\fs01\D$\Shares\Data\' | Should -BeNullOrEmpty -Because 'a trailing \ is the same folder'
+        Get-ServerSideLinkRefusal -Server 'fs01' -ServerPath '\\fs01\Data\HR' | Should -Not -BeNullOrEmpty -Because 'a guard that cannot read the path fails closed'
+        Get-ServerSideLinkRefusal -Server 'fs01' -ServerPath '\\fs01\D$' | Should -BeNullOrEmpty -Because 'the drive root has no folder to check (D-036 refuses it already)'
+        Get-ServerSideLinkRefusal -Server 'fs01' -ServerPath '\\fs01\D$\' | Should -BeNullOrEmpty
+    }
+
+    # M3: a Copy target is checked where Windows really reaches it.
+    It 'AC50_CopyTargetThatLeadsToAProtectedFolderIsRefused' {
+        $dir = New-Folder 'CopyIntoJunction'
+        $script:Dir50 = $dir
+        foreach ($real in '\\?\C:\Users', "\\?\$env:SystemRoot") {
+            $script:Real50 = $real
+            Mock Get-Win32PathName { if ($Kind -eq 'Final' -and $Path -eq $script:Dir50) { $script:Real50 } else { $Path } }
+            $t = Get-ChangeTarget -Path $dir -RefuseProtected
+            $t.Ok | Should -BeFalse -Because "$dir is a junction to $real"
+            $t.Refusal | Should -Match ([regex]::Escape($real.Substring(4)))
+            $t.Refusal | Should -Match "can't be copied"
+        }
+        # 8.3 names of a Windows folder and of System Volume Information.
+        Mock Get-Win32PathName { if ($Kind -eq 'Long' -and $Path -eq 'C:\PROGRA~1') { $env:ProgramFiles } elseif ($Kind -eq 'Long' -and $Path -eq 'D:\SYSTEM~1') { 'D:\System Volume Information' } else { $Path } }
+        foreach ($short in 'C:\PROGRA~1', 'D:\SYSTEM~1') {
+            (Get-ChangeTarget -Path $short -RefuseProtected).Ok | Should -BeFalse -Because "$short is a short name of a protected folder"
+        }
+        # A target whose final path cannot be told fails closed.
+        Mock Get-Win32PathName { $null }
+        $f = Get-ChangeTarget -Path $dir -RefuseProtected
+        $f.Ok | Should -BeFalse
+        $f.Refusal | Should -Match '(?i)could not tell where'
+        # Through the Copy flow: refused, no confirm, no task.
+        Mock Get-Win32PathName { if ($Kind -eq 'Final' -and $Path -eq $script:Dir50) { '\\?\C:\Users' } else { $Path } }
+        $script:Captured = $null; $script:Shown.Clear(); $script:Confirms.Clear()
+        Invoke-CopyPermissions -TargetText $dir
+        $script:Captured | Should -BeNullOrEmpty
+        $script:Confirms.Count | Should -Be 0
+        @($script:Shown | Where-Object { $_ -match [regex]::Escape('C:\Users') }).Count | Should -Be 1
+        # An ordinary folder that is where it says still copies.
+        Mock Get-Win32PathName { $Path }
+        (Get-ChangeTarget -Path $dir -RefuseProtected).Ok | Should -BeTrue
+    }
+
+    # M4 and m7: check on the server first, then a full, per-item backup path.
+    It 'AC53b_OrphanNextStepChecksOnTheServerBeforeTheIcaclsCommands' {
+        $sid = 'S-1-5-21-1-2-3-1009'
+        Mock ConvertTo-SidAccountName { $null }
+        $r = Get-RemoveIdentityProblem -Identity $sid -Sid $sid -Path @('\\fs01\Data\HR') -Type Allow
+        $r.Problem | Should -Match ([regex]::Escape("Windows can't look up this account from here (it may be deleted, or local to the server)"))
+        $check = $r.Problem.IndexOf('on the server itself')
+        $check | Should -BeGreaterThan -1 -Because 'the senior admin looks at the entry on the server first'
+        $save = $r.Problem.IndexOf('/save ')
+        $check | Should -BeLessThan $save -Because 'the check comes before the icacls commands'
+        $r.Problem.IndexOf('/remove:g') | Should -BeGreaterThan $check
+        $r.Problem | Should -Match '(?i)do not remove it'
+        $r.Problem | Should -Match ([regex]::Escape("Only if it still shows as $sid there"))
+    }
+
+    It 'AC53b_IcaclsBackupFileIsAFullPerItemTimestampedPath' {
+        $sid = 'S-1-5-21-1-2-3-1009'
+        Mock ConvertTo-SidAccountName { $null }
+        $r = Get-RemoveIdentityProblem -Identity $sid -Sid $sid -Path @('D:\Data\HR') -Type Allow
+        $r.Problem | Should -Match 'icacls "D:\\Data\\HR" /save "%USERPROFILE%\\acl-backup-HR-\d{4}-\d{2}-\d{2}_\d{6}\.txt"'
+        $r.Problem | Should -Match 'icacls "D:\\Data" /restore "%USERPROFILE%\\acl-backup-HR-\d{4}-\d{2}-\d{2}_\d{6}\.txt"' -Because 'it is put back on the folder above'
+        # A drive root is written D:\. so the closing quote is not escaped by a backslash.
+        $root = Get-RemoveIdentityProblem -Identity $sid -Sid $sid -Path @('D:\') -Type Deny
+        $root.Problem | Should -Match ([regex]::Escape('icacls "D:\." /save "%USERPROFILE%\acl-backup-'))
+        $root.Problem | Should -Match ([regex]::Escape('icacls "D:\." /remove:d *' + $sid))
+        $root.Problem | Should -Not -Match ([regex]::Escape('\"'))
+        Format-IcaclsPathArgument -Path '\\fs01\Data\' | Should -Be '\\fs01\Data'
+        $readme = Get-Content -LiteralPath (Join-Path $script:Root 'README.md') -Raw
+        $readme | Should -Match '(?s)account SIDs and paths.{0,40}delete it once the ticket is closed'
+    }
+
+    # m5: the renamed case does not say the account may be deleted.
+    It 'SQ018R2_RenamedAccountWordingDoesNotContradictItself' {
+        Mock ConvertTo-IdentitySid { $null }
+        Mock ConvertTo-SidAccountName { 'CONTOSO\HR-Team' }
+        $r = Get-RemoveIdentityProblem -Identity 'CONTOSO\HR' -Sid 'S-1-5-21-1-2-3-1001' -Path @('D:\Data') -Type Allow
+        $r.Problem | Should -Match ([regex]::Escape("Windows can't find CONTOSO\HR any more; the account of the entry you chose"))
+        $r.Problem | Should -Match ([regex]::Escape('is now called CONTOSO\HR-Team (it may have been renamed)'))
+        $r.Problem | Should -Not -Match 'may be deleted'
+        $r.Problem | Should -Match 'Nothing was changed|nothing was changed'
+    }
+
+    # m2: Copy fails closed when the source's entries could not be checked.
+    It 'AC48_CopyConfirmsWhenTheSourceCouldNotBeChecked_<Case>' -ForEach @(
+        @{ Case = 'NotLoaded' }
+        @{ Case = 'LoadFailed' }
+        @{ Case = 'AnotherFolder' }
+        @{ Case = 'AnotherSource' }
+    ) {
+        $source = New-FakeTarget -Display $script:Current.DisplayPath -Resolved $script:Current.RealPath
+        switch ($Case) {
+            'NotLoaded' { $script:ViewState.FolderPermissions = $null }
+            'LoadFailed' { $script:ViewState.FolderPermissions = [PSCustomObject]@{ Ok = $false; Path = $script:Current.RealPath; Rows = @() } }
+            'AnotherFolder' { $script:ViewState.FolderPermissions = [PSCustomObject]@{ Ok = $true; Path = 'D:\Elsewhere'; Rows = @() } }
+            'AnotherSource' { $source = New-FakeTarget -Display 'H:\Other' -Resolved $script:Current.RealPath }
+        }
+        $target = New-FakeTarget -Display 'D:\Data\Other'
+        Invoke-CopyPermissions -Source $source -Targets @($target)
+        $script:Confirms.Count | Should -Be 1 -Because "the source's own entries could not be checked ($Case)"
+        $script:AtConfirm[0] | Should -BeNullOrEmpty
+        $script:Confirms[0].IsDestructive | Should -BeTrue
+        $script:Confirms[0].Body | Should -Match 'could not be checked'
+        $script:Captured | Should -Not -BeNullOrEmpty
+
+        $script:Captured = $null; $script:Confirms.Clear(); $script:ConfirmAnswer = $false
+        Invoke-CopyPermissions -Source $source -Targets @($target)
+        $script:Confirms.Count | Should -Be 1
+        $script:Captured | Should -BeNullOrEmpty -Because 'declined: no task starts'
+    }
+
+    # m3: a root that is only the typed path is not called the root of a drive.
+    It 'AC49_ConfirmRootTextForAMappedDriveRootNamesTheRealFolder' {
+        $t = New-FakeTarget -Display 'H:\' -Resolved '\\fs01\Data\Dept'
+        $text = Get-ConfirmRootText -Targets @($t)
+        $text | Should -Match ([regex]::Escape('H:\ (the top of the mapped drive H:, really \\fs01\Data\Dept)'))
+        $text | Should -Not -Match ([regex]::Escape('\\fs01\Data\Dept is the root of a whole drive'))
+        # A real root still says what it is.
+        Get-ConfirmRootText -Targets @((New-FakeTarget -Display 'D:\')) | Should -Match ([regex]::Escape('D:\ is the root of a whole drive'))
+        # The confirm for an Add there carries it, destructive.
+        Invoke-AddPermission -Scope Folder -Identity 'CONTOSO\HR' -Rights 'Modify' -Type 'Allow' -Targets @($t)
+        $script:Confirms[0].IsDestructive | Should -BeTrue
+        $script:Confirms[0].Body | Should -Match ([regex]::Escape('the top of the mapped drive H:'))
+    }
+
+    # m6: Deny wording follows the canonical ACE order.
+    It 'AC47_DenyWarningDoesNotOverstateDeny' {
+        $spec = Get-ConfirmSpec -Action AddPermission -Targets @((New-FakeTarget -Display 'D:\Data\HR')) -Detail 'Deny Modify for CONTOSO\Temps' -Type Deny
+        $spec.Body | Should -Match ([regex]::Escape('A Deny blocks access even where another permission on the same folder allows it.'))
+        $spec.Body | Should -Match ([regex]::Escape('a permission set directly on a subfolder can still allow access there'))
+        $spec.Body | Should -Not -Match 'reaches every subfolder'
+        Get-Content -LiteralPath $script:AppPath -Raw | Should -Match ([regex]::Escape('https://learn.microsoft.com/windows/win32/secauthz/order-of-aces-in-a-dacl'))
+    }
+
+    # m8: IPC$ is not a folder.
+    It 'AC50_IpcShareRefusalSaysItIsNotAFolder' {
+        $text = Get-CopyTargetRefusal -Path '\\fs01\IPC$'
+        $text | Should -Match 'it is not a folder'
+        $text | Should -Match 'Choose the folder that needs these permissions instead'
+        $text | Should -Not -Match 'let people into it'
+    }
+
+    # m9: the second refusal check says how many more were refused.
+    It 'AC50_SecondCheckCountsTheRefusalsItDoesNotList' {
+        $source = New-FakeTarget -Display $script:Current.DisplayPath
+        $targets = @('\\fs01\ADMIN$', '\\fs01\SYSVOL', '\\fs01\NETLOGON', '\\fs01\PRINT$', '\\fs01\IPC$' | ForEach-Object { New-FakeTarget -Display $_ })
+        Invoke-CopyPermissions -Source $source -Targets $targets
+        $script:Captured | Should -BeNullOrEmpty
+        $script:Shown.Count | Should -Be 1
+        $script:Shown[0] | Should -Match 'and 2 more'
     }
 }
 }

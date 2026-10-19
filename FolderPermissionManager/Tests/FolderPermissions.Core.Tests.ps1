@@ -47,6 +47,10 @@ BeforeAll {
         throw "Get-NetworkDriveRemoteName ($Letter) was called without a mock in a test."
     }
     Mock Resolve-NetworkDrivePath { $Path }
+    # Backstop: the high-impact-root check reads this computer's profiles folder
+    # (GetProfilesDirectoryW). Tests never read the real machine, so it is always C:\Users
+    # here unless a test mocks it otherwise.
+    Mock Get-AppProfilesDirectory { 'C:\Users' }
 
     # The real cmdlet object: Pester mocks also intercept the module-qualified name.
     $script:RealGetAcl = Get-Command Get-Acl -CommandType Cmdlet

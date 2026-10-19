@@ -911,8 +911,11 @@ function Get-HighImpactRootRefusal {
           not detected. One profile folder below it (C:\Users\bob) is allowed;
         - anything in System Volume Information or $Recycle.Bin, on any drive.
         Text only, apart from reading this computer's profiles folder. Invoke-TreeOwnershipChange
-        runs it with D-036, also once more just before takeown; the GUI also applies it to where
-        a path really leads (junctions, symbolic links, 8.3 names, a share's server-side folder).
+        runs it with D-036, also once more just before takeown, and Get-TreeOwnershipTargetRefusal
+        and Get-TreeLinkRefusal run it on where a path really leads (the mapped drive's server
+        path, the final and long path, a link's destination), so a junction swapped in after the
+        confirm is caught by that late check too. The GUI also applies it to a share's
+        server-side folder.
     #>
     param([Parameter(Mandatory)][string]$Path)
     $p = ConvertTo-ComparablePath -Path $Path
@@ -1473,7 +1476,10 @@ function Get-TreeOwnershipTargetRefusal {
         Get-TreeOwnershipRefusal for a folder as Windows will really reach it: also refused when
         -Path leads into a protected folder through a mapped network drive, a junction, a
         symbolic link or DFS (on the folder or on any folder above it) or is spelt with 8.3
-        short names (C:\PROGRA~1). The text names -Path as given. $null when it is allowed.
+        short names (C:\PROGRA~1). Where it really leads (the server path of a mapped drive,
+        the final path and the long path) is also checked against the high-impact roots
+        (Get-HighImpactRootRefusal); -Path itself as typed is left to the caller. The text names
+        -Path as given. $null when it is allowed.
     .DESCRIPTION
         Reads the disk (Get-Win32PathName, attributes only; nothing is opened for reading or
         changed). A path on a mapped network drive is first turned into its server path
@@ -1510,6 +1516,7 @@ function Get-TreeOwnershipTargetRefusal {
     $given = ConvertTo-ComparablePath -Path $resolved
     if ($given -ine (ConvertTo-ComparablePath -Path $Path)) {
         $refusal = Get-TreeOwnershipRefusal -Path $given
+        if (-not $refusal) { $refusal = Get-HighImpactRootRefusal -Path $given }
         if ($refusal) { return "$Path is on a network drive and leads to $given. $refusal" }
     }
     $onNetwork = $given.StartsWith('\\')
@@ -1540,6 +1547,7 @@ function Get-TreeOwnershipTargetRefusal {
         if ($comparable -ieq $given) { continue }
         if ($form -ceq $final) { $finalLeadsElsewhere = $true }
         $refusal = Get-TreeOwnershipRefusal -Path $comparable
+        if (-not $refusal) { $refusal = Get-HighImpactRootRefusal -Path $comparable }
         if ($refusal) {
             return "$Path leads to $comparable (through a junction, a symbolic link or a short name). $refusal"
         }
@@ -1573,7 +1581,8 @@ function Get-TreeLinkRefusal {
     .SYNOPSIS
         Why a link found inside -Path (Save-OwnerSnapshot LinkPaths, Get-OwnerTreeItem Links)
         stops taking ownership of the whole tree, or $null when none does. A link is refused
-        when it leads into a protected folder (D-036) or where it leads cannot be found out.
+        when it leads into a protected folder (D-036) or a high-impact root
+        (Get-HighImpactRootRefusal), or where it leads cannot be found out.
         The text names what was found (Get-LinkKindName).
     .DESCRIPTION
         Microsoft's documentation does not say whether takeown /R or icacls /T follow links,
@@ -1608,6 +1617,7 @@ function Get-TreeLinkRefusal {
         $asListed = ConvertTo-ComparablePath -Path $link
         $comparableLink = $asListed
         $refusal = Get-TreeOwnershipRefusal -Path $link
+        if (-not $refusal) { $refusal = Get-HighImpactRootRefusal -Path $link }
         if (-not $refusal) {
             try {
                 $comparableLink = ConvertTo-ComparablePath -Path (Resolve-NetworkDrivePath -Path $link)
@@ -1617,6 +1627,7 @@ function Get-TreeLinkRefusal {
         }
         if (-not $refusal -and $comparableLink -ine $asListed) {
             $refusal = Get-TreeOwnershipRefusal -Path $comparableLink
+            if (-not $refusal) { $refusal = Get-HighImpactRootRefusal -Path $comparableLink }
             if ($refusal) { $refusal = "$link is $kind on a network drive that leads to $comparableLink. $refusal" }
         }
         if (-not $refusal) {
@@ -1630,6 +1641,7 @@ function Get-TreeLinkRefusal {
                     $refusal = "$link is $kind, and $script:UnresolvedDestinationText, $tail"
                 } else {
                     $refusal = Get-TreeOwnershipRefusal -Path $comparable
+                    if (-not $refusal) { $refusal = Get-HighImpactRootRefusal -Path $comparable }
                     if ($refusal) {
                         $refusal = "$link is $kind that leads to $comparable. $refusal"
                     } elseif ($comparable.StartsWith('\\')) {
@@ -2327,8 +2339,9 @@ function Invoke-TreeOwnershipChange {
         5. Unless -AllowSystemFolder, every junction and symbolic link the snapshot found inside
            the folder is checked like the folder (Get-TreeLinkRefusal): one that leads into a
            protected folder, or whose destination cannot be found out, refuses the whole tree.
-           The folder itself is checked again too (D-036 and the high-impact roots), so a
-           junction swapped in after step 2 is caught. A refused tree is Failed and nothing is changed; the snapshot is kept (the
+           The folder itself is checked again too (D-036 and the high-impact roots, on the path
+           as given and on where it really leads), so a junction swapped in after step 2 is
+           caught. A refused tree is Failed and nothing is changed; the snapshot is kept (the
            row names it, so it is not taken for an interrupted run) and needs no restoring.
         6. takeown /F <dir> /R /A /D N gives every item to Administrators, so an administrator
            can open items they are locked out of. A folder the account cannot list (no List
