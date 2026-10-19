@@ -29,14 +29,16 @@
     (inheritance turned off) do not get it, nor do the folders inside them, and an explicit
     Deny on a subfolder still wins. Add it with Add Permission in
     FolderPermissionManager-GUI.ps1 or on Explorer's Security tab. Without a browser:
-        icacls "D:\Shares\HR\Finance" /grant "DOMAIN\user:(OI)(CI)M"
-    (M is Modify; do not add /T, which writes it onto every subfolder and file, including
-    the ones that block inheritance).
+        icacls "D:\Shares\HR\Finance" /grant "DOMAIN\user:(OI)(CI)RX"
+    (RX is read and execute; use M only if they must change or delete files. Do not add /T,
+    which writes it onto every subfolder and file, including the ones that block
+    inheritance).
 
     Before taking ownership it prints the scope with [WARN] (the number of items, counted
-    read-only first) and asks "Continue? (y/N)". A host that cannot ask (a scheduled task,
-    or PowerShell started with -NonInteractive) needs -Force or -WhatIf; without either the
-    script stops with [FAIL] before anything is changed.
+    read-only first) and asks "Continue? (y/N)". A remote console (Enter-PSSession, psexec)
+    is asked like a local one. A host that cannot ask (a scheduled task, or PowerShell
+    started with -NonInteractive) needs -Force or -WhatIf; without either the script stops
+    with [FAIL] before anything is changed.
 
     Every change is written to <LogFolder>\Changes_<yyyy-MM-dd>.csv, the same log the GUI
     writes. See "Undo a change" in README.md to put owners back.
@@ -118,7 +120,8 @@
       session when UAC is on:
       https://learn.microsoft.com/dotnet/api/system.security.principal.windowsprincipal.isinrole
     - icacls /grant adds to the explicit permissions (without :r); (OI) and (CI) make files
-      and subfolders inherit it; /T performs the operation on every file and subfolder:
+      and subfolders inherit it; RX is read and execute access and M is modify access; /T
+      performs the operation on every file and subfolder:
       https://learn.microsoft.com/windows-server/administration/windows-commands/icacls
     - Explicit ACEs come before inherited ones, and within them deny before allow, so a Deny
       set on a subfolder wins over access it inherits:
@@ -126,12 +129,15 @@
     - ObjectSecurity.AreAccessRulesProtected: the folder's permissions are protected from
       inheritance:
       https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.objectsecurity.areaccessrulesprotected
-    - Environment.UserInteractive is false for a process without a user interface:
-      https://learn.microsoft.com/dotnet/api/system.environment.userinteractive
     - -NonInteractive (-noni in pwsh) makes Read-Host fail; parameters are case-insensitive,
-      may start with - or /, and everything after -File or -Command belongs to them:
+      may start with - or /, and everything after -File or -Command belongs to them. pwsh
+      also honours --noninteractive (not documented there; checked on pwsh 7.5):
       https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_powershell_exe
       https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_pwsh
+    - Environment.UserInteractive is not used to decide whether the host can ask: it can be
+      false in a remote session where Read-Host still works. A Read-Host that throws is
+      caught instead:
+      https://learn.microsoft.com/dotnet/api/system.environment.userinteractive
 #>
 
 [CmdletBinding(SupportsShouldProcess)]
@@ -197,7 +203,7 @@ function Write-CliChangeResult {
 
 function Confirm-CliStep {
     # True when the technician types y or Y. Anything else, including Enter, is no (the
-    # capital N says so).
+    # capital N says so). Read-Host throws when the host cannot ask; the caller catches it.
     param([string]$Question = 'Continue?')
     $answer = Read-Host "$Question (y/N)"
     $answer -eq 'y' -or $answer -eq 'Y'
@@ -206,26 +212,34 @@ function Confirm-CliStep {
 function Test-CliHostInteractive {
     <#
     .SYNOPSIS
-        True when this host can ask the technician a question: the process has a user
-        interface (Environment.UserInteractive) and PowerShell was not started with
-        -NonInteractive (or -noni, any case, - or /). Arguments after -File, -Command,
-        -EncodedCommand or -CommandWithArgs belong to the script or command and are not read.
+        False when PowerShell was started with -NonInteractive (or -noni, any case, starting
+        with -, / or, in pwsh, --), so Read-Host would fail; true otherwise. Arguments after
+        -File, -Command, -EncodedCommand or -CommandWithArgs belong to the script or command
+        and are not read.
+    .DESCRIPTION
+        Environment.UserInteractive is deliberately not used: it can be false in an
+        Enter-PSSession host (wsmprovhost.exe) or under psexec without -i, where Read-Host still
+        works, and refusing there teaches remote technicians to use -Force, which skips the
+        confirmation. A Read-Host that fails anyway is caught where it is asked.
     .NOTES
-        https://learn.microsoft.com/dotnet/api/system.environment.userinteractive
+        -NonInteractive makes Read-Host a statement-terminating error; parameters are
+        case-insensitive and powershell.exe also accepts /:
         https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_powershell_exe
         https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_pwsh
+        about_Pwsh does not document the -- form; pwsh 7.5 honours --noninteractive and --noni
+        (checked: Read-Host then fails with "PowerShell is in NonInteractive mode").
+        powershell.exe reads --noninteractive as the start of a command, which no technician
+        types, so it is treated the same here.
     #>
     [CmdletBinding()]
     [OutputType([bool])]
     param(
-        [bool]$UserInteractive = [Environment]::UserInteractive,
         [string[]]$CommandLineArgs = [Environment]::GetCommandLineArgs()
     )
 
-    if (-not $UserInteractive) { return $false }
     # The first argument is the program itself.
     foreach ($arg in @($CommandLineArgs | Select-Object -Skip 1)) {
-        if ($arg -notmatch '^[-/](?<name>[A-Za-z]+)$') { continue }
+        if ($arg -notmatch '^(?:--|[-/])(?<name>[A-Za-z]+)$') { continue }
         $name = $Matches['name'].ToLowerInvariant()
         if ($name.Length -ge 4 -and 'noninteractive'.StartsWith($name)) { return $false }
         $endsOptions = 'command'.StartsWith($name) -or 'file'.StartsWith($name) -or
@@ -239,10 +253,10 @@ function Invoke-FolderPermissionCli {
     <#
     .SYNOPSIS
         The script's work: take ownership, then show the permissions (D-035: there is no copy
-        to the subfolders; access is added once on the top folder and inherited). Taking
-        ownership shows its scope with [WARN], asks first (unless -Force), goes through the
-        core (backup, then change, then change log) and prints its result. Never throws for a
-        declined prompt.
+        to the subfolders; access is added on the folder they need and inherited by what is
+        inside it). Taking ownership shows its scope with [WARN], asks first (unless -Force),
+        goes through the core (backup, then change, then change log) and prints its result.
+        Never throws for a declined prompt or a host that cannot ask.
     .OUTPUTS
         The exit code for the script: 1 when the folder could not be used, taking ownership
         Failed or was only Partly done, or it could not be checked everywhere; 0 otherwise
@@ -259,9 +273,10 @@ function Invoke-FolderPermissionCli {
 
     $whatIf = [bool]$WhatIfPreference
     $exitCode = 0
+    $noPathMessage = '[FAIL] Give the folder with -Path; this host cannot ask. Nothing was changed.'
 
-    # A scheduled task or a -NonInteractive session cannot answer "Continue? (y/N)": stop
-    # before anything is asked, counted or saved instead of failing halfway on Read-Host.
+    # A -NonInteractive session cannot answer "Continue? (y/N)": stop before anything is
+    # asked, counted or saved instead of failing halfway on Read-Host.
     if (-not $Force -and -not $whatIf -and -not (Test-CliHostInteractive)) {
         Write-Host '[FAIL] Run with -Force, or -WhatIf for a dry run; this host cannot ask. Nothing was changed.' -ForegroundColor Red
         return 1
@@ -269,10 +284,17 @@ function Invoke-FolderPermissionCli {
 
     if (-not $Path) {
         if (-not (Test-CliHostInteractive)) {
-            Write-Host '[FAIL] Give the folder with -Path; this host cannot ask. Nothing was changed.' -ForegroundColor Red
+            Write-Host $noPathMessage -ForegroundColor Red
             return 1
         }
-        $Path = Read-Host 'Enter the path to the top-level folder'
+        # A host without the -NonInteractive switch can still be unable to ask (a scheduled
+        # task): Read-Host then throws, and the run stops cleanly.
+        try {
+            $Path = Read-Host 'Enter the path to the top-level folder'
+        } catch {
+            Write-Host $noPathMessage -ForegroundColor Red
+            return 1
+        }
     }
     # One full path for everything below: the snapshot, takeown, icacls and the log.
     $Path = Resolve-AclTargetPath -Path "$Path".Trim()
@@ -290,21 +312,6 @@ function Invoke-FolderPermissionCli {
     }
 
     $defaultLogFolder = Join-Path $PSScriptRoot 'Logs'
-    if ($whatIf) {
-        # A dry run writes nothing, so the log folder is not created or tested.
-        $logFolderUsed = if ($LogFolder) { $LogFolder } else { $defaultLogFolder }
-    } else {
-        try {
-            $logFolderUsed = Resolve-ChangeLogFolder -LogFolder $LogFolder -DefaultFolder $defaultLogFolder
-        } catch {
-            Write-Host "[FAIL] $($_.Exception.Message)" -ForegroundColor Red
-            return 1
-        }
-        foreach ($notice in @(Get-ChangeLogFolderNotice -LogFolder $LogFolder -ResolvedFolder $logFolderUsed -DefaultFolder $defaultLogFolder)) {
-            Write-Host "[WARN] $notice" -ForegroundColor Yellow
-        }
-        Write-Host "[INFO] Changes are backed up and logged to $logFolderUsed" -ForegroundColor Cyan
-    }
 
     # 1. Take ownership of everything under the folder. The tree is counted first (read only)
     # so the scope is shown before asking; the core lists it again for the snapshot.
@@ -332,8 +339,34 @@ function Invoke-FolderPermissionCli {
         $warning += " It contains $($links.Count) junction(s) or symbolic link(s), which are listed but not gone into. Microsoft's documentation does not say whether takeown and icacls follow them, and icacls changes what a symbolic link points to, so check them afterwards: $($links -join '; ')."
     }
     Write-Host $warning -ForegroundColor Yellow
-    $takeOwnership = $whatIf -or $Force -or (Confirm-CliStep)
+    $takeOwnership = $whatIf -or $Force
+    if (-not $takeOwnership) {
+        # Read-Host throws when the host cannot ask after all (not every such host is started
+        # with -NonInteractive); nothing has been created or changed yet.
+        try {
+            $takeOwnership = Confirm-CliStep
+        } catch {
+            Write-Host '[FAIL] This host cannot ask; run with -Force, or -WhatIf for a dry run. Nothing was changed.' -ForegroundColor Red
+            return 1
+        }
+    }
     if ($takeOwnership) {
+        # The log folder is set up only once the change is agreed (a dry run writes nothing,
+        # so it is not created or tested then).
+        if ($whatIf) {
+            $logFolderUsed = if ($LogFolder) { $LogFolder } else { $defaultLogFolder }
+        } else {
+            try {
+                $logFolderUsed = Resolve-ChangeLogFolder -LogFolder $LogFolder -DefaultFolder $defaultLogFolder
+            } catch {
+                Write-Host "[FAIL] $($_.Exception.Message) Nothing was changed." -ForegroundColor Red
+                return 1
+            }
+            foreach ($notice in @(Get-ChangeLogFolderNotice -LogFolder $LogFolder -ResolvedFolder $logFolderUsed -DefaultFolder $defaultLogFolder)) {
+                Write-Host "[WARN] $notice" -ForegroundColor Yellow
+            }
+            Write-Host "[INFO] Changes are backed up and logged to $logFolderUsed" -ForegroundColor Cyan
+        }
         if ($whatIf) {
             $rows = @(Set-ItemOwnerToCurrentUser -Path $Path -Recurse -AllowSystemFolder:$AllowSystemFolder -LogFolder $logFolderUsed -WhatIf)
             $null = Write-CliChangeResult -Entries $rows -LogFolder $logFolderUsed
@@ -388,6 +421,9 @@ function Invoke-FolderPermissionCli {
     # The folders that block inheritance do not get access added above them (D-031, D-035).
     # https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.objectsecurity.areaccessrulesprotected
     $blocking = New-Object System.Collections.Generic.List[string]
+    # A folder whose permissions cannot be read may block inheritance too; it is not claimed
+    # either way.
+    $unchecked = New-Object System.Collections.Generic.List[string]
     foreach ($folder in $subFolders) {
         try {
             $folderAcl = Get-Acl -LiteralPath $folder -ErrorAction Stop
@@ -395,6 +431,7 @@ function Invoke-FolderPermissionCli {
             if ($folderAcl.AreAccessRulesProtected) { $blocking.Add($folder) }
         } catch {
             Write-Host "[WARN] Cannot read $($folder): $($_.Exception.Message)" -ForegroundColor Yellow
+            $unchecked.Add($folder)
         }
     }
 
@@ -403,16 +440,25 @@ function Invoke-FolderPermissionCli {
     Write-Host "[INFO] To give someone access: add it on the folder they need. Adding it on $Path gives them everything inside it that inherits." -ForegroundColor Cyan
     if ($blocking.Count -gt 0) {
         Write-Host "[INFO] $($blocking.Count) subfolder(s) block inheritance, so they and the folders inside them do not get it: $($blocking -join '; ')." -ForegroundColor Cyan
-    } else {
+    }
+    if ($unchecked.Count -gt 0) {
+        Write-Host "[WARN] Of the subfolders listed above, $($unchecked.Count) could not be checked (their permissions could not be read), so they may block inheritance too: $($unchecked -join '; ')." -ForegroundColor Yellow
+    }
+    if ($blocking.Count -eq 0 -and $unchecked.Count -eq 0) {
         Write-Host '[INFO] None of the subfolders listed above block inheritance.' -ForegroundColor Cyan
+    } elseif ($blocking.Count -eq 0) {
+        Write-Host '[INFO] None of the others block inheritance.' -ForegroundColor Cyan
     }
     # Explicit deny ACEs are checked before inherited allow ACEs.
     # https://learn.microsoft.com/windows/win32/secauthz/order-of-aces-in-a-dacl
     Write-Host '[INFO] An explicit Deny on a subfolder still wins.' -ForegroundColor Cyan
     # icacls /grant without :r adds to the explicit permissions; (OI)(CI) lets files and
-    # subfolders inherit it. /T would write it onto every item, also those that block inheritance.
+    # subfolders inherit it; RX is read and execute access, M is modify access. /T would write
+    # it onto every item, also those that block inheritance. The folder is a placeholder, not
+    # the top folder: a pasted command must not grant everything below by accident.
     # https://learn.microsoft.com/windows-server/administration/windows-commands/icacls
-    Write-Host "[INFO] Add it with Add Permission in FolderPermissionManager-GUI.ps1 or on Explorer's Security tab. Without a browser, with the folder they need in place of $($Path): icacls ""$Path"" /grant ""DOMAIN\user:(OI)(CI)M"" (M is Modify; do not add /T, which writes it onto every subfolder and file, including the ones that block inheritance)." -ForegroundColor Cyan
+    $grantExample = Join-Path $Path '<folder they need>'
+    Write-Host "[INFO] Add it with Add Permission in FolderPermissionManager-GUI.ps1 or on Explorer's Security tab. Without a browser: icacls ""$grantExample"" /grant ""DOMAIN\user:(OI)(CI)RX"" (RX is read and execute; use M only if they must change or delete files. Do not add /T, which writes it onto every subfolder and file, including the ones that block inheritance)." -ForegroundColor Cyan
     $exitCode
 }
 

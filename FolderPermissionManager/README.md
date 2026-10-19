@@ -326,12 +326,13 @@ owner list. An explicit Deny on a subfolder still wins. Add it with Add Permissi
 or on Explorer's Security tab (Properties > Security > Edit > Add). Without a browser:
 
 ```powershell
-icacls "D:\Shares\HR\Finance" /grant "DOMAIN\user:(OI)(CI)M"
+icacls "D:\Shares\HR\Finance" /grant "DOMAIN\user:(OI)(CI)RX"
 ```
 
-`(OI)(CI)` lets the files and subfolders inherit it and `M` is Modify. Do not add /T: it
-writes the permission onto every subfolder and file, including the ones that block
-inheritance
+`(OI)(CI)` lets the files and subfolders inherit it and `RX` is read and execute; use M only
+if they must change or delete files (`(OI)(CI)M`, Modify). The script prints the same command
+with a placeholder under your folder, not the folder itself. Do not add /T: it writes the
+permission onto every subfolder and file, including the ones that block inheritance
 ([icacls](https://learn.microsoft.com/windows-server/administration/windows-commands/icacls)).
 
 ```powershell
@@ -360,10 +361,18 @@ ownership, or ownership failing, still shows the permissions. Run it in an eleva
 stops with `[FAIL]` otherwise (except with `-WhatIf`). See "Undo a change" above to put owners
 back.
 
-A host that cannot ask (a scheduled task, or PowerShell started with `-NonInteractive`) needs
-`-Force` or `-WhatIf`. Without either, the script stops with `[FAIL] Run with -Force, or
+A remote console (Enter-PSSession, or psexec) is asked like a local one. A host that cannot
+ask (a scheduled task, or PowerShell started with `-NonInteractive`) needs `-Force` or
+`-WhatIf`. Started with `-NonInteractive`, the script stops with `[FAIL] Run with -Force, or
 -WhatIf for a dry run; this host cannot ask.` and exit code `1` before anything is counted,
-saved or changed. With `-Force` but no `-Path` it stops the same way and asks for `-Path`.
+saved or changed. Any other host whose question fails stops at the question with `[FAIL]
+This host cannot ask; run with -Force, or -WhatIf for a dry run. Nothing was changed.` and exit
+code `1`; the log folder is only set up after you answer `y`. With `-Force` but no `-Path` it
+stops the same way and asks for `-Path`.
+
+After the owner list the script names the subfolders that block inheritance. A subfolder whose
+permissions it cannot read is counted as "could not be checked" (it may block inheritance too),
+so check those by hand.
 
 A drive root or a Windows folder is refused straight away, before any question, with one
 `[FAIL]` line that names the folder and `-AllowSystemFolder`, and exit code `1`. Nothing is

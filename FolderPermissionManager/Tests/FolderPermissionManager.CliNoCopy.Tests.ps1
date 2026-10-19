@@ -107,7 +107,10 @@ Describe 'FolderPermissionManager.ps1 has no copy-to-subfolders step (D-035)' {
         $text | Should -Match '(?i)inherit'
         $text | Should -Match '(?i)block inheritance'
         $text | Should -Match '(?i)explicit Deny'
-        $text | Should -Match ([regex]::Escape('/grant "DOMAIN\user:(OI)(CI)M"'))
+        # Fix round 2: the example grants read and execute; Modify only when they must change files.
+        $text | Should -Match ([regex]::Escape('/grant "DOMAIN\user:(OI)(CI)RX"'))
+        $text | Should -Match '(?i)use M only if they must change or delete files'
+        $text | Should -Not -Match ([regex]::Escape('(OI)(CI)M"'))
         $text | Should -Match '(?i)do not add /T'
         $text | Should -Match '(?i)Security tab'
         $text | Should -Not -Match '(?i)copies the permissions set directly'
@@ -125,7 +128,10 @@ Describe 'FolderPermissionManager.ps1 has no copy-to-subfolders step (D-035)' {
         $section | Should -Match '(?i)inherit'
         $section | Should -Match '(?i)block inheritance'
         $section | Should -Match '(?i)explicit Deny'
-        $section | Should -Match ([regex]::Escape('/grant "DOMAIN\user:(OI)(CI)M"'))
+        # Fix round 2: the example grants read and execute; Modify only when they must change files.
+        $section | Should -Match ([regex]::Escape('/grant "DOMAIN\user:(OI)(CI)RX"'))
+        $section | Should -Match '(?i)use M only if they must change or delete files'
+        $section | Should -Not -Match ([regex]::Escape('(OI)(CI)M"'))
         $section | Should -Match '(?i)do not add /T'
         $section | Should -Match '(?i)Security tab'
         $section | Should -Not -Match '(?i)again before copying'
@@ -175,7 +181,11 @@ Describe 'FolderPermissionManager.ps1 closing advice, owner list and non-interac
         $info | Should -Not -Match '(?i)add it once on the top folder'
         $info | Should -Match '(?i)explicit Deny .*still wins'
         $info | Should -Match '(?i)Security tab'
-        $info | Should -Match ([regex]::Escape("icacls ""$($script:Dir)"" /grant ""DOMAIN\user:(OI)(CI)M"""))
+        # Fix round 2: the command is not pre-filled with the top folder (pasting it would grant
+        # everything below); it names a placeholder under it and grants read and execute.
+        $info | Should -Match ([regex]::Escape("icacls ""$(Join-Path $script:Dir '<folder they need>')"" /grant ""DOMAIN\user:(OI)(CI)RX"""))
+        $info | Should -Not -Match ([regex]::Escape("icacls ""$($script:Dir)"""))
+        $info | Should -Match '(?i)use M only if they must change or delete files'
         $info | Should -Match '(?i)do not add /T'
     }
 
@@ -274,20 +284,136 @@ Describe 'FolderPermissionManager.ps1 closing advice, owner list and non-interac
 }
 
 Describe 'Test-CliHostInteractive' {
-    It 'AC20_Cli_HostIsInteractiveOnlyWithAUserSessionAndNoNonInteractiveSwitch (<Name>)' -ForEach @(
-        @{ Name = 'normal console'; User = $true; CmdArgs = @('powershell.exe', '-File', 'x.ps1'); Expected = $true }
-        @{ Name = 'no user session'; User = $false; CmdArgs = @('powershell.exe', '-File', 'x.ps1'); Expected = $false }
-        @{ Name = '-NonInteractive'; User = $true; CmdArgs = @('powershell.exe', '-NonInteractive', '-File', 'x.ps1'); Expected = $false }
-        @{ Name = '-noni in capitals'; User = $true; CmdArgs = @('pwsh.exe', '-NoProfile', '-NONI', '-File', 'x.ps1'); Expected = $false }
-        @{ Name = '/NonInteractive'; User = $true; CmdArgs = @('powershell.exe', '/NonInteractive', '-Command', 'x'); Expected = $false }
-        @{ Name = 'a script argument after -File'; User = $true; CmdArgs = @('powershell.exe', '-File', 'x.ps1', '-NonInteractive'); Expected = $true }
-        @{ Name = 'text after -c'; User = $true; CmdArgs = @('pwsh.exe', '-c', 'echo', '-noninteractive'); Expected = $true }
+    # Fix round 2 (SQ-015 D-035 review): the rule is the -NonInteractive switch only. A process
+    # without a user interface (Environment.UserInteractive false, as in an Enter-PSSession
+    # host or psexec without -i) can still answer Read-Host, so it no longer counts as "cannot
+    # ask"; a Read-Host that fails anyway is caught where it is asked.
+    It 'AC20_Cli_HostIsInteractiveUnlessStartedWithTheNonInteractiveSwitch (<Name>)' -ForEach @(
+        @{ Name = 'normal console'; CmdArgs = @('powershell.exe', '-File', 'x.ps1'); Expected = $true }
+        @{ Name = 'remoting host (Enter-PSSession), no user interface'; CmdArgs = @('C:\Windows\system32\wsmprovhost.exe', '-Embedding'); Expected = $true }
+        @{ Name = 'psexec without -i, no user interface'; CmdArgs = @('powershell.exe'); Expected = $true }
+        @{ Name = '-NonInteractive'; CmdArgs = @('powershell.exe', '-NonInteractive', '-File', 'x.ps1'); Expected = $false }
+        @{ Name = '-noni in capitals'; CmdArgs = @('pwsh.exe', '-NoProfile', '-NONI', '-File', 'x.ps1'); Expected = $false }
+        @{ Name = '/NonInteractive'; CmdArgs = @('powershell.exe', '/NonInteractive', '-Command', 'x'); Expected = $false }
+        @{ Name = '--noninteractive (pwsh)'; CmdArgs = @('pwsh.exe', '--noninteractive', '-File', 'x.ps1'); Expected = $false }
+        @{ Name = '--noni (pwsh)'; CmdArgs = @('pwsh.exe', '-NoProfile', '--noni', '-c', 'x'); Expected = $false }
+        @{ Name = 'a script argument after -File'; CmdArgs = @('powershell.exe', '-File', 'x.ps1', '-NonInteractive'); Expected = $true }
+        @{ Name = 'a script argument after --file'; CmdArgs = @('pwsh.exe', '--file', 'x.ps1', '--noninteractive'); Expected = $true }
+        @{ Name = 'text after -c'; CmdArgs = @('pwsh.exe', '-c', 'echo', '-noninteractive'); Expected = $true }
     ) {
-        Test-CliHostInteractive -UserInteractive $User -CommandLineArgs $CmdArgs | Should -Be $Expected -Because $Name
+        Test-CliHostInteractive -CommandLineArgs $CmdArgs | Should -Be $Expected -Because $Name
     }
 
     It 'AC20_Cli_HostInteractiveDefaultsToThisProcess' {
         $result = Test-CliHostInteractive
         $result | Should -BeOfType [bool]
+    }
+
+    It 'AC20_Cli_HostInteractiveDoesNotDependOnUserInteractive' {
+        $command = Get-Command Test-CliHostInteractive
+        $command.Parameters.Keys | Should -Not -Contain 'UserInteractive'
+        $command.ScriptBlock.ToString() | Should -Not -Match '\[Environment\]::UserInteractive'
+    }
+}
+
+# --- Fix round 2 (SQ-015 D-035 review) ------------------------------------------------------
+# Pinned: a remote console (no user interface, no -NonInteractive switch) is asked as usual. A
+# Read-Host that throws (the host cannot ask after all) ends the run with one [FAIL] line and
+# exit code 1 before anything is changed or the log folder is created; the log folder line comes
+# after the confirmation. A subfolder whose permissions cannot be read is counted as not
+# checked, so the script never claims that none block inheritance. The function's synopsis
+# gives the scoped advice.
+
+Describe 'FolderPermissionManager.ps1 remote consoles, prompts that fail and unreadable subfolders' {
+    BeforeEach {
+        $root = Join-Path $TestDrive ('d035r2-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path (Join-Path $root 'sub1') -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $root 'sub2') -Force | Out-Null
+        $script:Dir = $root
+        $script:Log = Join-Path $TestDrive ('d035r2-logs-' + [guid]::NewGuid().ToString('N'))
+        $script:Lines = [System.Collections.Generic.List[string]]::new()
+        $script:LinesAtPrompt = $null
+
+        Mock Set-Acl { }
+        Mock Invoke-AclTool { [PSCustomObject]@{ ExitCode = 0; Output = '' } }
+        Mock Write-Host { $script:Lines.Add("$Object") }
+        $script:RealHostTest = ${function:Test-CliHostInteractive}
+    }
+
+    It 'AC20_Cli_RemoteConsoleWithoutUserInterface_IsStillAsked' {
+        # The command line of an Enter-PSSession host: no -NonInteractive switch.
+        Mock Test-CliHostInteractive { & $script:RealHostTest -CommandLineArgs @('C:\Windows\system32\wsmprovhost.exe', '-Embedding') }
+        Mock Read-Host { 'n' }
+
+        $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
+
+        $code | Should -Be 0
+        Should -Invoke Read-Host -Times 1 -Exactly -Scope It -ParameterFilter { $Prompt -eq 'Continue? (y/N)' }
+        @($script:Lines | Where-Object { $_ -like '*cannot ask*' }).Count | Should -Be 0
+    }
+
+    It 'AC20_Cli_ConfirmationReadHostThrows_FailsCleanlyWithNothingChanged' {
+        Mock Test-CliHostInteractive { $true }
+        Mock Read-Host { throw 'PowerShell is in NonInteractive mode. Read and Prompt functionality is not available. (test)' }
+
+        $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
+
+        $code | Should -Be 1
+        $fail = @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' })
+        $fail.Count | Should -Be 1
+        $fail[0] | Should -Be '[FAIL] This host cannot ask; run with -Force, or -WhatIf for a dry run. Nothing was changed.'
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
+        Test-Path -LiteralPath $script:Log | Should -BeFalse -Because 'the log folder is only created after the technician agrees'
+        @($script:Lines | Where-Object { $_ -like '*Changes are backed up and logged*' }).Count | Should -Be 0
+        @($script:Lines | Where-Object { $_ -like 'Permissions on the top-level folder*' }).Count | Should -Be 0
+    }
+
+    It 'AC20_Cli_PathReadHostThrows_FailsCleanlyWithNothingChanged' {
+        Mock Test-CliHostInteractive { $true }
+        Mock Read-Host { throw 'PowerShell is in NonInteractive mode. Read and Prompt functionality is not available. (test)' }
+
+        $code = Invoke-FolderPermissionCli -LogFolder $script:Log -Force
+
+        $code | Should -Be 1
+        $fail = @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' })
+        $fail.Count | Should -Be 1
+        $fail[0] | Should -Be '[FAIL] Give the folder with -Path; this host cannot ask. Nothing was changed.'
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
+        Test-Path -LiteralPath $script:Log | Should -BeFalse
+    }
+
+    It 'AC20_Cli_LogFolderLineComesAfterTheConfirmation' {
+        Mock Test-CliHostInteractive { $true }
+        Mock Read-Host { $script:LinesAtPrompt = $script:Lines.ToArray(); 'y' }
+
+        $null = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
+
+        @($script:LinesAtPrompt | Where-Object { $_ -like '*Changes are backed up and logged*' }).Count | Should -Be 0 -Because 'nothing is set up before the technician agrees'
+        @($script:Lines | Where-Object { $_ -eq "[INFO] Changes are backed up and logged to $($script:Log)" }).Count | Should -Be 1
+        Should -Invoke Invoke-AclTool -Times 1 -Exactly -Scope It -ParameterFilter { $Tool -eq 'takeown' }
+    }
+
+    It 'AC15_CliAccessAdvice_SubfolderWhosePermissionsCannotBeRead_IsCountedAsNotChecked' {
+        Mock Test-CliHostInteractive { $true }
+        Mock Read-Host { 'n' }
+        $script:Unreadable = Join-Path $script:Dir 'sub1'
+        Mock Get-Acl { throw 'Attempted to perform an unauthorized operation. (test)' } -ParameterFilter { $LiteralPath -eq $script:Unreadable }
+
+        $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
+
+        $code | Should -Be 0 -Because 'ownership was declined'
+        @($script:Lines | Where-Object { $_ -like '`[INFO`] None of the subfolders listed above block inheritance*' }).Count | Should -Be 0
+        $unchecked = @($script:Lines | Where-Object { $_ -match '1 could not be checked' })
+        $unchecked.Count | Should -Be 1
+        $unchecked[0] | Should -Match ([regex]::Escape($script:Unreadable))
+        $unchecked[0] | Should -Not -Match ([regex]::Escape((Join-Path $script:Dir 'sub2')))
+    }
+
+    It 'AC15_CliFunctionSynopsis_GivesTheScopedAdvice' {
+        $synopsis = (Get-Help Invoke-FolderPermissionCli).Synopsis -replace '\s+', ' '
+        $synopsis | Should -Not -Match '(?i)added once on the top folder'
+        $synopsis | Should -Match '(?i)on the folder they need'
     }
 }
