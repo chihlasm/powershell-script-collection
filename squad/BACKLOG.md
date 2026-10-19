@@ -157,8 +157,8 @@ until the owner's lab test. Robocopy tab and Copy Files To are dropped (D-037). 
 SQ-014 and SQ-015 (same core and GUI file). Split per D-039.
 
 ## SQ-018 · FolderPermissionManager WPF app: every change, confirmations and results
-- status: blocked
-- waiting: Q-007, Q-008, Q-009 (owner answers; branch gates green)
+- status: ready
+- revision: D-043/D-044/D-045 (spec SQ-017.md Revision notes, SQ-018, AC47-AC53)
 - priority: P1
 - type: feature
 - branch: squad/SQ-018-fpm-wpf-changes (stacked: create it from squad/SQ-017-fpm-wpf-window as SQ-017 finishes this run; D-041)
@@ -171,6 +171,15 @@ closing blocked while a change runs, result-status parity with the browser GUI, 
 end, README and root README. Destructive-operations checklist applies in full. Builds after
 SQ-017. Split from SQ-017 per D-039. Follow-up after the owner's lab test (not planned): remove
 FolderPermissionManager-WebGUI.ps1 and its two test files.
+
+## SQ-020 · Whole-tree take ownership: WindowsApps aliases and Azure File Sync files count as plain files (D-042)
+- status: ready
+- priority: P1
+- type: fix
+- branch:
+- spec: squad/specs/SQ-020.md
+
+Add IO_REPARSE_TAG_APPEXECLINK and IO_REPARSE_TAG_STORAGE_SYNC to the D-040 allowlist so profile folders and Azure File Sync shares can be taken over as a whole tree. Branch from main after SQ-014 merges.
 
 ## SQ-010 · Ticket note in Network-QuickCheck and Citrix-FSLogix-Triage
 - status: done

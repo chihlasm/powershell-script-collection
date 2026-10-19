@@ -113,7 +113,7 @@ Format:
   same share.
 
 ### Q-006 · SQ-014 · Should app-execution links and Azure File Sync tiered files count as plain files?
-- status: open
+- status: answered (D-042)
 - blocks: nothing. SQ-014 continues and refuses these trees safely (fail closed) until you answer.
 - context: Under D-040 only the allowlisted reparse types are plain files. The run's
   destructive-operations reviewer pointed out two common types that don't redirect anywhere but
@@ -132,7 +132,7 @@ Format:
   C) Both are refused; techs fix those folders one level down or escalate.
 
 ### Q-007 · SQ-018 · Changes on a DFS folder that points to more than one server
-- status: open
+- status: answered (D-043)
 - blocks: SQ-018 (with Q-008).
 - context: When a tech changes permissions through a DFS path (for example `\\contoso.com\Files\HR`), the WPF app looks up where it really is. If the DFS folder points to two or more servers (DFS Replication), the app can't tell which copy Windows will open. It therefore refuses every change there and lists the servers: "a DFS folder that points to N servers; open the one you mean". The browser GUI simply changed whichever copy Windows happened to pick.
 - options:
@@ -145,7 +145,7 @@ Format:
   - C) Most convenient, but the most to build and test.
 
 ### Q-008 · SQ-018 · Should Add Permission and Copy Permissions ask before changing, like Remove does?
-- status: open
+- status: answered (D-044)
 - blocks: SQ-018 (with Q-007).
 - context:
   - Today (per AC36), Add and Copy are not treated as destructive. Clicking the dialog's button is the confirmation, and a second "are you sure" appears only when the drive letter came from a remembered mapping. The destructive-operations reviewer raised two cases:
@@ -170,7 +170,7 @@ Format:
   - C) No change; the two cases above stay possible.
 
 ### Q-009 · SQ-018 · Junctions on the file server behind a share (whole-tree take ownership)
-- status: open
+- status: answered (D-045)
 - blocks: SQ-018 (with Q-007 and Q-008). This is the last open major after two fix rounds.
 - context: For a whole-tree take ownership on `\\fs01\Data`, the app asks the server where the share really is (`D:\Shares\Data`) and checks that against the protected folders. It checks only the text of that path. If `D:\Shares\Data`, or a folder above it, is a junction on the server pointing somewhere sensitive (for example `D:\Users`), Windows follows it on the server, and nothing in the app or the core sees it from the client. The risk checklist names "server-side junctions on SMB".
 - options:
