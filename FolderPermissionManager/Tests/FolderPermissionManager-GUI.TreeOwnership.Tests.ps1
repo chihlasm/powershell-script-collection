@@ -132,7 +132,7 @@ Describe 'GUI recursive take ownership' {
 
         $response.StatusCode | Should -Be 200
         $script:Sent.status | Should -Be 'partial'
-        $script:Sent.message | Should -BeLike "*1 folder(s) could not be opened ($([WildcardPattern]::Escape($locked)))*cannot be restored from this backup*"
+        $script:Sent.message | Should -BeLike "*Escalate: 1 folder(s) could not be opened, so they were left alone. Not opened: $([WildcardPattern]::Escape($locked)).*cannot be restored from this backup*"
     }
 
     It 'AC17_GuiPage_ShowsPartialAsAWarningWithoutDoublingThePrefix' {
@@ -158,17 +158,18 @@ Describe 'GUI recursive take ownership' {
 
     # --- Fix round 2 (SQ-014 review) ---------------------------------------------------------
 
-    It 'AC16_GuiRecursiveConfirmText_SaysFoldersThatCannotBeOpenedGetFullControlAndAreBackedUp' {
-        # takeown /D Y replaces such a folder's permissions with full control for the user only.
+    # Fix round 2 pinned /D Y here (permissions replaced with full control and backed up);
+    # D-034 superseded that: takeown /D N skips such folders and leaves them alone.
+    It 'AC16_GuiRecursiveConfirmText_SaysFoldersThatCannotBeOpenedAreSkippedAndNamedForEscalation' {
         $raw = Get-Content -LiteralPath $script:GuiPath -Raw
         $m = [regex]::Match($raw, '(?s)This will change ownership on ALL files and subfolders under:.*?Continue\?')
         $m.Success | Should -BeTrue
-        $m.Value | Should -Match 'Any folder in it that cannot be opened also has its permissions replaced with full control for you only'
-        $m.Value | Should -Match 'Those permissions are backed up first where they can be read'
-        $m.Value | Should -Match 'whether any could not be backed up'
+        $m.Value | Should -Match 'Any folder in it that cannot be opened is skipped and left alone'
+        $m.Value | Should -Match 'the result names those folders so you can escalate them'
+        $m.Value | Should -Not -Match 'backed up first where they can be read'
     }
 
-    It 'AC18_GuiRecursiveTakeOwnership_FolderThatCannotBeListed_MessageSaysPermissionsWereReplacedAndBackedUp' {
+    It 'AC18_GuiRecursiveTakeOwnership_FolderThatCannotBeListed_MessageSaysToEscalateAndNothingIsBackedUpForIt' {
         $locked = Join-Path $script:Dir 'sub'
         Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $LiteralPath -eq $locked }
         $script:Body = [PSCustomObject]@{ path = $script:Dir; recursive = $true }
@@ -177,8 +178,9 @@ Describe 'GUI recursive take ownership' {
         Invoke-TakeOwnership $null $response
 
         $script:Sent.status | Should -Be 'partial'
-        $script:Sent.message | Should -BeLike '*takeown replaces the permissions of a folder it cannot open with full control for you only; the permissions those folders had were backed up to *_TakeOwnership_Permissions.csv first.*'
-        @(Get-ChildItem -LiteralPath (Join-Path $script:ChangeLogFolder 'Backups') -Filter '*_TakeOwnership_Permissions.csv').Count | Should -Be 1
+        $script:Sent.message | Should -BeLike '*Escalate: 1 folder(s) could not be opened, so they were left alone.*'
+        $script:Sent.message | Should -Not -Match 'full control'
+        @(Get-ChildItem -LiteralPath (Join-Path $script:ChangeLogFolder 'Backups') -Filter '*_TakeOwnership_Permissions.csv').Count | Should -Be 0
     }
 
     It 'AC16_GuiRecursiveTakeOwnership_JunctionMakesTheResultAWarningAndIsCounted' {
@@ -210,5 +212,145 @@ Describe 'GUI recursive take ownership' {
         $busy = [regex]::Match($raw, '(?s)function changeIsBusy\(\) \{.*?\n\}')
         $busy.Success | Should -BeTrue
         $busy.Value | Should -Match "setStatus\('Still working on the previous change"
+    }
+
+    # --- Revision (SQ-014 review 2026-10-17): D-034 and D-036 -------------------------------
+    # Pinned: the GUI never passes -AllowSystemFolder (no override, whatever the request says);
+    # a refused folder answers 500 with the refusal as `error`/`message` and does nothing.
+
+    It 'AC16b_GuiRecursiveTakeOwnership_TakeownRunsWithDNeverDY' {
+        $script:Body = [PSCustomObject]@{ path = $script:Dir; recursive = $true }
+        $script:Sent = $null
+        $response = [PSCustomObject]@{ StatusCode = 200 }
+
+        Invoke-TakeOwnership $null $response
+
+        Should -Invoke Invoke-AclTool -Times 1 -Exactly -Scope It -ParameterFilter {
+            $Tool -eq 'takeown' -and ($Arguments -join ' ') -eq "/F $($script:Dir) /R /A /D N"
+        }
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It -ParameterFilter { $Tool -eq 'takeown' -and $Arguments -contains 'Y' }
+    }
+
+    It 'AC16c_GuiRecursiveTakeOwnership_FolderThatCannotBeOpened_IsPartialNamedWithEscalateAndNotBackedUpOrChanged' {
+        $locked = Join-Path $script:Dir 'sub'
+        $script:LockedPath = $locked
+        $script:ToolsRan = $false
+        Mock Invoke-AclTool { $script:ToolsRan = $true; [PSCustomObject]@{ ExitCode = 0; Output = '' } }
+        Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $LiteralPath -eq $script:LockedPath }
+        # takeown /D N leaves a folder it cannot open alone, so its owner is still the old one.
+        Mock Get-ItemOwner {
+            if ($script:ToolsRan -and $Path -eq $script:LockedPath) { return [PSCustomObject]@{ Owner = 'CONTOSO\old.owner'; OwnerSid = 'S-1-5-21-1-2-3-1105' } }
+            & $script:RealGetItemOwner -Path $Path
+        }
+        $script:Body = [PSCustomObject]@{ path = $script:Dir; recursive = $true }
+        $response = [PSCustomObject]@{ StatusCode = 200 }
+
+        Invoke-TakeOwnership $null $response
+
+        $response.StatusCode | Should -Be 200
+        $script:Sent.status | Should -Be 'partial'
+        $script:Sent.message | Should -Match '^Partly done'
+        $script:Sent.message | Should -Match ([regex]::Escape('Escalate: 1 folder(s) could not be opened, so they were left alone.'))
+        $script:Sent.message | Should -Match ([regex]::Escape($locked))
+        $script:Sent.message | Should -Not -Match 'full control'
+        $script:Sent.message | Should -Not -Match '_Permissions\.csv'
+        @(Get-ChildItem -LiteralPath (Join-Path $script:ChangeLogFolder 'Backups') -Filter '*_Permissions.csv').Count | Should -Be 0
+        Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
+    }
+
+    It 'AC16c_GuiRecursiveConfirmText_SaysFoldersThatCannotBeOpenedAreSkipped_AndNoLongerPromisesFullControl' {
+        $raw = Get-Content -LiteralPath $script:GuiPath -Raw
+        $m = [regex]::Match($raw, '(?s)This will change ownership on ALL files and subfolders under:.*?Continue\?')
+        $m.Success | Should -BeTrue
+        $m.Value | Should -Match '(?i)cannot be opened[^.]*(skipped|left alone)'
+        $m.Value | Should -Not -Match 'full control'
+        $m.Value | Should -Not -Match 'backed up first where they can be read'
+        $m.Value | Should -Match 'The current owners will be saved to a backup first'
+    }
+
+    It 'AC16d_GuiRecursiveTakeOwnership_VolumeRoot_IsRefusedWithAPlainMessageAndNothingIsDone' {
+        $root = [System.IO.Path]::GetPathRoot($TestDrive)
+        # If the refusal is missing, these keep the test from walking the whole drive.
+        Mock Save-OwnerSnapshot { throw 'snapshot must not be taken (test)' }
+        $script:Body = [PSCustomObject]@{ path = $root; recursive = $true }
+        $script:Sent = $null
+        $response = [PSCustomObject]@{ StatusCode = 200 }
+
+        Invoke-TakeOwnership $null $response
+
+        $response.StatusCode | Should -Be 500
+        $script:Sent.error | Should -Not -BeNullOrEmpty
+        $script:Sent.error | Should -Be $script:Sent.message
+        $script:Sent.error | Should -Match ([regex]::Escape($root))
+        $script:Sent.error | Should -Match 'Nothing was changed'
+        $script:Sent.error | Should -Not -Match 'AllowSystemFolder'
+        Should -Invoke Save-OwnerSnapshot -Times 0 -Exactly -Scope It
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
+        Test-Path -LiteralPath (Join-Path $script:ChangeLogFolder 'Backups') | Should -BeFalse
+    }
+
+    It 'AC16d_GuiRecursiveTakeOwnership_FolderUnderAProtectedPath_IsRefusedAndTheRequestCannotOverrideIt' {
+        $base = Join-Path $TestDrive ('gui-protected-' + [guid]::NewGuid().ToString('N'))
+        $dir = Join-Path $base 'Contoso'
+        New-Item -ItemType Directory -Path (Join-Path $dir 'sub') -Force | Out-Null
+        $script:Body = [PSCustomObject]@{ path = $dir; recursive = $true; allowSystemFolder = $true; force = $true }
+        $script:Sent = $null
+        $response = [PSCustomObject]@{ StatusCode = 200 }
+        $old = [Environment]::GetEnvironmentVariable('ProgramData', 'Process')
+        [Environment]::SetEnvironmentVariable('ProgramData', $base, 'Process')
+        try {
+            Invoke-TakeOwnership $null $response
+        } finally {
+            [Environment]::SetEnvironmentVariable('ProgramData', $old, 'Process')
+        }
+
+        $response.StatusCode | Should -Be 500
+        $script:Sent.error | Should -Match ([regex]::Escape($dir))
+        $script:Sent.error | Should -Match 'Nothing was changed'
+        $script:Sent.error | Should -Not -Match 'AllowSystemFolder'
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        Test-Path -LiteralPath (Join-Path $script:ChangeLogFolder 'Backups') | Should -BeFalse
+    }
+
+    It 'AC16d_GuiScript_HasNoSystemFolderOverride' {
+        $raw = Get-Content -LiteralPath $script:GuiPath -Raw
+        $raw | Should -Not -Match 'AllowSystemFolder'
+    }
+
+    # --- Fix round 1 (SQ-014 review 2026-10-17) ------------------------------------------------
+
+    It 'AC16c_GuiRecursiveTakeOwnership_ManyFoldersThatCannotBeOpened_MessagePointsAtTheFullList' {
+        $script:LockedSet = @(1..5 | ForEach-Object {
+            $p = Join-Path $script:Dir ('locked{0}' -f $_)
+            New-Item -ItemType Directory -Path $p -Force | Out-Null
+            $p
+        })
+        Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $script:LockedSet -contains $LiteralPath }
+        $script:Body = [PSCustomObject]@{ path = $script:Dir; recursive = $true }
+        $response = [PSCustomObject]@{ StatusCode = 200 }
+
+        Invoke-TakeOwnership $null $response
+
+        $script:Sent.status | Should -Be 'partial'
+        $script:Sent.message | Should -Match 'and 2 more\.'
+        $script:Sent.message | Should -Match 'Full list: .*_NotOpened\.txt\.'
+        $script:Sent.message | Should -Match ([regex]::Escape('Ask a senior engineer to take ownership of them with an account that can open them.'))
+    }
+
+    It 'AC17_GuiPage_DoneWithItemsToCheckInsteadOfCheckThis' {
+        $raw = Get-Content -LiteralPath $script:GuiPath -Raw
+        $show = [regex]::Match($raw, '(?s)function showChangeResult\(r\) \{.*?\n\}')
+        $show.Success | Should -BeTrue
+        $show.Value | Should -Match "'Done, with items to check: '"
+        $show.Value | Should -Not -Match 'Check this:'
+    }
+
+    It 'AC16c_GuiPage_LongStatusMessagesScrollInsteadOfGrowingTheWindow' {
+        $raw = Get-Content -LiteralPath $script:GuiPath -Raw
+        $css = [regex]::Match($raw, '\.status-bar \{[^}]*\}')
+        $css.Success | Should -BeTrue
+        $css.Value | Should -Match 'max-height:'
+        $css.Value | Should -Match 'overflow-y: auto'
     }
 }

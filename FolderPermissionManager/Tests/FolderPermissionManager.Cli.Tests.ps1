@@ -182,7 +182,7 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         $result = @($script:Lines | Where-Object { $_ -match '^\[(PASS|WARN|FAIL)\] Took ownership' })
         $result.Count | Should -Be 1
         $result[0] | Should -Match '^\[WARN\] '
-        $result[0] | Should -BeLike "*could not be opened ($locked)*cannot be restored from this backup*"
+        $result[0] | Should -BeLike "*Escalate: 1 folder(s) could not be opened, so they were left alone. Not opened: $locked.*cannot be restored from this backup*"
     }
 
     It 'AC17_Cli_ExitCodeIsOneWhenOwnershipIsPartlyDoneOrFailed' -ForEach @(
@@ -215,7 +215,9 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
 
     # --- Fix round 2 (SQ-014 review) ---------------------------------------------------------
 
-    It 'AC18_Cli_FolderThatCannotBeListed_WarnsItsPermissionsAreReplacedAndBackedUp_AndExitsOne' {
+    # Fix round 2 pinned /D Y here (permissions replaced with full control, saved to
+    # *_TakeOwnership_Permissions.csv); D-034 superseded that: such folders are skipped.
+    It 'AC18_Cli_FolderThatCannotBeListed_WarnsItIsSkippedAndLeftAlone_AndExitsOne' {
         $locked = Join-Path $script:Dir 'sub1'
         Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $LiteralPath -eq $locked }
 
@@ -223,12 +225,13 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
 
         $scope = @($script:Lines | Where-Object { $_ -like '`[WARN`] Taking ownership makes *' })
         $scope.Count | Should -Be 1
-        $scope[0] | Should -BeLike '*The permissions of the 1 folder(s) that could not be opened are replaced with full control for you (*) only. Their current permissions are backed up first.*'
+        $scope[0] | Should -BeLike "*1 folder(s) cannot be opened, so they are skipped and left alone: $locked.*"
+        $scope[0] | Should -Not -Match 'full control'
         $code | Should -Be 1 -Because 'a folder that could not be opened leaves the result incomplete'
-        @(Get-ChildItem -LiteralPath (Join-Path $script:Log 'Backups') -Filter '*_TakeOwnership_Permissions.csv').Count | Should -Be 1
+        @(Get-ChildItem -LiteralPath (Join-Path $script:Log 'Backups') -Filter '*_TakeOwnership_Permissions.csv').Count | Should -Be 0
     }
 
-    It 'AC18_Cli_FolderThatCannotBeListedOrRead_WarnsItsPermissionsAreLost' {
+    It 'AC18_Cli_FolderThatCannotBeListedOrRead_WarnsItIsSkippedNotThatItsPermissionsAreLost' {
         $locked = Join-Path $script:Dir 'sub1'
         Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $LiteralPath -eq $locked }
         Mock Get-Acl { throw 'Attempted to perform an unauthorized operation. (test)' } -ParameterFilter { $LiteralPath -eq $locked }
@@ -236,7 +239,8 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         $null = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log -WhatIf
 
         $scope = @($script:Lines | Where-Object { $_ -like '`[WARN`] Taking ownership makes *' })
-        $scope[0] | Should -BeLike "*replaced with full control for you (*) only. 0 of them are backed up first; 1 cannot be read, so their current permissions cannot be backed up and are lost: $locked.*"
+        $scope[0] | Should -BeLike "*1 folder(s) cannot be opened, so they are skipped and left alone: $locked.*"
+        $scope[0] | Should -Not -Match 'lost'
     }
 
     It 'AC17_Cli_ExitCodeIsOneWhenOwnersCouldNotBeReadBack' {
@@ -429,6 +433,201 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
             Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
             Should -Invoke Read-Host -Times 1 -Exactly -Scope It -Because 'only ownership is asked; there is nothing to copy to'
             @($script:Lines | Where-Object { $_ -like '`[INFO`] 2 subfolder(s) block inheritance and will not be changed: *There are no other subfolders to copy the permissions to.' }).Count | Should -Be 1
+        }
+    }
+
+    # --- Revision (SQ-014 review 2026-10-17): D-034 and D-036 -------------------------------
+    # Pinned: Invoke-FolderPermissionCli and the script take -AllowSystemFolder. Without it a
+    # volume root or a folder under %SystemRoot%, %ProgramFiles%, %ProgramFiles(x86)% or
+    # %ProgramData% is refused with a [FAIL] line (naming the path and -AllowSystemFolder) and
+    # exit code 1, before any question, snapshot or tool call.
+
+    It 'AC16b_Cli_TakeownRunsWithDNeverDY' {
+        Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log -Force
+
+        Should -Invoke Invoke-AclTool -Times 1 -Exactly -Scope It -ParameterFilter {
+            $Tool -eq 'takeown' -and ($Arguments -join ' ') -eq "/F $($script:Dir) /R /A /D N"
+        }
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It -ParameterFilter { $Tool -eq 'takeown' -and $Arguments -contains 'Y' }
+    }
+
+    It 'AC16c_Cli_FolderThatCannotBeOpened_IsSkippedWarnedWithEscalateAndItsPermissionsAreNeitherSavedNorChanged' {
+        $locked = Join-Path $script:Dir 'sub1'
+        $script:RealGetItemOwner = ${function:Get-ItemOwner}
+        $script:LockedPath = $locked
+        $script:ToolsRan = $false
+        Mock Invoke-AclTool { $script:ToolsRan = $true; [PSCustomObject]@{ ExitCode = 0; Output = '' } }
+        Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $LiteralPath -eq $script:LockedPath }
+        # takeown /D N leaves a folder it cannot open alone, so its owner is still the old one.
+        Mock Get-ItemOwner {
+            if ($script:ToolsRan -and $Path -eq $script:LockedPath) { return [PSCustomObject]@{ Owner = 'CONTOSO\old.owner'; OwnerSid = 'S-1-5-21-1-2-3-1105' } }
+            & $script:RealGetItemOwner -Path $Path
+        }
+        $script:Answers.Enqueue('y')   # take ownership: yes
+        $script:Answers.Enqueue('n')   # copy permissions to subfolders: no
+
+        $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
+
+        $code | Should -Be 1
+        $result = @($script:Lines | Where-Object { $_ -match '^\[WARN\] Partly done' })
+        $result.Count | Should -Be 1
+        $result[0] | Should -Match ([regex]::Escape('Escalate: 1 folder(s) could not be opened, so they were left alone.'))
+        $result[0] | Should -Match ([regex]::Escape($locked))
+        $scope = @($script:Lines | Where-Object { $_ -like '`[WARN`] Taking ownership makes *' })
+        $scope.Count | Should -Be 1
+        $scope[0] | Should -Match 'cannot be opened'
+        $scope[0] | Should -Match '(?i)skipped|left alone'
+        @(Get-ChildItem -LiteralPath (Join-Path $script:Log 'Backups') -Filter '*_Permissions.csv').Count | Should -Be 0
+        Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
+    }
+
+    It 'AC16c_Cli_NoWarningSaysPermissionsAreReplacedWithFullControl' {
+        $locked = Join-Path $script:Dir 'sub1'
+        Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $LiteralPath -eq $locked }
+        Mock Get-Acl { throw 'Attempted to perform an unauthorized operation. (test)' } -ParameterFilter { $LiteralPath -eq $locked }
+
+        $null = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log -Force
+
+        @($script:Lines | Where-Object { $_ -match 'full control for you|replaced with full control|cannot be backed up and are lost|backed up first\.$' }).Count | Should -Be 0
+    }
+
+    It 'AC16d_Cli_VolumeRoot_IsRefusedWithAFailLineAndNothingIsDone' {
+        $root = [System.IO.Path]::GetPathRoot($TestDrive)
+        # If the refusal is missing, these keep the test from walking the whole drive.
+        Mock Get-OwnerTreeItem { [PSCustomObject]@{ Items = @(); Unlisted = @(); Links = @() } }
+        Mock Save-OwnerSnapshot { throw 'snapshot must not be taken (test)' }
+        $script:Answers.Enqueue('y'); $script:Answers.Enqueue('y')
+
+        $code = Invoke-FolderPermissionCli -Path $root -LogFolder $script:Log
+
+        $code | Should -Be 1
+        $fail = @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' })
+        $fail.Count | Should -Be 1
+        $fail[0] | Should -Match ([regex]::Escape($root))
+        $fail[0] | Should -Match '-AllowSystemFolder'
+        $fail[0] | Should -Match 'Nothing was changed'
+        Should -Invoke Read-Host -Times 0 -Exactly -Scope It -Because 'a refused folder is not asked about'
+        Should -Invoke Save-OwnerSnapshot -Times 0 -Exactly -Scope It
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
+        Test-Path -LiteralPath (Join-Path $script:Log 'Backups') | Should -BeFalse
+    }
+
+    It 'AC16d_Cli_FolderUnderAProtectedPath_IsRefusedUnlessAllowSystemFolderIsGiven' {
+        $base = Join-Path $TestDrive ('cli-protected-' + [guid]::NewGuid().ToString('N'))
+        $dir = Join-Path $base 'Contoso'
+        New-Item -ItemType Directory -Path (Join-Path $dir 'sub') -Force | Out-Null
+        $script:ProtectedDir = $dir
+        $old = [Environment]::GetEnvironmentVariable('ProgramData', 'Process')
+        [Environment]::SetEnvironmentVariable('ProgramData', $base, 'Process')
+        try {
+            $refusedCode = Invoke-FolderPermissionCli -Path $script:ProtectedDir -LogFolder $script:Log -Force
+            $refusedLines = @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' })
+            Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+            $script:Lines.Clear()
+
+            $allowedCode = Invoke-FolderPermissionCli -Path $script:ProtectedDir -LogFolder $script:Log -Force -AllowSystemFolder
+        } finally {
+            [Environment]::SetEnvironmentVariable('ProgramData', $old, 'Process')
+        }
+
+        $refusedCode | Should -Be 1
+        $refusedLines.Count | Should -Be 1
+        $refusedLines[0] | Should -Match ([regex]::Escape($dir))
+        $refusedLines[0] | Should -Match '-AllowSystemFolder'
+        $allowedCode | Should -Be 0
+        Should -Invoke Invoke-AclTool -Times 1 -Exactly -Scope It -ParameterFilter { $Tool -eq 'takeown' }
+    }
+
+    It 'AC16d_Cli_ScriptHasAnAllowSystemFolderSwitchWithHelp' {
+        $path = Join-Path $PSScriptRoot '..\FolderPermissionManager.ps1'
+        $parameter = (Get-Command $path).Parameters['AllowSystemFolder']
+        $parameter | Should -Not -BeNullOrEmpty
+        $parameter.ParameterType | Should -Be ([switch])
+        $help = Get-Help $path -Full
+        $entry = @($help.parameters.parameter | Where-Object { $_.name -eq 'AllowSystemFolder' })
+        $entry.Count | Should -Be 1
+        "$($entry[0].description.Text)" | Should -Not -BeNullOrEmpty
+    }
+
+    # --- Fix round 1 (SQ-014 review 2026-10-17) ------------------------------------------------
+    # Pinned: the refusal also follows junctions (Get-TreeOwnershipTargetRefusal), and after the
+    # take-ownership result the CLI prints every folder that could not be opened, one per line.
+
+    It 'AC16d_Cli_JunctionToAProtectedFolder_IsRefusedWithAFailLine' {
+        $base = Join-Path $TestDrive ('cli-protected-' + [guid]::NewGuid().ToString('N'))
+        $target = Join-Path $base 'Contoso'
+        New-Item -ItemType Directory -Path (Join-Path $target 'sub') -Force | Out-Null
+        $link = Join-Path $TestDrive ('cli-jn-' + [guid]::NewGuid().ToString('N'))
+        try { New-Item -ItemType Junction -Path $link -Target $target -ErrorAction Stop | Out-Null } catch { }
+        if (-not (Test-Path -LiteralPath $link)) { Set-ItResult -Skipped -Because 'a junction could not be created here'; return }
+        $old = [Environment]::GetEnvironmentVariable('ProgramData', 'Process')
+        [Environment]::SetEnvironmentVariable('ProgramData', $base, 'Process')
+        try {
+            $code = Invoke-FolderPermissionCli -Path $link -LogFolder $script:Log -Force
+        } finally {
+            [Environment]::SetEnvironmentVariable('ProgramData', $old, 'Process')
+        }
+
+        $code | Should -Be 1
+        $fail = @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' })
+        $fail.Count | Should -Be 1
+        $fail[0] | Should -Match ([regex]::Escape($link))
+        $fail[0] | Should -Match '-AllowSystemFolder'
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        Test-Path -LiteralPath (Join-Path $script:Log 'Backups') | Should -BeFalse
+    }
+
+    # --- Fix round 2 (SQ-014 review 2026-10-18) ------------------------------------------------
+    # Pinned: a junction or symbolic link inside the folder that leads into a protected folder
+    # (or somewhere that cannot be checked) refuses the whole folder with one [FAIL] line naming
+    # the link and -AllowSystemFolder, before anything is asked or saved.
+
+    It 'AC16d_Cli_JunctionInsideTheFolderToAProtectedFolder_IsRefusedWithAFailLine' {
+        $base = Join-Path $TestDrive ('cli-protected-' + [guid]::NewGuid().ToString('N'))
+        $target = Join-Path $base 'Contoso'
+        New-Item -ItemType Directory -Path (Join-Path $target 'sub') -Force | Out-Null
+        $link = Join-Path $script:Dir 'sub1\app'
+        try { New-Item -ItemType Junction -Path $link -Target $target -ErrorAction Stop | Out-Null } catch { }
+        if (-not (Test-Path -LiteralPath $link)) { Set-ItResult -Skipped -Because 'a junction could not be created here'; return }
+        $old = [Environment]::GetEnvironmentVariable('ProgramData', 'Process')
+        [Environment]::SetEnvironmentVariable('ProgramData', $base, 'Process')
+        try {
+            $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log -Force
+        } finally {
+            [Environment]::SetEnvironmentVariable('ProgramData', $old, 'Process')
+        }
+
+        $code | Should -Be 1
+        $fail = @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' })
+        $fail.Count | Should -Be 1
+        $fail[0] | Should -Match ([regex]::Escape($link))
+        $fail[0] | Should -Match '-AllowSystemFolder'
+        $fail[0] | Should -Match 'Nothing was changed\.'
+        @($script:Lines | Where-Object { $_ -like '`[WARN`] Taking ownership makes *' }).Count | Should -Be 0
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
+        Test-Path -LiteralPath (Join-Path $script:Log 'Backups') | Should -BeFalse
+    }
+
+    It 'AC16c_Cli_PrintsEveryFolderThatCouldNotBeOpened' {
+        $script:LockedSet = @(1..5 | ForEach-Object {
+            $p = Join-Path $script:Dir ('locked{0}' -f $_)
+            New-Item -ItemType Directory -Path $p | Out-Null
+            $p
+        })
+        Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $script:LockedSet -contains $LiteralPath }
+        $script:Answers.Enqueue('y')   # take ownership: yes
+        $script:Answers.Enqueue('n')   # copy: no
+
+        $null = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
+
+        $result = @($script:Lines | Where-Object { $_ -match '^\[WARN\] (Took ownership|Partly done)' })
+        $result.Count | Should -Be 1
+        $result[0] | Should -Match 'and 2 more'
+        $after = @($script:Lines | Select-Object -Skip ([array]::IndexOf($script:Lines.ToArray(), $result[0]) + 1))
+        foreach ($p in $script:LockedSet) {
+            @($after | Where-Object { $_.Trim() -eq $p }).Count | Should -Be 1 -Because "$p is printed on its own line after the result"
         }
     }
 }
