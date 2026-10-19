@@ -20,10 +20,15 @@
     Every change is made by FolderPermissions.Core.ps1, the same code the command-line script
     uses: the permissions are backed up first (nothing is changed when the backup cannot be
     saved) and each item is written to the change log. Before a change starts, a "Started" row
-    is logged for each item. Destructive changes ask first in a dialog that names the path, the
-    real location behind a mapped drive and how many items, with Cancel as the default button.
-    Taking ownership of a whole folder tree is refused on the root of a drive and on Windows
-    system folders and shares (D-036), checked on the real location.
+    is logged for each item. Where a change will really land (the share behind a mapped drive,
+    the server behind a DFS path) is worked out in the background before anything is asked, and
+    shown in the dialogs. Destructive changes ask first in a dialog that names the path, its
+    real location and how many items, with Cancel as the default button. Afterwards each item
+    is read again: a change that did not leave the intended permissions or owner is reported as
+    "Done, with items to check". Taking ownership of a whole folder tree is refused on the root
+    of a drive, on Windows system folders and shares (D-036), on the folder that holds every
+    user profile, and in System Volume Information and $Recycle.Bin, checked on the real
+    location (for a share, the folder on the server).
 
     Everything slow (opening a folder on a busy share, reading permissions, a change, the
     export) runs in the background, so the window never freezes; a busy line shows what is
@@ -36,10 +41,11 @@
 
 .PARAMETER LogFolder
     Folder for permission backups and the change log. Defaults to the Logs folder next to this
-    script; if the script is on a network share or any drive that is not a local fixed disk, or
-    that folder is read-only, %LOCALAPPDATA%\FolderPermissionManager\Logs is used instead. A
-    folder passed here is used as given (the window warns when it is on the network). The
-    window shows which folder is used and has an "Open log folder" button.
+    script; if the script is on a network share or any drive that is not a local fixed disk,
+    inside a OneDrive or SharePoint sync folder, or that folder is read-only,
+    %LOCALAPPDATA%\FolderPermissionManager\Logs is used instead. A folder passed here is used as
+    given (the window warns when it is on the network or in a sync folder). The window shows
+    which folder is used and has an "Open log folder" button.
 
 .PARAMETER DriveMap
     Used by the tool itself when it opens again as administrator: the mapped drives of the
@@ -60,7 +66,8 @@
 .EXAMPLE
     .\FolderPermissionManager-GUI.ps1 -WhatIf
     Dry run: the window says "Dry run (WhatIf): nothing will be changed", and every change
-    reports "WhatIf: nothing was changed (<n> items would be)." Nothing is backed up or logged.
+    reports "WhatIf: nothing was changed (<n> items would be)." Nothing is backed up or logged:
+    no Started or result rows are written and the change log is not created.
 
 .NOTES
     Requires: Windows PowerShell 5.1 (or PowerShell 7 on Windows), run as administrator (the
@@ -73,7 +80,12 @@
                     created (when it is on a local fixed disk) and a small probe file is written
                     and deleted there, to check it can be written. Each change writes its
                     "Started" rows, its backup (Backups\) and its result rows
-                    (Changes_<yyyy-MM-dd>.csv) here; with -WhatIf nothing is written.
+                    (Changes_<yyyy-MM-dd>.csv) here, plus a "Done, with items to check" row for
+                    an item whose read-back did not show the intended state; with -WhatIf
+                    nothing is written.
+      %LOCALAPPDATA%\FolderPermissionManager\Logs\Unlogged_<yyyy-MM-dd>.csv   only when the
+                    change log could not be written after a change: the result rows, so what
+                    was changed is not lost (the status line names the file)
       %LOCALAPPDATA%\FolderPermissionManager\settings.json   theme (dark or light)
       %LOCALAPPDATA%\FolderPermissionManager\gui-errors.log  unexpected errors with their raw
                     text (may name client folders), for support; trimmed to the last 1 MB at
@@ -205,9 +217,47 @@
     - A ':' after the drive or share part of a path names an alternate data stream (file:stream),
       not a folder or file, so such a path is refused before any change:
       https://learn.microsoft.com/windows/win32/fileio/file-streams
-    - A script relaunched through a remembered mapping is compared with the running script by
-      SHA-256 (Get-FileHash):
+    - A script relaunched through a remembered mapping is compared with the running copy, file
+      by file (this script and FolderPermissions.Core.ps1, which it loads): the sizes first,
+      then SHA-256 (Get-FileHash). This check connects to the server the remembered mapping
+      names, to read those two files there:
       https://learn.microsoft.com/powershell/module/microsoft.powershell.utility/get-filehash
+    - A share on another server is checked, for a whole-tree change, by the folder it is on that
+      server: NetShareGetInfo level 2 returns SHARE_INFO_2, whose shi2_path is "the local path
+      for the shared resource"; the buffer "must be freed using the NetApiBufferFree function".
+      Level 2 needs Administrator, Power User, Print Operator or Server Operator membership on
+      that server for a non-interactive caller, so a server that refuses is refused here too:
+      https://learn.microsoft.com/windows/win32/api/lmshare/nf-lmshare-netsharegetinfo
+      https://learn.microsoft.com/windows/win32/api/lmshare/ns-lmshare-share_info_2
+      https://learn.microsoft.com/windows/win32/api/lmapibuf/nf-lmapibuf-netapibufferfree
+    - The folder that holds every user profile: GetProfilesDirectory ("C:\Users" on Windows 7
+      and later) and the ProfilesDirectory setting ("normally C:\Users", %SYSTEMDRIVE%\Users,
+      can be moved to another volume). The registry value behind it
+      (HKLM\...\ProfileList\ProfilesDirectory) is NOT documented on Learn (searched 2026-10-19),
+      so the documented function is used:
+      https://learn.microsoft.com/windows/win32/api/userenv/nf-userenv-getprofilesdirectoryw
+      https://learn.microsoft.com/windows-hardware/customize/desktop/unattend/microsoft-windows-shell-setup-folderlocations-profilesdirectory
+    - A DFS namespace on this computer keeps each DFS folder as a reparse point with the tag
+      IO_REPARSE_TAG_DFS (0x8000000A, "Used by the DFS filter ... Server-side interpretation
+      only", MS-FSCC 2.1.2.1); the tag is read from the directory entry with FindFirstFileW
+      (dwReserved0 holds it when FILE_ATTRIBUTE_REPARSE_POINT is set):
+      https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+      https://learn.microsoft.com/windows/win32/fileio/reparse-point-tags
+      https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-findfirstfilew
+      https://learn.microsoft.com/windows/win32/debug/system-error-codes--0-499-
+    - Results are read back with ObjectSecurity.GetOwner, CommonObjectSecurity.GetAccessRules
+      (by SecurityIdentifier) and NTAccount.Translate:
+      https://learn.microsoft.com/dotnet/api/system.security.principal.ntaccount.translate
+    - IPv4-mapped IPv6 addresses (IPAddress.IsIPv4MappedToIPv6, MapToIPv4) and the IPv6 scope
+      ID (IPAddress.ScopeId), which does not change which address it is:
+      https://learn.microsoft.com/dotnet/api/system.net.ipaddress.isipv4mappedtoipv6
+      https://learn.microsoft.com/dotnet/api/system.net.ipaddress.maptoipv4
+      https://learn.microsoft.com/dotnet/api/system.net.ipaddress.scopeid
+    - ShowWindow SW_SHOW (5) shows the console again while the tool waits for a change to finish:
+      https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-showwindow
+    - AutomationLiveSetting.Assertive (a validation error in a dialog interrupts the screen
+      reader), Polite for the status line:
+      https://learn.microsoft.com/dotnet/api/system.windows.automation.automationlivesetting
     - Window.DialogResult, Button.IsDefault and Button.IsCancel (the confirm dialog: Cancel is
       the default and the Esc button; the action button sets DialogResult):
       https://learn.microsoft.com/dotnet/api/system.windows.window.dialogresult
@@ -613,11 +663,29 @@ function Get-RelaunchFileHash {
     try { (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash } catch { $null }
 }
 
+function Get-RelaunchFileSize {
+    # The size of a file in bytes, or $null when it cannot be read. Only read. Tests replace it.
+    param([Parameter(Mandatory)][string]$Path)
+    try { [long](Get-Item -LiteralPath $Path -Force -ErrorAction Stop).Length } catch { $null }
+}
+
+function Get-RelaunchFileList {
+    # Every file the relaunched copy loads: this script and the files it dot-sources from its
+    # own folder (only the core today). Keep in step with the dot-sourcing at the top.
+    # Text only (System.IO.Path, not Split-Path/Join-Path): the script's drive letter may be one
+    # this process cannot see, and those cmdlets fail on a drive that does not exist here.
+    param([Parameter(Mandatory)][string]$ScriptPath)
+    $folder = [System.IO.Path]::GetDirectoryName($ScriptPath)
+    @($ScriptPath, [System.IO.Path]::Combine($folder, 'FolderPermissions.Core.ps1'))
+}
+
 function Get-RelaunchScriptProblem {
-    # $null when the copy started again will run this same script; otherwise a plain message.
+    # $null when the copy started again will run these same files; otherwise a plain message.
     # The relaunch starts the script from the \\server\share path behind its drive letter. When
     # only a remembered (registry) mapping explains that letter, it may be out of date and point
-    # at another server, so the file there must be byte for byte the one running (SHA-256).
+    # at another server, so every file the copy loads (Get-RelaunchFileList) must be byte for
+    # byte the one running: the sizes are compared first (a mismatch is refused without reading
+    # the files), then SHA-256. This connects to the server the mapping names.
     param(
         [Parameter(Mandatory)][string]$ScriptPath,
         [hashtable]$DriveMap,
@@ -626,14 +694,28 @@ function Get-RelaunchScriptProblem {
     if ($ScriptPath -notmatch '^([A-Za-z]):') { return $null }
     $letter = $Matches[1].ToUpper()
     if (-not $DriveMapSource -or "$($DriveMapSource[$letter])" -ne 'Remembered') { return $null }
-    $unc = Resolve-MappedDrive -Path $ScriptPath -DriveMap $DriveMap
-    if ($unc -eq $ScriptPath) { return $null }
-    $running = Get-RelaunchFileHash -Path $ScriptPath
-    $there = Get-RelaunchFileHash -Path $unc
-    if ($running -and $there -and $running -eq $there) { return $null }
-    $what = if ($there) { 'is not the same file as the one running' } else { 'could not be read' }
-    "Folder Permission Manager is running from $ScriptPath. Drive ${letter}: is only a remembered mapping (Windows remembers it, but this window could not see it live), and the file behind it, $unc, $what. " +
-    'The copy started again would run from there, so it was not started. Copy the FolderPermissionManager folder to a local disk, or start it from its \\server\share path.'
+    if ((Resolve-MappedDrive -Path $ScriptPath -DriveMap $DriveMap) -eq $ScriptPath) { return $null }
+    foreach ($file in @(Get-RelaunchFileList -ScriptPath $ScriptPath)) {
+        $unc = Resolve-MappedDrive -Path $file -DriveMap $DriveMap
+        $what = $null
+        $runningSize = Get-RelaunchFileSize -Path $file
+        $thereSize = Get-RelaunchFileSize -Path $unc
+        if ($null -ne $runningSize -and $null -ne $thereSize -and $runningSize -ne $thereSize) {
+            $what = 'is not the same file as the one running (its size differs)'
+        }
+        else {
+            $running = Get-RelaunchFileHash -Path $file
+            $there = Get-RelaunchFileHash -Path $unc
+            if (-not $running) { $what = "could not be compared, because the running copy $file could not be read" }
+            elseif (-not $there) { $what = 'could not be read' }
+            elseif ($running -ne $there) { $what = 'is not the same file as the one running' }
+        }
+        if ($what) {
+            return "Folder Permission Manager is running from $ScriptPath. Drive ${letter}: is only a remembered mapping (Windows remembers it, but this window could not see it live), and the file behind it, $unc, $what. " +
+            'The copy started again would run from there, so it was not started. Copy the FolderPermissionManager folder to a local disk, or start it from its \\server\share path.'
+        }
+    }
+    $null
 }
 
 function Request-Elevation {
@@ -869,11 +951,17 @@ function ConvertTo-AclViewModel {
     # Owner, inheritance and one row per permission entry, in the order the ACL holds them.
     # https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.commonobjectsecurity.getaccessrules
     param([Parameter(Mandatory)]$Acl)
-    $rules = $Acl.GetAccessRules($true, $true, [System.Security.Principal.NTAccount])
-    $rows = @(foreach ($r in $rules) {
+    $rules = @($Acl.GetAccessRules($true, $true, [System.Security.Principal.NTAccount]))
+    # The same entries, in the same order, by SID: Remove Permission is keyed on the SID, so two
+    # names for one account (or a renamed one) are one choice.
+    $sids = @($Acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+    $rows = @(for ($i = 0; $i -lt $rules.Count; $i++) {
+            $r = $rules[$i]
             [PSCustomObject]@{
                 Identity        = "$($r.IdentityReference.Value)"
+                Sid             = $(if ($i -lt $sids.Count) { "$($sids[$i].IdentityReference.Value)" } else { '' })
                 PermissionLevel = Format-PermissionRights -Rights $r.FileSystemRights
+                Rights          = "$($r.FileSystemRights)"
                 Type            = "$($r.AccessControlType)"
                 IsInherited     = [bool]$r.IsInherited
                 InheritedText   = $(if ($r.IsInherited) { 'Inherited' } else { '' })
@@ -1195,12 +1283,41 @@ function Test-CanClose {
     # Asked by the window's Closing handler before anything is stopped. A change has no cancel:
     # stopping takeown or a batch midway would leave it half done, so the window stays open
     # (and says why) while one runs. Reads and the export can always be dropped.
-    $running = $script:ChangeTask
-    if (-not $running) { $running = @($script:BgTasks | Where-Object { Test-ChangeTaskRunning $_ }) | Select-Object -First 1 }
+    # "Running" is the task's own state (Test-ChangeTaskRunning), so a change whose result has
+    # not been shown yet does not keep the window open for ever. A change that is being started
+    # (no task object yet) counts as running.
+    $running = $null
+    $current = $script:ChangeTask
+    if ($current -and (-not $current.Task -or (Test-ChangeTaskRunning $current.Task))) { $running = $current }
+    if (-not $running) {
+        $task = @($script:BgTasks | Where-Object { Test-ChangeTaskRunning $_ }) | Select-Object -First 1
+        if ($task) { $running = [PSCustomObject]@{ Path = $(if ($current) { $current.Path } else { $null }) } }
+    }
     if (-not $running) { return $true }
     $where = if ($running.Path) { $running.Path } else { 'a folder' }
     Show-AppMessage -Icon Warning -Message "A permission change is still running on $where. Wait for it to finish: closing now could leave it half done."
     $false
+}
+
+function Get-FatalErrorMessage {
+    # What the window says when it has to close after an unexpected error. It never says
+    # "Nothing was changed" when a change ran this session or is still running.
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$ErrorText,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$ErrorLogPath,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$ChangeLogFolder,
+        [bool]$ChangeRunning,
+        [bool]$ChangeStarted
+    )
+    $text = "Folder Permission Manager hit an error and has to close:`n`n$ErrorText`n`nDetails were written to $ErrorLogPath."
+    if ($ChangeRunning) {
+        $text += " A change may still be running or may have been made; check the change log in $ChangeLogFolder. The tool closes when it finishes."
+    }
+    elseif ($ChangeStarted) {
+        $text += " A change may have been made in this session; check the change log in $ChangeLogFolder."
+    }
+    else { $text += ' Nothing was changed.' }
+    $text
 }
 
 function Test-OwnProcess {
@@ -1297,15 +1414,27 @@ function Select-TaskResult {
 }
 
 function Enable-LiveRegion {
-    # Marks the status box as a polite live region, so screen readers announce new messages.
-    # LiveSetting exists from .NET Framework 4.7.1; on older frameworks nothing is set ($false).
+    # Marks an element as a live region, so screen readers announce new text: Polite for the
+    # status line, Assertive (interrupts) for a dialog's validation error. LiveSetting exists
+    # from .NET Framework 4.7.1; on older frameworks nothing is set ($false).
     # https://learn.microsoft.com/dotnet/api/system.windows.automation.automationproperties.livesetting
-    param([Parameter(Mandatory)]$Element)
+    # https://learn.microsoft.com/dotnet/api/system.windows.automation.automationlivesetting
+    param([Parameter(Mandatory)]$Element, [ValidateSet('Polite', 'Assertive')][string]$Setting = 'Polite')
     $field = [System.Windows.Automation.AutomationProperties].GetField('LiveSettingProperty')
     if (-not $field) { return $false }
     $dp = $field.GetValue($null)
-    $Element.SetValue($dp, [Enum]::Parse($dp.PropertyType, 'Polite'))
+    $Element.SetValue($dp, [Enum]::Parse($dp.PropertyType, $Setting))
     $true
+}
+
+function Send-LiveRegionChanged {
+    # Tells screen readers a live region's text changed (.NET Framework 4.7.1 and later).
+    param([Parameter(Mandatory)]$Element)
+    try {
+        $peer = [System.Windows.Automation.Peers.UIElementAutomationPeer]::CreatePeerForElement($Element)
+        if ($peer) { $peer.RaiseAutomationEvent([System.Windows.Automation.Peers.AutomationEvents]::LiveRegionChanged) }
+    }
+    catch { }
 }
 
 #endregion
@@ -1319,6 +1448,13 @@ $script:ViewState = @{ FolderPermissions = $null; Files = $null }
 $script:FileAclCache = @{}
 $script:FileAclPending = @{}
 $script:BusyEntries = [ordered]@{}
+# A change being prepared (its target looked up, its tree counted, its dialog or confirm open):
+# $null, or Action, Path and Step (Start-ChangePrepRead). While it is set, as while a change
+# runs, the change buttons are off and new change clicks are refused.
+$script:ChangePending = $null
+$script:ChangeButtonTips = @{}
+# Set once a change task has started in this window (the fatal-error text depends on it).
+$script:ChangeMadeThisSession = $false
 $script:MaxFileDetails = 20
 $script:MaxFileAclAutoLoad = 50
 
@@ -1398,7 +1534,13 @@ function Set-FileAclResult {
 $script:WorkHelperFunctions = 'Get-InnermostErrorText', 'Test-AccessDeniedError', 'Get-AccessDeniedMessage',
 'Get-AclOwnerName', 'ConvertTo-AclViewModel', 'Read-ItemAclModel', 'Format-FileSize', 'ConvertTo-FileRows',
 'Get-DriveListModel', 'Get-ValidDriveMap', 'Test-UncSharePath', 'Write-ChangeStartedLog', 'New-ChangeWorkResult',
-'New-ChangeNotStartedResult'
+'New-ChangeNotStartedResult', 'Invoke-AppChange', 'Add-ChangeReadBack', 'Get-ReadBackProblem', 'ConvertTo-IdentitySid',
+'Save-UnloggedChangeRows',
+# Where a change lands (Resolve-ChangeTargetSet and everything it calls), looked up in the pool.
+'Resolve-ChangeTargetSet', 'Get-ChangeTarget', 'New-ChangeTarget', 'Get-StreamRefusal', 'Resolve-MappedDrive',
+'Test-ThisComputerName', 'Get-ThisComputerNames', 'ConvertFrom-Ipv6LiteralName', 'Test-SameIPAddress',
+'Get-LocalSharePath', 'Get-AppDfsTarget', 'Get-DfsClientTarget', 'Find-DfsReparsePoint', 'Get-AppReparseInfo',
+'Get-RemoteShareLocalPath', 'Get-HighImpactRootRefusal', 'Get-AppProfilesDirectory', 'Get-ShareTreeRefusal', 'Complete-AppChangeWork'
 
 function Write-ChangeStartedLog {
     # One 'Started' row per item in the change log before the change runs, so a change that is
@@ -1424,17 +1566,224 @@ function Write-ChangeStartedLog {
 }
 
 function New-ChangeWorkResult {
-    # What a change work block returns: the core's rows, the log file and the core's message.
-    param([AllowEmptyCollection()][AllowNull()][object[]]$Entries, [AllowNull()][string]$LogPath, [Parameter(Mandatory)][string]$LogFolder)
+    # What a change work block returns: the core's rows (with the read-back's CheckProblem and
+    # NothingRemoved notes, Add-ChangeReadBack), the log file, the core's message, and where the
+    # rows went when the log could not be written (UnloggedPath).
+    param(
+        [AllowEmptyCollection()][AllowNull()][object[]]$Entries,
+        [AllowNull()][string]$LogPath,
+        [Parameter(Mandatory)][string]$LogFolder,
+        [AllowNull()][string]$UnloggedPath
+    )
     $all = @($Entries | Where-Object { $null -ne $_ })
     $path = if ($LogPath) { $LogPath } else { $null }
     [PSCustomObject]@{
-        Ok      = $true
-        Entries = $all
-        LogPath = $path
-        Message = Get-ChangeResultMessage -Entries $all -LogPath $path -LogFolder $LogFolder
-        Error   = $null
+        Ok           = $true
+        Entries      = $all
+        LogPath      = $path
+        Message      = Get-ChangeResultMessage -Entries $all -LogPath $path -LogFolder $LogFolder
+        UnloggedPath = $(if ($UnloggedPath) { $UnloggedPath } else { $null })
+        Error        = $null
     }
+}
+
+function Invoke-AppChange {
+    # Runs one core change function (the -Change block). Normally through
+    # Invoke-LoggedPermissionChange, which logs each row as soon as that item is done. Under
+    # -WhatIfMode the core function is called directly (the block passes it -WhatIf too), so
+    # nothing is logged and the log folder is not created: "-WhatIf never writes or claims a
+    # log" (destructive-operations profile).
+    # The -Change block runs in a child scope of this function (and of Invoke-LoggedPermissionChange)
+    # and reads the work block's variables, so these parameter names must not hide theirs.
+    param([Parameter(Mandatory)][scriptblock]$Change, [Parameter(Mandatory)][string]$LogFolder, [bool]$WhatIfMode)
+    if ($WhatIfMode) {
+        return [PSCustomObject]@{ Entries = @(& $Change | Where-Object { $null -ne $_ }); LogPath = $null }
+    }
+    Invoke-LoggedPermissionChange -LogFolder $LogFolder -Change $Change
+}
+
+function ConvertTo-IdentitySid {
+    # The SID of a user or group name (or of a SID written as text), or $null when Windows cannot
+    # translate it. https://learn.microsoft.com/dotnet/api/system.security.principal.ntaccount.translate
+    param([AllowNull()][AllowEmptyString()][string]$Identity)
+    $id = "$Identity".Trim()
+    if (-not $id) { return $null }
+    try {
+        if ($id -match '^S-1-\d+(-\d+)+$') { return ([System.Security.Principal.SecurityIdentifier]$id).Value }
+        (New-Object System.Security.Principal.NTAccount -ArgumentList $id).Translate([System.Security.Principal.SecurityIdentifier]).Value
+    }
+    catch { $null }
+}
+
+function Get-ReadBackProblem {
+    # Reads one item again after a change and says what is not as intended, or $null when it is.
+    # Throws when the item cannot be read. Entries are compared by SID (GetAccessRules with
+    # SecurityIdentifier), never by name; rights are compared after mapping generic rights and
+    # without Synchronize, which Windows adds to Allow entries only (core ConvertTo-SpecificFileRight).
+    #   Add:    an explicit entry for the SID, of that type, with at least those rights;
+    #   Remove: no explicit entry for the SID of that type is left;
+    #   Owner:  the owner is the account running the tool;
+    #   Copy:   every explicit entry of the source is on the target (an inherited one counts when
+    #           the target is under the source, as Copy-FolderPermission counts it).
+    # https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.commonobjectsecurity.getaccessrules
+    # https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.objectsecurity.getowner
+    param(
+        [Parameter(Mandatory)][ValidateSet('Add', 'Remove', 'Owner', 'Copy')][string]$Kind,
+        [Parameter(Mandatory)][string]$Path,
+        [string]$Identity,
+        [string]$Sid,
+        [string]$Rights,
+        [string]$Type,
+        [string]$MySid,
+        [AllowEmptyCollection()][object[]]$SourceRules,
+        [string]$SourcePath
+    )
+    $sidType = [System.Security.Principal.SecurityIdentifier]
+    $noSync = -bnot [int64]0x100000
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    switch ($Kind) {
+        'Owner' {
+            $owner = "$($acl.GetOwner($sidType).Value)"
+            if ($owner -eq $MySid) { return $null }
+            $name = $owner
+            try { $name = ([System.Security.Principal.SecurityIdentifier]$owner).Translate([System.Security.Principal.NTAccount]).Value } catch { }
+            return "its owner is $name afterwards, not you"
+        }
+        'Add' {
+            $need = (ConvertTo-SpecificFileRight ([System.Security.AccessControl.FileSystemRights]$Rights)) -band $noSync
+            foreach ($r in @($acl.GetAccessRules($true, $false, $sidType))) {
+                if ("$($r.IdentityReference.Value)" -ne $Sid -or "$($r.AccessControlType)" -ne $Type) { continue }
+                if (((ConvertTo-SpecificFileRight $r.FileSystemRights) -band $need) -eq $need) { return $null }
+            }
+            return "no explicit $Type $Rights entry for $Identity was found on it afterwards"
+        }
+        'Remove' {
+            $left = @($acl.GetAccessRules($true, $false, $sidType) | Where-Object { "$($_.IdentityReference.Value)" -eq $Sid -and "$($_.AccessControlType)" -eq $Type })
+            if ($left.Count -eq 0) { return $null }
+            return "$Identity still has an explicit $Type entry on it afterwards"
+        }
+        'Copy' {
+            $within = [bool](Test-PathWithin -Path $Path -Root $SourcePath)
+            $have = @($acl.GetAccessRules($true, $within, $sidType))
+            $missing = 0
+            foreach ($s in @($SourceRules)) {
+                $need = (ConvertTo-SpecificFileRight $s.FileSystemRights) -band $noSync
+                $found = @($have | Where-Object {
+                        "$($_.IdentityReference.Value)" -eq "$($s.IdentityReference.Value)" -and $_.AccessControlType -eq $s.AccessControlType -and
+                        (((ConvertTo-SpecificFileRight $_.FileSystemRights) -band $need) -eq $need) })
+                if ($found.Count -eq 0) { $missing++ }
+            }
+            if ($missing -eq 0) { return $null }
+            return "$missing of the $(@($SourceRules).Count) permission(s) set on $SourcePath are not on it afterwards"
+        }
+    }
+}
+
+function Add-ChangeReadBack {
+    # The core reports Done once Set-Acl returned; this reads each Done item again and checks the
+    # intended state is there ("Done/PASS only after reading the result back", destructive-
+    # operations profile). Never throws. A row that fails gets a CheckProblem note (shown as
+    # "Done, with items to check") and a 'Done, with items to check' row in the change log; the
+    # core's row itself is not changed. A remove whose permissions are byte for byte the same
+    # before and after (OldValue = NewValue) and whose SID has no explicit entry of that type
+    # gets NothingRemoved instead: there was nothing to remove.
+    param(
+        [Parameter(Mandatory)][ValidateSet('Add', 'Remove', 'Owner', 'Copy')][string]$Kind,
+        [AllowEmptyCollection()][AllowNull()][object[]]$Entries,
+        [string]$Identity,
+        [string]$Sid,
+        [string]$Rights,
+        [string]$Type,
+        [string]$SourcePath,
+        [string]$LogFolder
+    )
+    $done = @($Entries | Where-Object { $null -ne $_ -and $_.Result -eq 'Done' })
+    if ($done.Count -eq 0) { return }
+    $setupProblem = $null
+    $mySid = $null
+    $sourceRules = @()
+    try {
+        switch ($Kind) {
+            'Owner' { $mySid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value }
+            'Copy' {
+                $source = Get-Acl -LiteralPath $SourcePath -ErrorAction Stop
+                $sourceRules = @($source.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]))
+            }
+            default {
+                if (-not $Sid) { $Sid = ConvertTo-IdentitySid -Identity $Identity }
+                if (-not $Sid) { $setupProblem = "Windows could not find the account $Identity to check the change afterwards" }
+            }
+        }
+    }
+    catch { $setupProblem = "the permissions of $SourcePath could not be read again to check the change ($(Get-InnermostErrorText $_))" }
+    $rows = [System.Collections.Generic.List[object]]::new()
+    foreach ($e in $done) {
+        $problem = $setupProblem
+        if (-not $problem) {
+            try {
+                $problem = Get-ReadBackProblem -Kind $Kind -Path "$($e.Target)" -Identity $Identity -Sid $Sid -Rights $Rights -Type $Type `
+                    -MySid $mySid -SourceRules $sourceRules -SourcePath $SourcePath
+            }
+            catch { $problem = "it could not be read again to check the change ($(Get-InnermostErrorText $_))" }
+        }
+        if (-not $problem -and $Kind -eq 'Remove' -and "$($e.OldValue)" -and "$($e.OldValue)" -ne 'Could not read' -and "$($e.OldValue)" -ceq "$($e.NewValue)") {
+            $e | Add-Member -NotePropertyName NothingRemoved -NotePropertyValue $true -Force
+            continue
+        }
+        if ($problem) {
+            $e | Add-Member -NotePropertyName CheckProblem -NotePropertyValue $problem -Force
+            $itemType = if ("$($e.ItemType)") { "$($e.ItemType)" } else { 'Unknown' }
+            $rows.Add((New-PermissionChangeEntry -Action "$($e.Action)" -Target "$($e.Target)" -ItemType $itemType -Detail "$($e.Detail)" `
+                        -OldValue "$($e.OldValue)" -NewValue "$($e.NewValue)" -Result 'Done, with items to check' `
+                        -ErrorText "Read back after the change: $problem." -BackupFile "$($e.BackupFile)"))
+        }
+    }
+    if ($rows.Count -gt 0 -and $LogFolder) { $null = Write-PermissionChangeLog -Entries $rows.ToArray() -LogFolder $LogFolder }
+}
+
+function Save-UnloggedChangeRows {
+    # The change log could not be written after a change: the result rows go to
+    # Unlogged_<yyyy-MM-dd>.csv (the change log's columns) in %LOCALAPPDATA%\FolderPermissionManager\Logs,
+    # so what was changed is not lost. Returns the file, or $null when that fails too.
+    param([AllowEmptyCollection()][AllowNull()][object[]]$Entries, [string]$Folder)
+    $rows = @($Entries | Where-Object { $null -ne $_ })
+    if ($rows.Count -eq 0) { return $null }
+    if (-not $Folder) {
+        $base = Get-LocalAppDataFolder
+        if (-not $base) { return $null }
+        $Folder = Join-Path $base 'FolderPermissionManager\Logs'
+    }
+    $columns = @(Get-PermissionChangeColumn)
+    $safe = @(foreach ($e in $rows) {
+            $o = [ordered]@{}
+            foreach ($n in $columns) { $v = $e.$n; $o[$n] = if ($v -is [string]) { ConvertTo-CsvSafeText $v } else { $v } }
+            [PSCustomObject]$o
+        })
+    try {
+        if (-not (Test-Path -LiteralPath $Folder -PathType Container)) { New-Item -ItemType Directory -Path $Folder -Force -WhatIf:$false -ErrorAction Stop | Out-Null }
+        $path = Join-Path $Folder ('Unlogged_{0}.csv' -f (Get-Date -Format 'yyyy-MM-dd'))
+        $csv = @($safe | ConvertTo-Csv -NoTypeInformation)
+        if (Test-Path -LiteralPath $path -PathType Leaf) { $csv = @($csv | Select-Object -Skip 1) }
+        Add-Content -LiteralPath $path -Value $csv -Encoding UTF8 -WhatIf:$false -ErrorAction Stop
+        $path
+    }
+    catch { $null }
+}
+
+function Complete-AppChangeWork {
+    # The end of every single-item change work block: read back (not under -WhatIf), save the
+    # rows elsewhere when the change log could not be written, and build the result.
+    param(
+        [Parameter(Mandatory)]$Done,
+        [Parameter(Mandatory)][string]$LogFolder,
+        [bool]$WhatIfMode,
+        [hashtable]$ReadBack
+    )
+    $entries = @($Done.Entries | Where-Object { $null -ne $_ })
+    if (-not $WhatIfMode -and $ReadBack) { Add-ChangeReadBack @ReadBack -Entries $entries -LogFolder $LogFolder }
+    $unlogged = $null
+    if (-not $WhatIfMode -and -not $Done.LogPath -and $entries.Count -gt 0) { $unlogged = Save-UnloggedChangeRows -Entries $entries }
+    New-ChangeWorkResult -Entries $entries -LogPath $Done.LogPath -LogFolder $LogFolder -UnloggedPath $unlogged
 }
 
 function New-ChangeNotStartedResult {
@@ -1589,16 +1938,20 @@ $script:ExportWork = {
 }
 
 # The changes. Only Start-ChangeTask runs these (one at a time). Each one:
-#   1. writes a 'Started' row per item to the change log, or changes nothing if it cannot;
-#   2. calls one core change function through Invoke-LoggedPermissionChange, which backs up
-#      first and logs each item as soon as it is done. -WhatIf:$WhatIf is passed explicitly: a
-#      pool runspace starts with $WhatIfPreference false, so the launch's -WhatIf would not
+#   1. writes a 'Started' row per item to the change log, or changes nothing if it cannot
+#      (under -WhatIf nothing is written);
+#   2. calls one core change function through Invoke-AppChange: normally through
+#      Invoke-LoggedPermissionChange, which backs up first and logs each item as soon as it is
+#      done; under -WhatIf directly, so nothing is logged. -WhatIf:$WhatIf is passed explicitly:
+#      a pool runspace starts with $WhatIfPreference false, so the launch's -WhatIf would not
 #      reach the core otherwise. -Confirm:$false: the window's own dialog was the confirmation,
 #      and a runspace has no host to ask;
-#   3. returns the core's rows and its message (Get-ChangeResultMessage).
-# The -Change block runs in a child scope of Invoke-LoggedPermissionChange and reads this
-# block's parameters ($Paths, $Identity, ...), so the core's names must not hide them (the
-# browser version relies on the same rule, see Complete-PermissionChange there).
+#   3. reads each item that was done again and checks the intended state (Add-ChangeReadBack;
+#      the core does not), and saves the rows elsewhere if the change log could not be written;
+#   4. returns the core's rows and its message (Get-ChangeResultMessage).
+# The -Change block runs in a child scope of Invoke-AppChange and Invoke-LoggedPermissionChange
+# and reads this block's parameters ($Paths, $Identity, ...), so their names must not hide them
+# (the browser version relies on the same rule, see Complete-PermissionChange there).
 $script:AddPermissionWork = {
     param([string[]]$Paths, [string]$Identity, [string]$Rights, [string]$Type, [string]$LogFolder, [bool]$WhatIf, [string]$CorePath)
     try {
@@ -1607,28 +1960,30 @@ $script:AddPermissionWork = {
         if (-not (Write-ChangeStartedLog -Action 'Add permission' -Detail "$Type $Rights for $Identity" -Path $Paths -LogFolder $LogFolder -WhatIfMode $WhatIf)) {
             return (New-ChangeNotStartedResult -LogFolder $LogFolder)
         }
-        $logged = Invoke-LoggedPermissionChange -LogFolder $LogFolder -Change {
+        $done = Invoke-AppChange -LogFolder $LogFolder -WhatIfMode $WhatIf -Change {
             Add-FolderPermission -Path $Paths -Identity $Identity -Rights $Rights -Type $Type -LogFolder $LogFolder -Confirm:$false -WhatIf:$WhatIf
         }
-        New-ChangeWorkResult -Entries $logged.Entries -LogPath $logged.LogPath -LogFolder $LogFolder
+        Complete-AppChangeWork -Done $done -LogFolder $LogFolder -WhatIfMode $WhatIf -ReadBack @{ Kind = 'Add'; Identity = $Identity; Rights = $Rights; Type = $Type }
     }
     catch {
         [PSCustomObject]@{ Ok = $false; Entries = @(); LogPath = $null; Message = $null; Error = Get-InnermostErrorText $_ }
     }
 }
 
+# -Sid: the account chosen in the remove dialog, so the read-back checks that SID (the core
+# removes by name, Remove-FolderPermission -Identity); empty means the name is translated.
 $script:RemovePermissionWork = {
-    param([string[]]$Paths, [string]$Identity, [string]$Rights, [string]$Type, [string]$LogFolder, [bool]$WhatIf, [string]$CorePath)
+    param([string[]]$Paths, [string]$Identity, [string]$Rights, [string]$Type, [string]$LogFolder, [bool]$WhatIf, [string]$Sid, [string]$CorePath)
     try {
         if ($CorePath -and -not (Get-Command -Name Get-ItemOwner -CommandType Function -ErrorAction SilentlyContinue)) { . $CorePath -LoadFunctionsOnly }
         $Paths = @($Paths | Where-Object { "$_".Trim() })
         if (-not (Write-ChangeStartedLog -Action 'Remove permission' -Detail "$Type $Rights for $Identity" -Path $Paths -LogFolder $LogFolder -WhatIfMode $WhatIf)) {
             return (New-ChangeNotStartedResult -LogFolder $LogFolder)
         }
-        $logged = Invoke-LoggedPermissionChange -LogFolder $LogFolder -Change {
+        $done = Invoke-AppChange -LogFolder $LogFolder -WhatIfMode $WhatIf -Change {
             Remove-FolderPermission -Path $Paths -Identity $Identity -Rights $Rights -Type $Type -LogFolder $LogFolder -Confirm:$false -WhatIf:$WhatIf
         }
-        New-ChangeWorkResult -Entries $logged.Entries -LogPath $logged.LogPath -LogFolder $LogFolder
+        Complete-AppChangeWork -Done $done -LogFolder $LogFolder -WhatIfMode $WhatIf -ReadBack @{ Kind = 'Remove'; Identity = $Identity; Sid = $Sid; Rights = $Rights; Type = $Type }
     }
     catch {
         [PSCustomObject]@{ Ok = $false; Entries = @(); LogPath = $null; Message = $null; Error = Get-InnermostErrorText $_ }
@@ -1637,7 +1992,8 @@ $script:RemovePermissionWork = {
 
 # This item only, or with $Recurse the folder and everything under it (the core's whole-tree
 # take ownership, Invoke-TreeOwnershipChange: owner snapshot first, takeown /R /A /D N, D-034;
-# it refuses the root of a drive and the Windows system folders itself, D-036).
+# it refuses the root of a drive and the Windows system folders itself, D-036, and reads every
+# owner back itself, so only this-item-only changes are read back here).
 $script:TakeOwnershipWork = {
     param([string[]]$Paths, [bool]$Recurse, [string]$LogFolder, [bool]$WhatIf, [string]$CorePath)
     try {
@@ -1649,10 +2005,11 @@ $script:TakeOwnershipWork = {
         if (-not (Write-ChangeStartedLog -Action $action -Detail $detail -Path $Paths -LogFolder $LogFolder -WhatIfMode $WhatIf)) {
             return (New-ChangeNotStartedResult -LogFolder $LogFolder)
         }
-        $logged = Invoke-LoggedPermissionChange -LogFolder $LogFolder -Change {
+        $done = Invoke-AppChange -LogFolder $LogFolder -WhatIfMode $WhatIf -Change {
             Set-ItemOwnerToCurrentUser -Path $Paths -LogFolder $LogFolder -Recurse:$Recurse -Confirm:$false -WhatIf:$WhatIf
         }
-        New-ChangeWorkResult -Entries $logged.Entries -LogPath $logged.LogPath -LogFolder $LogFolder
+        $readBack = if ($Recurse) { $null } else { @{ Kind = 'Owner' } }
+        Complete-AppChangeWork -Done $done -LogFolder $LogFolder -WhatIfMode $WhatIf -ReadBack $readBack
     }
     catch {
         [PSCustomObject]@{ Ok = $false; Entries = @(); LogPath = $null; Message = $null; Error = Get-InnermostErrorText $_ }
@@ -1669,16 +2026,32 @@ $script:CopyPermissionsWork = {
         if (-not (Write-ChangeStartedLog -Action 'Copy permissions' -Detail "Copy the permissions set on $SourcePath" -Path $TargetPaths -LogFolder $LogFolder -WhatIfMode $WhatIf)) {
             return (New-ChangeNotStartedResult -LogFolder $LogFolder)
         }
-        $logged = Invoke-LoggedPermissionChange -LogFolder $LogFolder -Change {
+        $done = Invoke-AppChange -LogFolder $LogFolder -WhatIfMode $WhatIf -Change {
             Copy-FolderPermission -SourcePath $SourcePath -TargetPath $TargetPaths -LogFolder $LogFolder -Confirm:$false -WhatIf:$WhatIf
         }
-        New-ChangeWorkResult -Entries $logged.Entries -LogPath $logged.LogPath -LogFolder $LogFolder
+        Complete-AppChangeWork -Done $done -LogFolder $LogFolder -WhatIfMode $WhatIf -ReadBack @{ Kind = 'Copy'; SourcePath = $SourcePath }
     }
     catch {
         [PSCustomObject]@{ Ok = $false; Entries = @(); LogPath = $null; Message = $null; Error = Get-InnermostErrorText $_ }
     }
 }
 
+# Read only, before any change: where the change would land and whether it is refused
+# (Resolve-ChangeTargetSet: mapped drives, this computer's own names and shares, DFS, D-036 and
+# the high-impact roots for a whole tree). Its lookups (DFS, Win32_Share, NetShareGetInfo, this
+# computer's addresses, reparse points) can wait on the network, so they never run on the
+# window's thread.
+$script:ChangeTargetWork = {
+    param([string[]]$Paths, [hashtable]$DriveMap, [hashtable]$DriveMapSource, [bool]$WholeTree, [string]$FolderDisplayPath, [string]$FolderRealPath, [string]$CorePath)
+    try {
+        if ($CorePath -and -not (Get-Command -Name Get-ItemOwner -CommandType Function -ErrorAction SilentlyContinue)) { . $CorePath -LoadFunctionsOnly }
+        Resolve-ChangeTargetSet -Path $Paths -DriveMap $DriveMap -DriveMapSource $DriveMapSource -WholeTree:$WholeTree `
+            -FolderDisplayPath $FolderDisplayPath -FolderRealPath $FolderRealPath
+    }
+    catch {
+        [PSCustomObject]@{ Ok = $false; Targets = @(); Refusal = "Could not work out where the change would land, so nothing was changed: $(Get-InnermostErrorText $_)" }
+    }
+}
 # Read only: what a whole-tree take ownership would cover, counted the way the core's owner
 # snapshot lists it (Get-OwnerTreeItem: hidden and system items too, links listed but not gone
 # into, folders that cannot be opened counted but not what is inside them). Folders includes
@@ -2480,7 +2853,8 @@ $res
 }
 
 function Get-PermissionDialogXaml {
-    # Add and remove permission (folder or selected files). Wired up in SQ-018.
+    # Add and remove permission (folder or selected files). Remove mode hides the level and lists
+    # only explicit entries (Show-PermissionDialog). Submit is the default button only for Add.
     $ns = $script:XamlNamespaces
     $res = Get-AppResourcesXaml
     @"
@@ -2500,7 +2874,7 @@ $res
     <TextBox x:Name="PermIdentityBox" FontFamily="{StaticResource Mono}"/>
     <ComboBox x:Name="PermIdentityCombo" Visibility="Collapsed"/>
     <TextBlock x:Name="PermIdentityHint" Style="{StaticResource Hint}" Text="For example CONTOSO\HR-Staff."/>
-    <TextBlock Style="{StaticResource Lbl}" Text="PERMISSION LEVEL"/>
+    <TextBlock x:Name="PermRightsLabel" Style="{StaticResource Lbl}" Text="PERMISSION LEVEL"/>
     <ComboBox x:Name="PermRightsCombo" SelectedIndex="1">
       <ComboBoxItem Content="Full Control" Tag="FullControl"/>
       <ComboBoxItem Content="Modify" Tag="Modify"/>
@@ -2516,7 +2890,7 @@ $res
     <TextBlock x:Name="PermDialogError" Foreground="{DynamicResource Danger}" TextWrapping="Wrap" Margin="0,10,0,0" Visibility="Collapsed"/>
     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0">
       <Button x:Name="PermCancelBtn" Style="{StaticResource Btn}" Content="Cancel" IsCancel="True" Margin="0,0,8,0"/>
-      <Button x:Name="PermSubmitBtn" Style="{StaticResource PrimaryBtn}" Content="Add Permission"/>
+      <Button x:Name="PermSubmitBtn" Style="{StaticResource PrimaryBtn}" Content="Add Permission" IsDefault="True"/>
     </StackPanel>
   </StackPanel>
 </Window>
@@ -2524,7 +2898,8 @@ $res
 }
 
 function Get-CopyPermissionsDialogXaml {
-    # Copy Permissions To... (adds only, D-031; no recursive option, SQ-015). Wired up in SQ-018.
+    # Copy Permissions To... (adds only, D-031; no recursive option, SQ-015). The list box takes
+    # Enter for new lines (AcceptsReturn), so the default button only answers Enter elsewhere.
     $ns = $script:XamlNamespaces
     $res = Get-AppResourcesXaml
     @"
@@ -2549,7 +2924,7 @@ $res
     <TextBlock x:Name="CopyError" Foreground="{DynamicResource Danger}" TextWrapping="Wrap" Margin="0,10,0,0" Visibility="Collapsed"/>
     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0">
       <Button x:Name="CopyCancelBtn" Style="{StaticResource Btn}" Content="Cancel" IsCancel="True" Margin="0,0,8,0"/>
-      <Button x:Name="CopySubmitBtn" Style="{StaticResource PrimaryBtn}" Content="Copy Permissions"/>
+      <Button x:Name="CopySubmitBtn" Style="{StaticResource PrimaryBtn}" Content="Copy Permissions" IsDefault="True"/>
     </StackPanel>
   </StackPanel>
 </Window>
@@ -2558,7 +2933,7 @@ $res
 
 function Get-ConfirmDialogXaml {
     # Asks before a destructive change: names the path(s) and how many items; Cancel is the
-    # default and the action button carries a verb. Filled in and wired up in SQ-018.
+    # default and the action button carries a verb (Set-ConfirmDialog, Show-ConfirmDialog).
     $ns = $script:XamlNamespaces
     $res = Get-AppResourcesXaml
     @"
@@ -2629,14 +3004,16 @@ function Set-Status {
     $box = $script:UI.StatusText
     $box.Text = Get-StatusText -Text $Text -Kind $Kind
     $box.SetResourceReference([System.Windows.Controls.Control]::ForegroundProperty, $key)
-    if ($script:StatusIsLiveRegion) {
-        # Tell screen readers the live region changed (.NET Framework 4.7.1 and later).
-        try {
-            $peer = [System.Windows.Automation.Peers.UIElementAutomationPeer]::CreatePeerForElement($box)
-            if ($peer) { $peer.RaiseAutomationEvent([System.Windows.Automation.Peers.AutomationEvents]::LiveRegionChanged) }
-        }
-        catch { }
-    }
+    if ($script:StatusIsLiveRegion) { Send-LiveRegionChanged -Element $box }
+}
+
+function Get-BusyLineEntry {
+    # The entry the busy line shows: the running change when there is one (it matters most and
+    # must not hide behind reads), otherwise the newest read. $null when nothing runs.
+    param([System.Collections.IDictionary]$Entries, [string]$ChangeKey)
+    if (-not $Entries -or $Entries.Count -eq 0) { return $null }
+    if ($ChangeKey -and $Entries.Contains($ChangeKey)) { return $Entries[$ChangeKey] }
+    @($Entries.Values)[$Entries.Count - 1]
 }
 
 function Set-PaneStateView {
@@ -2650,13 +3027,15 @@ function Set-PaneStateView {
 }
 
 function Update-BusyLine {
-    # The newest running read, with its elapsed time; hidden when nothing runs.
+    # The running change, or else the newest running read, with its elapsed time; hidden when
+    # nothing runs.
     if (-not ($script:UI -and $script:UI.BusyBar)) { return }
-    $entries = @($script:BusyEntries.Values)
-    if ($entries.Count -eq 0) { $script:UI.BusyBar.Visibility = 'Collapsed'; return }
-    $latest = $entries[$entries.Count - 1]
-    $line = Get-BusyLine -Action $latest.Action -Path $latest.Path -Elapsed ([DateTime]::UtcNow - $latest.Started)
-    if ($entries.Count -gt 1) { $line += "  (and $($entries.Count - 1) more)" }
+    $count = $script:BusyEntries.Count
+    $changeKey = if ($script:ChangeTask) { "$($script:ChangeTask.Key)" } else { $null }
+    $shown = Get-BusyLineEntry -Entries $script:BusyEntries -ChangeKey $changeKey
+    if (-not $shown) { $script:UI.BusyBar.Visibility = 'Collapsed'; return }
+    $line = Get-BusyLine -Action $shown.Action -Path $shown.Path -Elapsed ([DateTime]::UtcNow - $shown.Started)
+    if ($count -gt 1) { $line += "  (and $($count - 1) more)" }
     $script:UI.BusyText.Text = $line
     $script:UI.BusyBar.Visibility = 'Visible'
 }
@@ -3140,9 +3519,21 @@ function Hide-OwnConsole {
         $list = New-Object uint32[] 8
         $count = [FolderPermissionManager.AppConsoleWin]::GetConsoleProcessList($list, 8)
         $hwnd = [FolderPermissionManager.AppConsoleWin]::GetConsoleWindow()
-        if ($count -le 1 -and $hwnd -ne [IntPtr]::Zero) { [void][FolderPermissionManager.AppConsoleWin]::ShowWindow($hwnd, 0) }
+        if ($count -le 1 -and $hwnd -ne [IntPtr]::Zero) {
+            # SW_HIDE (0). https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-showwindow
+            [void][FolderPermissionManager.AppConsoleWin]::ShowWindow($hwnd, 0)
+            $script:HiddenConsole = $hwnd
+        }
     }
     catch { }
+}
+
+function Show-OwnConsole {
+    # Shows the console Hide-OwnConsole hid, so a wait after the window has gone (a change still
+    # finishing) is visible instead of a process running with nothing on screen. SW_SHOW (5).
+    # https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-showwindow
+    if (-not $script:HiddenConsole) { return }
+    try { [void][FolderPermissionManager.AppConsoleWin]::ShowWindow($script:HiddenConsole, 5) } catch { }
 }
 
 function Initialize-PermissionWindow {
@@ -3186,15 +3577,16 @@ function Initialize-PermissionWindow {
     $ui.RefreshBtn.Add_Click({ Update-CurrentFolder })
     $ui.ExportBtn.Add_Click({ Start-PermissionExport })
     $ui.StopExportBtn.Add_Click({ Stop-PermissionExport })
-    # The changes (each asks first where it must, then runs in the background, one at a time).
+    # The changes. Each click first works out in the background where the change would land
+    # (Open-*: never on this thread), then asks where it must, then runs it, one at a time.
     $ui.AddPermissionBtn.Add_Click({ Invoke-UiAction { Open-AddPermission -Scope Folder } })
     $ui.RemovePermissionBtn.Add_Click({ Invoke-UiAction { Open-RemovePermission -Scope Folder } })
-    $ui.TakeOwnershipBtn.Add_Click({ Invoke-UiAction { Invoke-TakeOwnership -Scope Folder } })
-    $ui.TakeOwnershipTreeBtn.Add_Click({ Invoke-UiAction { Invoke-TakeOwnership -Scope Tree } })
+    $ui.TakeOwnershipBtn.Add_Click({ Invoke-UiAction { Open-TakeOwnership -Scope Folder } })
+    $ui.TakeOwnershipTreeBtn.Add_Click({ Invoke-UiAction { Open-TakeOwnership -Scope Tree } })
     $ui.CopyPermissionsBtn.Add_Click({ Invoke-UiAction { Open-CopyPermissions } })
     $ui.AddFilePermissionBtn.Add_Click({ Invoke-UiAction { Open-AddPermission -Scope Files } })
     $ui.RemoveFilePermissionBtn.Add_Click({ Invoke-UiAction { Open-RemovePermission -Scope Files } })
-    $ui.TakeFileOwnershipBtn.Add_Click({ Invoke-UiAction { Invoke-TakeOwnership -Scope Files } })
+    $ui.TakeFileOwnershipBtn.Add_Click({ Invoke-UiAction { Open-TakeOwnership -Scope Files } })
     Update-ChangeControls
     $ui.FolderTree.AddHandler([System.Windows.Controls.TreeViewItem]::ExpandedEvent, [System.Windows.RoutedEventHandler] {
             param($s, $e)
@@ -3255,34 +3647,106 @@ function Get-ChangeControlNames {
     'AddFilePermissionBtn', 'RemoveFilePermissionBtn', 'TakeFileOwnershipBtn'
 }
 
+function Get-ChangeControlState {
+    # Whether the change buttons are on now and, when they are off, why (their tooltip says it).
+    if ($script:ChangeTask) {
+        return [PSCustomObject]@{ Enabled = $false; Reason = "A change is running on $($script:ChangeTask.Path). Wait for it to finish." }
+    }
+    if ($script:ChangePending) {
+        return [PSCustomObject]@{
+            Enabled = $false
+            Reason  = "A change on $($script:ChangePending.Path) is being prepared (checking where it is, counting what is in it, or waiting for your answer). Finish or cancel it first."
+        }
+    }
+    if (-not $script:Current) { return [PSCustomObject]@{ Enabled = $false; Reason = 'Choose a folder first.' } }
+    [PSCustomObject]@{ Enabled = $true; Reason = $null }
+}
+
 function Update-ChangeControls {
-    # Change buttons are on when a folder is chosen and no change is running. Names the window
-    # does not have are skipped.
+    # Change buttons are on when a folder is chosen and no change runs or is being prepared.
+    # While they are off, their tooltip says why (the buttons show tooltips when disabled);
+    # their own tooltip comes back when they are on. Names the window does not have are skipped.
     if (-not $script:UI) { return }
-    $enabled = (-not $script:ChangeTask) -and ($null -ne $script:Current)
+    $state = Get-ChangeControlState
     foreach ($name in Get-ChangeControlNames) {
         $control = $script:UI[$name]
-        if ($control) { $control.IsEnabled = $enabled }
+        if (-not $control) { continue }
+        $control.IsEnabled = $state.Enabled
+        if ($control.PSObject.Properties['ToolTip']) {
+            if (-not $script:ChangeButtonTips.ContainsKey($name)) { $script:ChangeButtonTips[$name] = $control.ToolTip }
+            $control.ToolTip = if ($state.Enabled) { $script:ChangeButtonTips[$name] } else { $state.Reason }
+        }
+    }
+}
+
+function Enter-ChangePending {
+    # A click starts preparing a change: $true, and the change buttons stay off until
+    # Exit-ChangePending (Start-ChangePrepRead calls it when the last step is done). $false,
+    # after saying why, when a change runs or another one is being prepared.
+    param([Parameter(Mandatory)][string]$Action, [string]$Path)
+    if ($script:ChangeTask) {
+        Set-Status -Kind Warning -Text "Another change is still running on $($script:ChangeTask.Path). Wait for it to finish."
+        return $false
+    }
+    if ($script:ChangePending) {
+        Set-Status -Kind Warning -Text (Get-ChangeControlState).Reason
+        return $false
+    }
+    $script:ChangePending = [PSCustomObject]@{ Action = $Action; Path = $Path; Step = 0 }
+    Update-ChangeControls
+    $true
+}
+
+function Exit-ChangePending {
+    $script:ChangePending = $null
+    Update-ChangeControls
+}
+
+function Start-ChangePrepRead {
+    # A background read a change being prepared waits for: the target lookup, the whole-tree
+    # count, the selected files' permissions. OnDone ($result, $State) runs on the window's
+    # thread; when it returns or throws, the pending change ends (buttons back) unless OnDone
+    # handed it on to another such read (the step moved on). So every way out, a refusal, a
+    # cancelled dialog, an error, ends it.
+    param(
+        [Parameter(Mandatory)][string]$Action,
+        [string]$Path,
+        [Parameter(Mandatory)][scriptblock]$Work,
+        [object[]]$ArgumentList,
+        [Parameter(Mandatory)][scriptblock]$OnDone,
+        $State
+    )
+    if (-not $script:ChangePending) { $script:ChangePending = [PSCustomObject]@{ Action = $Action; Path = $Path; Step = 0 } }
+    $script:ChangePending.Step++
+    Update-ChangeControls
+    Start-ReadTask -Action $Action -Path $Path -Work $Work -ArgumentList $ArgumentList -State @{ Step = $script:ChangePending.Step; OnDone = $OnDone; State = $State } -OnDone {
+        param($result, $s)
+        try { & $s.OnDone $result $s.State }
+        finally {
+            if ($script:ChangePending -and $script:ChangePending.Step -eq $s.Step) { Exit-ChangePending }
+        }
     }
 }
 
 function Invoke-UiAction {
     # Runs a button's action; an unexpected error is shown and logged instead of closing the
-    # window.
+    # window. A change it began preparing, but had not handed to a background read yet, ends.
     param([Parameter(Mandatory)][scriptblock]$Action)
+    $pendingBefore = $script:ChangePending
     try { & $Action }
     catch {
         Write-AppError "Action: $($_.Exception.Message)`n$($_.ScriptStackTrace)"
         Set-Status -Kind Error -Text "Something went wrong: $(Get-InnermostErrorText $_) Nothing was started. Press Refresh and try again."
+        if ($script:ChangePending -and -not [object]::ReferenceEquals($pendingBefore, $script:ChangePending) -and $script:ChangePending.Step -eq 0) { Exit-ChangePending }
     }
 }
-
 function Start-ChangeTask {
     # The only way a change starts. One at a time: while one runs, another is refused with a
     # message and nothing starts. The change buttons are switched off and the busy line shows
     # "<Action> <Path>... (elapsed)". When the work is done, OnDone is called with
     # ($result, $State) on the window's thread. Whatever happens (the work threw, OnDone threw,
-    # the task could not even start) the busy state is cleared and the buttons come back.
+    # the task could not even start) the busy state is cleared and the buttons come back. When
+    # the work failed, what it touched is read again too (a refresh state as -State).
     # $true when the task started.
     param(
         [Parameter(Mandatory)][string]$Action,
@@ -3309,6 +3773,11 @@ function Start-ChangeTask {
                 $why = if ($result -and "$($result.Error)".Trim()) { "$($result.Error)".Trim() } else { 'No reason was given.' }
                 if ($result -and $result.NotStarted) { Set-Status -Kind Error -Text $why }
                 else { Set-Status -Kind Error -Text "The change may or may not have been made. Check the folder's permissions. ($why)" }
+                # Show what is there now, so the tech checks the real state, not the old view.
+                if ($s.State -is [System.Collections.IDictionary] -and $s.State['Scope']) {
+                    try { Invoke-ChangeRefresh -State $s.State }
+                    catch { Write-AppError "Refreshing after a failed change '$($s.Action) $($s.Path)': $($_.Exception.Message)" }
+                }
             }
             else {
                 try { & $s.OnDone $result $s.State }
@@ -3329,6 +3798,8 @@ function Start-ChangeTask {
     try {
         $task = Start-BgTask -Work $Work -ArgumentList $ArgumentList -State $taskState -OnDone $finish -Kind Change
         $script:ChangeTask.Task = $task
+        # From here on a change may have been made in this session (Get-FatalErrorMessage).
+        $script:ChangeMadeThisSession = $true
     }
     catch {
         $script:BusyEntries.Remove($key)
@@ -3343,16 +3814,26 @@ function Start-ChangeTask {
 }
 
 function Complete-ChangeTask {
-    # A change finished: show the core's message as the browser version did (Get-ChangeStatus),
-    # then read again what it changed. $State is $null when there is nothing to refresh.
+    # A change finished: show the core's message as the browser version did (Get-ChangeStatus,
+    # with what the read-back found), say where the rows went when the change log could not be
+    # written, then read again what it changed. $State is $null when there is nothing to refresh.
     param([Parameter(Mandatory)]$Result, $State)
     $entries = @($Result.Entries | Where-Object { $null -ne $_ })
     $message = if ("$($Result.Message)".Trim()) { "$($Result.Message)" } else { 'The change finished.' }
     $status = Get-ChangeStatus -Entries $entries -LogPath $Result.LogPath -Message $message
-    Set-Status -Kind $status.Kind -Text $status.Text
+    $kind = $status.Kind
+    $text = $status.Text
+    $whatIfOnly = @($entries | Where-Object { $_.Result -ne 'Skipped (WhatIf)' }).Count -eq 0
+    if ($Result.UnloggedPath) {
+        $text += " The results were saved to $($Result.UnloggedPath) instead: attach that file to the ticket."
+        if ($kind -eq 'Success' -or $kind -eq 'Info') { $kind = 'Warning' }
+    }
+    elseif (-not $Result.LogPath -and $entries.Count -gt 0 -and -not $whatIfOnly) {
+        $text += ' The results could not be saved to a file either: copy this message into the ticket.'
+    }
+    Set-Status -Kind $kind -Text $text
     if ($State) { Invoke-ChangeRefresh -State $State }
 }
-
 function Invoke-ChangeRefresh {
     # Reads again what a change touched (Get-RefreshPlan), for the folder shown now.
     param([Parameter(Mandatory)]$State)
@@ -3407,10 +3888,28 @@ function ConvertFrom-Ipv6LiteralName {
     $null
 }
 
+function Test-SameIPAddress {
+    # True when two addresses are the same address: an IPv4-mapped IPv6 address (::ffff:10.0.0.5)
+    # is read as its IPv4 address, and an IPv6 scope ID is ignored (fe80::1%4 and fe80::1%7 are
+    # the same address seen through two interfaces).
+    # https://learn.microsoft.com/dotnet/api/system.net.ipaddress.isipv4mappedtoipv6
+    # https://learn.microsoft.com/dotnet/api/system.net.ipaddress.maptoipv4
+    # https://learn.microsoft.com/dotnet/api/system.net.ipaddress.scopeid
+    param([Parameter(Mandatory)][System.Net.IPAddress]$A, [Parameter(Mandatory)][System.Net.IPAddress]$B)
+    if ($A.IsIPv4MappedToIPv6) { $A = $A.MapToIPv4() }
+    if ($B.IsIPv4MappedToIPv6) { $B = $B.MapToIPv4() }
+    if ($A.AddressFamily -ne $B.AddressFamily) { return $false }
+    [BitConverter]::ToString($A.GetAddressBytes()) -eq [BitConverter]::ToString($B.GetAddressBytes())
+}
+
 function Test-ThisComputerName {
     # True when a \\server name is this computer: a loopback name or address (Uri.IsLoopback:
-    # 127.0.0.1, loopback and the local host name; IPAddress.IsLoopback), an ipv6-literal.net
-    # loopback, or one of this computer's own names or addresses (Get-ThisComputerNames).
+    # 127.0.0.1, loopback and the local host name; IPAddress.IsLoopback, also for an
+    # IPv4-mapped IPv6 address such as ::ffff:127.0.0.1), an ipv6-literal.net loopback, or one
+    # of this computer's own names or addresses (Get-ThisComputerNames; an IPv6 address matches
+    # whatever its scope ID). A DNS alias (CNAME) or an extra NetBIOS name of this computer is
+    # NOT detected: such a name is treated as another computer, so its paths get the remote
+    # checks (DFS lookup, the share's folder on the server), never the local ones.
     # https://learn.microsoft.com/dotnet/api/system.uri.isloopback
     # https://learn.microsoft.com/dotnet/api/system.net.ipaddress.isloopback
     param([AllowEmptyString()][string]$Name)
@@ -3421,22 +3920,24 @@ function Test-ThisComputerName {
         $parsed = $null
         if ([System.Net.IPAddress]::TryParse($n.Trim('[', ']'), [ref]$parsed)) { $ip = $parsed }
     }
-    if ($ip -and [System.Net.IPAddress]::IsLoopback($ip)) { return $true }
-    if (-not $ip) {
+    if ($ip) {
+        $plain = if ($ip.IsIPv4MappedToIPv6) { $ip.MapToIPv4() } else { $ip }
+        if ([System.Net.IPAddress]::IsLoopback($plain)) { return $true }
+    }
+    else {
         try { if (([uri]"file://$n/").IsLoopback) { return $true } } catch { }
     }
     foreach ($own in @(Get-ThisComputerNames)) {
         if (-not $own) { continue }
         $ownIp = $null
         if ($ip -and [System.Net.IPAddress]::TryParse($own, [ref]$ownIp)) {
-            if ($ip.Equals($ownIp)) { return $true }
+            if (Test-SameIPAddress -A $ip -B $ownIp) { return $true }
             continue
         }
         if ($n -ieq $own) { return $true }
     }
     $false
 }
-
 function Get-LocalSharePath {
     # The local folder of a share on this computer (Win32_Share.Path), only read. Throws when it
     # cannot be told. Tests replace it.
@@ -3542,23 +4043,240 @@ function New-ChangeTarget {
     }
 }
 
+function Get-AppReparseInfo {
+    # Whether an item exists and is a reparse point, and its tag, read from its directory entry
+    # only (FindFirstFileW: "If the dwFileAttributes member includes the
+    # FILE_ATTRIBUTE_REPARSE_POINT attribute, then the dwReserved0 member specifies the reparse
+    # point" tag). Unlike the core's Get-ReparsePointTag it tells "not there" (ERROR_FILE_NOT_FOUND
+    # 2, ERROR_PATH_NOT_FOUND 3) apart from "could not be read" (throws), so a check built on it
+    # fails closed. Tests replace it.
+    # https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-findfirstfilew
+    # https://learn.microsoft.com/windows/win32/api/minwinbase/ns-minwinbase-win32_find_dataw
+    # https://learn.microsoft.com/windows/win32/debug/system-error-codes--0-499-
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not ('FolderPermissionManager.AppReparseFind' -as [type])) {
+        Add-Type -Namespace FolderPermissionManager -Name AppReparseFind -ErrorAction Stop -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+public struct FindData {
+    public uint dwFileAttributes;
+    public System.Runtime.InteropServices.ComTypes.FILETIME ftCreationTime;
+    public System.Runtime.InteropServices.ComTypes.FILETIME ftLastAccessTime;
+    public System.Runtime.InteropServices.ComTypes.FILETIME ftLastWriteTime;
+    public uint nFileSizeHigh;
+    public uint nFileSizeLow;
+    public uint dwReserved0;
+    public uint dwReserved1;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string cFileName;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 14)] public string cAlternateFileName;
+}
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+public static extern IntPtr FindFirstFileW(string lpFileName, out FindData lpFindFileData);
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool FindClose(IntPtr hFindFile);
+'@
+    }
+    $p = $Path.TrimEnd('\')
+    # A long local path needs the \\?\ form (no MAX_PATH limit).
+    if ($p.Length -ge 248 -and $p -match '^[A-Za-z]:\\') { $p = "\\?\$p" }
+    $data = New-Object FolderPermissionManager.AppReparseFind+FindData
+    $handle = [FolderPermissionManager.AppReparseFind]::FindFirstFileW($p, [ref]$data)
+    if ($handle -eq [IntPtr]::Zero -or $handle -eq [IntPtr](-1)) {
+        $code = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        if ($code -eq 2 -or $code -eq 3) { return [PSCustomObject]@{ Exists = $false; IsReparsePoint = $false; Tag = $null } }
+        $why = (New-Object System.ComponentModel.Win32Exception -ArgumentList ([int]$code)).Message
+        throw "Windows could not read $Path (error $($code): $why)"
+    }
+    $null = [FolderPermissionManager.AppReparseFind]::FindClose($handle)
+    # 0x400 = FILE_ATTRIBUTE_REPARSE_POINT
+    $isReparse = ($data.dwFileAttributes -band 0x400) -ne 0
+    [PSCustomObject]@{ Exists = $true; IsReparsePoint = $isReparse; Tag = $(if ($isReparse) { [uint32]$data.dwReserved0 } else { $null }) }
+}
+
+function Find-DfsReparsePoint {
+    # The first folder, from -Path up to (not including) its drive root, that is a DFS folder:
+    # a reparse point with the tag IO_REPARSE_TAG_DFS (0x8000000A, "Used by the DFS filter ...
+    # Server-side interpretation only", MS-FSCC 2.1.2.1). A DFS namespace hosted on this
+    # computer keeps each DFS folder as such a reparse point in the namespace root's folder;
+    # changing it in place would change the reparse point, not the folder it stands for.
+    # $null when there is none; throws when an entry cannot be read (Get-AppReparseInfo).
+    # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+    param([Parameter(Mandatory)][string]$Path)
+    # 0x8000000A, written as a number: a hex literal that large is a negative Int32 in PowerShell.
+    $dfsTag = [uint32]2147483658
+    $current = "$Path".TrimEnd('\')
+    $root = "$([System.IO.Path]::GetPathRoot($Path))".TrimEnd('\')
+    while ($current -and $current.Length -gt $root.Length) {
+        $info = Get-AppReparseInfo -Path $current
+        if ($info.Exists -and $info.IsReparsePoint -and $null -ne $info.Tag -and [uint32]$info.Tag -eq $dfsTag) { return $current }
+        $parent = [System.IO.Path]::GetDirectoryName($current)
+        if (-not $parent -or $parent.Length -ge $current.Length) { break }
+        $current = $parent.TrimEnd('\')
+    }
+    $null
+}
+
+function Get-RemoteShareLocalPath {
+    # The folder a share is on its server: NetShareGetInfo level 2, SHARE_INFO_2.shi2_path ("the
+    # local path for the shared resource"), the buffer freed with NetApiBufferFree. Level 2
+    # needs Administrator, Power User, Print Operator or Server Operator membership on that
+    # server for a caller who is not logged on there. Throws when the server does not say.
+    # Only read. Tests replace it.
+    # https://learn.microsoft.com/windows/win32/api/lmshare/nf-lmshare-netsharegetinfo
+    # https://learn.microsoft.com/windows/win32/api/lmshare/ns-lmshare-share_info_2
+    # https://learn.microsoft.com/windows/win32/api/lmapibuf/nf-lmapibuf-netapibufferfree
+    param([Parameter(Mandatory)][string]$Server, [Parameter(Mandatory)][string]$Share)
+    if (-not ('FolderPermissionManager.AppNetShare' -as [type])) {
+        Add-Type -Namespace FolderPermissionManager -Name AppNetShare -ErrorAction Stop -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+public struct ShareInfo2 {
+    [MarshalAs(UnmanagedType.LPWStr)] public string NetName;
+    public uint Type;
+    [MarshalAs(UnmanagedType.LPWStr)] public string Remark;
+    public uint Permissions;
+    public uint MaxUses;
+    public uint CurrentUses;
+    [MarshalAs(UnmanagedType.LPWStr)] public string Path;
+    [MarshalAs(UnmanagedType.LPWStr)] public string Password;
+}
+[DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
+private static extern uint NetShareGetInfo(string servername, string netname, uint level, out IntPtr bufptr);
+[DllImport("netapi32.dll")]
+public static extern uint NetApiBufferFree(IntPtr Buffer);
+public static uint GetInfo2(string server, string share, out IntPtr buffer) {
+    return NetShareGetInfo(server, share, 2, out buffer);
+}
+'@
+    }
+    $buffer = [IntPtr]::Zero
+    $status = [FolderPermissionManager.AppNetShare]::GetInfo2($Server, $Share, [ref]$buffer)
+    try {
+        if ($status -ne 0) {
+            $why = (New-Object System.ComponentModel.Win32Exception -ArgumentList ([int]$status)).Message
+            throw "$Server did not say which folder its share $Share is (error $($status): $why)"
+        }
+        $info = [System.Runtime.InteropServices.Marshal]::PtrToStructure($buffer, [type][FolderPermissionManager.AppNetShare+ShareInfo2])
+        if (-not "$($info.Path)".Trim()) { throw "$Server gave no folder for its share $Share" }
+        "$($info.Path)"
+    }
+    finally {
+        if ($buffer -ne [IntPtr]::Zero) { $null = [FolderPermissionManager.AppNetShare]::NetApiBufferFree($buffer) }
+    }
+}
+
+function Get-AppProfilesDirectory {
+    # This computer's folder for user profiles: GetProfilesDirectory ("C:\Users" on Windows 7
+    # and later; the ProfilesDirectory setting can move it to another volume). $null when it
+    # cannot be read. The registry value behind it is not documented on Learn, so the function
+    # is used. Tests replace it.
+    # https://learn.microsoft.com/windows/win32/api/userenv/nf-userenv-getprofilesdirectoryw
+    # https://learn.microsoft.com/windows-hardware/customize/desktop/unattend/microsoft-windows-shell-setup-folderlocations-profilesdirectory
+    try {
+        if (-not ('FolderPermissionManager.AppProfiles' -as [type])) {
+            Add-Type -Namespace FolderPermissionManager -Name AppProfiles -ErrorAction Stop -MemberDefinition @'
+[DllImport("userenv.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+public static extern bool GetProfilesDirectoryW(System.Text.StringBuilder lpProfileDir, ref uint lpcchSize);
+'@
+        }
+        $size = [uint32]1024
+        $sb = New-Object System.Text.StringBuilder -ArgumentList 1024
+        if (-not [FolderPermissionManager.AppProfiles]::GetProfilesDirectoryW($sb, [ref]$size)) { return $null }
+        $sb.ToString()
+    }
+    catch { $null }
+}
+
+function Get-HighImpactRootRefusal {
+    # Why a whole-tree change is refused on a high-impact root ("C:\Users, System Volume
+    # Information and $Recycle.Bin on data volumes", destructive-operations profile), or $null:
+    #   - the folder that holds every user profile: this computer's profiles folder
+    #     (Get-AppProfilesDirectory) and %SystemDrive%\Users; on another computer
+    #     \\server\<letter>$\Users, because its profiles folder cannot be read from here.
+    #     One profile folder below it (C:\Users\bob) is allowed;
+    #   - anything in System Volume Information or $Recycle.Bin, on any drive.
+    # Text only, apart from reading this computer's profiles folder.
+    param([Parameter(Mandatory)][string]$Path)
+    $p = ConvertTo-ComparablePath -Path $Path
+    if (-not $p) { return $null }
+    $tail = 'Taking ownership of everything in it cannot easily be undone. Choose the one folder that needs fixing instead.'
+    foreach ($segment in $p.Split('\')) {
+        if ($segment -ieq 'System Volume Information') { return "$Path is in System Volume Information, where Windows keeps restore points and volume data. $tail" }
+        if ($segment -ieq '$Recycle.Bin') { return "$Path is in `$Recycle.Bin, the Recycle Bin of every user of that drive. $tail" }
+    }
+    $profileTail = 'Taking ownership of everything in it changes the owner of every user profile, so users can lose access to their own files, and it cannot easily be undone. Choose the one profile folder that needs fixing instead (for example ...\Users\<name>).'
+    if ($p -match '^\\\\([^\\]+)\\([A-Za-z])\$\\Users$') {
+        return "$Path is the Users folder of drive $($Matches[2].ToUpper()): on $($Matches[1]), where Windows keeps every user profile. $profileTail"
+    }
+    if ($p -match '^[A-Za-z]:\\') {
+        $roots = @()
+        if ($env:SystemDrive) { $roots += "$($env:SystemDrive)\Users" }
+        $profiles = Get-AppProfilesDirectory
+        if ($profiles) { $roots += "$profiles" }
+        foreach ($r in $roots) {
+            $c = (ConvertTo-ComparablePath -Path $r).TrimEnd('\')
+            if ($c -and $p.TrimEnd('\') -ieq $c) { return "$Path is the folder that holds every user profile on this computer ($r). $profileTail" }
+        }
+    }
+    $null
+}
+
+function Get-ShareTreeRefusal {
+    # A whole-tree change on \\server\share\... (not an administrative share): the share's folder
+    # on the server (Get-RemoteShareLocalPath), checked as the server's own path
+    # \\server\<letter>$\..., so D-036 (the root of a drive, the Windows folders) and the
+    # high-impact roots see where it really is. A share whose folder cannot be found out is
+    # refused: "a guard that cannot resolve the path fails closed" (destructive-operations
+    # profile). $null when it is allowed.
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Server, [Parameter(Mandatory)][string]$Share, [string]$Rest)
+    $instead = "Open it by its administrative share path instead (for example \\$Server\D`$\...), or ask a senior admin."
+    try { $local = Get-RemoteShareLocalPath -Server $Server -Share $Share }
+    catch {
+        $why = (Get-InnermostErrorText $_).TrimEnd('.')
+        return "Windows could not tell which folder on $Server the share $Share is ($why), so $Path cannot be checked against the root of a drive, the Windows system folders and the user profiles folder. $instead"
+    }
+    if ("$local" -notmatch '^([A-Za-z]):(\\.*)?$') {
+        return "The share $Share on $Server is $local, not a folder on a drive, so $Path cannot be checked against the root of a drive and the Windows system folders. $instead"
+    }
+    $serverPath = "\\$Server\$($Matches[1].ToUpper())`$" + "$($Matches[2])".TrimEnd('\')
+    if ($Rest) { $serverPath += "\$Rest" }
+    $refusal = Get-TreeOwnershipRefusal -Path $serverPath
+    if (-not $refusal) { $refusal = Get-HighImpactRootRefusal -Path $serverPath }
+    if ($refusal) { return "$Path is $local on $Server ($serverPath). $refusal" }
+    $null
+}
+
+function Get-StreamRefusal {
+    # A ':' after the drive or share part names an alternate data stream (file:stream), not a
+    # folder or file. https://learn.microsoft.com/windows/win32/fileio/file-streams
+    param([Parameter(Mandatory)][string]$Path)
+    $where = if ($Path.StartsWith('\\')) { 'the share name' } else { 'the drive' }
+    "$Path contains a ':' after $where, so it points at hidden data inside a file (an alternate data stream), not at a folder or file. Nothing was changed."
+}
+
 function Get-ChangeTarget {
     <#
         Where a change will really land, worked out before anything is asked or started, and
-        whether it is refused. Text only, apart from two lookups: this computer's names
-        (Get-ThisComputerNames) and DFS (Get-AppDfsTarget), plus Get-LocalSharePath for a
-        non-administrative share on this computer. The path does not have to exist.
+        whether it is refused. The window runs it in the background (Resolve-ChangeTargetSet
+        in $script:ChangeTargetWork), because apart from the text checks it asks: this computer's
+        names (Get-ThisComputerNames), DFS (Get-AppDfsTarget), the folder of a share on this
+        computer (Get-LocalSharePath, Win32_Share) and whether it is a DFS folder
+        (Find-DfsReparsePoint), and for a whole tree the folder of a share on another server
+        (Get-ShareTreeRefusal) and this computer's profiles folder. The path does not have to
+        exist.
         - A mapped drive letter becomes its \\server\share path; IsRemembered when that mapping
           only came from Windows' remembered mappings (it may be out of date).
         - Refused: a device path (\\?\, \\.\), a path that is not a full local or UNC path, and
           an alternate data stream (a ':' after the drive or share part).
         - A \\server name that is this computer (loopback, its own names) sets IsLocal; its X$
-          share becomes X:\..., another share its local folder.
+          share becomes X:\..., another share its local folder. When that folder is, or is
+          inside, a DFS folder of a namespace this computer hosts, it is looked up in DFS like a
+          path on another server (or refused when that fails).
         - Any other UNC path is looked up in DFS; a lookup that fails is refused (fail closed),
-          as is a DFS path with more than one target (which one would change is not known).
-        - With -WholeTree, D-036 runs on the resolved path, never the display path: the core's
-          Get-TreeOwnershipRefusal (drive roots, X$ roots, ADMIN$, SYSVOL, NETLOGON, PRINT$,
-          Windows folders) plus IPC$, which is not a folder at all.
+          as is a DFS folder with more than one target (which one would change is not known).
+        - With -WholeTree, on the resolved path, never the display path: D-036 (the core's
+          Get-TreeOwnershipRefusal: drive roots, X$ roots, ADMIN$, SYSVOL, NETLOGON, PRINT$,
+          Windows folders) plus IPC$, which is not a folder at all; the high-impact roots
+          (Get-HighImpactRootRefusal); and for an ordinary share on a server, the same checks
+          on the folder it is on that server (Get-ShareTreeRefusal).
     #>
     param([Parameter(Mandatory)][string]$Path, [hashtable]$DriveMap, [hashtable]$DriveMapSource, [switch]$WholeTree)
     if (-not $PSBoundParameters.ContainsKey('DriveMap')) { $DriveMap = $script:MappedDrives }
@@ -3566,6 +4284,8 @@ function Get-ChangeTarget {
     $display = $Path.Trim()
     $refuse = { param($text, $resolved, $local) New-ChangeTarget -Ok $false -Refusal $text -DisplayPath $display -ResolvedPath $resolved -IsRemembered $remembered -IsLocal ([bool]$local) }
     $remembered = $false
+    $systemShares = @('ADMIN$', 'IPC$', 'SYSVOL', 'NETLOGON', 'PRINT$')
+    $useRealPath = 'Open the folder by its real \\server\share path instead (Properties > DFS tab in Explorer shows it).'
 
     if (-not $display) { return (& $refuse 'No folder or file was chosen, so nothing was changed.' $display $false) }
     if ($display -match '^[\\/]{2}[?.][\\/]') {
@@ -3574,11 +4294,7 @@ function Get-ChangeTarget {
     if ($display.Contains('/') -or $display -notmatch '^([A-Za-z]:\\|\\\\[^\\]+\\[^\\]+)') {
         return (& $refuse "$display is not a full path to a folder or file on a drive or share (for example D:\Data or \\fs01\Data), so nothing was changed." $display $false)
     }
-    # file:stream names an alternate data stream; a ':' is only allowed in the drive part.
-    # https://learn.microsoft.com/windows/win32/fileio/file-streams
-    if ($display.Substring(2).Contains(':')) {
-        return (& $refuse "$display names an alternate data stream (the part after ':'), not a folder or file, so nothing was changed." $display $false)
-    }
+    if ($display.Substring(2).Contains(':')) { return (& $refuse (Get-StreamRefusal -Path $display) $display $false) }
     if ($display -match '^([A-Za-z]):' -and $DriveMapSource -and "$($DriveMapSource[$Matches[1].ToUpper()])" -eq 'Remembered' -and
         $DriveMap -and $DriveMap[$Matches[1].ToUpper()]) {
         $remembered = $true
@@ -3587,32 +4303,57 @@ function Get-ChangeTarget {
     $local = $false
 
     if ($resolved -match '^\\\\([^\\]+)\\([^\\]+)(\\.*)?$') {
+        $unc = $resolved
         $server = $Matches[1]; $share = $Matches[2]; $rest = "$($Matches[3])".TrimStart('\')
+        $askDfs = $true
+        $dfsFolder = $null
         if (Test-ThisComputerName -Name $server) {
             $local = $true
+            $askDfs = $false
+            $localPath = $null
             if ($share -match '^([A-Za-z])\$$') {
                 # The administrative share of drive X: on this computer is X:\.
-                $resolved = "$($Matches[1].ToUpper()):\" + $rest
+                $localPath = "$($Matches[1].ToUpper()):\" + $rest
             }
-            elseif (@('ADMIN$', 'IPC$', 'SYSVOL', 'NETLOGON', 'PRINT$') -notcontains $share.ToUpperInvariant()) {
+            elseif ($systemShares -notcontains $share.ToUpperInvariant()) {
                 $folder = $null
                 try { $folder = Get-LocalSharePath -Name $share } catch { $folder = $null }
-                if ($folder) { $resolved = if ($rest) { $folder.TrimEnd('\') + '\' + $rest } else { $folder } }
+                if ($folder) { $localPath = if ($rest) { $folder.TrimEnd('\') + '\' + $rest } else { $folder } }
                 elseif ($WholeTree) {
                     return (& $refuse "$display is a share on this computer, and the folder behind it could not be found, so it cannot be checked against the Windows system folders. Open the folder by its local path (for example D:\Shares\Data) instead." $resolved $true)
                 }
+                else {
+                    # The folder behind the share is not known: check the path as another
+                    # server's would be (it may be a DFS namespace this computer hosts).
+                    $askDfs = $true
+                }
+            }
+            if ($localPath) {
+                $resolved = $localPath
+                try { $dfsFolder = Find-DfsReparsePoint -Path $localPath }
+                catch {
+                    $why = (Get-InnermostErrorText $_).TrimEnd('.')
+                    return (& $refuse "Windows could not tell whether $display is a DFS folder on this computer ($why), so nothing was changed. $useRealPath" $resolved $true)
+                }
+                if ($dfsFolder) { $askDfs = $true }
             }
         }
-        else {
-            try { $targets = @(Get-AppDfsTarget -Path $resolved | Where-Object { "$_".Trim() }) }
+        if ($askDfs) {
+            try { $targets = @(Get-AppDfsTarget -Path $unc | Where-Object { "$_".Trim() }) }
             catch {
                 $why = (Get-InnermostErrorText $_).TrimEnd('.')
-                return (& $refuse "Windows could not tell whether $resolved is in a DFS namespace ($why), so nothing was changed. Open the folder by its real \\server\share path instead (Properties > DFS tab in Explorer shows it)." $resolved $false)
+                return (& $refuse "Windows could not tell whether $unc is in a DFS namespace ($why), so nothing was changed. $useRealPath" $unc $false)
             }
             if ($targets.Count -gt 1) {
-                return (& $refuse "$display is a DFS path with $($targets.Count) folder targets ($($targets -join '; ')), and the change would land on only one of them. Open the folder on the server you want to change (one of those paths) and try again." $resolved $false)
+                return (& $refuse "$display is a DFS folder that points to $($targets.Count) servers ($($targets -join '; ')), and the change would land on only one of them. Open the folder on the server you want to change (one of those paths) and try again." $unc $false)
             }
-            if ($targets.Count -eq 1) { $resolved = "$($targets[0])" }
+            if ($targets.Count -eq 1) {
+                $resolved = "$($targets[0])"
+                $local = $false
+            }
+            elseif ($dfsFolder) {
+                return (& $refuse "$display is a DFS folder on this computer ($dfsFolder), and Windows did not say which server it points to, so nothing was changed. $useRealPath" $unc $false)
+            }
         }
     }
 
@@ -3622,6 +4363,13 @@ function Get-ChangeTarget {
             $refusal = "$resolved is the IPC`$ share of $($Matches[1]), which Windows uses for remote administration; it is not a folder. Choose the folder that needs fixing instead."
         }
         if (-not $refusal) { $refusal = Get-TreeOwnershipRefusal -Path $resolved }
+        if (-not $refusal) { $refusal = Get-HighImpactRootRefusal -Path $resolved }
+        if (-not $refusal -and $resolved -match '^\\\\([^\\]+)\\([^\\]+)(?:\\(.*))?$') {
+            $tServer = $Matches[1]; $tShare = $Matches[2]; $tRest = "$($Matches[3])"
+            if ($tShare -notmatch '^[A-Za-z]\$$' -and $systemShares -notcontains $tShare.ToUpperInvariant()) {
+                $refusal = Get-ShareTreeRefusal -Path $resolved -Server $tServer -Share $tShare -Rest $tRest
+            }
+        }
         if ($refusal) {
             if ($resolved -ne $display) { $refusal = "$display is $resolved. $refusal" }
             return (& $refuse $refusal $resolved $local)
@@ -3630,43 +4378,79 @@ function Get-ChangeTarget {
     New-ChangeTarget -Ok $true -DisplayPath $display -ResolvedPath $resolved -IsRemembered $remembered -IsLocal $local
 }
 
+function Resolve-ChangeTargetSet {
+    # Get-ChangeTarget for each path (blank ones dropped), as one answer: Ok and Targets, or Ok
+    # $false and Refusal (the refused paths' reasons, the first three of them). With
+    # -FolderDisplayPath and -FolderRealPath (the folder the selected files are in), a file in
+    # that folder takes the folder's resolved location, so the folder is looked up once for the
+    # whole batch. Runs in the background ($script:ChangeTargetWork).
+    param(
+        [AllowEmptyCollection()][AllowNull()][string[]]$Path,
+        [hashtable]$DriveMap,
+        [hashtable]$DriveMapSource,
+        [switch]$WholeTree,
+        [string]$FolderDisplayPath,
+        [string]$FolderRealPath
+    )
+    $paths = @($Path | Where-Object { "$_".Trim() })
+    if ($paths.Count -eq 0) { return [PSCustomObject]@{ Ok = $false; Targets = @(); Refusal = 'No folder or file was chosen, so nothing was changed.' } }
+    $folder = $null
+    $prefix = $null
+    if ($FolderDisplayPath -and $FolderRealPath) {
+        $folder = Get-ChangeTarget -Path $FolderDisplayPath -DriveMap $DriveMap -DriveMapSource $DriveMapSource
+        if ($folder.Ok) { $prefix = $FolderRealPath.TrimEnd('\') + '\' }
+    }
+    $targets = [System.Collections.Generic.List[object]]::new()
+    $refusals = [System.Collections.Generic.List[string]]::new()
+    foreach ($p in $paths) {
+        if ($prefix -and $p.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+            $rest = $p.Substring($prefix.Length)
+            if ($rest.Contains(':')) { $refusals.Add((Get-StreamRefusal -Path $p)); continue }
+            $targets.Add((New-ChangeTarget -Ok $true -DisplayPath ($folder.DisplayPath.TrimEnd('\') + '\' + $rest) -ResolvedPath ($folder.ResolvedPath.TrimEnd('\') + '\' + $rest) `
+                        -IsRemembered $folder.IsRemembered -IsLocal $folder.IsLocal))
+            continue
+        }
+        $t = Get-ChangeTarget -Path $p -DriveMap $DriveMap -DriveMapSource $DriveMapSource -WholeTree:$WholeTree
+        if ($t.Ok) { $targets.Add($t) } else { $refusals.Add("$($t.Refusal)") }
+    }
+    if ($refusals.Count -gt 0) {
+        $text = @($refusals | Select-Object -First 3) -join "`n"
+        if ($refusals.Count -gt 3) { $text += "`n... and $($refusals.Count - 3) more were refused too." }
+        return [PSCustomObject]@{ Ok = $false; Targets = @(); Refusal = $text }
+    }
+    [PSCustomObject]@{ Ok = $true; Targets = $targets.ToArray(); Refusal = $null }
+}
+
+function Show-ChangeRefusal {
+    # A refused change: the reason in the status line and in a message box, so it is not missed.
+    param([Parameter(Mandatory)][string]$Text)
+    Set-Status -Kind Error -Text $Text
+    Show-AppMessage -Icon Warning -Message $Text
+}
+
 function Get-CurrentChangeTarget {
-    # The chosen folder as a change target, or $null after saying why there is none.
+    # The chosen folder as a change target, or $null after saying why there is none. Looks it up
+    # on this thread: the window's buttons do that in the background instead (Open-*); this is
+    # for Invoke-* called without -Targets (the tests).
     param([switch]$WholeTree)
     if (-not $script:Current) { Set-Status -Kind Warning -Text 'Choose a folder first.'; return $null }
-    $t = Get-ChangeTarget -Path $script:Current.DisplayPath -DriveMap $script:MappedDrives -DriveMapSource $script:MappedDriveSources -WholeTree:$WholeTree
-    if (-not $t.Ok) { Set-Status -Kind Error -Text $t.Refusal; return $null }
-    $t
+    $set = Resolve-ChangeTargetSet -Path @($script:Current.DisplayPath) -DriveMap $script:MappedDrives -DriveMapSource $script:MappedDriveSources -WholeTree:$WholeTree
+    if (-not $set.Ok) { Show-ChangeRefusal -Text $set.Refusal; return $null }
+    $set.Targets[0]
 }
 
 function Get-SelectedFileTargets {
     # The selected files as change targets (blank entries dropped), or $null after saying why.
     # Files in the chosen folder take its real location (one DFS lookup for the whole batch).
+    # Like Get-CurrentChangeTarget, only for Invoke-* called without -Targets.
     $paths = @(Get-SelectedFileRows | ForEach-Object { "$($_.Path)" } | Where-Object { $_.Trim() })
     if ($paths.Count -eq 0) { Set-Status -Kind Warning -Text $script:NoFilesSelectedText; return $null }
-    $folder = $null
-    if ($script:Current -and $script:Current.RealPath) {
-        $folder = Get-ChangeTarget -Path $script:Current.DisplayPath -DriveMap $script:MappedDrives -DriveMapSource $script:MappedDriveSources
-    }
-    $prefix = if ($folder -and $folder.Ok) { "$($script:Current.RealPath)".TrimEnd('\') + '\' } else { $null }
-    $targets = foreach ($p in $paths) {
-        if ($prefix -and $p.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
-            $rest = $p.Substring($prefix.Length)
-            if ($rest.Contains(':')) {
-                Set-Status -Kind Error -Text "$p names an alternate data stream (the part after ':'), not a file, so nothing was changed."
-                return $null
-            }
-            New-ChangeTarget -Ok $true -DisplayPath ($folder.DisplayPath.TrimEnd('\') + '\' + $rest) -ResolvedPath ($folder.ResolvedPath.TrimEnd('\') + '\' + $rest) `
-                -IsRemembered $folder.IsRemembered -IsLocal $folder.IsLocal
-            continue
-        }
-        $t = Get-ChangeTarget -Path $p -DriveMap $script:MappedDrives -DriveMapSource $script:MappedDriveSources
-        if (-not $t.Ok) { Set-Status -Kind Error -Text $t.Refusal; return $null }
-        $t
-    }
-    , @($targets)
+    $display = if ($script:Current) { $script:Current.DisplayPath } else { $null }
+    $real = if ($script:Current) { $script:Current.RealPath } else { $null }
+    $set = Resolve-ChangeTargetSet -Path $paths -DriveMap $script:MappedDrives -DriveMapSource $script:MappedDriveSources -FolderDisplayPath $display -FolderRealPath $real
+    if (-not $set.Ok) { Show-ChangeRefusal -Text $set.Refusal; return $null }
+    , @($set.Targets)
 }
-
 function Format-ItemCount {
     # "1 file", "3 files", "12,408 items" (the number in this computer's format).
     param([Parameter(Mandatory)][long]$Count, [Parameter(Mandatory)][string]$Singular, [Parameter(Mandatory)][string]$Plural)
@@ -3686,10 +4470,24 @@ function Get-ConfirmTargetText {
     $lines -join "`n"
 }
 
+function Get-TargetLocationText {
+    # "\\fs01\A (real location: \\fs03\A), \\fs01\B": each path with its real location when that
+    # differs, at most -Max of them. For the status line.
+    param([Parameter(Mandatory)][object[]]$Targets, [int]$Max = 5)
+    $all = @($Targets | Where-Object { $_ })
+    $parts = @(foreach ($t in @($all | Select-Object -First $Max)) {
+            if ($t.ResolvedPath -and $t.ResolvedPath -ne $t.DisplayPath) { "$($t.DisplayPath) (real location: $($t.ResolvedPath))" } else { "$($t.DisplayPath)" }
+        })
+    $text = $parts -join ', '
+    if ($all.Count -gt $Max) { $text += " and $($all.Count - $Max) more" }
+    $text
+}
+
 function Get-ConfirmSpec {
     # What the confirm dialog says for a change: a title, a body that names every path (and the
-    # real location behind a mapped drive) and how many items, a button label with a verb, and
-    # whether it is destructive (danger style). A target on a remembered mapping adds a warning.
+    # real location behind a mapped drive or DFS path) and how many items, a button label with a
+    # verb, and whether it is destructive (danger style). A target on a remembered mapping adds
+    # a warning.
     param(
         [Parameter(Mandatory)][ValidateSet('AddPermission', 'RemovePermission', 'TakeOwnershipFolder', 'TakeOwnershipFiles', 'TakeOwnershipTree', 'CopyPermissions')][string]$Action,
         [Parameter(Mandatory)][object[]]$Targets,
@@ -3711,9 +4509,15 @@ function Get-ConfirmSpec {
         }
         'RemovePermission' {
             $title = 'Remove a permission?'
-            $asked = if ($Detail -match '^(Allow|Deny) (.+?) for (.+)$') { "all $($Matches[1]) permissions for $($Matches[3]) (asked: $($Matches[2]))" } else { $Detail }
+            # Every explicit entry of the type goes, whatever its level, so no level is named.
+            $entryWord = 'entry of that type'
+            $asked = $Detail
+            if ($Detail -match '^(Allow|Deny) (.+?) for (.+)$') {
+                $asked = "all $($Matches[1]) permissions for $($Matches[3])"
+                $entryWord = "$($Matches[1]) entry"
+            }
             $what = if ($n -eq 1) { 'from:' } else { "from these $(Format-ItemCount $n 'item' 'items'):" }
-            $body = "Remove $asked $what`n$where`n`nEvery entry of that type for that user or group is removed, whatever its level. Inherited entries stay. $backup"
+            $body = "Remove $asked $what`n$where`n`nEvery explicit $entryWord for that user or group is removed, whatever its level. Inherited entries stay. $backup"
             $label = if ($n -eq 1) { 'Remove permission' } else { "Remove permission from $(Format-ItemCount $n 'item' 'items')" }
             $destructive = $true
         }
@@ -3732,16 +4536,28 @@ function Get-ConfirmSpec {
         }
         'TakeOwnershipTree' {
             $title = 'Take ownership of everything in this folder?'
-            # Browser text kept, with the scope counted first (destructive-operations profile).
-            $scope = if ($Counts) {
-                $text = "It holds $(Format-ItemCount ([long]$Counts.Folders) 'folder' 'folders') and $(Format-ItemCount ([long]$Counts.Files) 'file' 'files') (counted just now, the folder itself included)."
-                if ([long]$Counts.NotOpened -gt 0) { $text += " $(Format-ItemCount ([long]$Counts.NotOpened) 'folder' 'folders') in it could not be opened, so what is inside them was not counted." }
-                $text
+            # The scope first, counted just now (destructive-operations profile); browser text kept.
+            if ($Counts) {
+                $folders = [long]$Counts.Folders
+                $fileCount = [long]$Counts.Files
+                $first = "This will change ownership on $(Format-ItemCount ($folders + $fileCount) 'item' 'items') ($(Format-ItemCount $folders 'folder' 'folders') and $(Format-ItemCount $fileCount 'file' 'files')) under:"
+                $notes = [System.Collections.Generic.List[string]]::new()
+                $notes.Add('Counted just now, the folder itself included.')
+                $notOpened = [long]$Counts.NotOpened
+                if ($notOpened -gt 0) { $notes.Add("$(Format-ItemCount $notOpened 'folder' 'folders') in it could not be opened, so what is inside them was not counted.") }
+                $links = [long]$Counts.Links
+                if ($links -gt 0) {
+                    $notes.Add("$(Format-ItemCount $links 'junction or symbolic link' 'junctions or symbolic links') in it are listed but not gone into; nothing is changed if one leads into a Windows folder or somewhere that cannot be checked.")
+                }
+                $scope = $notes -join ' '
             }
-            else { 'The folders and files in it could not be counted.' }
-            $body = "This will change ownership on ALL files and subfolders under:`n$where`n`n$scope`n`n" +
+            else {
+                $first = 'This will change ownership on ALL files and subfolders under:'
+                $scope = 'The folders and files in it could not be counted.'
+            }
+            $body = "$first`n$where`n`n$scope`n`n" +
             "You become the owner. The current owners will be saved to a backup first.`n`n" +
-            'Any folder in it that cannot be opened is skipped and left alone; the result names those folders so you can escalate them.'
+            'Any folder in it that cannot be opened is skipped and left alone; the result names those folders so you can ask a senior admin to open them.'
             $label = if ($Counts) { "Take ownership of $(Format-ItemCount ([long]$Counts.Folders + [long]$Counts.Files) 'item' 'items')" } else { 'Take ownership of everything' }
             $destructive = $true
         }
@@ -3763,7 +4579,6 @@ function Get-ConfirmSpec {
     if ($script:WhatIfMode) { $body += "`n`nDry run (WhatIf): nothing will be changed." }
     [PSCustomObject]@{ Title = $title; Body = $body; ActionLabel = $label; IsDestructive = $destructive }
 }
-
 function Set-ConfirmDialog {
     # Fills in the confirm dialog. The action button carries the verb, gets the danger style for
     # a destructive change, and is never the default button (Cancel is, in the XAML).
@@ -3802,14 +4617,19 @@ function Get-ChangeStatus {
     # The status line for a change result, as the browser version showed it
     # (changeStatusType / showChangeResult and ConvertTo-ChangeResultRow there):
     #   - a whole-tree result that was only partly done or could not be checked everywhere: Warning;
-    #   - nothing done and something failed or was not found: Error;
+    #   - something failed and nothing was done: Error (also when other items were already up
+    #     to date);
     #   - every item already had what was asked (Skipped (nothing to copy)): Info;
-    #   - something failed or was not found, the log was not written, or items cannot be restored
-    #     from the backup: Warning; else Success.
+    #   - something failed or was not found (every item not found too), the log was not
+    #     written, or items cannot be restored from the backup: Warning; else Success.
     # A Warning starts "Partly done: " when some items were done and others failed or were not
     # found, else "Done, with items to check: ", unless the message already starts "Partly done:".
     # Deliberate deviation: a dry run (every row Skipped (WhatIf)) is Info; the browser showed it
     # as an error.
+    # Added by the app's read-back (Add-ChangeReadBack), which the browser did not have: an item
+    # whose read-back did not show the intended state (CheckProblem) makes a Success or Info a
+    # Warning and is named after "Check this: "; a remove that had nothing to remove anywhere
+    # (NothingRemoved on every row) is Info "Nothing was removed: ...".
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Entries,
         [AllowNull()][string]$LogPath,
@@ -3819,6 +4639,17 @@ function Get-ChangeStatus {
     $result = { param($kind, $text) [PSCustomObject]@{ Kind = $kind; Text = $text } }
     if ($all.Count -eq 0) { return (& $result 'Info' $Message) }
     if (@($all | Where-Object { $_.Result -ne 'Skipped (WhatIf)' }).Count -eq 0) { return (& $result 'Info' $Message) }
+
+    $noops = @($all | Where-Object { $_.PSObject.Properties['NothingRemoved'] -and $_.NothingRemoved })
+    $problems = @($all | Where-Object { $_.PSObject.Properties['CheckProblem'] -and "$($_.CheckProblem)" })
+    $who = 'that user or group'; $type = 'Allow or Deny'
+    if ($noops.Count -gt 0 -and "$($noops[0].Detail)" -match '^(Allow|Deny) (.+?) for (.+)$') { $type = $Matches[1]; $who = $Matches[3] }
+    if ($noops.Count -gt 0 -and $noops.Count -eq $all.Count) {
+        $text = if ($all.Count -eq 1) { "Nothing was removed: $who had no explicit $type entry here." }
+        else { "Nothing was removed: $who had no explicit $type entry on any of these $($all.Count) items." }
+        if ($LogPath) { $text += " Logged to $LogPath." }
+        return (& $result 'Info' $text)
+    }
 
     $done = @($all | Where-Object { $_.Result -eq 'Done' }).Count
     $notFound = @($all | Where-Object { $_.Result -eq 'Skipped (not found)' }).Count
@@ -3831,20 +4662,30 @@ function Get-ChangeStatus {
     $partial = $doneOrPartly -eq $all.Count -and ($partly -gt 0 -or $incomplete -gt 0)
 
     $kind = if ($partial) { 'Warning' }
-    elseif ($done -eq 0 -and $unchanged -eq 0 -and ($failed -gt 0 -or $notFound -gt 0)) { 'Error' }
+    elseif ($failed -gt 0 -and $done -eq 0) { 'Error' }
     elseif ($unchanged -eq $all.Count) { 'Info' }
     elseif ($failed -gt 0 -or $notFound -gt 0 -or -not $LogPath -or (Get-UnrestorableItemCount -Entries $all) -gt 0) { 'Warning' }
     else { 'Success' }
+    if ($problems.Count -gt 0 -and ($kind -eq 'Success' -or $kind -eq 'Info')) { $kind = 'Warning' }
 
     $text = $Message
+    if ($noops.Count -gt 0) {
+        $names = @($noops | Select-Object -First 3 | ForEach-Object { "$($_.Target)" }) -join ', '
+        if ($noops.Count -gt 3) { $names += " and $($noops.Count - 3) more" }
+        $text += " Nothing was removed from $($names): $who had no explicit $type entry there."
+    }
+    if ($problems.Count -gt 0) {
+        $named = @($problems | Select-Object -First 3 | ForEach-Object { "$($_.Target): $($_.CheckProblem)" }) -join '; '
+        if ($problems.Count -gt 3) { $named += " (and $($problems.Count - 3) more)" }
+        $text += " Check this: $named. Press Refresh to see what is there now."
+    }
     if ($kind -eq 'Warning' -and -not $Message.StartsWith('Partly done:')) {
         $someDone = $done -gt 0
         $someShort = $failed -gt 0 -or $notFound -gt 0
-        $text = $(if ($someDone -and $someShort) { 'Partly done: ' } else { 'Done, with items to check: ' }) + $Message
+        $text = $(if ($someDone -and $someShort) { 'Partly done: ' } else { 'Done, with items to check: ' }) + $text
     }
     & $result $kind $text
 }
-
 function Get-RefreshPlan {
     # What to read again after a change, given the folder shown now (-CurrentPath):
     #   Folder: that folder's permissions and files when it is still shown; its tree entry always.
@@ -3883,27 +4724,85 @@ function Remove-CachedFileAcl {
     }
 }
 
+function ConvertTo-RightsName {
+    # Rights as the core takes them (a FileSystemRights name) without Synchronize, which Windows
+    # adds to every Allow entry ('Modify, Synchronize' is Modify). Empty or unreadable gives
+    # FullControl: Remove-FolderPermission removes every explicit entry of the type whatever its
+    # rights and only records them in the log's Detail.
+    # https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.filesystemrights
+    param([AllowNull()][AllowEmptyString()][string]$Rights)
+    if (-not "$Rights".Trim()) { return 'FullControl' }
+    try { $r = [System.Security.AccessControl.FileSystemRights]"$Rights" } catch { return 'FullControl' }
+    $value = [int]$r -band (-bnot [int][System.Security.AccessControl.FileSystemRights]::Synchronize)
+    if ($value -eq 0) { return "$r" }
+    "$([System.Enum]::ToObject([System.Security.AccessControl.FileSystemRights], $value))"
+}
+
 function Get-RemoveIdentityChoices {
-    # Who can be removed: for the folder, each User or Group in its permission table once, in
-    # table order; for the selected files, the union of their loaded permissions, plus the
-    # files whose permissions are not loaded yet (NotLoaded), to be read first.
+    # Who can be removed: only EXPLICIT entries (an inherited one is removed on the folder above,
+    # not here), one choice per account, keyed by its SID (a renamed account, or two names for
+    # one SID, is one choice), in table order, with the types (Allow, Deny) it has explicit
+    # entries of and their rights. For the folder, its permission table; for the selected
+    # files, the union of their loaded permissions, plus the files whose permissions are not
+    # loaded yet (NotLoaded), to be read first. Identities: each name once, for the status line.
     param([Parameter(Mandatory)][ValidateSet('Folder', 'Files')][string]$Scope)
-    $ids = [System.Collections.Generic.List[string]]::new()
-    $add = { param($id) if ("$id".Trim() -and -not ($ids | Where-Object { $_ -ieq "$id" })) { $ids.Add("$id") } }
+    $choices = [ordered]@{}
     $notLoaded = [System.Collections.Generic.List[string]]::new()
+    $addRow = {
+        param($r)
+        if ($null -eq $r -or $r.IsInherited) { return }
+        $id = "$($r.Identity)".Trim()
+        if (-not $id) { return }
+        $sid = "$($r.Sid)".Trim()
+        $key = if ($sid) { "sid:$sid" } else { "name:$($id.ToLowerInvariant())" }
+        if (-not $choices.Contains($key)) {
+            $choices[$key] = [PSCustomObject]@{ Key = $key; Sid = $sid; Identity = $id; Types = [System.Collections.Generic.List[string]]::new(); Rights = @{} }
+        }
+        $c = $choices[$key]
+        $type = "$($r.Type)"
+        if (@('Allow', 'Deny') -contains $type) {
+            if (-not $c.Types.Contains($type)) { $c.Types.Add($type) }
+            if (-not $c.Rights.ContainsKey($type)) { $c.Rights[$type] = ConvertTo-RightsName -Rights "$($r.Rights)" }
+        }
+    }
     if ($Scope -eq 'Folder') {
         $v = $script:ViewState.FolderPermissions
-        if ($v) { foreach ($r in @($v.Rows)) { & $add $r.Identity } }
+        if ($v) { foreach ($r in @($v.Rows)) { & $addRow $r } }
     }
     else {
         foreach ($p in @(Get-SelectedFileRows | ForEach-Object { "$($_.Path)" } | Where-Object { $_.Trim() })) {
             if (-not $script:FileAclCache.ContainsKey($p)) { $notLoaded.Add($p); continue }
-            foreach ($r in @($script:FileAclCache[$p].Rows)) { & $add $r.Identity }
+            foreach ($r in @($script:FileAclCache[$p].Rows)) { & $addRow $r }
         }
     }
-    [PSCustomObject]@{ Identities = $ids.ToArray(); NotLoaded = $notLoaded.ToArray() }
+    $list = @(foreach ($c in $choices.Values) {
+            $types = @(@('Allow', 'Deny') | Where-Object { $c.Types.Contains($_) })
+            $label = if ($types.Count -eq 2) { "$($c.Identity) (Allow and Deny)" } elseif ($types.Count -eq 1) { "$($c.Identity) ($($types[0]))" } else { $c.Identity }
+            [PSCustomObject]@{
+                Key         = $c.Key
+                Sid         = $c.Sid
+                Identity    = $c.Identity
+                Types       = $types
+                Rights      = $c.Rights
+                Label       = $label
+                DefaultType = $(if ($types -contains 'Allow' -or $types.Count -eq 0) { 'Allow' } else { 'Deny' })
+            }
+        })
+    $ids = [System.Collections.Generic.List[string]]::new()
+    foreach ($c in $list) { if (-not ($ids | Where-Object { $_ -ieq $c.Identity })) { $ids.Add($c.Identity) } }
+    [PSCustomObject]@{ Identities = $ids.ToArray(); Choices = $list; NotLoaded = $notLoaded.ToArray() }
 }
 
+function Get-RemoveTypeChoice {
+    # Which of Allow and Deny the remove dialog lets the tech pick for a user or group, and
+    # which is selected: only the types it has explicit entries of, so a Deny-only account gives
+    # Deny; Allow when it has both.
+    param([Parameter(Mandatory)]$Choice)
+    $allowed = @(@($Choice.Types) | Where-Object { $_ })
+    if ($allowed.Count -eq 0) { $allowed = @('Allow', 'Deny') }
+    $default = if ($allowed -contains 'Allow') { 'Allow' } else { 'Deny' }
+    [PSCustomObject]@{ Default = $default; Allowed = $allowed }
+}
 function Get-PermissionInputError {
     # $null when the add dialog's user or group can be used; otherwise what to fix.
     param([AllowNull()][AllowEmptyString()][string]$Identity)
@@ -3944,95 +4843,155 @@ function Get-ScopeRefreshState {
     New-ChangeRefreshState -Scope Files -Paths @($folder) -ChangedFiles @(Get-SelectedFileRows | ForEach-Object { "$($_.Path)" } | Where-Object { $_.Trim() })
 }
 
+function Test-NoOtherChangePending {
+    # Invoke-* called without -Targets starts a change of its own: $false (after saying why)
+    # while another one is being prepared.
+    if (-not $script:ChangePending) { return $true }
+    Set-Status -Kind Warning -Text (Get-ChangeControlState).Reason
+    $false
+}
+
 function Invoke-AddPermission {
     # Adds a permission to the chosen folder or the selected files. The add dialog is the
     # confirmation (as in the browser version), unless a target is on a remembered mapping:
-    # then the confirm dialog warns first.
-    param([Parameter(Mandatory)][ValidateSet('Folder', 'Files')][string]$Scope, [string]$Identity, [string]$Rights, [ValidateSet('Allow', 'Deny')][string]$Type = 'Allow')
+    # then the confirm dialog warns first. -Targets: where the change lands, worked out in the
+    # background before the dialog opened (Open-AddPermission), with -Label and -RefreshState
+    # fixed at the click. Without -Targets they are worked out here, on this thread: only the
+    # tests call it that way.
+    param(
+        [Parameter(Mandatory)][ValidateSet('Folder', 'Files')][string]$Scope,
+        [string]$Identity,
+        [string]$Rights,
+        [ValidateSet('Allow', 'Deny')][string]$Type = 'Allow',
+        [object[]]$Targets,
+        [string]$Label,
+        [hashtable]$RefreshState
+    )
     $problem = Get-PermissionInputError -Identity $Identity
     if ($problem) { Set-Status -Kind Warning -Text $problem; return }
     $Identity = $Identity.Trim()
-    $targets = Get-ChangeScopeTargets -Scope $Scope
-    if (-not $targets) { return }
+    if (-not $PSBoundParameters.ContainsKey('Targets')) {
+        if (-not (Test-NoOtherChangePending)) { return }
+        $Targets = Get-ChangeScopeTargets -Scope $Scope
+        if (-not $Targets) { return }
+    }
+    if (-not $Label) { $Label = Get-ChangeLabel -Scope $Scope -Targets $Targets }
+    if (-not $RefreshState) { $RefreshState = Get-ScopeRefreshState -Scope $Scope -Targets $Targets }
     $detail = "$Type $Rights for $Identity"
-    if (@($targets | Where-Object { $_.IsRemembered }).Count -gt 0) {
-        if (-not (Show-ConfirmDialog -Spec (Get-ConfirmSpec -Action AddPermission -Targets $targets -Detail $detail))) {
+    if (@($Targets | Where-Object { $_.IsRemembered }).Count -gt 0) {
+        if (-not (Show-ConfirmDialog -Spec (Get-ConfirmSpec -Action AddPermission -Targets $Targets -Detail $detail))) {
             Set-Status -Text 'Cancelled: nothing was changed.'
             return
         }
     }
-    $paths = [string[]]@($targets | ForEach-Object { $_.ResolvedPath })
-    $started = Start-ChangeTask -Action 'Adding a permission on' -Path (Get-ChangeLabel -Scope $Scope -Targets $targets) -Work $script:AddPermissionWork `
+    $paths = [string[]]@($Targets | ForEach-Object { $_.ResolvedPath })
+    $started = Start-ChangeTask -Action 'Adding a permission on' -Path $Label -Work $script:AddPermissionWork `
         -ArgumentList @($paths, $Identity, $Rights, $Type, $script:ChangeLogFolder, [bool]$script:WhatIfMode, $script:CorePath) `
-        -State (Get-ScopeRefreshState -Scope $Scope -Targets $targets) -OnDone { param($result, $state) Complete-ChangeTask -Result $result -State $state }
+        -State $RefreshState -OnDone { param($result, $state) Complete-ChangeTask -Result $result -State $state }
     if ($started) {
-        $text = if ($Scope -eq 'Files') { "Backing up and adding the permission to $(Format-ItemCount $paths.Count 'file' 'files')..." } else { 'Backing up and adding the permission...' }
+        $text = if ($Scope -eq 'Files') { "Backing up and adding the permission to $(Format-ItemCount $paths.Count 'file' 'files')..." } else { "Backing up and adding the permission to $(Get-TargetLocationText -Targets $Targets)..." }
         Set-Status -Text $text
     }
 }
 
 function Invoke-RemovePermission {
-    # Removes a user or group's Allow or Deny entries from the chosen folder or the selected
-    # files, after the confirm dialog.
-    param([Parameter(Mandatory)][ValidateSet('Folder', 'Files')][string]$Scope, [string]$Identity, [string]$Rights, [ValidateSet('Allow', 'Deny')][string]$Type = 'Allow')
-    $targets = Get-ChangeScopeTargets -Scope $Scope
-    if (-not $targets) { return }
+    # Removes a user or group's explicit Allow or Deny entries from the chosen folder or the
+    # selected files, after the confirm dialog. -Sid: the account chosen in the remove dialog
+    # (the core removes by name; the read-back checks this SID). -Targets, -Label and
+    # -RefreshState as for Invoke-AddPermission.
+    param(
+        [Parameter(Mandatory)][ValidateSet('Folder', 'Files')][string]$Scope,
+        [string]$Identity,
+        [string]$Rights,
+        [ValidateSet('Allow', 'Deny')][string]$Type = 'Allow',
+        [string]$Sid,
+        [object[]]$Targets,
+        [string]$Label,
+        [hashtable]$RefreshState
+    )
+    if (-not $PSBoundParameters.ContainsKey('Targets')) {
+        if (-not (Test-NoOtherChangePending)) { return }
+        $Targets = Get-ChangeScopeTargets -Scope $Scope
+        if (-not $Targets) { return }
+    }
     $problem = Get-PermissionInputError -Identity $Identity
     if ($problem) { Set-Status -Kind Warning -Text $problem; return }
     $Identity = $Identity.Trim()
+    if (-not $Label) { $Label = Get-ChangeLabel -Scope $Scope -Targets $Targets }
+    if (-not $RefreshState) { $RefreshState = Get-ScopeRefreshState -Scope $Scope -Targets $Targets }
+    if (-not "$Rights".Trim()) { $Rights = 'FullControl' }
     $detail = "$Type $Rights for $Identity"
-    if (-not (Show-ConfirmDialog -Spec (Get-ConfirmSpec -Action RemovePermission -Targets $targets -Detail $detail))) {
+    if (-not (Show-ConfirmDialog -Spec (Get-ConfirmSpec -Action RemovePermission -Targets $Targets -Detail $detail))) {
         Set-Status -Text 'Cancelled: nothing was changed.'
         return
     }
-    $paths = [string[]]@($targets | ForEach-Object { $_.ResolvedPath })
-    $started = Start-ChangeTask -Action 'Removing a permission from' -Path (Get-ChangeLabel -Scope $Scope -Targets $targets) -Work $script:RemovePermissionWork `
-        -ArgumentList @($paths, $Identity, $Rights, $Type, $script:ChangeLogFolder, [bool]$script:WhatIfMode, $script:CorePath) `
-        -State (Get-ScopeRefreshState -Scope $Scope -Targets $targets) -OnDone { param($result, $state) Complete-ChangeTask -Result $result -State $state }
+    $paths = [string[]]@($Targets | ForEach-Object { $_.ResolvedPath })
+    $started = Start-ChangeTask -Action 'Removing a permission from' -Path $Label -Work $script:RemovePermissionWork `
+        -ArgumentList @($paths, $Identity, $Rights, $Type, $script:ChangeLogFolder, [bool]$script:WhatIfMode, "$Sid", $script:CorePath) `
+        -State $RefreshState -OnDone { param($result, $state) Complete-ChangeTask -Result $result -State $state }
     if ($started) {
-        $text = if ($Scope -eq 'Files') { "Backing up and removing the permission from $(Format-ItemCount $paths.Count 'file' 'files')..." } else { 'Backing up and removing the permission...' }
+        $text = if ($Scope -eq 'Files') { "Backing up and removing the permission from $(Format-ItemCount $paths.Count 'file' 'files')..." } else { "Backing up and removing the permission from $(Get-TargetLocationText -Targets $Targets)..." }
         Set-Status -Text $text
     }
 }
 
 function Invoke-TakeOwnership {
     # Take ownership of the chosen folder only, of the selected files, or (Tree) of the folder
-    # and everything in it. Tree: refused on drive roots and Windows folders (D-036, on the real
-    # location), then the items are counted in the background, then the confirm dialog shows the
-    # count, then the change runs. Nothing starts if the tech says no.
-    param([Parameter(Mandatory)][ValidateSet('Folder', 'Files', 'Tree')][string]$Scope)
+    # and everything in it. Tree: refused on drive roots, Windows folders and the high-impact
+    # roots (D-036, on the real location), then the items are counted in the background while
+    # the change is pending (no other change can start), then the confirm dialog shows the
+    # count, then the change runs. Nothing starts if the tech says no. -Targets, -Label and
+    # -RefreshState as for Invoke-AddPermission.
+    param(
+        [Parameter(Mandatory)][ValidateSet('Folder', 'Files', 'Tree')][string]$Scope,
+        [object[]]$Targets,
+        [string]$Label,
+        [hashtable]$RefreshState
+    )
+    $fromLookup = $PSBoundParameters.ContainsKey('Targets')
     if ($Scope -eq 'Tree') {
-        $target = Get-CurrentChangeTarget -WholeTree
-        if (-not $target) { return }
+        if ($fromLookup) { $target = @($Targets)[0] }
+        else {
+            if (-not (Test-NoOtherChangePending)) { return }
+            $target = Get-CurrentChangeTarget -WholeTree
+            if (-not $target) { return }
+        }
         if ($script:ChangeTask) {
             Set-Status -Kind Warning -Text "Another change is still running on $($script:ChangeTask.Path). Wait for it to finish."
             return
         }
+        # Pending from the click's lookup already; a direct call starts its own.
+        if (-not $fromLookup -and -not (Enter-ChangePending -Action 'Take Ownership of all subfolders and files' -Path $target.DisplayPath)) { return }
+        $node = if ($RefreshState -and $RefreshState.Node) { $RefreshState.Node } else { $script:CurrentNode }
         Set-Status -Text "Counting the folders and files in $($target.DisplayPath) before asking. Nothing has been changed."
-        [void](Start-ReadTask -Action 'Counting the folders and files in' -Path $target.DisplayPath -Work $script:TreeCountWork `
-                -ArgumentList @($target.ResolvedPath, $script:CorePath) -State @{ Target = $target; Node = $script:CurrentNode } -OnDone {
+        [void](Start-ChangePrepRead -Action 'Counting the folders and files in' -Path $target.DisplayPath -Work $script:TreeCountWork `
+                -ArgumentList @($target.ResolvedPath, $script:CorePath) -State @{ Target = $target; Node = $node } -OnDone {
                 param($result, $s)
                 Confirm-TreeOwnership -Count $result -Target $s.Target -Node $s.Node
             })
         return
     }
-    $targets = Get-ChangeScopeTargets -Scope $Scope
-    if (-not $targets) { return }
+    if (-not $fromLookup) {
+        if (-not (Test-NoOtherChangePending)) { return }
+        $Targets = Get-ChangeScopeTargets -Scope $Scope
+        if (-not $Targets) { return }
+    }
+    if (-not $Label) { $Label = Get-ChangeLabel -Scope $Scope -Targets $Targets }
+    if (-not $RefreshState) { $RefreshState = Get-ScopeRefreshState -Scope $Scope -Targets $Targets }
     $action = if ($Scope -eq 'Files') { 'TakeOwnershipFiles' } else { 'TakeOwnershipFolder' }
-    if (-not (Show-ConfirmDialog -Spec (Get-ConfirmSpec -Action $action -Targets $targets))) {
+    if (-not (Show-ConfirmDialog -Spec (Get-ConfirmSpec -Action $action -Targets $Targets))) {
         Set-Status -Text 'Cancelled: nothing was changed.'
         return
     }
-    $paths = [string[]]@($targets | ForEach-Object { $_.ResolvedPath })
-    $started = Start-ChangeTask -Action 'Taking ownership of' -Path (Get-ChangeLabel -Scope $Scope -Targets $targets) -Work $script:TakeOwnershipWork `
+    $paths = [string[]]@($Targets | ForEach-Object { $_.ResolvedPath })
+    $started = Start-ChangeTask -Action 'Taking ownership of' -Path $Label -Work $script:TakeOwnershipWork `
         -ArgumentList @($paths, $false, $script:ChangeLogFolder, [bool]$script:WhatIfMode, $script:CorePath) `
-        -State (Get-ScopeRefreshState -Scope $Scope -Targets $targets) -OnDone { param($result, $state) Complete-ChangeTask -Result $result -State $state }
+        -State $RefreshState -OnDone { param($result, $state) Complete-ChangeTask -Result $result -State $state }
     if ($started) {
-        $text = if ($Scope -eq 'Files') { "Backing up and taking ownership of $(Format-ItemCount $paths.Count 'file' 'files')..." } else { 'Backing up and taking ownership...' }
+        $text = if ($Scope -eq 'Files') { "Backing up and taking ownership of $(Format-ItemCount $paths.Count 'file' 'files')..." } else { "Backing up and taking ownership of $(Get-TargetLocationText -Targets $Targets)..." }
         Set-Status -Text $text
     }
 }
-
 function Confirm-TreeOwnership {
     # The count for a whole-tree take ownership arrived: ask with it, then start the change.
     # When the count failed nothing goes ahead (the scope must be shown before confirming).
@@ -4065,28 +5024,84 @@ function ConvertTo-TargetPathList {
 
 function Invoke-CopyPermissions {
     # Copies the chosen folder's own permissions to each folder listed (adds only, D-031). The
-    # copy dialog is the confirmation, unless a folder is on a remembered mapping.
-    param([AllowNull()][AllowEmptyString()][string]$TargetText)
-    $lines = ConvertTo-TargetPathList -Text $TargetText
-    if ($lines.Count -eq 0) { Set-Status -Kind Warning -Text $script:NoTargetPathText; return }
-    $source = Get-CurrentChangeTarget
-    if (-not $source) { return }
-    $targets = @(foreach ($line in $lines) { Get-ChangeTarget -Path $line -DriveMap $script:MappedDrives -DriveMapSource $script:MappedDriveSources })
-    $refused = @($targets | Where-Object { -not $_.Ok })
-    if ($refused.Count -gt 0) { Set-Status -Kind Error -Text $refused[0].Refusal; return }
-    if (@(@($source) + $targets | Where-Object { $_.IsRemembered }).Count -gt 0) {
-        if (-not (Show-ConfirmDialog -Spec (Get-ConfirmSpec -Action CopyPermissions -Targets $targets -Detail $source.DisplayPath -Source $source))) {
+    # copy dialog is the confirmation, unless a folder is on a remembered mapping. -Source and
+    # -Targets: where the change lands, worked out in the background (Open-CopyPermissions: the
+    # source before the dialog, the typed folders after it); the status line names their real
+    # locations. Without them they are worked out here from -TargetText: only the tests do that.
+    param([AllowNull()][AllowEmptyString()][string]$TargetText, $Source, [object[]]$Targets)
+    if (-not $PSBoundParameters.ContainsKey('Targets')) {
+        $lines = ConvertTo-TargetPathList -Text $TargetText
+        if ($lines.Count -eq 0) { Set-Status -Kind Warning -Text $script:NoTargetPathText; return }
+        if (-not (Test-NoOtherChangePending)) { return }
+        $Source = Get-CurrentChangeTarget
+        if (-not $Source) { return }
+        $set = Resolve-ChangeTargetSet -Path $lines -DriveMap $script:MappedDrives -DriveMapSource $script:MappedDriveSources
+        if (-not $set.Ok) { Show-ChangeRefusal -Text $set.Refusal; return }
+        $Targets = @($set.Targets)
+    }
+    if (@($Targets).Count -eq 0) { Set-Status -Kind Warning -Text $script:NoTargetPathText; return }
+    if (@(@($Source) + @($Targets) | Where-Object { $_.IsRemembered }).Count -gt 0) {
+        if (-not (Show-ConfirmDialog -Spec (Get-ConfirmSpec -Action CopyPermissions -Targets $Targets -Detail $Source.DisplayPath -Source $Source))) {
             Set-Status -Text 'Cancelled: nothing was changed.'
             return
         }
     }
-    $state = @{ Scope = 'Tree'; Paths = @($targets | ForEach-Object { $_.DisplayPath }); ChangedFiles = @(); Node = $null }
-    $started = Start-ChangeTask -Action 'Copying permissions from' -Path $source.DisplayPath -Work $script:CopyPermissionsWork `
-        -ArgumentList @($source.ResolvedPath, [string[]]@($targets | ForEach-Object { $_.ResolvedPath }), $script:ChangeLogFolder, [bool]$script:WhatIfMode, $script:CorePath) `
+    $state = @{ Scope = 'Tree'; Paths = @($Targets | ForEach-Object { $_.DisplayPath }); ChangedFiles = @(); Node = $null }
+    $started = Start-ChangeTask -Action 'Copying permissions from' -Path $Source.DisplayPath -Work $script:CopyPermissionsWork `
+        -ArgumentList @($Source.ResolvedPath, [string[]]@($Targets | ForEach-Object { $_.ResolvedPath }), $script:ChangeLogFolder, [bool]$script:WhatIfMode, $script:CorePath) `
         -State $state -OnDone { param($result, $state) Complete-ChangeTask -Result $result -State $state }
-    if ($started) { Set-Status -Text 'Backing up and copying permissions...' }
+    if ($started) {
+        Set-Status -Text "Backing up and copying the permissions of $(Get-TargetLocationText -Targets @($Source)) to $(Get-TargetLocationText -Targets $Targets)..."
+    }
 }
 
+function Get-SyncFolderOf {
+    # The OneDrive or SharePoint sync folder a local path is in, or $null: one of -SyncRoot
+    # (Get-OneDriveFolder), or a folder starting with OneDrive in a user profile
+    # (Test-OneDriveLikePath). Text only.
+    param([AllowNull()][AllowEmptyString()][string]$Path, [AllowEmptyCollection()][AllowNull()][string[]]$SyncRoot)
+    if (-not $Path) { return $null }
+    $roots = @($SyncRoot | Where-Object { "$_".Trim() })
+    foreach ($r in $roots) { if (Test-PathWithin -Path $Path -Root $r) { return $r } }
+    if (Test-OneDriveLikePath -Path $Path -KnownRoot $roots) { return 'a OneDrive folder' }
+    $null
+}
+
+function Get-AppDefaultLogFolder {
+    # The default log folder: the Logs folder next to the script, unless that is inside a
+    # OneDrive or SharePoint sync folder. Backups and the change log hold client folder paths
+    # and account names and must not be uploaded, so %LOCALAPPDATA%\FolderPermissionManager\Logs
+    # (the folder the core falls back to) is the default then. Resolve-ChangeLogFolder checks
+    # it as usual.
+    param([Parameter(Mandatory)][string]$ScriptLogsFolder, [AllowNull()][AllowEmptyString()][string]$LocalAppData, [AllowEmptyCollection()][AllowNull()][string[]]$SyncRoot)
+    if ($LocalAppData -and (Get-SyncFolderOf -Path $ScriptLogsFolder -SyncRoot $SyncRoot)) {
+        return (Join-Path $LocalAppData 'FolderPermissionManager\Logs')
+    }
+    $ScriptLogsFolder
+}
+
+function Get-SyncedLogFolderNotice {
+    # The banner warnings about a log folder and the OneDrive or SharePoint sync folders: a
+    # -LogFolder inside one is used as given, with a warning; a script inside one logs to
+    # %LOCALAPPDATA% instead (Get-AppDefaultLogFolder), and the banner says why.
+    param(
+        [AllowNull()][AllowEmptyString()][string]$LogFolder,
+        [Parameter(Mandatory)][string]$ScriptLogsFolder,
+        [Parameter(Mandatory)][string]$DefaultFolder,
+        [AllowEmptyCollection()][AllowNull()][string[]]$SyncRoot
+    )
+    if ($LogFolder) {
+        $where = Get-SyncFolderOf -Path $LogFolder -SyncRoot $SyncRoot
+        if (-not $where) { return @() }
+        return , @("The log folder $LogFolder is inside $where (OneDrive or a synced SharePoint library), so backups and the change log, which hold client folder paths and account names, are uploaded to the cloud. Start the tool again with -LogFolder set to a local folder outside OneDrive.")
+    }
+    if ($DefaultFolder -ne $ScriptLogsFolder) {
+        $where = Get-SyncFolderOf -Path $ScriptLogsFolder -SyncRoot $SyncRoot
+        if (-not $where) { return @() }
+        return , @("This script is inside $where (OneDrive or a synced SharePoint library), so backups and the change log go to $DefaultFolder on this computer instead of $($ScriptLogsFolder): they hold client folder paths and account names and must not be uploaded.")
+    }
+    @()
+}
 function Get-LogFolderMappingNotice {
     # A warning for the window's banner when -LogFolder is on a drive letter that only Windows'
     # remembered mappings explain: backups and the change log would go to a place this window
@@ -4103,15 +5118,44 @@ function Get-LogFolderMappingNotice {
 
 #region Change dialogs (window only)
 
+function Show-DialogError {
+    # A validation error in a dialog: shown, announced at once (an Assertive live region), and
+    # the control to fix gets the focus. Hidden again when the tech types (Add_TextChanged).
+    param([Parameter(Mandatory)]$ErrorBlock, [Parameter(Mandatory)][string]$Text, $FocusTarget)
+    $ErrorBlock.Text = $Text
+    $ErrorBlock.Visibility = 'Visible'
+    Send-LiveRegionChanged -Element $ErrorBlock
+    if ($FocusTarget) { [void]$FocusTarget.Focus() }
+}
+
+function Set-RemoveTypeCombo {
+    # Remove mode: only the Allow/Deny types the chosen user or group has explicit entries of can
+    # be picked, and the one it has is selected (Get-RemoveTypeChoice).
+    param([Parameter(Mandatory)]$Dialog)
+    $combo = $Dialog.FindName('PermIdentityCombo')
+    $typeCombo = $Dialog.FindName('PermTypeCombo')
+    $choice = if ($combo.SelectedIndex -ge 0) { @($Dialog.Tag.Choices)[$combo.SelectedIndex] } else { $null }
+    if (-not $choice) { return }
+    $types = Get-RemoveTypeChoice -Choice $choice
+    $select = $null
+    foreach ($item in $typeCombo.Items) {
+        $item.IsEnabled = @($types.Allowed) -contains "$($item.Tag)"
+        if ("$($item.Tag)" -eq $types.Default) { $select = $item }
+    }
+    if ($select) { $typeCombo.SelectedItem = $select }
+}
+
 function Show-PermissionDialog {
-    # The add or remove dialog. Returns Identity, Rights (a FileSystemRights name) and Type, or
-    # $null when cancelled. Add: a typed user or group, checked before the dialog closes.
-    # Remove: one of -Choices.
+    # The add or remove dialog. Returns Identity, Rights (a FileSystemRights name), Type and Sid,
+    # or $null when cancelled. Add: a typed user or group, checked before the dialog closes;
+    # Enter submits. Remove: one of -Choices (Get-RemoveIdentityChoices: explicit entries, by
+    # SID), with only the types it has offered and the level not asked (every explicit entry of
+    # the type goes); Remove is never the default button.
     param(
         [Parameter(Mandatory)][ValidateSet('Add', 'Remove')][string]$Mode,
         [Parameter(Mandatory)][ValidateSet('Folder', 'Files')][string]$Scope,
         [Parameter(Mandatory)][string]$TargetText,
-        [string[]]$Choices
+        [object[]]$Choices
     )
     $dlg = New-AppDialog -Xaml (Get-PermissionDialogXaml)
     $title = switch ("$Mode$Scope") {
@@ -4121,35 +5165,49 @@ function Show-PermissionDialog {
         default { 'Remove Permission from Selected Files' }
     }
     $dlg.Title = $title
+    $dlg.Tag = @{ Choices = @($Choices); Answer = $null }
     $dlg.FindName('PermDialogTitle').Text = $title
     $dlg.FindName('PermDialogTarget').Text = $TargetText
+    try { [void](Enable-LiveRegion -Element $dlg.FindName('PermDialogError') -Setting Assertive) } catch { }
     $submit = $dlg.FindName('PermSubmitBtn')
     if ($Mode -eq 'Remove') {
         $dlg.FindName('PermIdentityBox').Visibility = 'Collapsed'
+        # RemoveAccessRuleAll takes every explicit entry of the type, whatever its level, so the
+        # level is not asked.
+        $dlg.FindName('PermRightsLabel').Visibility = 'Collapsed'
+        $dlg.FindName('PermRightsCombo').Visibility = 'Collapsed'
         $combo = $dlg.FindName('PermIdentityCombo')
-        $combo.ItemsSource = @($Choices)
-        $combo.SelectedIndex = 0
+        $combo.ItemsSource = @($Choices | ForEach-Object { $_.Label })
         $combo.Visibility = 'Visible'
-        $dlg.FindName('PermIdentityHint').Text = 'Every explicit entry of the type below for this user or group is removed, whatever its level. Inherited entries stay.'
+        $combo.Add_SelectionChanged({ param($s, $e) $w = [System.Windows.Window]::GetWindow($s); if ($w) { Set-RemoveTypeCombo -Dialog $w } })
+        $combo.SelectedIndex = 0
+        Set-RemoveTypeCombo -Dialog $dlg
+        $dlg.FindName('PermIdentityHint').Text = 'Only entries set on this item itself are listed. Every one of the chosen type is removed, whatever its level. Inherited entries stay: remove them on the folder above.'
         $submit.Content = 'Remove Permission'
         $submit.Style = $dlg.Resources['DangerBtn']
+        $submit.IsDefault = $false
+    }
+    else {
+        $dlg.FindName('PermIdentityBox').Add_TextChanged({ param($s, $e) $w = [System.Windows.Window]::GetWindow($s); if ($w) { $w.FindName('PermDialogError').Visibility = 'Collapsed' } })
     }
     $submit.Add_Click({
             param($s, $e)
             $w = [System.Windows.Window]::GetWindow($s)
             $box = $w.FindName('PermIdentityBox')
-            $identity = if ($box.Visibility -eq 'Visible') { $box.Text } else { "$($w.FindName('PermIdentityCombo').SelectedItem)" }
-            $problem = Get-PermissionInputError -Identity $identity
             $err = $w.FindName('PermDialogError')
-            if ($problem) {
-                $err.Text = $problem
-                $err.Visibility = 'Visible'
-                return
+            $type = "$($w.FindName('PermTypeCombo').SelectedItem.Tag)"
+            if ($box.Visibility -eq 'Visible') {
+                $identity = $box.Text
+                $problem = Get-PermissionInputError -Identity $identity
+                if ($problem) { Show-DialogError -ErrorBlock $err -Text $problem -FocusTarget $box; return }
+                $w.Tag.Answer = [PSCustomObject]@{ Identity = $identity.Trim(); Rights = "$($w.FindName('PermRightsCombo').SelectedItem.Tag)"; Type = $type; Sid = $null }
             }
-            $w.Tag = [PSCustomObject]@{
-                Identity = $identity.Trim()
-                Rights   = "$($w.FindName('PermRightsCombo').SelectedItem.Tag)"
-                Type     = "$($w.FindName('PermTypeCombo').SelectedItem.Tag)"
+            else {
+                $combo = $w.FindName('PermIdentityCombo')
+                $choice = if ($combo.SelectedIndex -ge 0) { @($w.Tag.Choices)[$combo.SelectedIndex] } else { $null }
+                if (-not $choice) { Show-DialogError -ErrorBlock $err -Text 'Choose the user or group to remove.' -FocusTarget $combo; return }
+                $rights = if ($choice.Rights -and $choice.Rights[$type]) { "$($choice.Rights[$type])" } else { 'FullControl' }
+                $w.Tag.Answer = [PSCustomObject]@{ Identity = $choice.Identity; Rights = $rights; Type = $type; Sid = $choice.Sid }
             }
             $w.DialogResult = $true
         })
@@ -4158,43 +5216,159 @@ function Show-PermissionDialog {
             $box = $s.FindName('PermIdentityBox')
             if ($box.Visibility -eq 'Visible') { [void]$box.Focus() } else { [void]$s.FindName('PermIdentityCombo').Focus() }
         })
-    if ($dlg.ShowDialog() -eq $true) { return $dlg.Tag }
+    if ($dlg.ShowDialog() -eq $true) { return $dlg.Tag.Answer }
     $null
 }
 
 function Get-DialogTargetText {
-    # What the add and remove dialogs say they work on.
-    param([Parameter(Mandatory)][ValidateSet('Folder', 'Files')][string]$Scope)
-    if ($Scope -eq 'Folder') { return "$($script:Current.DisplayPath)" }
-    $paths = @(Get-SelectedFileRows | ForEach-Object { "$($_.Path)" } | Where-Object { $_.Trim() })
-    $shown = @($paths | Select-Object -First 10)
-    $text = "$(Format-ItemCount $paths.Count 'file' 'files'):`n" + ($shown -join "`n")
-    if ($paths.Count -gt $shown.Count) { $text += "`n... and $($paths.Count - $shown.Count) more" }
+    # What the add and remove dialogs say they work on: each path and, when it differs, its real
+    # location, as the background lookup found it before the dialog opened.
+    param([Parameter(Mandatory)][ValidateSet('Folder', 'Files')][string]$Scope, [Parameter(Mandatory)][object[]]$Targets)
+    $all = @($Targets | Where-Object { $_ })
+    if ($Scope -eq 'Folder') {
+        $t = $all[0]
+        $text = "$($t.DisplayPath)"
+        if ($t.ResolvedPath -and $t.ResolvedPath -ne $t.DisplayPath) { $text += "`nReal location: $($t.ResolvedPath)" }
+        if ($t.IsRemembered) { $text += "`n(remembered mapping: it may be out of date)" }
+        return $text
+    }
+    $shown = @($all | Select-Object -First 10)
+    $lines = @(foreach ($t in $shown) {
+            $line = "$($t.DisplayPath)"
+            if ($t.ResolvedPath -and $t.ResolvedPath -ne $t.DisplayPath) { $line += "  (real location: $($t.ResolvedPath))" }
+            $line
+        })
+    $text = "$(Format-ItemCount $all.Count 'file' 'files'):`n" + ($lines -join "`n")
+    if ($all.Count -gt $shown.Count) { $text += "`n... and $($all.Count - $shown.Count) more" }
+    $text
+}
+
+function Get-CopyDialogSourceText {
+    # The copy dialog's "Copy from" line: the folder and the real location the work will read,
+    # the same ResolvedPath it is given.
+    param([Parameter(Mandatory)]$Source)
+    $text = "$($Source.DisplayPath)"
+    if ($Source.ResolvedPath -and $Source.ResolvedPath -ne $Source.DisplayPath) { $text += "  (real location: $($Source.ResolvedPath))" }
     $text
 }
 
 function Test-ReadyForChange {
-    # $false (after saying why) when no folder or file is chosen or a change is still running.
+    # $false (after saying why) when no folder or file is chosen, or a change is running or
+    # being prepared.
     param([Parameter(Mandatory)][ValidateSet('Folder', 'Files')][string]$Scope)
     if (-not $script:Current) { Set-Status -Kind Warning -Text 'Choose a folder first.'; return $false }
     if ($Scope -eq 'Files' -and @(Get-SelectedFileRows).Count -eq 0) { Set-Status -Kind Warning -Text $script:NoFilesSelectedText; return $false }
     if ($script:ChangeTask) { Set-Status -Kind Warning -Text "Another change is still running on $($script:ChangeTask.Path). Wait for it to finish."; return $false }
+    if ($script:ChangePending) { Set-Status -Kind Warning -Text (Get-ChangeControlState).Reason; return $false }
     $true
 }
 
+function Get-ChangeRequest {
+    # What a click asks the background lookup to check, taken from the window at the click: the
+    # chosen folder, or the selected files and the folder they are in; plus the label for the
+    # busy line and what to refresh afterwards (the tech may browse elsewhere meanwhile).
+    param([Parameter(Mandatory)][ValidateSet('Folder', 'Files')][string]$Scope)
+    $display = "$($script:Current.DisplayPath)"
+    if ($Scope -eq 'Folder') {
+        return @{
+            Scope             = $Scope
+            CurrentPath       = $display
+            FilesRequest      = [int]$script:PaneRequests['Files']
+            Paths             = [string[]]@($display)
+            FolderDisplayPath = $null
+            FolderRealPath    = $null
+            Label             = $display
+            RefreshState      = (New-ChangeRefreshState -Scope Folder -Paths @($display))
+        }
+    }
+    $paths = [string[]]@(Get-SelectedFileRows | ForEach-Object { "$($_.Path)" } | Where-Object { $_.Trim() })
+    @{
+        Scope             = $Scope
+        CurrentPath       = $display
+        FilesRequest      = [int]$script:PaneRequests['Files']
+        Paths             = $paths
+        FolderDisplayPath = $display
+        FolderRealPath    = "$($script:Current.RealPath)"
+        Label             = "$(Format-ItemCount $paths.Count 'file' 'files') in $display"
+        RefreshState      = (New-ChangeRefreshState -Scope Files -Paths @($display) -ChangedFiles $paths)
+    }
+}
+
+function Test-ChangeRequestCurrent {
+    # The stale-request guard for a click's lookup: true when the window still shows what the
+    # click asked about (the same folder and, for files, the same file list). A lookup that
+    # comes back for anything else is dropped, so no dialog opens for a folder that is no
+    # longer on screen.
+    param([Parameter(Mandatory)][hashtable]$Request)
+    if (-not $script:Current -or "$($script:Current.DisplayPath)" -ne "$($Request.CurrentPath)") { return $false }
+    if ($Request.Scope -eq 'Files' -and [int]$script:PaneRequests['Files'] -ne [int]$Request.FilesRequest) { return $false }
+    $true
+}
+
+function Start-ChangeLookup {
+    # Works out where a change would land in the background ($script:ChangeTargetWork), with
+    # "Checking where <path> really is..." on the busy line, while the change is pending. Then
+    # -OnResolved ($targets, $State) runs on the window's thread to open the dialog or the
+    # confirm; a refusal or a failed lookup is shown instead and nothing goes ahead. With
+    # -Request (Get-ChangeRequest), a result that comes back after the tech moved to another
+    # folder is dropped (Test-ChangeRequestCurrent).
+    param(
+        [Parameter(Mandatory)][string[]]$Paths,
+        [Parameter(Mandatory)][string]$Label,
+        [switch]$WholeTree,
+        [string]$FolderDisplayPath,
+        [string]$FolderRealPath,
+        [hashtable]$Request,
+        [Parameter(Mandatory)][scriptblock]$OnResolved,
+        $State
+    )
+    $verb = if (@($Paths).Count -gt 1) { 'are' } else { 'is' }
+    Set-Status -Text "Checking where $Label really $verb. Nothing has been changed yet."
+    Start-ChangePrepRead -Action 'Checking where' -Path "$Label really $verb" -Work $script:ChangeTargetWork `
+        -ArgumentList @([string[]]$Paths, $script:MappedDrives, $script:MappedDriveSources, [bool]$WholeTree, $FolderDisplayPath, $FolderRealPath, $script:CorePath) `
+        -State @{ OnResolved = $OnResolved; State = $State; Label = $Label; Verb = $verb; Request = $Request } -OnDone {
+        param($result, $s)
+        if ($s.Request -and -not (Test-ChangeRequestCurrent -Request $s.Request)) {
+            Set-Status -Text "Another folder was opened while $($s.Label) was being checked, so nothing was changed. Open it again and click the button again."
+            return
+        }
+        if (-not ($result -and $result.Ok)) {
+            $text = if ($result -and "$($result.Refusal)".Trim()) { "$($result.Refusal)" }
+            else {
+                $why = if ($result -and "$($result.Error)".Trim()) { " ($("$($result.Error)".Trim()))" } else { '' }
+                "Could not check where $($s.Label) really $($s.Verb), so nothing was changed.$why Press Refresh and try again."
+            }
+            Show-ChangeRefusal -Text $text
+            return
+        }
+        & $s.OnResolved @($result.Targets) $s.State
+    }
+}
+
 function Open-AddPermission {
+    # Add Permission: where it lands is looked up in the background first, then the dialog
+    # shows the real location; its submit is the confirmation.
     param([Parameter(Mandatory)][ValidateSet('Folder', 'Files')][string]$Scope)
     if (-not (Test-ReadyForChange -Scope $Scope)) { return }
-    $answer = Show-PermissionDialog -Mode Add -Scope $Scope -TargetText (Get-DialogTargetText -Scope $Scope)
-    if (-not $answer) { return }
-    Invoke-AddPermission -Scope $Scope -Identity $answer.Identity -Rights $answer.Rights -Type $answer.Type
+    $request = Get-ChangeRequest -Scope $Scope
+    if (-not (Enter-ChangePending -Action 'Add Permission' -Path $request.Label)) { return }
+    [void](Start-ChangeLookup -Paths $request.Paths -Label $request.Label -FolderDisplayPath $request.FolderDisplayPath -FolderRealPath $request.FolderRealPath `
+            -Request $request -State @{ Scope = $Scope; Request = $request } -OnResolved {
+            param($targets, $s)
+            $answer = Show-PermissionDialog -Mode Add -Scope $s.Scope -TargetText (Get-DialogTargetText -Scope $s.Scope -Targets $targets)
+            if (-not $answer) { Set-Status -Text 'Cancelled: nothing was changed.'; return }
+            Invoke-AddPermission -Scope $s.Scope -Identity $answer.Identity -Rights $answer.Rights -Type $answer.Type `
+                -Targets $targets -Label $s.Request.Label -RefreshState $s.Request.RefreshState
+        })
 }
 
 function Open-RemovePermission {
-    # The remove dialog lists who can be removed. For files whose permissions are not loaded yet,
-    # those are read first, then the dialog opens (-AfterLoad: once only).
+    # The remove dialog lists who can be removed (explicit entries only). For files whose
+    # permissions are not loaded yet, those are read first (-AfterLoad: once only, still the same
+    # pending change); then where it lands is looked up, then the dialog and the confirm.
     param([Parameter(Mandatory)][ValidateSet('Folder', 'Files')][string]$Scope, [switch]$AfterLoad)
-    if (-not (Test-ReadyForChange -Scope $Scope)) { return }
+    if (-not $AfterLoad -and -not (Test-ReadyForChange -Scope $Scope)) { return }
+    if (-not $script:Current) { Set-Status -Kind Warning -Text 'Choose a folder first.'; return }
     if ($Scope -eq 'Folder') {
         $v = $script:ViewState.FolderPermissions
         if (-not $v -or $v.Path -ne $script:Current.RealPath) {
@@ -4213,33 +5387,62 @@ function Open-RemovePermission {
             return
         }
         $missing = [string[]]@($choices.NotLoaded)
+        if (-not (Enter-ChangePending -Action 'Remove Permission' -Path (Format-ItemCount $missing.Count 'file' 'files'))) { return }
         foreach ($p in $missing) { $script:FileAclPending[$p] = $true }
         $request = [int]$script:PaneRequests['Files']
         Set-Status -Text "Reading the permissions of $(Format-ItemCount $missing.Count 'selected file' 'selected files') first..."
-        [void](Start-ReadTask -Action 'Loading the permissions of' -Path (Format-ItemCount $missing.Count 'file' 'files') -Work $script:FileAclWork `
+        [void](Start-ChangePrepRead -Action 'Loading the permissions of' -Path (Format-ItemCount $missing.Count 'file' 'files') -Work $script:FileAclWork `
                 -ArgumentList @($missing, $script:CorePath) -State @{ Request = $request; Paths = $missing } -OnDone {
                 param($result, $s)
                 if (Set-FileAclResult -Result $result -Request $s.Request -Paths $s.Paths) { Open-RemovePermission -Scope Files -AfterLoad }
             })
         return
     }
-    if (@($choices.Identities).Count -eq 0) {
+    if (@($choices.Choices).Count -eq 0) {
         $what = if ($Scope -eq 'Folder') { 'This folder has' } else { 'The selected files have' }
-        Set-Status -Kind Warning -Text "$what no permission entries that could be read, so there is nothing to remove."
+        Set-Status -Kind Warning -Text "$what no permission entries of their own that could be read, so there is nothing to remove here. Inherited entries come from the folder above: remove them there."
         return
     }
-    $answer = Show-PermissionDialog -Mode Remove -Scope $Scope -TargetText (Get-DialogTargetText -Scope $Scope) -Choices $choices.Identities
-    if (-not $answer) { return }
-    Invoke-RemovePermission -Scope $Scope -Identity $answer.Identity -Rights $answer.Rights -Type $answer.Type
+    $request = Get-ChangeRequest -Scope $Scope
+    if (-not $AfterLoad -and -not (Enter-ChangePending -Action 'Remove Permission' -Path $request.Label)) { return }
+    [void](Start-ChangeLookup -Paths $request.Paths -Label $request.Label -FolderDisplayPath $request.FolderDisplayPath -FolderRealPath $request.FolderRealPath `
+            -Request $request -State @{ Scope = $Scope; Request = $request; Choices = @($choices.Choices) } -OnResolved {
+            param($targets, $s)
+            $answer = Show-PermissionDialog -Mode Remove -Scope $s.Scope -TargetText (Get-DialogTargetText -Scope $s.Scope -Targets $targets) -Choices $s.Choices
+            if (-not $answer) { Set-Status -Text 'Cancelled: nothing was changed.'; return }
+            Invoke-RemovePermission -Scope $s.Scope -Identity $answer.Identity -Rights $answer.Rights -Type $answer.Type -Sid $answer.Sid `
+                -Targets $targets -Label $s.Request.Label -RefreshState $s.Request.RefreshState
+        })
+}
+
+function Open-TakeOwnership {
+    # Take ownership (this folder only, the selected files, or the whole tree): where it lands is
+    # looked up in the background first (for the whole tree with the D-036 and high-impact
+    # checks), then the confirm (after the count, for the whole tree).
+    param([Parameter(Mandatory)][ValidateSet('Folder', 'Files', 'Tree')][string]$Scope)
+    $kind = if ($Scope -eq 'Files') { 'Files' } else { 'Folder' }
+    if (-not (Test-ReadyForChange -Scope $kind)) { return }
+    $request = Get-ChangeRequest -Scope $kind
+    $action = 'Take Ownership'
+    if ($Scope -eq 'Tree') {
+        $request.RefreshState = New-ChangeRefreshState -Scope Tree -Paths @($script:Current.DisplayPath)
+        $action = 'Take Ownership of all subfolders and files'
+    }
+    if (-not (Enter-ChangePending -Action $action -Path $request.Label)) { return }
+    [void](Start-ChangeLookup -Paths $request.Paths -Label $request.Label -WholeTree:($Scope -eq 'Tree') `
+            -FolderDisplayPath $request.FolderDisplayPath -FolderRealPath $request.FolderRealPath -Request $request -State @{ Scope = $Scope; Request = $request } -OnResolved {
+            param($targets, $s)
+            Invoke-TakeOwnership -Scope $s.Scope -Targets $targets -Label $s.Request.Label -RefreshState $s.Request.RefreshState
+        })
 }
 
 function Show-CopyPermissionsDialog {
-    # The copy dialog. Returns the typed text, or $null when cancelled. Blank input is caught
-    # before the dialog closes.
+    # The copy dialog, for -Source (looked up before it opened). Returns the typed text, or
+    # $null when cancelled. Blank input is caught before the dialog closes.
+    param([Parameter(Mandatory)]$Source)
     $dlg = New-AppDialog -Xaml (Get-CopyPermissionsDialogXaml)
-    $source = "$($script:Current.DisplayPath)"
-    if ($script:Current.RealPath -and $script:Current.RealPath -ne $source) { $source += "  (real location: $($script:Current.RealPath))" }
-    $dlg.FindName('CopySourceText').Text = $source
+    $dlg.FindName('CopySourceText').Text = Get-CopyDialogSourceText -Source $Source
+    try { [void](Enable-LiveRegion -Element $dlg.FindName('CopyError') -Setting Assertive) } catch { }
     # Only the folder's own permissions are copied, so only its own Deny entries are copied.
     $note = $dlg.FindName('CopyDenyNote')
     $v = $script:ViewState.FolderPermissions
@@ -4254,17 +5457,16 @@ function Show-CopyPermissionsDialog {
             $note.Visibility = 'Visible'
         }
     }
+    $dlg.FindName('CopyTargetsBox').Add_TextChanged({ param($s, $e) $w = [System.Windows.Window]::GetWindow($s); if ($w) { $w.FindName('CopyError').Visibility = 'Collapsed' } })
     $dlg.FindName('CopySubmitBtn').Add_Click({
             param($s, $e)
             $w = [System.Windows.Window]::GetWindow($s)
-            $text = $w.FindName('CopyTargetsBox').Text
-            if ((ConvertTo-TargetPathList -Text $text).Count -eq 0) {
-                $err = $w.FindName('CopyError')
-                $err.Text = $script:NoTargetPathText
-                $err.Visibility = 'Visible'
+            $box = $w.FindName('CopyTargetsBox')
+            if ((ConvertTo-TargetPathList -Text $box.Text).Count -eq 0) {
+                Show-DialogError -ErrorBlock $w.FindName('CopyError') -Text $script:NoTargetPathText -FocusTarget $box
                 return
             }
-            $w.Tag = $text
+            $w.Tag = $box.Text
             $w.DialogResult = $true
         })
     $dlg.Add_ContentRendered({ param($s, $e) [void]$s.FindName('CopyTargetsBox').Focus() })
@@ -4273,12 +5475,25 @@ function Show-CopyPermissionsDialog {
 }
 
 function Open-CopyPermissions {
+    # Copy Permissions To...: the source is looked up in the background first (the dialog shows
+    # its real location), then the typed folders after the dialog, then the change.
     if (-not (Test-ReadyForChange -Scope Folder)) { return }
-    $text = Show-CopyPermissionsDialog
-    if ($null -eq $text) { return }
-    Invoke-CopyPermissions -TargetText $text
+    $request = Get-ChangeRequest -Scope Folder
+    if (-not (Enter-ChangePending -Action 'Copy Permissions' -Path $request.Label)) { return }
+    [void](Start-ChangeLookup -Paths $request.Paths -Label $request.Label -Request $request -State @{ Request = $request } -OnResolved {
+            param($targets, $s)
+            $source = @($targets)[0]
+            $text = Show-CopyPermissionsDialog -Source $source
+            if ($null -eq $text) { Set-Status -Text 'Cancelled: nothing was changed.'; return }
+            $lines = ConvertTo-TargetPathList -Text $text
+            if ($lines.Count -eq 0) { Set-Status -Kind Warning -Text $script:NoTargetPathText; return }
+            $label = if ($lines.Count -eq 1) { $lines[0] } else { "the $($lines.Count) folders you listed" }
+            [void](Start-ChangeLookup -Paths $lines -Label $label -State @{ Source = $source } -OnResolved {
+                    param($copyTargets, $s2)
+                    Invoke-CopyPermissions -Source $s2.Source -Targets $copyTargets
+                })
+        })
 }
-
 #endregion
 
 if ($LoadFunctionsOnly) { return }
@@ -4345,7 +5560,11 @@ $mappingNotice = @(Get-LogFolderMappingNotice -LogFolder $LogFolder -DriveMap $s
 $LogFolder = Resolve-MappedDrive -Path $LogFolder -DriveMap $script:MappedDrives
 
 # Not $script:LogFolder: at script scope that IS the -LogFolder parameter.
-$script:DefaultLogFolder = Join-Path $script:ScriptRoot 'Logs'
+# The Logs folder next to the script, unless the script is in a OneDrive or SharePoint sync
+# folder: then %LOCALAPPDATA% (backups and the change log must not be uploaded).
+$script:ScriptLogsFolder = Join-Path $script:ScriptRoot 'Logs'
+$syncRoots = @(Get-OneDriveFolder)
+$script:DefaultLogFolder = Get-AppDefaultLogFolder -ScriptLogsFolder $script:ScriptLogsFolder -LocalAppData (Get-LocalAppDataFolder) -SyncRoot $syncRoots
 try {
     $script:ChangeLogFolder = Resolve-ChangeLogFolder -LogFolder $LogFolder -DefaultFolder $script:DefaultLogFolder
 }
@@ -4353,7 +5572,8 @@ catch {
     Show-AppMessage -Icon Error -Message $_.Exception.Message
     return
 }
-$script:LogFolderNotice = @(Get-ChangeLogFolderNotice -LogFolder $LogFolder -ResolvedFolder $script:ChangeLogFolder -DefaultFolder $script:DefaultLogFolder) + $mappingNotice
+$script:LogFolderNotice = @(Get-ChangeLogFolderNotice -LogFolder $LogFolder -ResolvedFolder $script:ChangeLogFolder -DefaultFolder $script:DefaultLogFolder) +
+@(Get-SyncedLogFolderNotice -LogFolder $LogFolder -ScriptLogsFolder $script:ScriptLogsFolder -DefaultFolder $script:DefaultLogFolder -SyncRoot $syncRoots) + $mappingNotice
 
 if (-not (Enter-SingleInstance -LogFolder $script:ChangeLogFolder -DriveMap $script:MappedDrives)) { return }
 
@@ -4369,14 +5589,19 @@ try {
 catch {
     $script:FatalError = $true
     Write-AppError "Fatal: $($_.Exception.Message)`n$($_.ScriptStackTrace)"
-    Show-AppMessage -Icon Error -Message "Folder Permission Manager hit an error and has to close:`n`n$($_.Exception.Message)`n`nDetails were written to $($script:ErrorLogPath). Nothing was changed."
+    # Never "Nothing was changed" when a change ran this session or is still running.
+    $changeRunning = @($script:BgTasks | Where-Object { Test-ChangeTaskRunning $_ }).Count -gt 0
+    Show-AppMessage -Icon Error -Message (Get-FatalErrorMessage -ErrorText "$($_.Exception.Message)" -ErrorLogPath "$($script:ErrorLogPath)" `
+            -ChangeLogFolder "$($script:ChangeLogFolder)" -ChangeRunning $changeRunning -ChangeStarted ([bool]$script:ChangeMadeThisSession))
 }
 finally {
     # A change still running in the pool (only possible after a fatal error: the window refuses
     # to close during one) is never stopped and the process never ends under it: wait for it
-    # first, however long it takes. The core logs each item as it completes.
+    # first, however long it takes. The core logs each item as it completes. The window is gone
+    # by now, so the console the window hid is shown again with what is happening.
     if (@($script:BgTasks | Where-Object { Test-ChangeTaskRunning $_ }).Count -gt 0) {
-        Write-Host '[WARN] A permission change is still running. Waiting for it to finish before closing; do not close this window.' -ForegroundColor Yellow
+        Show-OwnConsole
+        Write-Host "[WARN] A permission change is still running. Waiting for it to finish before closing; do not close this window. Its results go to the change log in $($script:ChangeLogFolder)." -ForegroundColor Yellow
     }
     $null = Wait-ChangeTasks -Tasks @($script:BgTasks)
     # Then the mutex, then the pool without blocking; a read stuck in network I/O ends with the

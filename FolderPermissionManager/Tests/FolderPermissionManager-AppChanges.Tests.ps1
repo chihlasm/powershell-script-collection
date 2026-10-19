@@ -172,6 +172,11 @@ BeforeAll {
         if (-not $Resolved) { $Resolved = $Display }
         [PSCustomObject]@{ Ok = $true; Refusal = $null; DisplayPath = $Display; ResolvedPath = $Resolved; IsRemembered = $Remembered; IsLocal = $Local }
     }
+    function script:Get-AllLogTextIn {
+        param([string]$Folder)
+        $files = @(Get-ChildItem -LiteralPath $Folder -Recurse -File -ErrorAction SilentlyContinue)
+        ($files | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }) -join "`n"
+    }
     function script:Get-AllLogText {
         $files = @(Get-ChildItem -LiteralPath $script:ChangeLogFolder -Recurse -File -ErrorAction SilentlyContinue)
         ($files | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }) -join "`n"
@@ -255,9 +260,17 @@ BeforeEach {
     Mock Update-CurrentFolder { }
     Mock Select-Folder { }
     Mock Start-ChangeTask { $script:Captured = @{ Action = $Action; Path = $Path; Work = $Work; ArgumentList = $ArgumentList; OnDone = $OnDone }; $true }
+    # Seams added in the SQ-018 review round: the disk and network reads behind the target checks.
+    # Defaults: no folder is a reparse point, every remote share is an ordinary folder on D:, the
+    # profiles folder is C:\Users, and no file size can be read (the relaunch check then hashes).
+    Mock Get-AppReparseInfo { [PSCustomObject]@{ Exists = $true; IsReparsePoint = $false; Tag = $null } }
+    Mock Get-RemoteShareLocalPath { "D:\Shares\$Share" }
+    Mock Get-AppProfilesDirectory { 'C:\Users' }
+    Mock Get-RelaunchFileSize { $null }
 
     $script:WhatIfMode = $false
     $script:ChangeTask = $null
+    $script:ChangePending = $null
     $script:CurrentNode = $null
     $script:UI = New-FakeChangeUi
     $script:ChangeLogFolder = Join-Path $TestDrive ('log-' + [guid]::NewGuid().ToString('N'))
@@ -863,7 +876,7 @@ Describe 'SQ-017 review notes: target classification' {
         $remote = Get-ChangeTarget -Path '\\fs01\C$\Users\bob' -WholeTree
         $remote.IsLocal | Should -BeFalse
         $remote.ResolvedPath | Should -Be '\\fs01\C$\Users\bob'
-        Should -Invoke Get-AppDfsTarget -Times 0 -ParameterFilter { $Path -like '\\testpc*' -or $Path -like '\\localhost*' -or $Path -like '\\127.*' } -Because 'this computer is not a DFS namespace'
+        Should -Invoke Get-AppDfsTarget -Times 0 -ParameterFilter { $Path -like '\\testpc*' -or $Path -like '\\localhost*' -or $Path -like '\\127.*' } -Because 'no folder on these paths is a DFS reparse point (SQ018R1_ThisComputerAsDfsNamespaceServer covers one that is)'
     }
 
     It 'SQ018N_Dfs_ResolvedThroughTheSeamOrFailsClosed' {
@@ -1191,6 +1204,776 @@ Describe 'SQ-017 review notes: -WhatIf, writes, pool, started row' {
             $script:SeenAtCall[0] | Should -Match 'Started' -Because "run $i must have logged a 'Started' row before the core change function ran"
             @($r.Entries | ForEach-Object { $_.Result }) | Should -Not -Contain 'Started'
         }
+    }
+}
+
+# ---------------------------------------------------------------------------------------------
+# SQ-018 review, round 1 (SQ018R1_*). Each Describe names the review item it covers.
+# ---------------------------------------------------------------------------------------------
+
+Describe 'Review 1-2: target lookups run in the background, real locations in the dialogs' {
+    BeforeEach {
+        # Every background read is captured, not run; the test runs its callback by hand.
+        $script:Reads = [System.Collections.Generic.List[object]]::new()
+        Mock Start-ReadTask { $script:Reads.Add(@{ Action = $Action; Path = $Path; Work = $Work; ArgumentList = $ArgumentList; OnDone = $OnDone; State = $State }) }
+        $script:Dialogs = [System.Collections.Generic.List[object]]::new()
+        $script:DialogAnswer = [PSCustomObject]@{ Identity = 'BUILTIN\Users'; Rights = 'Modify'; Type = 'Allow'; Sid = 'S-1-5-32-545' }
+        Mock Show-PermissionDialog { $script:Dialogs.Add(@{ Mode = $Mode; Scope = $Scope; TargetText = $TargetText; Choices = $Choices }); $script:DialogAnswer }
+        $script:CopyDialogs = [System.Collections.Generic.List[object]]::new()
+        $script:CopyText = "\\fs01\A`n\\fs01\B"
+        Mock Show-CopyPermissionsDialog { $script:CopyDialogs.Add(@{ Source = $Source }); $script:CopyText }
+        $script:MappedDrives = @{ H = '\\fs01\home' }
+        $script:MappedDriveSources = @{ H = 'Live' }
+        $script:Current = [PSCustomObject]@{ DisplayPath = 'H:\Data'; RealPath = '\\fs01\home\Data' }
+        $script:ViewState.FolderPermissions = [PSCustomObject]@{ Ok = $true; Path = '\\fs01\home\Data'; Rows = @(
+                [PSCustomObject]@{ Identity = 'BUILTIN\Users'; Sid = 'S-1-5-32-545'; Type = 'Allow'; IsInherited = $false; Rights = 'Modify, Synchronize' }) }
+        $script:SelectedRows = @([PSCustomObject]@{ Path = '\\fs01\home\Data\a.txt' })
+        $script:FileAclCache = @{ '\\fs01\home\Data\a.txt' = [PSCustomObject]@{ Ok = $true; Path = '\\fs01\home\Data\a.txt'; Rows = @(
+                    [PSCustomObject]@{ Identity = 'BUILTIN\Users'; Sid = 'S-1-5-32-545'; Type = 'Allow'; IsInherited = $false; Rights = 'Modify' }) } }
+        $script:FileAclPending = @{}
+    }
+
+    It 'SQ018R1_ClickHandlersStartALookupTask' {
+        # No click may look up a target on the window's thread: each one starts a background read
+        # of $script:ChangeTargetWork and calls none of the lookups itself.
+        Mock Get-ChangeTarget { throw 'Get-ChangeTarget ran on the window thread' }
+        Mock Resolve-ChangeTargetSet { throw 'Resolve-ChangeTargetSet ran on the window thread' }
+        $clicks = [ordered]@{
+            'add folder'       = { Open-AddPermission -Scope Folder }
+            'add files'        = { Open-AddPermission -Scope Files }
+            'remove folder'    = { Open-RemovePermission -Scope Folder }
+            'remove files'     = { Open-RemovePermission -Scope Files }
+            'ownership folder' = { Open-TakeOwnership -Scope Folder }
+            'ownership files'  = { Open-TakeOwnership -Scope Files }
+            'ownership tree'   = { Open-TakeOwnership -Scope Tree }
+            'copy'             = { Open-CopyPermissions }
+        }
+        foreach ($name in $clicks.Keys) {
+            $script:Reads.Clear(); $script:ChangePending = $null
+            & $clicks[$name]
+            $script:Reads.Count | Should -Be 1 -Because "$name starts one background read"
+            $script:Reads[0].Work.ToString() | Should -Be $script:ChangeTargetWork.ToString() -Because "$name starts the target lookup"
+            $script:Reads[0].Action | Should -Be 'Checking where'
+            $script:ChangePending | Should -Not -BeNullOrEmpty -Because "$name is a pending change until the lookup and the dialog are done"
+        }
+        Should -Invoke Get-ChangeTarget -Times 0 -Exactly
+        Should -Invoke Resolve-ChangeTargetSet -Times 0 -Exactly
+        Should -Invoke Get-AppDfsTarget -Times 0 -Exactly
+        Should -Invoke Get-ThisComputerNames -Times 0 -Exactly
+        Should -Invoke Get-RemoteShareLocalPath -Times 0 -Exactly
+        Should -Invoke Show-PermissionDialog -Times 0 -Exactly -Because 'the dialog opens only from the lookup callback'
+        Should -Invoke Show-ConfirmDialog -Times 0 -Exactly
+
+        # The buttons are wired to those Open-* functions only.
+        $init = @($script:Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Initialize-PermissionWindow' }, $true))[0]
+        foreach ($b in $script:ChangeButtons) {
+            $wire = @($init.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $n.Expression.Extent.Text -eq "`$ui.$b" -and $n.Member.Extent.Text -eq 'Add_Click' }, $true))
+            $wire.Count | Should -Be 1 -Because "$b has one click handler"
+            $called = @($wire[0].FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() } | Where-Object { $_ -ne 'Invoke-UiAction' })
+            $called.Count | Should -Be 1
+            $called[0] | Should -BeLike 'Open-*' -Because "$b starts with a background lookup"
+        }
+    }
+
+    It 'SQ018R1_StaleLookupOpensNoDialog' {
+        # The tech opened another folder while the lookup ran: its result is dropped.
+        Open-AddPermission -Scope Folder
+        $script:Current = [PSCustomObject]@{ DisplayPath = 'H:\Other'; RealPath = '\\fs01\home\Other' }
+        & $script:Reads[0].OnDone ([PSCustomObject]@{ Ok = $true; Targets = @(New-FakeTarget -Display 'H:\Data'); Refusal = $null }) $script:Reads[0].State
+        $script:Dialogs.Count | Should -Be 0
+        $script:Captured | Should -BeNullOrEmpty
+        (Get-LastStatus).Text | Should -Match ([regex]::Escape('H:\Data'))
+        (Get-LastStatus).Text | Should -Match '(?i)nothing was changed'
+        $script:ChangePending | Should -BeNullOrEmpty
+    }
+
+    It 'SQ018R1_PoolHasEveryFunctionTheWorkCalls' {
+        # Pool runspaces get only the core and $script:WorkHelperFunctions. Every app function that
+        # a work block calls, directly or through another app function, must be in that list, or it
+        # fails only at run time in the real window (Pester mocks do not reach the pool).
+        $appFunctions = @{}
+        foreach ($f in $script:Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) { $appFunctions[$f.Name] = $f }
+        $core = @(Get-CoreFunctionNames -CorePath $script:CorePath)
+        $listed = @($script:WorkHelperFunctions)
+        $called = { param($node) @($node.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() } | Where-Object { $_ } | Sort-Object -Unique) }
+        $work = @($script:Ast.FindAll({ param($n)
+                    $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and "$($n.Left)" -match '^\$script:\w+Work$' }, $true))
+        $work.Count | Should -BeGreaterThan 5
+        $queue = [System.Collections.Generic.Queue[string]]::new()
+        $seen = @{}
+        foreach ($w in $work) { foreach ($c in & $called $w) { $queue.Enqueue($c) } }
+        $missing = [System.Collections.Generic.List[string]]::new()
+        while ($queue.Count -gt 0) {
+            $name = $queue.Dequeue()
+            if ($seen[$name]) { continue }
+            $seen[$name] = $true
+            if (-not $appFunctions.ContainsKey($name) -or $core -contains $name) { continue }
+            if ($listed -notcontains $name) { $missing.Add($name) }
+            foreach ($c in & $called $appFunctions[$name]) { $queue.Enqueue($c) }
+        }
+        @($missing) | Should -BeNullOrEmpty -Because 'these app functions run in the pool but are not copied there'
+    }
+
+    It 'SQ018R1_LookupWorkRunsInThePool' {
+        # The lookup block and every helper it calls exist in the pool (read-only paths only).
+        $dir = New-Folder 'LookupPool'
+        try {
+            Initialize-BackgroundPool
+            $loop = '\\' + 'local' + 'host\C$\Windows'
+            $t = Start-BgTask -Work $script:ChangeTargetWork -ArgumentList @([string[]]@($dir), @{}, @{}, $false, $null, $null, $null) -OnDone { } -Kind Read
+            $t.Handle.AsyncWaitHandle.WaitOne(60000) | Should -BeTrue
+            $r = Select-TaskResult -Output @($t.PS.EndInvoke($t.Handle))
+            @($t.PS.Streams.Error).Count | Should -Be 0 -Because "$($t.PS.Streams.Error | Out-String)"
+            $t.PS.Dispose()
+            $r.Ok | Should -BeTrue -Because "$($r.Refusal)"
+            $r.Targets[0].ResolvedPath | Should -Be $dir
+
+            $t2 = Start-BgTask -Work $script:ChangeTargetWork -ArgumentList @([string[]]@($loop), @{}, @{}, $true, $null, $null, $null) -OnDone { } -Kind Read
+            $t2.Handle.AsyncWaitHandle.WaitOne(60000) | Should -BeTrue
+            $r2 = Select-TaskResult -Output @($t2.PS.EndInvoke($t2.Handle))
+            $t2.PS.Dispose()
+            $r2.Ok | Should -BeFalse
+            $r2.Refusal | Should -Match '(?i)Windows system folder' -Because 'this computer''s C$\Windows is its Windows folder'
+        }
+        finally {
+            if ($script:BgPool) { try { $script:BgPool.Close() } catch { } }
+        }
+    }
+
+    It 'SQ018R1_AddDialogShowsTheRealLocation' {
+        Open-AddPermission -Scope Folder
+        $script:Reads.Count | Should -Be 1
+        $script:Reads[0].Path | Should -Be 'H:\Data really is'
+        @($script:Status | Where-Object { $_.Text -like 'Checking where H:\Data really is*' }).Count | Should -Be 1
+        $real = New-FakeTarget -Display 'H:\Data' -Resolved '\\fs02\real\Data'
+        & $script:Reads[0].OnDone ([PSCustomObject]@{ Ok = $true; Targets = @($real); Refusal = $null }) $script:Reads[0].State
+        $script:Dialogs.Count | Should -Be 1
+        $script:Dialogs[0].TargetText | Should -Match ([regex]::Escape('Real location: \\fs02\real\Data'))
+        $script:Captured | Should -Not -BeNullOrEmpty
+        @($script:Captured.ArgumentList[0]) | Should -Be @('\\fs02\real\Data') -Because 'the change goes where the lookup said'
+        $script:ChangePending | Should -BeNullOrEmpty -Because 'the dialog closed'
+
+        # Files: one line per file, with its real location.
+        $text = Get-DialogTargetText -Scope Files -Targets @((New-FakeTarget -Display 'H:\Data\a.txt' -Resolved '\\fs02\real\Data\a.txt'), (New-FakeTarget -Display 'C:\b.txt'))
+        $text | Should -Match ([regex]::Escape('H:\Data\a.txt'))
+        $text | Should -Match ([regex]::Escape('real location: \\fs02\real\Data\a.txt'))
+        $text | Should -Match '2 files'
+
+        # A lookup that refuses opens no dialog and says why, in the status line and a message box.
+        $script:Reads.Clear(); $script:Dialogs.Clear(); $script:Shown.Clear()
+        Open-AddPermission -Scope Folder
+        & $script:Reads[0].OnDone ([PSCustomObject]@{ Ok = $false; Targets = @(); Refusal = 'H:\Data is refused for a test.' }) $script:Reads[0].State
+        $script:Dialogs.Count | Should -Be 0
+        $script:Shown | Should -Contain 'H:\Data is refused for a test.'
+        (Get-LastStatus).Kind | Should -Be 'Error'
+        $script:ChangePending | Should -BeNullOrEmpty
+        # The task itself failing (no result) is said too.
+        $script:Reads.Clear()
+        Open-AddPermission -Scope Folder
+        & $script:Reads[0].OnDone ([PSCustomObject]@{ Ok = $false; Stopped = $false; Error = 'pool broke' }) $script:Reads[0].State
+        (Get-LastStatus).Text | Should -Match 'pool broke'
+        $script:ChangePending | Should -BeNullOrEmpty
+    }
+
+    It 'SQ018R1_CopyShowsTheSourceAndResolvesTypedTargetsAfterTheDialog' {
+        Open-CopyPermissions
+        $source = New-FakeTarget -Display 'H:\Data' -Resolved '\\fs02\real\Data'
+        & $script:Reads[0].OnDone ([PSCustomObject]@{ Ok = $true; Targets = @($source); Refusal = $null }) $script:Reads[0].State
+        $script:CopyDialogs.Count | Should -Be 1
+        $script:CopyDialogs[0].Source.ResolvedPath | Should -Be '\\fs02\real\Data' -Because 'the dialog shows the ResolvedPath the work uses'
+        Get-CopyDialogSourceText -Source $source | Should -Match ([regex]::Escape('real location: \\fs02\real\Data'))
+
+        # The typed folders are looked up after the dialog, in the background too.
+        $script:Reads.Count | Should -Be 2
+        $script:Reads[1].Work.ToString() | Should -Be $script:ChangeTargetWork.ToString()
+        @($script:Reads[1].ArgumentList[0]) | Should -Be @('\\fs01\A', '\\fs01\B')
+        $script:Captured | Should -BeNullOrEmpty -Because 'nothing starts before the typed folders are checked'
+
+        # One cannot be resolved: refused, no task, still pending until now and then cleared.
+        $state = $script:Reads[1].State
+        & $script:Reads[1].OnDone ([PSCustomObject]@{ Ok = $false; Targets = @(); Refusal = 'Windows could not tell whether \\fs01\B is in a DFS namespace.' }) $state
+        $script:Captured | Should -BeNullOrEmpty
+        $script:Shown | Should -Contain 'Windows could not tell whether \\fs01\B is in a DFS namespace.'
+        $script:ChangePending | Should -BeNullOrEmpty
+
+        # All resolved: the change starts with the real paths, and the status line names them.
+        $script:Reads.Clear()
+        Open-CopyPermissions
+        & $script:Reads[0].OnDone ([PSCustomObject]@{ Ok = $true; Targets = @($source); Refusal = $null }) $script:Reads[0].State
+        $targets = @((New-FakeTarget -Display '\\fs01\A' -Resolved '\\fs03\A'), (New-FakeTarget -Display '\\fs01\B'))
+        & $script:Reads[1].OnDone ([PSCustomObject]@{ Ok = $true; Targets = $targets; Refusal = $null }) $script:Reads[1].State
+        $script:Captured | Should -Not -BeNullOrEmpty
+        $script:Captured.ArgumentList[0] | Should -Be '\\fs02\real\Data'
+        @($script:Captured.ArgumentList[1]) | Should -Be @('\\fs03\A', '\\fs01\B')
+        (Get-LastStatus).Text | Should -Match ([regex]::Escape('\\fs01\A (real location: \\fs03\A)'))
+        $script:ChangePending | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Review 3: one pending change while counting and confirming' {
+    It 'SQ018R1_DoubleClickStartsOneCountAndOneConfirm' {
+        $folder = New-Folder 'Pending3'
+        $script:Current = [PSCustomObject]@{ DisplayPath = $folder; RealPath = $folder }
+        $script:Reads = [System.Collections.Generic.List[object]]::new()
+        Mock Start-ReadTask { $script:Reads.Add(@{ Work = $Work; OnDone = $OnDone; State = $State }) }
+
+        # Two clicks on the whole-tree button (the direct entry point): one count only.
+        Invoke-TakeOwnership -Scope Tree
+        Invoke-TakeOwnership -Scope Tree
+        $script:Reads.Count | Should -Be 1 -Because 'the second click is refused while the first is pending'
+        (Get-LastStatus).Kind | Should -Be 'Warning'
+        (Get-LastStatus).Text | Should -Match ([regex]::Escape($folder))
+        foreach ($b in $script:ChangeButtons) { $script:UI[$b].IsEnabled | Should -BeFalse -Because "$b is off while the count runs" }
+        Test-ReadyForChange -Scope Folder | Should -BeFalse
+        (Get-ChangeControlState).Reason | Should -Match '(?i)being prepared'
+
+        # While the confirm is open, no other change can start, and no second confirm opens.
+        Mock Show-ConfirmDialog {
+            $script:Confirms.Add($Spec)
+            Invoke-TakeOwnership -Scope Tree
+            Open-AddPermission -Scope Folder
+            Open-TakeOwnership -Scope Tree
+            $true
+        }
+        & $script:Reads[0].OnDone ([PSCustomObject]@{ Ok = $true; Path = $folder; Folders = 3; Files = 4; NotOpened = 0; Links = 2; Error = $null }) $script:Reads[0].State
+        $script:Confirms.Count | Should -Be 1
+        $script:Reads.Count | Should -Be 1 -Because 'nothing new started while the confirm was open'
+        Should -Invoke Start-ChangeTask -Times 1 -Exactly
+        $script:Confirms[0].Body | Should -Match '2 junctions or symbolic links' -Because 'the count''s links are in the confirm'
+        $script:ChangePending | Should -BeNullOrEmpty -Because 'the confirm closed'
+        foreach ($b in $script:ChangeButtons) { $script:UI[$b].IsEnabled | Should -BeTrue }
+
+        # Through the lookup (the window's buttons): two clicks, one lookup.
+        $script:Reads.Clear()
+        Open-TakeOwnership -Scope Tree
+        Open-TakeOwnership -Scope Tree
+        $script:Reads.Count | Should -Be 1
+    }
+
+    It 'SQ018R1_PendingClearedOnEveryExit' {
+        $folder = New-Folder 'Pending3b'
+        $script:Current = [PSCustomObject]@{ DisplayPath = $folder; RealPath = $folder }
+        $script:Reads = [System.Collections.Generic.List[object]]::new()
+        Mock Start-ReadTask { $script:Reads.Add(@{ OnDone = $OnDone; State = $State }) }
+        $count = [PSCustomObject]@{ Ok = $true; Path = $folder; Folders = 1; Files = 1; NotOpened = 0; Links = 0; Error = $null }
+        $cases = [ordered]@{
+            'count failed'     = { & $script:Reads[0].OnDone ([PSCustomObject]@{ Ok = $false; Error = 'no count' }) $script:Reads[0].State }
+            'confirm declined' = { $script:ConfirmAnswer = $false; & $script:Reads[0].OnDone $count $script:Reads[0].State }
+            'confirm threw'    = { Mock Show-ConfirmDialog { throw 'dialog broke' }; try { & $script:Reads[0].OnDone $count $script:Reads[0].State } catch { } }
+        }
+        foreach ($name in $cases.Keys) {
+            $script:Reads.Clear(); $script:ChangePending = $null; $script:ConfirmAnswer = $true
+            Invoke-TakeOwnership -Scope Tree
+            $script:ChangePending | Should -Not -BeNullOrEmpty
+            & $cases[$name]
+            $script:ChangePending | Should -BeNullOrEmpty -Because "$name ends the pending change"
+            foreach ($b in $script:ChangeButtons) { $script:UI[$b].IsEnabled | Should -BeTrue -Because "$($name): $b is back" }
+        }
+        # The confirm says the count in its first line.
+        $spec = Get-ConfirmSpec -Action TakeOwnershipTree -Targets @(New-FakeTarget -Display 'D:\Data') -Counts ([PSCustomObject]@{ Folders = 3201; Files = 9207; NotOpened = 0; Links = 0 })
+        ($spec.Body -split "`n")[0] | Should -Be "This will change ownership on $((12408).ToString('N0')) items ($((3201).ToString('N0')) folders and $((9207).ToString('N0')) files) under:"
+        $spec.Body | Should -Match 'ask a senior admin to open them'
+        $spec.Body | Should -Not -Match 'escalate them'
+    }
+}
+
+Describe 'Review 4: the remove dialog' {
+    It 'SQ018R1_RemoveOffersExplicitEntriesBySid' {
+        $script:ViewState.FolderPermissions = [PSCustomObject]@{ Ok = $true; Rows = @(
+                [PSCustomObject]@{ Identity = 'BUILTIN\Users'; Sid = 'S-1-5-32-545'; Type = 'Allow'; IsInherited = $true; Rights = 'ReadAndExecute, Synchronize' },
+                [PSCustomObject]@{ Identity = 'CONTOSO\HR'; Sid = 'S-1-5-21-1-2-3-1001'; Type = 'Deny'; IsInherited = $false; Rights = 'Write' },
+                [PSCustomObject]@{ Identity = 'CONTOSO\Sales'; Sid = 'S-1-5-21-1-2-3-1002'; Type = 'Allow'; IsInherited = $false; Rights = 'Modify, Synchronize' },
+                [PSCustomObject]@{ Identity = 'CONTOSO\Sales'; Sid = 'S-1-5-21-1-2-3-1002'; Type = 'Deny'; IsInherited = $false; Rights = 'Delete' },
+                [PSCustomObject]@{ Identity = 'CONTOSO\sales-renamed'; Sid = 'S-1-5-21-1-2-3-1002'; Type = 'Allow'; IsInherited = $false; Rights = 'Read' }) }
+        $c = Get-RemoveIdentityChoices -Scope Folder
+        @($c.Choices).Count | Should -Be 2 -Because 'inherited-only identities are not offered, and one SID is one choice'
+        $c.Identities | Should -Not -Contain 'BUILTIN\Users'
+        $hr = @($c.Choices | Where-Object { $_.Sid -eq 'S-1-5-21-1-2-3-1001' })[0]
+        $hr.Identity | Should -Be 'CONTOSO\HR'
+        @($hr.Types) | Should -Be @('Deny')
+        (Get-RemoveTypeChoice -Choice $hr).Default | Should -Be 'Deny' -Because 'Deny-only gives Deny'
+        @((Get-RemoveTypeChoice -Choice $hr).Allowed) | Should -Be @('Deny')
+        $hr.Rights['Deny'] | Should -Be 'Write'
+        $sales = @($c.Choices | Where-Object { $_.Sid -eq 'S-1-5-21-1-2-3-1002' })[0]
+        @($sales.Types) | Should -Be @('Allow', 'Deny')
+        (Get-RemoveTypeChoice -Choice $sales).Default | Should -Be 'Allow'
+        $sales.Rights['Allow'] | Should -Be 'Modify' -Because 'Synchronize is not a level of its own'
+        $sales.Label | Should -Match 'Allow and Deny'
+
+        # The confirm no longer says "(asked: ...)", and the dialog hides the level in Remove mode.
+        $spec = Get-ConfirmSpec -Action RemovePermission -Targets @(New-FakeTarget -Display 'D:\Data') -Detail 'Deny Write for CONTOSO\HR'
+        $spec.Body | Should -Not -Match 'asked'
+        $spec.Body | Should -Match ([regex]::Escape('Remove all Deny permissions for CONTOSO\HR'))
+        Get-XamlButton -Xaml (Get-PermissionDialogXaml) -Name 'PermRightsLabel' | Should -Not -BeNullOrEmpty
+        $code = Get-Content -LiteralPath $script:AppPath -Raw
+        $code | Should -Match ([regex]::Escape("`$dlg.FindName('PermRightsLabel').Visibility = 'Collapsed'"))
+        $code | Should -Match ([regex]::Escape("`$dlg.FindName('PermRightsCombo').Visibility = 'Collapsed'"))
+
+        # The SID goes to the work block (for the read-back); the core gets the name.
+        $dir = New-Folder 'RemoveSid'
+        $script:Current = [PSCustomObject]@{ DisplayPath = $dir; RealPath = $dir }
+        Invoke-RemovePermission -Scope Folder -Identity 'CONTOSO\HR' -Rights 'Write' -Type 'Deny' -Sid 'S-1-5-21-1-2-3-1001'
+        $script:Captured.ArgumentList[1] | Should -Be 'CONTOSO\HR'
+        $script:Captured.ArgumentList | Should -Contain 'S-1-5-21-1-2-3-1001'
+    }
+
+    It 'SQ018R1_AclRowsCarrySidAndRights' {
+        $acl = New-Object System.Security.AccessControl.DirectorySecurity
+        $acl.SetSecurityDescriptorSddlForm('O:BAG:SYD:(A;;FA;;;BU)(D;;0x1200a9;;;WD)')
+        $rows = @((ConvertTo-AclViewModel -Acl $acl).Rows)
+        $rows[0].Sid | Should -Be 'S-1-5-32-545'
+        $rows[1].Sid | Should -Be 'S-1-1-0'
+        $rows[0].Rights | Should -Match 'FullControl'
+    }
+}
+
+Describe 'Review 5-7: log folder, relaunch, fatal error and close' {
+    It 'SQ018R1_LogFolderInASyncedFolder' {
+        $sync = New-Folder 'Profile\OneDrive - Contoso'
+        $tools = New-Folder 'Profile\OneDrive - Contoso\Tools\FPM'
+        $local = Join-Path $TestDrive 'LocalAppData'
+        $scriptLogs = Join-Path $tools 'Logs'
+        $default = Get-AppDefaultLogFolder -ScriptLogsFolder $scriptLogs -LocalAppData $local -SyncRoot @($sync)
+        $default | Should -Be (Join-Path $local 'FolderPermissionManager\Logs')
+        $notice = @(Get-SyncedLogFolderNotice -ScriptLogsFolder $scriptLogs -DefaultFolder $default -SyncRoot @($sync))
+        $notice.Count | Should -Be 1
+        $notice[0] | Should -Match ([regex]::Escape($default))
+
+        $plain = Join-Path (New-Folder 'Tools2') 'Logs'
+        Get-AppDefaultLogFolder -ScriptLogsFolder $plain -LocalAppData $local -SyncRoot @($sync) | Should -Be $plain
+        @(Get-SyncedLogFolderNotice -ScriptLogsFolder $plain -DefaultFolder $plain -SyncRoot @($sync)).Count | Should -Be 0
+
+        # An explicit -LogFolder inside a sync root is used as given, with a warning.
+        $explicit = Join-Path $sync 'Tickets\1'
+        $warn = @(Get-SyncedLogFolderNotice -LogFolder $explicit -ScriptLogsFolder $plain -DefaultFolder $plain -SyncRoot @($sync))
+        $warn.Count | Should -Be 1
+        $warn[0] | Should -Match '(?i)uploaded to the cloud'
+        @(Get-SyncedLogFolderNotice -LogFolder (Join-Path $TestDrive 'Tickets') -ScriptLogsFolder $plain -DefaultFolder $plain -SyncRoot @($sync)).Count | Should -Be 0
+
+        # Startup works the default out before Resolve-ChangeLogFolder and shows the notice.
+        $code = Get-Content -LiteralPath $script:AppPath -Raw
+        $startup = $code.Substring($code.IndexOf('#region Startup'))
+        $startup.IndexOf('Get-AppDefaultLogFolder') | Should -BeGreaterThan 0
+        $startup.IndexOf('Get-AppDefaultLogFolder') | Should -BeLessThan $startup.IndexOf('Resolve-ChangeLogFolder')
+        $startup | Should -Match 'Get-SyncedLogFolderNotice'
+    }
+
+    It 'SQ018R1_RelaunchChecksEveryFileItLoads' {
+        $map = @{ H = '\\fs01\tools' }
+        $running = 'H:\FPM\FolderPermissionManager-GUI.ps1'
+        $uncCore = '\\fs01\tools\FPM\FolderPermissions.Core.ps1'
+        # Only the core differs: refused, naming the core.
+        Mock Get-RelaunchFileHash { if ("$Path" -eq $uncCore) { 'DIFFERENT' } else { 'SAME' } }
+        $p = Get-RelaunchScriptProblem -ScriptPath $running -DriveMap $map -DriveMapSource @{ H = 'Remembered' }
+        $p | Should -Not -BeNullOrEmpty
+        $p | Should -Match ([regex]::Escape($uncCore))
+        # Both the same: allowed.
+        Mock Get-RelaunchFileHash { 'SAME' }
+        Get-RelaunchScriptProblem -ScriptPath $running -DriveMap $map -DriveMapSource @{ H = 'Remembered' } | Should -BeNullOrEmpty
+        # A size that differs is refused without reading the files.
+        $script:HashCalls = 0
+        Mock Get-RelaunchFileHash { $script:HashCalls++; 'SAME' }
+        Mock Get-RelaunchFileSize { if ("$Path" -like '\\*') { 200 } else { 100 } }
+        Get-RelaunchScriptProblem -ScriptPath $running -DriveMap $map -DriveMapSource @{ H = 'Remembered' } | Should -Match '(?i)not the same file'
+        $script:HashCalls | Should -Be 0 -Because 'a size mismatch is refused without reading the files'
+        # .NOTES says the check connects to the remembered server.
+        ($script:Ast.GetHelpContent().Notes) | Should -Match '(?i)connects to the server'
+    }
+
+    It 'SQ018R1_FatalErrorAndCloseFollowTheTaskState' {
+        $m = Get-FatalErrorMessage -ErrorText 'boom' -ErrorLogPath 'C:\x\gui-errors.log' -ChangeLogFolder 'D:\Logs' -ChangeRunning $false -ChangeStarted $false
+        $m | Should -Match 'Nothing was changed'
+        foreach ($case in @(@{ R = $true; S = $true }, @{ R = $false; S = $true }, @{ R = $true; S = $false })) {
+            $m2 = Get-FatalErrorMessage -ErrorText 'boom' -ErrorLogPath 'C:\x\gui-errors.log' -ChangeLogFolder 'D:\Logs' -ChangeRunning $case.R -ChangeStarted $case.S
+            $m2 | Should -Not -Match 'Nothing was changed'
+            $m2 | Should -Match ([regex]::Escape('check the change log in D:\Logs'))
+        }
+        (Get-FatalErrorMessage -ErrorText 'b' -ErrorLogPath 'l' -ChangeLogFolder 'D:\Logs' -ChangeRunning $true -ChangeStarted $true) | Should -Match 'A change may still be running or may have been made'
+        $code = Get-Content -LiteralPath $script:AppPath -Raw
+        $main = $code.Substring($code.IndexOf('#region Main'))
+        $main | Should -Match 'Get-FatalErrorMessage'
+        $main | Should -Match 'ChangeMadeThisSession'
+        $main.IndexOf('Show-OwnConsole') | Should -BeGreaterThan 0 -Because 'the wait is visible'
+        $main.IndexOf('Show-OwnConsole') | Should -BeLessThan $main.IndexOf('Wait-ChangeTasks')
+
+        # A change started this session sets the flag.
+        $script:ChangeMadeThisSession = $false
+        Mock Start-BgTask { [PSCustomObject]@{ Kind = 'Change'; PS = $null; Handle = [PSCustomObject]@{ IsCompleted = $false } } }
+        [void](& $script:RealStartChangeTask -Action 'Adding a permission on' -Path 'D:\Data' -Work { 'w' } -OnDone { param($r) })
+        $script:ChangeMadeThisSession | Should -BeTrue
+
+        # Closing follows the task's own state, not only that $script:ChangeTask is set.
+        $script:ChangeTask = [PSCustomObject]@{ Action = 'x'; Path = 'D:\Data'; Task = (New-FakeTask -Kind 'Change' -Completed $true) }
+        $script:BgTasks = [System.Collections.Generic.List[object]]::new()
+        @(Test-CanClose)[-1] | Should -BeTrue -Because 'the change task has finished'
+        $script:ChangeTask = [PSCustomObject]@{ Action = 'x'; Path = 'D:\Data'; Task = (New-FakeTask -Kind 'Change' -Completed $false) }
+        @(Test-CanClose)[-1] | Should -BeFalse
+        $script:ChangeTask = $null
+
+        $readme = Get-Content -LiteralPath (Join-Path $script:Root 'README.md') -Raw
+        ($readme -match '(?i)stuck') -and ($readme -match '(?i)mutex|single-instance lock|one window per log folder') | Should -BeTrue
+    }
+}
+
+Describe 'Review 8: -WhatIf writes no change log' {
+    It 'SQ018R1_WhatIfLeavesTheLogFolderAlone' {
+        $script:LoggedCalls = 0
+        Mock Invoke-LoggedPermissionChange { $script:LoggedCalls++; throw 'a -WhatIf run must not go through the change log' }
+        $dir = New-Folder 'WhatIfNoLog'
+        $dest = New-Folder 'WhatIfNoLogDest'
+        $f = New-File $dir 'a.txt'
+        $log = Join-Path $TestDrive 'whatif-log'
+        $runs = [ordered]@{
+            'add'       = { & $script:AddPermissionWork -Paths @($dir) -Identity 'BUILTIN\Users' -Rights 'Modify' -Type 'Allow' -LogFolder $log -WhatIf $true -CorePath $null }
+            'remove'    = { & $script:RemovePermissionWork -Paths @($f) -Identity 'BUILTIN\Users' -Rights 'Modify' -Type 'Allow' -LogFolder $log -WhatIf $true -CorePath $null }
+            'own'       = { & $script:TakeOwnershipWork -Paths @($dir) -Recurse $false -LogFolder $log -WhatIf $true -CorePath $null }
+            'own tree'  = { & $script:TakeOwnershipWork -Paths @($dir) -Recurse $true -LogFolder $log -WhatIf $true -CorePath $null }
+            'copy'      = { & $script:CopyPermissionsWork -SourcePath $dir -TargetPaths @($dest) -LogFolder $log -WhatIf $true -CorePath $null }
+        }
+        foreach ($name in $runs.Keys) {
+            $r = & $runs[$name]
+            $r.Ok | Should -BeTrue -Because "$name ($($r.Error))"
+            $r.LogPath | Should -BeNullOrEmpty
+            (Test-Path -LiteralPath $log) | Should -BeFalse -Because "$name under -WhatIf creates no log folder"
+        }
+        $script:LoggedCalls | Should -Be 0
+        ($script:Ast.GetHelpContent().Examples -join "`n") | Should -Match 'Nothing is backed up or logged'
+    }
+
+    It 'SQ018R1_WhatIfPoolRunWritesNothing' {
+        $marker = Join-Path $TestDrive 'whatif-reached.txt'
+        $stub = { param($n) "param([Parameter(ValueFromRemainingArguments)]`$a) Add-Content -LiteralPath '$marker' -Value '$n'; [PSCustomObject]@{ ExitCode = 0; Output = '' }" }
+        $override = @{}
+        foreach ($n in 'Set-Acl', 'Invoke-AclTool', 'takeown', 'icacls') { $override[$n] = & $stub $n }
+        # Records any change-log write instead of making it.
+        $override['Write-PermissionChangeLog'] = "param(`$Entries, `$LogFolder) Add-Content -LiteralPath '$marker' -Value 'log'; `$null"
+        $dir = New-Folder 'WhatIfPool'
+        $dest = New-Folder 'WhatIfPoolDest'
+        $log = Join-Path $TestDrive 'whatif-pool-log'
+        try {
+            Initialize-BackgroundPool -FunctionOverride $override
+            $jobs = @(
+                @{ W = $script:AddPermissionWork; A = @([string[]]@($dir), 'BUILTIN\Users', 'Modify', 'Allow', $log, $true, $null) }
+                @{ W = $script:RemovePermissionWork; A = @([string[]]@($dir), 'BUILTIN\Users', 'Modify', 'Allow', $log, $true, '', $null) }
+                @{ W = $script:TakeOwnershipWork; A = @([string[]]@($dir), $false, $log, $true, $null) }
+                @{ W = $script:TakeOwnershipWork; A = @([string[]]@($dir), $true, $log, $true, $null) }
+                @{ W = $script:CopyPermissionsWork; A = @($dir, [string[]]@($dest), $log, $true, $null) }
+            )
+            foreach ($j in $jobs) {
+                $t = Start-BgTask -Work $j.W -ArgumentList $j.A -OnDone { } -Kind Change
+                $t.Handle.AsyncWaitHandle.WaitOne(120000) | Should -BeTrue
+                $r = Select-TaskResult -Output @($t.PS.EndInvoke($t.Handle))
+                $t.PS.Dispose()
+                $r.Ok | Should -BeTrue -Because "$($r.Error)"
+            }
+            (Test-Path -LiteralPath $marker) | Should -BeFalse -Because 'no write and no change-log write was reached'
+            (Test-Path -LiteralPath $log) | Should -BeFalse
+        }
+        finally {
+            if ($script:BgPool) { try { $script:BgPool.Close() } catch { } }
+        }
+    }
+}
+
+Describe 'Review 9: results are read back' {
+    BeforeEach {
+        $script:Dir9 = New-Folder ('ReadBack-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+        $script:Log9 = Join-Path $TestDrive ('rb-log-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+        function script:New-SddlAcl { param([string]$Sddl) $a = New-Object System.Security.AccessControl.DirectorySecurity; $a.SetSecurityDescriptorSddlForm($Sddl); $a }
+    }
+
+    It 'SQ018R1_AddReadBackFails' {
+        Mock Add-FolderPermission { New-Row -Action 'Add permission' -Target $Path[0] -Detail "$Type $Rights for $Identity" }
+        Mock Get-Acl { New-SddlAcl 'O:BAG:SYD:(A;OICI;FA;;;SY)' }
+        $r = & $script:AddPermissionWork -Paths @($script:Dir9) -Identity 'BUILTIN\Users' -Rights 'Modify' -Type 'Allow' -LogFolder $script:Log9 -WhatIf $false -CorePath $null
+        $r.Message | Should -Be (Get-ChangeResultMessage -Entries $r.Entries -LogPath $r.LogPath -LogFolder $script:Log9) -Because 'the core message is kept'
+        $r.Entries[0].Result | Should -Be 'Done' -Because 'the core row is not rewritten'
+        $r.Entries[0].CheckProblem | Should -Match '(?i)no explicit Allow'
+        $s = Get-ChangeStatus -Entries $r.Entries -LogPath $r.LogPath -Message $r.Message
+        $s.Kind | Should -Be 'Warning'
+        $s.Text | Should -BeLike 'Done, with items to check: *'
+        $s.Text | Should -Match ([regex]::Escape($script:Dir9))
+        (Get-AllLogTextIn $script:Log9) | Should -Match 'Done, with items to check' -Because 'the failed check is logged too'
+
+        # The entry is there: no problem.
+        Mock Get-Acl { New-SddlAcl 'O:BAG:SYD:(A;OICI;0x1301bf;;;BU)' }
+        $ok = & $script:AddPermissionWork -Paths @($script:Dir9) -Identity 'BUILTIN\Users' -Rights 'Modify' -Type 'Allow' -LogFolder $script:Log9 -WhatIf $false -CorePath $null
+        $ok.Entries[0].PSObject.Properties['CheckProblem'] | Should -BeNullOrEmpty
+        (Get-ChangeStatus -Entries $ok.Entries -LogPath $ok.LogPath -Message $ok.Message).Kind | Should -Be 'Success'
+    }
+
+    It 'SQ018R1_RemoveInheritedOnlyWrongTypeAndNoOp' {
+        Mock Remove-FolderPermission { New-Row -Action 'Remove permission' -Target $Path[0] -Detail "$Type $Rights for $Identity" -OldValue 'D:SAME' -NewValue 'D:SAME' }
+        $cases = @(
+            @{ Name = 'inherited only'; Sddl = 'O:BAG:SYD:(A;OICIID;0x1301bf;;;BU)' }
+            @{ Name = 'wrong type'; Sddl = 'O:BAG:SYD:(D;OICI;0x1301bf;;;BU)' }
+        )
+        foreach ($c in $cases) {
+            $script:Sddl9 = $c.Sddl
+            Mock Get-Acl { New-SddlAcl $script:Sddl9 }
+            $r = & $script:RemovePermissionWork -Paths @($script:Dir9) -Identity 'BUILTIN\Users' -Rights 'Modify' -Type 'Allow' -LogFolder $script:Log9 -WhatIf $false -Sid 'S-1-5-32-545' -CorePath $null
+            $s = Get-ChangeStatus -Entries $r.Entries -LogPath $r.LogPath -Message $r.Message
+            $s.Kind | Should -Be 'Info' -Because $c.Name
+            $s.Text | Should -BeLike 'Nothing was removed: BUILTIN\Users had no explicit Allow entry here.*' -Because $c.Name
+        }
+        # The same SDDL, yet the SID still has an explicit entry of that type: the name went elsewhere.
+        Mock Get-Acl { New-SddlAcl 'O:BAG:SYD:(A;OICI;0x1301bf;;;BU)' }
+        $r = & $script:RemovePermissionWork -Paths @($script:Dir9) -Identity 'BUILTIN\Users' -Rights 'Modify' -Type 'Allow' -LogFolder $script:Log9 -WhatIf $false -Sid 'S-1-5-32-545' -CorePath $null
+        $r.Entries[0].CheckProblem | Should -Match '(?i)still has an explicit Allow'
+        (Get-ChangeStatus -Entries $r.Entries -LogPath $r.LogPath -Message $r.Message).Kind | Should -Be 'Warning'
+
+        # A real removal that left an explicit entry behind is not a success either.
+        Mock Remove-FolderPermission { New-Row -Action 'Remove permission' -Target $Path[0] -Detail "$Type $Rights for $Identity" -OldValue 'D:OLD' -NewValue 'D:NEW' }
+        $r2 = & $script:RemovePermissionWork -Paths @($script:Dir9) -Identity 'BUILTIN\Users' -Rights 'Modify' -Type 'Allow' -LogFolder $script:Log9 -WhatIf $false -Sid 'S-1-5-32-545' -CorePath $null
+        (Get-ChangeStatus -Entries $r2.Entries -LogPath $r2.LogPath -Message $r2.Message).Text | Should -BeLike 'Done, with items to check: *'
+    }
+
+    It 'SQ018R1_OwnerAndCopyReadBack' {
+        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        Mock Set-ItemOwnerToCurrentUser { New-Row -Action 'Take ownership' -Target $Path[0] -Detail 'Owner set to me' }
+        Mock Get-Acl { New-SddlAcl 'O:SYG:SYD:(A;OICI;FA;;;SY)' }
+        $r = & $script:TakeOwnershipWork -Paths @($script:Dir9) -Recurse $false -LogFolder $script:Log9 -WhatIf $false -CorePath $null
+        $r.Entries[0].CheckProblem | Should -Match '(?i)owner'
+        $script:Me9 = $me
+        Mock Get-Acl { New-SddlAcl "O:$($script:Me9)G:SYD:(A;OICI;FA;;;SY)" }
+        $r = & $script:TakeOwnershipWork -Paths @($script:Dir9) -Recurse $false -LogFolder $script:Log9 -WhatIf $false -CorePath $null
+        $r.Entries[0].PSObject.Properties['CheckProblem'] | Should -BeNullOrEmpty
+
+        $dest = New-Folder ('ReadBackDest-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+        $script:Src9 = $script:Dir9
+        Mock Copy-FolderPermission { foreach ($t in $TargetPath) { New-Row -Action 'Copy permissions' -Target $t -Detail "Copied from $($SourcePath): Allow Modify for BUILTIN\Users" } }
+        Mock Get-Acl { if ("$LiteralPath" -eq $script:Src9) { New-SddlAcl 'O:BAG:SYD:(A;OICI;0x1301bf;;;BU)' } else { New-SddlAcl 'O:BAG:SYD:(A;OICI;FA;;;SY)' } }
+        $c = & $script:CopyPermissionsWork -SourcePath $script:Dir9 -TargetPaths @($dest) -LogFolder $script:Log9 -WhatIf $false -CorePath $null
+        $c.Entries[0].CheckProblem | Should -Match '(?i)not on it'
+        Mock Get-Acl { New-SddlAcl 'O:BAG:SYD:(A;OICI;0x1301bf;;;BU)' }
+        $c2 = & $script:CopyPermissionsWork -SourcePath $script:Dir9 -TargetPaths @($dest) -LogFolder $script:Log9 -WhatIf $false -CorePath $null
+        $c2.Entries[0].PSObject.Properties['CheckProblem'] | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Review 10-12: this computer as a DFS server, whole-tree guards, DFS with two targets' {
+    It 'SQ018R1_ThisComputerAsDfsNamespaceServer' {
+        # \\testpc\Public is a DFS namespace root shared from C:\DFSRoots\Public; Link is a DFS folder.
+        Mock Get-LocalSharePath { 'C:\DFSRoots\Public' }
+        Mock Get-AppReparseInfo { [PSCustomObject]@{ Exists = $true; IsReparsePoint = ($Path -eq 'C:\DFSRoots\Public\Link'); Tag = $(if ($Path -eq 'C:\DFSRoots\Public\Link') { [uint32]2147483658 } else { $null }) } }
+        Mock Get-AppDfsTarget { '\\fs02\HR\Sub' } -ParameterFilter { $Path -eq '\\testpc\Public\Link\Sub' }
+        $t = Get-ChangeTarget -Path '\\testpc\Public\Link\Sub'
+        $t.Ok | Should -BeTrue
+        $t.ResolvedPath | Should -Be '\\fs02\HR\Sub' -Because 'the DFS folder on this computer is looked up, not changed in place'
+        Should -Invoke Get-AppDfsTarget -Times 1 -Exactly -ParameterFilter { $Path -eq '\\testpc\Public\Link\Sub' }
+
+        # A folder on the namespace share that is not a DFS folder stays local and is not looked up.
+        $plain = Get-ChangeTarget -Path '\\testpc\Public\Readme'
+        $plain.ResolvedPath | Should -Be 'C:\DFSRoots\Public\Readme'
+        $plain.IsLocal | Should -BeTrue
+
+        # The lookup fails, or finds nothing, or finds two: refused.
+        Mock Get-AppDfsTarget { throw 'DFS did not answer' } -ParameterFilter { $Path -eq '\\testpc\Public\Link\Sub' }
+        (Get-ChangeTarget -Path '\\testpc\Public\Link\Sub').Refusal | Should -Match 'DFS'
+        Mock Get-AppDfsTarget { } -ParameterFilter { $Path -eq '\\testpc\Public\Link\Sub' }
+        $none = Get-ChangeTarget -Path '\\testpc\Public\Link\Sub'
+        $none.Ok | Should -BeFalse
+        $none.Refusal | Should -Match 'DFS'
+        # The reparse point cannot be read: refused (fail closed).
+        Mock Get-AppReparseInfo { throw 'Access is denied' }
+        $unread = Get-ChangeTarget -Path '\\testpc\Public\Link\Sub'
+        $unread.Ok | Should -BeFalse
+        $unread.Refusal | Should -Match 'DFS'
+
+        # The walk finds the DFS folder above the path, and stops below the drive root.
+        Mock Get-AppReparseInfo { [PSCustomObject]@{ Exists = ($Path -ne 'C:\DFSRoots\Public\Link\HR\New'); IsReparsePoint = ($Path -eq 'C:\DFSRoots\Public\Link'); Tag = [uint32]2147483658 } }
+        Find-DfsReparsePoint -Path 'C:\DFSRoots\Public\Link\HR\New' | Should -Be 'C:\DFSRoots\Public\Link'
+        Should -Invoke Get-AppReparseInfo -Times 0 -ParameterFilter { $Path -eq 'C:\' -or $Path -eq 'C:' }
+        # 2684354563 = 0xA0000003, IO_REPARSE_TAG_MOUNT_POINT (the hex literal is a negative Int32 in PowerShell).
+        Mock Get-AppReparseInfo { [PSCustomObject]@{ Exists = $true; IsReparsePoint = $true; Tag = [uint32]2684354563 } }
+        Find-DfsReparsePoint -Path 'C:\Data\Junction' | Should -BeNullOrEmpty -Because 'a junction is not a DFS folder'
+    }
+
+    It 'SQ018R1_ReparseInfoReadsTheDirectoryEntry' {
+        # Real read, inside $TestDrive only.
+        $dir = New-Folder 'ReparseReal'
+        $i = & (Get-Command Get-AppReparseInfo -CommandType Function).ScriptBlock -Path $dir
+        $i.Exists | Should -BeTrue
+        $i.IsReparsePoint | Should -BeFalse
+        $missing = & (Get-Command Get-AppReparseInfo -CommandType Function).ScriptBlock -Path (Join-Path $dir 'nope')
+        $missing.Exists | Should -BeFalse
+    }
+
+    It 'SQ018R1_WholeTreeOnAShareChecksTheServerSidePath' {
+        $cases = @(
+            @{ Local = 'D:\'; Match = '(?i)root of drive' }
+            @{ Local = 'C:\Windows'; Match = '(?i)Windows system folder' }
+            @{ Local = 'C:\Users'; Match = '(?i)profile' }
+            @{ Local = 'E:\Data\$RECYCLE.BIN'; Match = '(?i)Recycle Bin' }
+        )
+        foreach ($c in $cases) {
+            $script:Local11 = $c.Local
+            Mock Get-RemoteShareLocalPath { $script:Local11 }
+            $t = Get-ChangeTarget -Path '\\fs01\Data' -WholeTree
+            $t.Ok | Should -BeFalse -Because "the share is $($c.Local) on fs01"
+            $t.Refusal | Should -Match $c.Match
+            $t.Refusal | Should -Match ([regex]::Escape($c.Local))
+        }
+        Mock Get-RemoteShareLocalPath { 'D:\Shares\Data' }
+        (Get-ChangeTarget -Path '\\fs01\Data\HR' -WholeTree).Ok | Should -BeTrue
+        Should -Invoke Get-RemoteShareLocalPath -ParameterFilter { $Server -eq 'fs01' -and $Share -eq 'Data' }
+
+        # It cannot be told: refused (fail closed).
+        Mock Get-RemoteShareLocalPath { throw 'Access is denied' }
+        $f = Get-ChangeTarget -Path '\\fs01\Data\HR' -WholeTree
+        $f.Ok | Should -BeFalse
+        $f.Refusal | Should -Match ([regex]::Escape('\\fs01\D$'))
+        Mock Get-RemoteShareLocalPath { '\\?\Volume{1234}\Data' }
+        (Get-ChangeTarget -Path '\\fs01\Data\HR' -WholeTree).Ok | Should -BeFalse
+
+        # Only whole-tree changes ask, and never for an administrative share.
+        $script:ShareCalls = 0
+        Mock Get-RemoteShareLocalPath { $script:ShareCalls++; 'D:\Shares\Data' }
+        $null = Get-ChangeTarget -Path '\\fs01\Data\HR'
+        $null = Get-ChangeTarget -Path '\\fs01\E$\Data' -WholeTree
+        $script:ShareCalls | Should -Be 0
+    }
+
+    It 'SQ018R1_WholeTreeRefusesHighImpactRoots' {
+        foreach ($p in 'C:\Users', 'C:\Users\', '\\testpc\C$\Users', '\\fs01\C$\Users', '\\fs01\D$\Users', 'D:\System Volume Information', 'D:\System Volume Information\x', 'E:\$Recycle.Bin', '\\fs01\E$\$RECYCLE.BIN\S-1-5-21') {
+            $t = Get-ChangeTarget -Path $p -WholeTree
+            $t.Ok | Should -BeFalse -Because "$p is a high-impact root"
+        }
+        Mock Get-AppProfilesDirectory { 'E:\Profiles' }
+        (Get-ChangeTarget -Path 'E:\Profiles' -WholeTree).Ok | Should -BeFalse -Because 'the ProfilesDirectory is refused wherever it is'
+        (Get-ChangeTarget -Path 'E:\Profiles\bob' -WholeTree).Ok | Should -BeTrue -Because 'one profile folder is allowed'
+        Mock Get-AppProfilesDirectory { 'C:\Users' }
+        foreach ($p in 'C:\Users\bob', '\\testpc\C$\Users\bob', '\\fs01\C$\Users\bob', 'D:\Data\Users') {
+            (Get-ChangeTarget -Path $p -WholeTree).Ok | Should -BeTrue -Because "$p is one profile or an ordinary folder"
+        }
+        # Only whole-tree changes are guarded this way.
+        (Get-ChangeTarget -Path 'C:\Users').Ok | Should -BeTrue
+    }
+
+    It 'SQ018R1_DfsWithTwoTargetsIsRefused' {
+        Mock Get-AppDfsTarget { '\\fs01\Data\HR'; '\\fs02\Data\HR' } -ParameterFilter { $Path -eq '\\contoso.com\dfs\hr' }
+        $t = Get-ChangeTarget -Path '\\contoso.com\dfs\hr'
+        $t.Ok | Should -BeFalse
+        $t.Refusal | Should -Match ([regex]::Escape('\\fs01\Data\HR'))
+        $t.Refusal | Should -Match ([regex]::Escape('\\fs02\Data\HR'))
+        $t.Refusal | Should -Match 'a DFS folder that points to 2 servers'
+        $script:Current = [PSCustomObject]@{ DisplayPath = '\\contoso.com\dfs\hr'; RealPath = '\\contoso.com\dfs\hr' }
+        Invoke-AddPermission -Scope Folder -Identity 'BUILTIN\Users' -Rights 'Modify' -Type 'Allow'
+        Should -Invoke Start-ChangeTask -Times 0 -Exactly
+        @($script:Shown | Where-Object { $_ -match '2 servers' }).Count | Should -Be 1 -Because 'the refusal is also a message box'
+    }
+}
+
+Describe 'Review minors' {
+    It 'SQ018R1_DefaultButtonsAndValidation' {
+        (Get-XamlButton -Xaml (Get-PermissionDialogXaml) -Name 'PermSubmitBtn').GetAttribute('IsDefault') | Should -Be 'True'
+        (Get-XamlButton -Xaml (Get-CopyPermissionsDialogXaml) -Name 'CopySubmitBtn').GetAttribute('IsDefault') | Should -Be 'True'
+        (Get-XamlButton -Xaml (Get-ConfirmDialogXaml) -Name 'ConfirmActionBtn').GetAttribute('IsDefault') | Should -Not -Be 'True'
+        $code = Get-Content -LiteralPath $script:AppPath -Raw
+        $code | Should -Match ([regex]::Escape('$submit.IsDefault = $false')) -Because 'Remove is never the default button'
+        $code | Should -Match 'Add_TextChanged' -Because 'a validation error clears when the tech types'
+
+        Add-Type -AssemblyName PresentationCore, PresentationFramework, WindowsBase
+        $set = [System.Collections.Generic.List[object]]::new()
+        $fake = [PSCustomObject]@{}
+        $fake | Add-Member ScriptMethod SetValue { param($dp, $value) $set.Add(@($dp, $value)) }.GetNewClosure()
+        Enable-LiveRegion -Element $fake -Setting Assertive | Should -BeTrue
+        "$($set[0][1])" | Should -Be 'Assertive'
+    }
+
+    It 'SQ018R1_RefusalsArePlainAndAlsoAMessageBox' {
+        $t = Get-ChangeTarget -Path 'C:\Data\a.txt:secret'
+        $t.Refusal | Should -Match ([regex]::Escape("contains a ':' after the drive, so it points at hidden data inside a file"))
+        (Get-ChangeTarget -Path '\\fs01\share\a.txt:s').Refusal | Should -Match ([regex]::Escape("contains a ':' after the share name"))
+        $script:Current = [PSCustomObject]@{ DisplayPath = 'D:\Data\x:hidden'; RealPath = 'D:\Data\x:hidden' }
+        Invoke-TakeOwnership -Scope Folder
+        @($script:Shown | Where-Object { $_ -match 'hidden data inside a file' }).Count | Should -Be 1
+        (Get-LastStatus).Kind | Should -Be 'Error'
+    }
+
+    It 'SQ018R1_DisabledButtonsSayWhyAndBusyLineShowsTheChangeFirst' {
+        $script:UI = @{}
+        foreach ($b in $script:ChangeButtons) { $script:UI[$b] = [PSCustomObject]@{ IsEnabled = $true; ToolTip = "tip $b" } }
+        $script:ChangeButtonTips = @{}
+        $script:Current = $null
+        Update-ChangeControls
+        $script:UI['AddPermissionBtn'].IsEnabled | Should -BeFalse
+        $script:UI['AddPermissionBtn'].ToolTip | Should -Be 'Choose a folder first.'
+        $script:Current = [PSCustomObject]@{ DisplayPath = 'D:\Data'; RealPath = 'D:\Data' }
+        $script:ChangeTask = [PSCustomObject]@{ Action = 'Taking ownership of'; Path = 'D:\Data\HR'; Key = 'k1' }
+        Update-ChangeControls
+        $script:UI['AddPermissionBtn'].ToolTip | Should -BeLike 'A change is running on D:\Data\HR*'
+        $script:ChangeTask = $null
+        Update-ChangeControls
+        $script:UI['AddPermissionBtn'].IsEnabled | Should -BeTrue
+        $script:UI['AddPermissionBtn'].ToolTip | Should -Be 'tip AddPermissionBtn' -Because 'the normal tooltip comes back'
+
+        $entries = [ordered]@{
+            k1 = [PSCustomObject]@{ Action = 'Taking ownership of'; Path = 'D:\Data\HR'; Started = [DateTime]::UtcNow }
+            k2 = [PSCustomObject]@{ Action = 'Opening folder'; Path = 'D:\Other'; Started = [DateTime]::UtcNow }
+        }
+        (Get-BusyLineEntry -Entries $entries -ChangeKey 'k1').Path | Should -Be 'D:\Data\HR'
+        (Get-BusyLineEntry -Entries $entries -ChangeKey $null).Path | Should -Be 'D:\Other' -Because 'without a change, the newest read'
+    }
+
+    It 'SQ018R1_FailedChangeRefreshesToo' {
+        $script:Started = [System.Collections.Generic.List[object]]::new()
+        Mock Start-BgTask { $script:Started.Add(@{ OnDone = $OnDone; State = $State }); [PSCustomObject]@{ Kind = 'Change'; PS = $null; Handle = [PSCustomObject]@{ IsCompleted = $false } } }
+        Mock Invoke-ChangeRefresh { }
+        $refresh = @{ Scope = 'Folder'; Paths = @('D:\Data'); ChangedFiles = @(); Node = $null }
+        [void](& $script:RealStartChangeTask -Action 'Adding a permission on' -Path 'D:\Data' -Work { 'w' } -State $refresh -OnDone { param($r) })
+        & $script:Started[0].OnDone ([PSCustomObject]@{ Ok = $false; Stopped = $false; Error = 'boom' }) $script:Started[0].State
+        Should -Invoke Invoke-ChangeRefresh -Times 1 -Exactly
+    }
+
+    It 'SQ018R1_UnloggedRowsGoToAFallbackFile' {
+        $old = $env:LOCALAPPDATA
+        $env:LOCALAPPDATA = Join-Path $TestDrive 'la-unlogged'
+        try {
+            Mock Write-PermissionChangeLog { if (@($Entries)[0].Result -eq 'Started') { Join-Path $TestDrive 'started.csv' } else { $null } }
+            Mock Add-FolderPermission { New-Row -Action 'Add permission' -Target $Path[0] -Detail "$Type $Rights for $Identity" }
+            Mock Get-Acl { $a = New-Object System.Security.AccessControl.DirectorySecurity; $a.SetSecurityDescriptorSddlForm('O:BAG:SYD:(A;OICI;0x1301bf;;;BU)'); $a }
+            $dir = New-Folder 'Unlogged'
+            $r = & $script:AddPermissionWork -Paths @($dir) -Identity 'BUILTIN\Users' -Rights 'Modify' -Type 'Allow' -LogFolder (Join-Path $TestDrive 'nolog') -WhatIf $false -CorePath $null
+            $r.LogPath | Should -BeNullOrEmpty
+            $r.UnloggedPath | Should -BeLike (Join-Path $env:LOCALAPPDATA 'FolderPermissionManager\Logs\Unlogged_*.csv')
+            (Test-Path -LiteralPath $r.UnloggedPath) | Should -BeTrue
+            (Get-Content -LiteralPath $r.UnloggedPath -Raw) | Should -Match ([regex]::Escape($dir))
+            Complete-ChangeTask -Result $r -State $null
+            (Get-LastStatus).Text | Should -Match ([regex]::Escape($r.UnloggedPath))
+        }
+        finally { $env:LOCALAPPDATA = $old }
+    }
+
+    It 'SQ018R1_ChangeStatusMatchesTheBrowser' {
+        # Failed and nothing done is an error even when another item was already up to date.
+        $s = Get-ChangeStatus -Entries @((New-Row -Result 'Failed' -ErrorText 'denied'), (New-Row -Result 'Skipped (nothing to copy)')) -LogPath 'C:\l.csv' -Message 'm'
+        $s.Kind | Should -Be 'Error'
+        # Every item not found is a warning, not an error.
+        (Get-ChangeStatus -Entries @((New-Row -Result 'Skipped (not found)')) -LogPath 'C:\l.csv' -Message 'm').Kind | Should -Be 'Warning'
+    }
+
+    It 'SQ018R1_ThisComputerNameIPv6ScopeAndMappedLoopback' {
+        Test-ThisComputerName -Name '0--ffff-7f00-1.ipv6-literal.net' | Should -BeTrue -Because '::ffff:127.0.0.1 is loopback'
+        Test-ThisComputerName -Name '[::ffff:127.0.0.1]' | Should -BeTrue
+        Mock Get-ThisComputerNames { @('TESTPC', 'fe80::1234%4', '10.0.0.5') }
+        Test-ThisComputerName -Name 'fe80--1234s7.ipv6-literal.net' | Should -BeTrue -Because 'the scope ID does not change which address it is'
+        Test-ThisComputerName -Name '0--ffff-a00-5.ipv6-literal.net' | Should -BeTrue -Because '::ffff:10.0.0.5 is this computer''s IPv4 address'
+        Test-ThisComputerName -Name 'fe80--9999.ipv6-literal.net' | Should -BeFalse
+        $code = Get-Content -LiteralPath $script:AppPath -Raw
+        $code | Should -Match '(?i)DNS alias'
+    }
+
+    It 'SQ018R1_StaleCommentsAndReadme' {
+        $code = Get-Content -LiteralPath $script:AppPath -Raw
+        $code | Should -Not -Match '(?i)wired up in SQ-018'
+        $readme = Get-Content -LiteralPath (Join-Path $script:Root 'README.md') -Raw
+        $app = [regex]::Match($readme, '(?s)### FolderPermissionManager-GUI\.ps1 \(Windows app\)(.*?)\n### ').Groups[1].Value
+        $app | Should -Match '`Started`'
+        $app | Should -Match '(?i)orphan'
+        $app | Should -Match ([regex]::Escape('%LOCALAPPDATA%\FolderPermissionManager\Logs'))
+        $app | Should -Match 'Unlogged_'
+        $app | Should -Match ([regex]::Escape('Done, with items to check'))
     }
 }
 }
