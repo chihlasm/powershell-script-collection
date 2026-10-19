@@ -126,11 +126,10 @@ The copy-permissions tree backup is no longer needed (D-031). The old CLI
 ownership, `-Force` and a help block (D-010). Builds after SQ-008. Split per D-004.
 
 ## SQ-015 · FolderPermissionManager: fix recursive copy permissions
-- status: needs-answers
-- waiting: SQ-014 (blocked on Q-005); SQ-015 is stacked on SQ-014's branch, so it is held until SQ-014 is unblocked (squad scheduling, 2026-10-18 run)
+- status: ready
 - priority: P1
 - type: fix
-- branch: squad/SQ-015-fpm-recursive-copy
+- branch: squad/SQ-015-fpm-recursive-copy (stacked on SQ-014; SQ-014's tip 33d09c5 merged in at 43ca5a3, owner 2026-10-19, D-041)
 - spec: squad/specs/SQ-015.md
 
 Bugs found while planning SQ-008: the recursive copy maps rights with `switch -Wildcard` and no
@@ -141,11 +140,10 @@ turns inherited rules into explicit ones, and handlers use `-Path`, which breaks
 subfolders untouched (D-031). Fix with a regression test for each. Builds after SQ-014 (D-011).
 
 ## SQ-017 · FolderPermissionManager as a WPF app: the window, browsing and viewing (read-only)
-- status: needs-answers
-- waiting: SQ-014 and SQ-015 merged to main (owner hold, 2026-10-18 review); set back to ready after that review
+- status: ready
 - priority: P1
 - type: feature
-- branch: squad/SQ-017-fpm-wpf-window
+- branch: squad/SQ-017-fpm-wpf-window (stacked: create it from squad/SQ-015-fpm-recursive-copy as SQ-015 finishes this run, not from main; D-041)
 - spec: squad/specs/SQ-017.md (AC1-AC25)
 
 Rewrite FolderPermissionManager-GUI.ps1 as a WPF window in the style of RobocopyMigration-GUI.ps1,
@@ -159,11 +157,10 @@ until the owner's lab test. Robocopy tab and Copy Files To are dropped (D-037). 
 SQ-014 and SQ-015 (same core and GUI file). Split per D-039.
 
 ## SQ-018 · FolderPermissionManager WPF app: every change, confirmations and results
-- status: needs-answers
-- waiting: SQ-014 and SQ-015 merged to main (owner hold, 2026-10-18 review); set back to ready after that review
+- status: ready
 - priority: P1
 - type: feature
-- branch: squad/SQ-018-fpm-wpf-changes
+- branch: squad/SQ-018-fpm-wpf-changes (stacked: create it from squad/SQ-017-fpm-wpf-window as SQ-017 finishes this run; D-041)
 - spec: squad/specs/SQ-017.md (AC26-AC46)
 
 Second half of the WPF rewrite: add/remove permission (folders and files), take ownership
@@ -227,7 +224,8 @@ password problem, encryption type blocked") with the next step, in the report an
 (D-022, D-023, D-024). Per-DC gate says "can't tell" where a DC can't log the events. Read-only.
 
 ## SQ-007 · Mailbox check: the facts, with "do NOT reset yet" on takeover signs
-- status: ready
+- status: needs-answers
+- waiting: parked for the folder-permissions run (owner, 2026-10-19, D-041); back to ready after that run
 - revision: merge to main failed one test at review 2026-10-18 (see spec Revision notes)
 - priority: P2
 - type: feature
@@ -272,7 +270,8 @@ Invoke-Command (D-005), and log every change in the shared format (D-030). Fail 
 can't be written (D-029).
 
 ## SQ-012 · AVD host checks in Citrix-FSLogix-Triage
-- status: ready
+- status: needs-answers
+- waiting: parked for the folder-permissions run (owner, 2026-10-19, D-041); back to ready after that run
 - priority: P2
 - type: feature
 - branch:
@@ -284,7 +283,8 @@ documented event 3277 errors, events 3703/3019/3389 and the rdp-sxs listener, ea
 Learn fix. No new folder. Split from SQ-003 per D-004; P2 per D-016.
 
 ## SQ-005 · End-of-support section in AD-Audit
-- status: ready
+- status: needs-answers
+- waiting: parked for the folder-permissions run (owner, 2026-10-19, D-041); back to ready after that run
 - priority: P3
 - type: feature
 - branch:
