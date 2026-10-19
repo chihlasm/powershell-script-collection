@@ -1484,8 +1484,8 @@ Describe 'README after fix round 2' {
 #          Each entry has a learn.microsoft.com citation on its own line or in the two lines
 #          above it. Values from MS-FSCC 2.1.2.1 "Reparse Tags":
 #          https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
-#   The OneDrive tag IO_REPARSE_TAG_ONEDRIVE (0x80000021) is NOT pinned: D-040 names the
-#          IO_REPARSE_TAG_CLOUD* family only (see the report for the open question).
+#   IO_REPARSE_TAG_ONEDRIVE (0x80000021) is allowlisted too (lead decision: D-040 says the
+#          cloud/OneDrive family). 22 entries in all.
 Describe 'D-040 reparse allowlist: links inside the tree' {
     BeforeAll {
         # Learn MS-FSCC 2.1.2.1 values. Do not edit without owner approval (AC20d).
@@ -1495,6 +1495,7 @@ Describe 'D-040 reparse allowlist: links inside the tree' {
             IO_REPARSE_TAG_HSM     = [uint32]'0xC0000004'
             IO_REPARSE_TAG_HSM2    = [uint32]'0x80000006'
             IO_REPARSE_TAG_SIS     = [uint32]'0x80000007'
+            IO_REPARSE_TAG_ONEDRIVE = [uint32]'0x80000021'
             IO_REPARSE_TAG_CLOUD   = [uint32]'0x9000001A'
             IO_REPARSE_TAG_CLOUD_1 = [uint32]'0x9000101A'
             IO_REPARSE_TAG_CLOUD_2 = [uint32]'0x9000201A'
@@ -1570,6 +1571,7 @@ Describe 'D-040 reparse allowlist: links inside the tree' {
             @{ Name = 'IO_REPARSE_TAG_HSM'; Value = [uint32]'0xC0000004' }
             @{ Name = 'IO_REPARSE_TAG_HSM2'; Value = [uint32]'0x80000006' }
             @{ Name = 'IO_REPARSE_TAG_SIS'; Value = [uint32]'0x80000007' }
+            @{ Name = 'IO_REPARSE_TAG_ONEDRIVE'; Value = [uint32]'0x80000021' }
             @{ Name = 'IO_REPARSE_TAG_CLOUD'; Value = [uint32]'0x9000001A' }
             @{ Name = 'IO_REPARSE_TAG_CLOUD_1'; Value = [uint32]'0x9000101A' }
             @{ Name = 'IO_REPARSE_TAG_CLOUD_2'; Value = [uint32]'0x9000201A' }
@@ -1656,6 +1658,7 @@ Describe 'D-040 reparse allowlist: links inside the tree' {
             @{ Name = 'IO_REPARSE_TAG_HSM'; Value = [uint32]'0xC0000004' }
             @{ Name = 'IO_REPARSE_TAG_HSM2'; Value = [uint32]'0x80000006' }
             @{ Name = 'IO_REPARSE_TAG_SIS'; Value = [uint32]'0x80000007' }
+            @{ Name = 'IO_REPARSE_TAG_ONEDRIVE'; Value = [uint32]'0x80000021' }
             @{ Name = 'IO_REPARSE_TAG_CLOUD'; Value = [uint32]'0x9000001A' }
             @{ Name = 'IO_REPARSE_TAG_CLOUD_F'; Value = [uint32]'0x9000F01A' }
         ) {
