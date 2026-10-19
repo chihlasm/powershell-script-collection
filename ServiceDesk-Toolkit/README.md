@@ -129,6 +129,14 @@ It checks whether sign-in is blocked, whether a licence is assigned and working,
 latest sign-in (the error code, Microsoft's own reason, and which Conditional Access policy
 blocked it), MFA methods, and whether ID Protection flags the user as risky.
 
+For a synced user it also asks **"is it a sync problem?"**: does the on-premises AD account
+agree, did sync report an error, does another user, group or contact already hold their
+address, has sync run in the last 3 hours, and was the account blocked on purpose with
+M365-SyncedUserFixes. If the user is not in Microsoft 365 at all but is in AD, it says so
+("exists in AD but not in Microsoft 365"). This part needs RSAT and a domain controller: run
+it on a client server, or add `-Server <domain controller> -Credential <client admin>`.
+Without them the answer still comes, with "On-premises AD: could not check".
+
 Add `-TicketNumber 482113` to save the [ticket note](#one-note-for-the-whole-ticket) in the
 ticket's folder, and `-OutputPath C:\Temp` to also save an HTML report and a CSV (with both, all
 three go into `C:\Temp\Ticket_482113`). Without `-OutputPath` no report is written.
@@ -140,7 +148,8 @@ three go into `C:\Temp\Ticket_482113`). Without `-OutputPath` no report is writt
 - Anything listed under **Could not check** was not checked, so it is not ruled out.
 - If Windows signs you in with your own work account instead of the client's, run it again
   with `-DisableWam` (it then uses a device code, where you choose the account).
-- It does not check the on-premises AD account yet. For a synced user who is blocked, run
+- It compares the AD account with Microsoft 365 but does not check its state in depth (locked
+  out, password expired). For a synced user who is blocked, run
   [AD-UserQuickCheck](#cant-sign-in) too.
 
 ---

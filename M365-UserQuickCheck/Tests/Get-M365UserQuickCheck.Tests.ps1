@@ -49,6 +49,14 @@ BeforeAll {
     function Set-Clipboard { [CmdletBinding()] param([Parameter(ValueFromPipeline = $true)][AllowEmptyString()][string[]]$Value, [switch]$Append, [switch]$AsHtml) }
     # The kit (CaseKit.ps1) defines this only once the script runs; the stub lets it be mocked.
     function Invoke-WinFormsClipboard { param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text) }
+    # SQ-011 review: a file-level Get-ADUser that THROWS, so a test that forgets to mock it fails
+    # loudly instead of reaching a domain controller (the AD Describe shadows it with its own stub
+    # and Mock). Real parameter names.
+    function Get-ADUser {
+        [CmdletBinding()]
+        param($Identity, $LDAPFilter, $Filter, $Server, [pscredential]$Credential, $Properties, $SearchBase, $ResultSetSize)
+        throw 'Get-ADUser was called without a Mock: a test must never reach a real domain controller.'
+    }
 
     $script:TenantId = '11111111-2222-3333-4444-555555555555'
     $script:UserId = 'aaaaaaaa-0000-0000-0000-000000000001'
@@ -87,6 +95,7 @@ BeforeAll {
             MfaMethods = @(@{ '@odata.type' = '#microsoft.graph.passwordAuthenticationMethod'; id = '28c10230-6103-485e-b985-444c60001490' },
                 @{ '@odata.type' = '#microsoft.graph.microsoftAuthenticatorAuthenticationMethod'; id = 'cccccccc-0000-0000-0000-000000000001' })
             RiskyUser = $null; RiskyStatus = 'NotFound'; ThrowOnUsers = $false
+            SidMatches = @(); ThrowOnGroups = $false
         }
         foreach ($k in $Override.Keys) { $s[$k] = $Override[$k] }
         $script:Scn = $s
@@ -141,8 +150,13 @@ BeforeAll {
                 return $s.RiskyUser
             }
             '/authentication/methods' { return @{ value = @($s.MfaMethods) } }
+            '/groups' {
+                if ($s.ThrowOnGroups) { throw (Get-FakeGraphError 'Forbidden' '{"error":{"code":"Authorization_RequestDenied","message":"Insufficient privileges to complete the operation."}}') }
+                return @{ value = @() }
+            }
             '/users' {
                 if ($s.ThrowOnUsers) { throw 'boom: synthetic failure while looking up the user' }
+                if ($u -match 'onPremisesSecurityIdentifier eq') { return @{ value = @($s.SidMatches) } }
                 if ($u -match 'userPrincipalName eq') { return @{ value = @($s.UpnMatches) } }
                 return @{ value = @($s.FallbackMatches) }
             }
@@ -554,6 +568,85 @@ Describe 'AC3 read-only by construction' {
             $script:Asts[$f.Name] = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tokens, [ref]$errs)
         }
         function Get-Commands($ast) { $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) }
+
+        # SQ-011 review: an ALLOWLIST, compared case-insensitively the way PowerShell resolves
+        # commands, so Set-AdUser, set-aduser and ActiveDirectory\Set-ADUser cannot slip past a
+        # case-sensitive denylist. Any command whose noun starts with AD must be Get-ADUser; any
+        # whose noun starts with Mg must be one of the Graph session cmdlets below; nothing from
+        # the AzureAD, MSOnline or Microsoft.Entra modules (AzureAD*, Msol*, Entra* nouns) is
+        # used at all. Set-MgGraphOption is not allowed either: the script never calls it, and
+        # it persists a client-side setting on the machine (SQ-011 review). Nouns that
+        # start with the English word "Address" (the core's Add-AddressConflictReasons) are not
+        # AD nouns: no ActiveDirectory cmdlet noun starts with it (checked against the real
+        # module in the test below where RSAT is installed).
+        $script:AllowedAdCommands = @('Get-ADUser')
+        $script:AllowedMgCommands = @('Connect-MgGraph', 'Disconnect-MgGraph', 'Get-MgContext', 'Invoke-MgGraphRequest')
+        function Test-ForbiddenCommand([string]$Name) {
+            $bare = $Name -replace '^.*\\', ''
+            if ($bare -notmatch '^(?<verb>\w+)-(?<noun>\w+)$') { return $false }
+            $noun = $Matches['noun']
+            if ($noun -match '^AD' -and $noun -notmatch '^Address') { return ($bare -notin $script:AllowedAdCommands) }
+            if ($noun -match '^(AzureAD|Msol|Entra)') { return $true }
+            if ($noun -match '^Mg') { return ($bare -notin $script:AllowedMgCommands) }
+            return $false
+        }
+        # Constructs that would let a script write without a write cmdlet: running built text,
+        # a command whose name is only known at run time, raw HTTP outside
+        # Invoke-MgGraphRequest, and ADSI (DirectoryEntry.SetInfo / CommitChanges write straight
+        # to AD).
+        #
+        # & or . with no static command name: the guard cannot see what runs, so it is a hit
+        # unless every assignment to the invoked variable in the same file is a script block
+        # literal (its body is scanned with the rest of the file) or, for dot-sourcing only,
+        # Join-Path $PSScriptRoot '<name>.ps1' (a sibling script, scanned too). The production
+        # scripts use exactly these: & $safe and & $getUsers, . $corePath and . $kit.
+        function Test-ScannedInvocationTarget($ast, $command) {
+            $target = $command.CommandElements[0]
+            if ($target -isnot [System.Management.Automation.Language.VariableExpressionAst]) { return $false }
+            $name = $target.VariablePath.UserPath
+            $rhs = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                        $n.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and $n.Left.VariablePath.UserPath -eq $name }, $true) | ForEach-Object Right)
+            if ($rhs.Count -eq 0) { return $false }
+            foreach ($r in $rhs) {
+                if ($r -is [System.Management.Automation.Language.PipelineAst] -and @($r.PipelineElements).Count -eq 1) { $r = $r.PipelineElements[0] }
+                if ($r -is [System.Management.Automation.Language.CommandExpressionAst] -and $r.Expression -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) { continue }
+                $isSiblingScript = ($command.InvocationOperator -eq 'Dot' -and $r -is [System.Management.Automation.Language.CommandAst] -and
+                    $r.GetCommandName() -eq 'Join-Path' -and @($r.CommandElements).Count -eq 3 -and $r.CommandElements[1].Extent.Text -eq '$PSScriptRoot' -and
+                    $r.CommandElements[2] -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $r.CommandElements[2].Value -match '^[\w.-]+\.ps1$')
+                if (-not $isSiblingScript) { return $false }
+            }
+            return $true
+        }
+        function Get-UnsafeConstruct($ast) {
+            $hits = New-Object System.Collections.Generic.List[string]
+            foreach ($c in @(Get-Commands $ast)) {
+                $bare = ([string]$c.GetCommandName()) -replace '^.*\\', ''
+                if ($bare -in 'Invoke-Expression', 'iex', 'Invoke-RestMethod', 'irm', 'Invoke-WebRequest', 'iwr', 'curl', 'wget') { $hits.Add("line $($c.Extent.StartLineNumber): $bare") }
+                if ($bare -eq 'New-Object' -and $c.Extent.Text -match 'DirectoryEntry|DirectorySearcher|Net\.WebClient|Net\.Http\.HttpClient') { $hits.Add("line $($c.Extent.StartLineNumber): $($c.Extent.Text)") }
+                if ($c.InvocationOperator -ne 'Unknown' -and $null -eq $c.GetCommandName() -and -not (Test-ScannedInvocationTarget $ast $c)) {
+                    $hits.Add("line $($c.Extent.StartLineNumber): $($c.InvocationOperator) with no static command name ($($c.CommandElements[0].Extent.Text))")
+                }
+            }
+            $types = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.TypeExpressionAst] -or $n -is [System.Management.Automation.Language.TypeConstraintAst] }, $true)
+            foreach ($t in @($types)) {
+                if ($t.TypeName.FullName -match '^(adsi|adsisearcher|(System\.)?(DirectoryServices\.)?(DirectoryEntry|DirectorySearcher))$') { $hits.Add("line $($t.Extent.StartLineNumber): [$($t.TypeName.FullName)]") }
+                if ($t.TypeName.FullName -match '^(System\.)?Net\.(WebClient|Http\.HttpClient)$') { $hits.Add("line $($t.Extent.StartLineNumber): [$($t.TypeName.FullName)]") }
+            }
+            # $ExecutionContext.InvokeCommand runs commands and script text by name.
+            $refs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.MemberExpressionAst] -and
+                    $n.Expression -is [System.Management.Automation.Language.VariableExpressionAst] -and $n.Expression.VariablePath.UserPath -eq 'ExecutionContext' -and
+                    $n.Member.Extent.Text.Trim('"', "'") -eq 'InvokeCommand' }, $true)
+            foreach ($x in @($refs)) { $hits.Add("line $($x.Extent.StartLineNumber): `$ExecutionContext.InvokeCommand") }
+            $members = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true)
+            foreach ($m in @($members)) {
+                $member = [string]$m.Member.Extent.Text.Trim('"', "'")
+                if ($member -in 'SetInfo', 'CommitChanges') { $hits.Add("line $($m.Extent.StartLineNumber): .$member()") }
+                if ($member -eq 'Create' -and $m.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and $m.Expression.TypeName.FullName -match '^(scriptblock|System\.Management\.Automation\.ScriptBlock)$') {
+                    $hits.Add("line $($m.Extent.StartLineNumber): [scriptblock]::Create")
+                }
+            }
+            return $hits.ToArray()
+        }
     }
 
     It 'AC3_ReadOnlyByConstruction: the entry script and the core exist to be scanned' {
@@ -576,14 +669,94 @@ Describe 'AC3 read-only by construction' {
         }
     }
 
-    It 'AC3_ReadOnlyByConstruction: no write cmdlet appears in any script' {
-        $bad = '^(New|Set|Update|Remove)-Mg|^Set-AD|^Enable-ADAccount$|^Unlock-ADAccount$|^Set-ADAccountPassword$'
+    It 'AC3_ReadOnlyByConstruction: no write cmdlet appears in any script (AD and Graph cmdlets allowlisted, any case, any module prefix)' {
         $hits = @()
         foreach ($name in $script:Asts.Keys) {
-            $hits += @(Get-Commands $script:Asts[$name] | Where-Object { $_.GetCommandName() -match $bad } | ForEach-Object { "$name line $($_.Extent.StartLineNumber): $($_.GetCommandName())" })
+            $hits += @(Get-Commands $script:Asts[$name] | Where-Object { Test-ForbiddenCommand ([string]$_.GetCommandName()) } | ForEach-Object { "$name line $($_.Extent.StartLineNumber): $($_.GetCommandName())" })
         }
         $script:Asts.Count | Should -BeGreaterThan 0 -Because 'there must be scripts to scan'
         $hits | Should -BeNullOrEmpty
+    }
+
+    It 'AC3_ReadOnlyByConstruction: the allowlist catches AD and Graph write cmdlets in any case or module-qualified, and passes the read-only ones and the core''s own helpers' {
+        $mustCatch = @(
+            'Set-ADUser', 'New-ADUser', 'Remove-ADUser', 'Move-ADObject', 'Rename-ADObject', 'Add-ADGroupMember', 'Enable-ADAccount',
+            'Disable-ADAccount', 'Unlock-ADAccount', 'Clear-ADAccountExpiration', 'Reset-ADServiceAccountPassword',
+            'Set-AdUser', 'set-aduser', 'ActiveDirectory\Set-ADUser', 'Restore-ADObject', 'Set-ADAccountPassword', 'Set-ADDomain',
+            'New-MgUser', 'Update-MgUser', 'Remove-MgUser', 'Invoke-MgDismissRiskyUser', 'Revoke-MgUserSignInSession',
+            'Microsoft.Graph.Users\Update-MgUser', 'update-mguser', 'Set-MgGraphOption',
+            'Set-AzureADUser', 'Remove-AzureADUser', 'Get-AzureADUser', 'Set-MsolUser', 'Set-MsolUserPassword', 'Remove-MsolUser',
+            'Set-EntraUser', 'Remove-EntraUser', 'Microsoft.Entra.Users\Update-EntraUser')
+        foreach ($w in $mustCatch) { Test-ForbiddenCommand $w | Should -BeTrue -Because "$w writes and must be caught" }
+        foreach ($ok in 'Get-ADUser', 'get-aduser', 'ActiveDirectory\Get-ADUser', 'Add-AddressConflictReasons', 'Add-Reason', 'Invoke-MgGraphRequest',
+            'Connect-MgGraph', 'Disconnect-MgGraph', 'Get-MgContext', 'Import-Module', 'Get-M365Prop') {
+            Test-ForbiddenCommand $ok | Should -BeFalse -Because "$ok is read-only or a local helper"
+        }
+    }
+
+    It 'AC3_ReadOnlyByConstruction: every real ActiveDirectory cmdlet except Get-ADUser is caught by the allowlist (where RSAT is installed)' {
+        # A child pwsh keeps this session's stubs; with no pwsh on PATH the test skips, not throws.
+        $pwsh = Get-Command -Name pwsh -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $pwsh) { Set-ItResult -Skipped -Because 'pwsh is not on PATH, so the real module cannot be listed in a child session'; return }
+        # ADPS_LoadDefaultDrive = 0 stops the module mapping the AD: drive, which contacts a DC.
+        $json = & $pwsh.Source -NoProfile -Command @'
+$env:ADPS_LoadDefaultDrive = 0
+$c = @(Get-Command -Module ActiveDirectory -ErrorAction SilentlyContinue | ForEach-Object Name)
+if ($c.Count -gt 0) { $c | ConvertTo-Json -Compress }
+'@
+        if (-not $json) { Set-ItResult -Skipped -Because 'the ActiveDirectory module (RSAT) is not installed'; return }
+        $real = @($json | ConvertFrom-Json)
+        foreach ($n in @($real | Where-Object { $_ -ne 'Get-ADUser' })) { Test-ForbiddenCommand $n | Should -BeTrue -Because "$n is an ActiveDirectory cmdlet" }
+        Test-ForbiddenCommand 'Get-ADUser' | Should -BeFalse
+    }
+
+    It 'AC3_ReadOnlyByConstruction: no Invoke-Expression, [scriptblock]::Create, Invoke-RestMethod/Invoke-WebRequest, WebClient/HttpClient, $ExecutionContext.InvokeCommand, unscanned & / . call, ADSI type or SetInfo/CommitChanges call in the production scripts' {
+        $hits = @()
+        foreach ($name in $script:Asts.Keys) { $hits += @(Get-UnsafeConstruct $script:Asts[$name] | ForEach-Object { "${name} $_" }) }
+        $names = @($script:Asts.Keys)
+        $names | Should -Contain 'Get-M365UserQuickCheck.ps1'
+        $names | Should -Contain 'M365UserCheck.Core.ps1'
+        $hits | Should -BeNullOrEmpty
+    }
+
+    It 'AC3_ReadOnlyByConstruction: the unsafe-construct scan catches each construct' {
+        $samples = [ordered]@{
+            'Invoke-Expression'   = 'Invoke-Expression $text'
+            'iex'                 = 'iex $text'
+            'scriptblock Create'  = '$sb = [scriptblock]::Create($text)'
+            'ScriptBlock full'    = '$sb = [System.Management.Automation.ScriptBlock]::Create($text)'
+            'Invoke-RestMethod'   = 'Invoke-RestMethod -Method PATCH -Uri $u'
+            'Invoke-WebRequest'   = 'Microsoft.PowerShell.Utility\Invoke-WebRequest -Uri $u'
+            'adsi cast'           = '$e = [adsi]"LDAP://CN=x"'
+            'DirectoryEntry type' = '$e = [System.DirectoryServices.DirectoryEntry]::new("LDAP://CN=x")'
+            'New-Object'          = '$e = New-Object System.DirectoryServices.DirectoryEntry ("LDAP://CN=x")'
+            'SetInfo'             = '$e.SetInfo()'
+            'CommitChanges'       = '$e.CommitChanges()'
+            'call by built name'  = '& (''Set-'' + ''ADUser'') -Identity jdoe'
+            'call by string var'  = '$cmd = ''Set-ADUser''; & $cmd -Identity jdoe'
+            'var reassigned'      = '$safe = { param($s) $s }; $safe = ''Set-ADUser''; & $safe -Identity jdoe'
+            'call by command obj' = '& (Get-Command Set-ADUser) -Identity jdoe'
+            'dot-source unknown'  = '. $env:TEMP\x.ps1'
+            'dot-source built'    = '$p = Join-Path $env:TEMP ''x.ps1''; . $p'
+            'unassigned variable' = '& $notAssignedHere'
+            'WebClient type'      = '$w = [System.Net.WebClient]::new()'
+            'WebClient short'     = '$w = [Net.WebClient]::new()'
+            'HttpClient type'     = '$h = [System.Net.Http.HttpClient]::new()'
+            'New-Object WebClient' = '$w = New-Object System.Net.WebClient'
+            'InvokeCommand'       = '$ExecutionContext.InvokeCommand.InvokeScript($text)'
+        }
+        foreach ($k in $samples.Keys) {
+            $tokens = $null; $errs = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseInput($samples[$k], [ref]$tokens, [ref]$errs)
+            @(Get-UnsafeConstruct $ast).Count | Should -BeGreaterThan 0 -Because "$k must be caught"
+        }
+        $tokens = $null; $errs = $null
+        $okAst = [System.Management.Automation.Language.Parser]::ParseInput('$r = Invoke-MgGraphRequest -Method GET -Uri $u; $x = [string]$y; $sb.Append("a")', [ref]$tokens, [ref]$errs)
+        @(Get-UnsafeConstruct $okAst).Count | Should -Be 0
+        # The shapes the production scripts use: a script block written in the same file, and a
+        # sibling script dot-sourced by literal name.
+        $okInvoke = [System.Management.Automation.Language.Parser]::ParseInput('$safe = { param($s) "$s" }; & $safe "x"; $kit = Join-Path $PSScriptRoot ''CaseKit.ps1''; . $kit', [ref]$tokens, [ref]$errs)
+        @(Get-UnsafeConstruct $okInvoke) | Should -BeNullOrEmpty
     }
 
     It 'AC3_ReadOnlyByConstruction: every requested scope is a .Read / .Read.All scope, and the four expected scopes are requested' {
@@ -615,7 +788,10 @@ Describe 'AC3 read-only by construction' {
 Describe 'Mocks cannot lie about parameter names' {
     BeforeAll {
         $script:RealParams = @{}
-        $json = & pwsh -NoProfile -Command @'
+        # No pwsh on PATH: nothing to compare against, so the test below skips rather than throws.
+        $pwsh = Get-Command -Name pwsh -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        $json = if ($pwsh) {
+            & $pwsh.Source -NoProfile -Command @'
 $r = @{}
 foreach ($n in 'Connect-MgGraph','Invoke-MgGraphRequest','Disconnect-MgGraph','Get-MgContext') {
   $c = Get-Command $n -Module Microsoft.Graph.Authentication -ErrorAction SilentlyContinue
@@ -623,6 +799,7 @@ foreach ($n in 'Connect-MgGraph','Invoke-MgGraphRequest','Disconnect-MgGraph','G
 }
 $r | ConvertTo-Json -Compress
 '@
+        }
         if ($json) { $o = $json | ConvertFrom-Json; foreach ($p in $o.PSObject.Properties) { $script:RealParams[$p.Name] = @($p.Value) } }
     }
 
@@ -650,5 +827,271 @@ $r | ConvertTo-Json -Compress
                 }
             }
         }
+    }
+}
+
+# =============================================================================
+# SQ-011, on-premises AD stage, end to end: AC18 plus the AD call counts of AC19 and AC20.
+# The entry is run WITHOUT -SkipOnPremises (Invoke-Entry defaults it on). Import-Module and
+# Get-ADUser are faked; nothing reaches a domain controller. Pinned wording: the banner line and
+# the Could not check line both read "On-premises AD: could not check (<reason>)".
+# =============================================================================
+Describe 'SQ-011 on-premises AD stage' {
+    BeforeAll {
+        $script:Sid = 'S-1-5-21-1111111111-2222222222-3333333333-1105'
+        # Stub with the real parameter names (Get-ADUser; checked with Get-Command).
+        function Get-ADUser {
+            [CmdletBinding()]
+            param($Identity, $LDAPFilter, $Filter, $Server, [pscredential]$Credential, $Properties, $SearchBase, $ResultSetSize)
+        }
+        function New-AdAccount {
+            param([hashtable]$Set = @{})
+            $a = @{ Enabled = $true; UserPrincipalName = 'jdoe@contoso.com'; mail = 'jdoe@contoso.com'; proxyAddresses = @('SMTP:jdoe@contoso.com')
+                SamAccountName = 'jdoe'; DistinguishedName = 'CN=Jane Doe,OU=Staff,DC=contoso,DC=com'; 'msDS-cloudExtensionAttribute10' = $null }
+            foreach ($k in $Set.Keys) { $a[$k] = $Set[$k] }
+            $a
+        }
+        function New-SyncedCloudUser { New-User @{ onPremisesSyncEnabled = $true; onPremisesSecurityIdentifier = $script:Sid; onPremisesProvisioningErrors = @() } }
+        $script:NoDcMessage = 'Unable to contact the server. This may be because this server does not exist, it is currently down, or it does not have the Active Directory Web Services running.'
+    }
+    BeforeEach {
+        New-Scenario
+        $script:AdCalls = New-Object System.Collections.Generic.List[hashtable]
+        $script:AdBySid = New-AdAccount; $script:AdByFilter = @(); $script:AdThrow = $null; $script:ImportAdThrows = $false
+        $script:Events = New-Object System.Collections.Generic.List[string]
+        Mock Import-Module { if ($script:ImportAdThrows -and $Name -eq 'ActiveDirectory') { throw 'The specified module ''ActiveDirectory'' was not loaded because no valid module file was found in any module directory.' } }
+        Mock Connect-MgGraph { $script:Events.Add('CONNECT') }
+        Mock Get-MgContext { [PSCustomObject]@{ Account = $script:Scn.Me; TenantId = $script:TenantId; Scopes = @('Directory.Read.All'); AuthType = 'Delegated'; ContextScope = 'Process' } }
+        Mock Disconnect-MgGraph { $script:Events.Add('DISCONNECT') }
+        Mock Set-Clipboard { }
+        Mock Write-Host { $script:Events.Add('HOST:' + ($Object -join ' ')) }
+        Mock Invoke-MgGraphRequest -MockWith $script:FakeGraph
+        Mock Get-ADUser {
+            $script:AdCalls.Add(@{ Identity = $Identity; LDAPFilter = $LDAPFilter; Server = $Server; Credential = $Credential })
+            if ($script:AdThrow) { throw $script:AdThrow }
+            # Pester 5.7 leaves $PSBoundParameters empty in a mock body without param(); the
+            # bound value is still in $Identity.
+            if ($null -ne $Identity) {
+                if ($null -eq $script:AdBySid) { throw 'Cannot find an object with identity: ''S-1-5-21-1111111111-2222222222-3333333333-1105'' under: ''DC=contoso,DC=com''.' }
+                return $script:AdBySid
+            }
+            return @($script:AdByFilter)
+        }
+    }
+
+    It 'AC18_AdStageUnavailableStillGivesVerdict: ActiveDirectory module missing -> Graph verdict printed, banner and Could not check say "could not check (...)", exit code from Graph' {
+        New-Scenario @{ UpnMatches = @((New-SyncedCloudUser)) }
+        $script:ImportAdThrows = $true
+        $r = Invoke-Entry @{ SkipOnPremises = $false }
+        $script:LastError | Should -BeNullOrEmpty
+        $r.ExitCode | Should -Be 0
+        $text = Get-HostText
+        $text | Should -Match 'Can Jane Doe sign in to Microsoft 365\?\s+YES'
+        @([regex]::Matches($text, 'On-premises AD: could not check \(')).Count | Should -BeGreaterOrEqual 2 -Because 'once in the banner, once under Could not check'
+        $text | Should -Match 'ActiveDirectory'
+        $text.IndexOf('On-premises AD: could not check') | Should -BeLessThan $text.IndexOf('Can Jane Doe sign in')
+        @($r.Assessment.CouldNotCheck | Where-Object { $_.Source -eq 'On-premises AD' }).Count | Should -Be 1
+        $text | Should -Not -Match 'not checked in this version'
+        Should -Invoke Get-ADUser -Times 0 -Exactly -Scope It
+    }
+
+    It 'AC18_AdStageUnavailableStillGivesVerdict: no DC answers (Get-ADUser throws) -> same, and a Graph blocker still exits 1' {
+        New-Scenario @{ UpnMatches = @((New-User @{ onPremisesSyncEnabled = $true; onPremisesSecurityIdentifier = $script:Sid; accountEnabled = $false })) }
+        $script:AdThrow = $script:NoDcMessage
+        $r = Invoke-Entry @{ SkipOnPremises = $false }
+        $script:LastError | Should -BeNullOrEmpty
+        $r.ExitCode | Should -Be 1
+        $text = Get-HostText
+        $text | Should -Match 'Can Jane Doe sign in to Microsoft 365\?\s+NO'
+        @([regex]::Matches($text, 'On-premises AD: could not check \(')).Count | Should -BeGreaterOrEqual 2
+        $text | Should -Not -Match 'not checked in this version'
+    }
+
+    It 'AC18_AdStageUnavailableStillGivesVerdict: with -SkipOnPremises nothing is imported for AD and Get-ADUser is never called' {
+        New-Scenario @{ UpnMatches = @((New-SyncedCloudUser)) }
+        $r = Invoke-Entry @{ SkipOnPremises = $true }
+        $r.ExitCode | Should -Be 0
+        Should -Invoke Get-ADUser -Times 0 -Exactly -Scope It
+        @($r.Assessment.CouldNotCheck | Where-Object { $_.Source -eq 'On-premises AD' }).Count | Should -Be 1
+    }
+
+    It 'AC19_CloudOnlySkipsAd: cloud-only user, no AD account has the UPN -> pass "Cloud-only account: sync is not involved", one Get-ADUser call (the UPN search)' {
+        New-Scenario @{ UpnMatches = @((New-User)) }
+        $r = Invoke-Entry @{ SkipOnPremises = $false }
+        $r.ExitCode | Should -Be 0
+        (Get-HostText) | Should -Match 'Cloud-only account: sync is not involved'
+        $script:AdCalls.Count | Should -Be 1
+        $script:AdCalls[0].LDAPFilter | Should -Match 'userPrincipalName='
+        $script:AdCalls[0].Identity | Should -BeNullOrEmpty
+        (Get-HostText) | Should -Match 'On-premises AD: available'
+    }
+
+    It 'AC20_NeverSynced: no Microsoft 365 user but the AD user exists -> NO, exit 1, "exists in AD but not in Microsoft 365"' {
+        New-Scenario @{ UpnMatches = @(); FallbackMatches = @() }
+        # A real AD account always has a SID; without one the SID search cannot run (CloudSidCheckError).
+        $script:AdByFilter = @((New-AdAccount @{ SID = (New-Object System.Security.Principal.SecurityIdentifier ($script:Sid)) }))
+        $r = Invoke-Entry @{ SkipOnPremises = $false }
+        $r.ExitCode | Should -Be 1
+        $text = Get-HostText
+        $text | Should -Match 'This account exists in AD but not in Microsoft 365'
+        $text | Should -Match 'Can .* sign in to Microsoft 365\?\s+NO'
+        @($script:Events | Where-Object { $_ -match 'signIns|authentication/methods' }).Count | Should -Be 0 -Because 'there is no cloud user to read sign-ins for'
+    }
+
+    It 'AC4_UserNotFoundOrAmbiguous: nothing in Microsoft 365 and nothing in AD -> still "No Microsoft 365 user matched", exit 2' {
+        New-Scenario @{ UpnMatches = @(); FallbackMatches = @() }
+        $r = Invoke-Entry @{ SkipOnPremises = $false }
+        $r.ExitCode | Should -Be 2
+        ((Get-HostText) + "`n" + $r.Message) | Should -Match 'No Microsoft 365 user matched'
+    }
+
+    It 'AC4_UserNotFoundOrAmbiguous: nothing in Microsoft 365 and no DC answers -> exit 2, not a crash' {
+        New-Scenario @{ UpnMatches = @(); FallbackMatches = @() }
+        $script:AdThrow = $script:NoDcMessage
+        $r = Invoke-Entry @{ SkipOnPremises = $false }
+        $script:LastError | Should -BeNullOrEmpty
+        $r.ExitCode | Should -Be 2
+    }
+
+    It 'AC25_UpnMismatch: synced user is matched by SID first (Get-ADUser -Identity <SID>), own Graph object is not an address conflict' {
+        New-Scenario @{ UpnMatches = @((New-SyncedCloudUser)) }
+        $r = Invoke-Entry @{ SkipOnPremises = $false }
+        $script:AdCalls.Count | Should -Be 1
+        $script:AdCalls[0].Identity | Should -Be $script:Sid
+        $r.ExitCode | Should -Be 0 -Because 'the only /users hit for the AD address is the user itself'
+        (Get-HostText) | Should -Match 'Can Jane Doe sign in to Microsoft 365\?\s+YES'
+    }
+
+    It 'AC25_UpnMismatch: AD UPN differs -> Warning with both values printed' {
+        New-Scenario @{ UpnMatches = @((New-SyncedCloudUser)) }
+        $script:AdBySid = New-AdAccount @{ UserPrincipalName = 'jane.doe@contoso.com' }
+        $null = Invoke-Entry @{ SkipOnPremises = $false }
+        $text = Get-HostText
+        $text | Should -Match 'jane\.doe@contoso\.com'
+        $text | Should -Match 'jdoe@contoso\.com'
+    }
+
+    It 'Edge_ServerParameterReachesGetADUser: -Server dc01.contoso.com is passed to Get-ADUser' {
+        New-Scenario @{ UpnMatches = @((New-SyncedCloudUser)) }
+        $null = Invoke-Entry @{ SkipOnPremises = $false; Server = 'dc01.contoso.com' }
+        $script:AdCalls[0].Server | Should -Be 'dc01.contoso.com'
+    }
+
+    It 'Edge_CredentialNeverWritten: a supplied -Credential reaches Get-ADUser but its user name and password appear nowhere in the result, CSV, HTML, note or console' {
+        $secret = 'Pa55w0rd-NotReal-9x'
+        $account = 'CONTOSO\svc-m365check'
+        $cred = New-Object System.Management.Automation.PSCredential ($account, (ConvertTo-SecureString $secret -AsPlainText -Force))
+        New-Scenario @{ UpnMatches = @((New-SyncedCloudUser)) }
+        $out = New-OutDir
+        $r = Invoke-Entry @{ SkipOnPremises = $false; Credential = $cred; Server = 'dc01.contoso.com'; TicketNumber = 'T2001'; OutputPath = $out }
+        $script:LastError | Should -BeNullOrEmpty
+        $script:AdCalls[0].Credential | Should -Not -BeNullOrEmpty -Because 'the credential must be used, or this test proves nothing'
+        $files = @(Get-ChildItem -LiteralPath $out -Recurse -File)
+        @($files | Where-Object { $_.Extension -eq '.html' }).Count | Should -Be 1
+        @($files | Where-Object { $_.Extension -eq '.csv' }).Count | Should -Be 1
+        @($files | Where-Object { $_.Name -like 'Note_*.txt' }).Count | Should -Be 1
+        $everything = @((Get-HostText), ($r | ConvertTo-Json -Depth 6 -WarningAction Ignore), ($r | Out-String -Width 4000)) + @($files | ForEach-Object { [System.IO.File]::ReadAllText($_.FullName) })
+        foreach ($text in $everything) {
+            $text | Should -Not -Match ([regex]::Escape($secret))
+            $text | Should -Not -Match ([regex]::Escape('svc-m365check'))
+        }
+    }
+
+    It 'Edge_CredentialNeverWritten: Get-ADUser fails with -Credential supplied -> its user name and password still appear nowhere in the result, CSV, HTML, note or console' {
+        $secret = 'Pa55w0rd-NotReal-9x'
+        $account = 'CONTOSO\svc-m365check'
+        $cred = New-Object System.Management.Automation.PSCredential ($account, (ConvertTo-SecureString $secret -AsPlainText -Force))
+        New-Scenario @{ UpnMatches = @((New-SyncedCloudUser)) }
+        $script:AdThrow = 'The server has rejected the client credentials.'
+        $out = New-OutDir
+        $r = Invoke-Entry @{ SkipOnPremises = $false; Credential = $cred; Server = 'dc01.contoso.com'; TicketNumber = 'T2003'; OutputPath = $out }
+        $script:LastError | Should -BeNullOrEmpty
+        $script:AdCalls[0].Credential | Should -Not -BeNullOrEmpty -Because 'the credential must be used, or this test proves nothing'
+        @($r.Assessment.CouldNotCheck | Where-Object { $_.Source -eq 'On-premises AD' }).Count | Should -Be 1 -Because 'this is the failure path'
+        $files = @(Get-ChildItem -LiteralPath $out -Recurse -File)
+        @($files | Where-Object { $_.Extension -eq '.html' }).Count | Should -Be 1
+        @($files | Where-Object { $_.Extension -eq '.csv' }).Count | Should -Be 1
+        @($files | Where-Object { $_.Name -like 'Note_*.txt' }).Count | Should -Be 1
+        $everything = @((Get-HostText), ($r | ConvertTo-Json -Depth 6 -WarningAction Ignore), ($r | Out-String -Width 4000)) + @($files | ForEach-Object { [System.IO.File]::ReadAllText($_.FullName) })
+        foreach ($text in $everything) {
+            $text | Should -Not -Match ([regex]::Escape($secret))
+            $text | Should -Not -Match ([regex]::Escape('svc-m365check'))
+        }
+    }
+
+    It 'Edge_ServerIpNotOnConsole: -Server 192.0.2.10 and Get-ADUser fails -> the IP address is not printed anywhere on the console (banner included)' {
+        New-Scenario @{ UpnMatches = @((New-SyncedCloudUser)) }
+        $script:AdThrow = $script:NoDcMessage
+        $r = Invoke-Entry @{ SkipOnPremises = $false; Server = '192.0.2.10' }
+        $script:LastError | Should -BeNullOrEmpty
+        $script:AdCalls[0].Server | Should -Be '192.0.2.10' -Because 'the server must be used, or this test proves nothing'
+        $text = Get-HostText
+        $text | Should -Match 'On-premises AD: could not check' -Because 'the failure is still reported'
+        $text | Should -Not -Match ([regex]::Escape('192.0.2.10'))
+    }
+
+    It 'AC22_AddressHeldByAnotherObject: another user holds the address but the groups lookup is refused (403) -> still NO with the conflict shown, and "Address conflicts" under Could not check' {
+        New-Scenario @{ UpnMatches = @((New-SyncedCloudUser)); ThrowOnGroups = $true }
+        # The address lookups select only id,displayName(,onPremisesSyncEnabled); Find-M365User
+        # selects the full user, so this answers only the conflict search on /users by mail.
+        Mock Invoke-MgGraphRequest {
+            $u = [uri]::UnescapeDataString([string]$Uri)
+            if ($u -match '/users\?' -and $u -match "mail eq 'jdoe@contoso\.com'" -and $u -notmatch 'accountEnabled') {
+                $script:Events.Add("GET $u")
+                return @{ value = @(@{ id = 'eeeeeeee-0000-0000-0000-000000000002'; displayName = 'Jane Doe (cloud copy)'; onPremisesSyncEnabled = $null }) }
+            }
+            & $script:FakeGraph
+        }
+        $r = Invoke-Entry @{ SkipOnPremises = $false }
+        $script:LastError | Should -BeNullOrEmpty
+        $r.ExitCode | Should -Be 1
+        $text = Get-HostText
+        $text | Should -Match 'Can Jane Doe sign in to Microsoft 365\?\s+NO'
+        $text | Should -Match 'Jane Doe \(cloud copy\)'
+        @($r.Assessment.Reasons | Where-Object { $_.Code -eq 'AddressHeld' }).Count | Should -Be 1
+        $c = @($r.Assessment.CouldNotCheck | Where-Object { $_.Source -eq 'Address conflicts' })
+        $c.Count | Should -Be 1
+        $c[0].Reason | Should -Match 'groups'
+        $text | Should -Match 'Address conflicts: '
+    }
+
+    It 'AC20b_NeverSyncedChecksSid: no cloud user by the typed name, AD user exists, but a cloud user holds its SID -> that user is assessed, no "exists in AD but not in Microsoft 365"' {
+        $sidObject = New-Object System.Security.Principal.SecurityIdentifier ($script:Sid)
+        $script:AdByFilter = @((New-AdAccount @{ SID = $sidObject }))
+        $cloud = New-User @{ userPrincipalName = 'jane.doe@contoso.com'; onPremisesSyncEnabled = $true; onPremisesSecurityIdentifier = $script:Sid; onPremisesProvisioningErrors = @() }
+        New-Scenario @{ UpnMatches = @(); FallbackMatches = @(); SidMatches = @($cloud) }
+        $r = Invoke-Entry @{ SkipOnPremises = $false }
+        $script:LastError | Should -BeNullOrEmpty
+        @($script:Events | Where-Object { $_ -match "^GET .*onPremisesSecurityIdentifier eq '$([regex]::Escape($script:Sid))'" }).Count | Should -BeGreaterThan 0 -Because 'the AD user''s SID is looked up in Graph first'
+        $r.ExitCode | Should -Be 0
+        $r.Status | Should -Be 'Ok'
+        $text = Get-HostText
+        $text | Should -Not -Match 'exists in AD but not in Microsoft 365'
+        $text | Should -Match 'Can Jane Doe sign in to Microsoft 365\?\s+YES'
+        $text | Should -Match 'jane\.doe@contoso\.com' -Because 'the cloud user found by SID is the one assessed'
+    }
+
+    It 'AC20b_NeverSyncedChecksSid: no cloud user holds the SID either -> still NO, "exists in AD but not in Microsoft 365"' {
+        $sidObject = New-Object System.Security.Principal.SecurityIdentifier ($script:Sid)
+        $script:AdByFilter = @((New-AdAccount @{ SID = $sidObject }))
+        New-Scenario @{ UpnMatches = @(); FallbackMatches = @(); SidMatches = @() }
+        $r = Invoke-Entry @{ SkipOnPremises = $false }
+        @($script:Events | Where-Object { $_ -match 'onPremisesSecurityIdentifier eq' }).Count | Should -BeGreaterThan 0
+        $r.ExitCode | Should -Be 1
+        (Get-HostText) | Should -Match 'This account exists in AD but not in Microsoft 365'
+    }
+
+    It 'AC22c_AddressCheckFailedIsCouldNotCheck: the address lookup fails (Graph 403 on groups) -> "Address conflicts" under Could not check in the console and the ticket note' {
+        New-Scenario @{ UpnMatches = @((New-SyncedCloudUser)); ThrowOnGroups = $true }
+        $out = New-OutDir
+        $r = Invoke-Entry @{ SkipOnPremises = $false; TicketNumber = 'T2002'; OutputPath = $out }
+        $script:LastError | Should -BeNullOrEmpty
+        @($r.Assessment.CouldNotCheck | Where-Object { $_.Source -eq 'Address conflicts' }).Count | Should -Be 1
+        (Get-HostText) | Should -Match 'Address conflicts: '
+        $noteFile = @(Get-ChildItem -LiteralPath (Join-Path $out 'Ticket_T2002') -Filter 'Note_*.txt' -ErrorAction SilentlyContinue)
+        $noteFile.Count | Should -Be 1
+        $lines = [System.IO.File]::ReadAllLines($noteFile[0].FullName)
+        (Get-Section $lines 'Could not check:') -join "`n" | Should -Match '(?i)address conflicts'
+        (Get-Section $lines 'Ruled out:') -join "`n" | Should -Not -Match '(?i)address conflict'
     }
 }
