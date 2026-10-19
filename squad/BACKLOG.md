@@ -53,7 +53,7 @@ tenant without Entra ID P1 the headline is PROBABLY YES with "sign-in history no
 (D-006). Read-only whatever account is used. Builds after SQ-001. Split per D-004.
 
 ## SQ-011 · M365 user check: is it a sync problem? (on-prem AD comparison)
-- status: ready
+- status: review
 - priority: P1
 - type: feature
 - branch: squad/SQ-011-m365-sync-check
@@ -64,6 +64,24 @@ Second stage of the M365 user check: never synced, provisioning errors, an addre
 another object, an enabled mismatch (with the M365-SyncedUserFixes block marker), stale tenant
 sync, and a UPN mismatch. Says "could not check" when no DC answers (D-014). Builds after SQ-002.
 Split from SQ-002 per D-004.
+
+
+## SQ-019 · M365 user check: blocked synced user advice must escalate, not "change it" (D-017)
+- status: new
+- priority: P1
+- type: fix
+- branch:
+- spec:
+
+Found in the SQ-011 destructive-operations review (2026-10-18), pre-existing from SQ-002.
+`M365UserCheck.Core.ps1` SignInBlocked next step for a synced user when no AD comparison ran
+(no RSAT, -SkipOnPremises, AD failed) tells tier 1 "...block marker... Change it in on-premises AD
+if it is wrong". With AD data the same case already says "Check with the senior engineer".
+Reword it the D-017 way. Widen D017_NoRemovalStepForTier1 to catch reversal verbs too (clear,
+change it, undo, enable, anything that mentions the block marker) across the with-AD and no-AD
+branches, and add a regression test for the no-AD synced-blocked path. Same pass:
+AdDisabledCloudEnabled "enable the AD account" gets the manager/ticket check used for
+cloud-only users. Builds on SQ-011 (same files).
 
 ## SQ-003 · "Why did this user get a temporary profile?" one-user VDI verdict
 - status: done
@@ -93,7 +111,8 @@ the shared change-log format (D-030), and SDDL backup plus logging for every sin
 in the GUI. A change whose backup can't be written is refused. Split per D-004.
 
 ## SQ-014 · FolderPermissionManager: whole-tree actions and the CLI script
-- status: ready
+- status: blocked
+- waiting: Q-005 (which reparse points count as links)
 - priority: P1
 - type: fix
 - branch: squad/SQ-014-fpm-tree-cli
@@ -107,7 +126,8 @@ The copy-permissions tree backup is no longer needed (D-031). The old CLI
 ownership, `-Force` and a help block (D-010). Builds after SQ-008. Split per D-004.
 
 ## SQ-015 · FolderPermissionManager: fix recursive copy permissions
-- status: ready
+- status: needs-answers
+- waiting: SQ-014 (blocked on Q-005); SQ-015 is stacked on SQ-014's branch, so it is held until SQ-014 is unblocked (squad scheduling, 2026-10-18 run)
 - priority: P1
 - type: fix
 - branch: squad/SQ-015-fpm-recursive-copy
@@ -181,10 +201,10 @@ optional (D-018); DFS namespace paths are detected (D-019). Read-only, with a re
 the past primary-group bug. Split per D-004.
 
 ## SQ-013 · Folder access: what to do about it
-- status: ready
+- status: review
 - priority: P2
 - type: feature
-- branch:
+- branch: squad/SQ-013-folder-access-next-step
 - spec: squad/specs/SQ-004.md (ACs 28-36)
 - idea: squad/ideas/sessions/2026-10-16/cards/I-07-folder-access-evidence.md
 
@@ -194,10 +214,10 @@ ticket note, and a next step pointing to FolderPermissionManager. Builds after S
 Split from SQ-004 per D-004.
 
 ## SQ-006 · Lockout tools recognize Kerberos encryption-type blocks (RC4 enforcement)
-- status: ready
+- status: review
 - priority: P2
 - type: feature
-- branch:
+- branch: squad/SQ-006-kerberos-etype-block
 - spec: squad/specs/SQ-006.md
 - idea: squad/ideas/sessions/2026-10-16/cards/I-06-kerberos-enforcement-check.md
 
@@ -207,10 +227,10 @@ password problem, encryption type blocked") with the next step, in the report an
 (D-022, D-023, D-024). Per-DC gate says "can't tell" where a DC can't log the events. Read-only.
 
 ## SQ-007 · Mailbox check: the facts, with "do NOT reset yet" on takeover signs
-- status: ready
+- status: review
 - priority: P2
 - type: feature
-- branch:
+- branch: squad/SQ-007-mailbox-check
 - spec: squad/specs/SQ-007.md
 - idea: squad/ideas/sessions/2026-10-16/cards/I-02-mailbox-check.md
 
@@ -221,10 +241,10 @@ with "Check CIPP's BEC report" as the next step. Subjects stay out of the ticket
 Second entry script in the SQ-002 folder; builds after SQ-002.
 
 ## SQ-016 · Mailbox check: when were rules, forwarding and delegates added?
-- status: ready
+- status: review
 - priority: P2
 - type: feature
-- branch:
+- branch: squad/SQ-016-mailbox-audit-log (stacked on squad/SQ-007-mailbox-check; merge SQ-007 first)
 - spec: squad/specs/SQ-016.md
 - idea: squad/ideas/sessions/2026-10-16/cards/I-02-mailbox-check.md
 
@@ -235,10 +255,10 @@ line, with when, who and whether it was the user's own account (D-032). "Could n
 the audit role is missing or auditing is off. Builds after SQ-007.
 
 ## SQ-009 · LocalAdminManager: make remote changes work, and log every add and remove
-- status: ready
+- status: review
 - priority: P2
 - type: fix
-- branch:
+- branch: squad/SQ-009-localadmin-remote-log
 - spec: squad/specs/SQ-009.md
 - idea: squad/ideas/sessions/2026-10-16/brief.md (I-12, "Worth a look")
 

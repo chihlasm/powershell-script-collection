@@ -86,3 +86,28 @@ Format:
 - consequence: A) The CLI does ownership plus a view of permissions; to grant access you add it
   once on the top folder. B) Same reach as inheritance with more code to trust. C) Access can
   silently widen across a share.
+
+### Q-005 · SQ-014 · Which reparse points count as "links" when taking ownership of a whole tree?
+- status: open
+- blocks: SQ-014 (blocked after two fix rounds; branch `squad/SQ-014-fpm-tree-cli` at 33d09c5, gates green).
+- context: SQ-014 now refuses a whole-tree take ownership when a link inside the folder leads into a
+  protected folder (D-036) or somewhere it can't work out. In fix round 2 the squad narrowed "link"
+  to reparse points with the name-surrogate bit (junctions, symbolic links), so that Data
+  Deduplication files and OneDrive/cloud placeholders, which are also reparse points, don't refuse
+  every tree on a dedup file server. The final destructive-operations review found that this lets
+  DFS links through (tag 0x8000000A has no surrogate bit): on `\\contoso.com\Shares`, a DFS link
+  to `\\dc01\NETLOGON` or `\\app01\C$\Program Files\X` would be walked and re-owned. This comes from
+  reading the SMB2 spec; nobody has tested it against a real DFS root. Every other check passes:
+  admin shares, system shares, 8.3 names, `\\?\` paths, junctions on the folder and inside the
+  tree, and 32-bit hosts.
+- options: A) Allowlist: only known redirect-free tags (Dedup, WOF, the cloud/OneDrive family,
+  HSM, SIS) count as plain files; every other reparse point, DFS included, counts as a link and is
+  checked or refused (recommended). B) Go back to "every reparse point is a link": the safest, but
+  whole-tree take ownership refuses any tree with a deduplicated file or a OneDrive placeholder.
+  C) Option A, and also refuse any link whose target is outside the chosen folder, so the change
+  can never leave the tree you picked. This also covers links nested inside link targets.
+- consequence: A) DFS links are refused, and dedup and OneDrive trees still work; it needs a
+  maintained list of tag values cited from Learn. B) Nothing is missed, but the tool can't be used
+  on dedup volumes. C) Like A, and it also closes the two-hop case (a link to an allowed folder
+  that contains a link to C:\Windows). It also refuses harmless links that point elsewhere on the
+  same share.
