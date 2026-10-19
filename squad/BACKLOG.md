@@ -111,8 +111,8 @@ the shared change-log format (D-030), and SDDL backup plus logging for every sin
 in the GUI. A change whose backup can't be written is refused. Split per D-004.
 
 ## SQ-014 · FolderPermissionManager: whole-tree actions and the CLI script
-- status: blocked
-- waiting: Q-005 (which reparse points count as links)
+- status: ready
+- revision: D-040 allowlist for reparse tags (spec SQ-008.md Revision notes 2026-10-18, AC20a-d)
 - priority: P1
 - type: fix
 - branch: squad/SQ-014-fpm-tree-cli

@@ -88,7 +88,7 @@ Format:
   silently widen across a share.
 
 ### Q-005 · SQ-014 · Which reparse points count as "links" when taking ownership of a whole tree?
-- status: open
+- status: answered (D-040)
 - blocks: SQ-014 (blocked after two fix rounds; branch `squad/SQ-014-fpm-tree-cli` at 33d09c5, gates green).
 - context: SQ-014 now refuses a whole-tree take ownership when a link inside the folder leads into a
   protected folder (D-036) or somewhere it can't work out. In fix round 2 the squad narrowed "link"
