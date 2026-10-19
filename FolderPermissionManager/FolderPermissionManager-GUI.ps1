@@ -117,9 +117,26 @@
       them read-only from HKCU:\Network\<letter>, value RemotePath, with Get-ItemProperty.
       Learn documents remembered connections and Get-ItemProperty, but not that key's layout
       (DriveMap-Diagnostics reads the same key), so every value is checked as a plain
-      \\server\share path before it is used:
+      \\server\share path before it is used. A remembered mapping can be stale, so the live
+      mappings of this process and those the first window passed on win; a remembered one only
+      fills a letter neither has and is shown as "(remembered mapping)":
       https://learn.microsoft.com/windows/win32/api/winnetwk/nf-winnetwk-wnetaddconnection2w
       https://learn.microsoft.com/powershell/module/microsoft.powershell.management/get-itemproperty
+    - A name ending in a space or a period, and "/" in a share path, are refused in drive map
+      values; \\?\ and \\.\ device paths are refused for -LogFolder:
+      https://learn.microsoft.com/windows/win32/fileio/naming-a-file
+    - Before the UAC relaunch, a script or -LogFolder on a drive letter the elevated copy cannot
+      see (not fixed or removable, not a known mapped drive, or a SUBST letter whose DOS device
+      target is not a \Device\ volume) is refused. Drive letters a normal caller defines are
+      local to its logon session:
+      https://learn.microsoft.com/dotnet/api/system.io.drivetype
+      https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-querydosdevicew
+      https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-definedosdevicew
+    - OneDrive sync roots (HKCU:\Software\SyncEngines\Providers\OneDrive\*\MountPoint and
+      HKCU:\Software\Microsoft\OneDrive\Accounts\*\UserFolder) are UNDOCUMENTED on Learn; they
+      are only read, and a folder starting "OneDrive" in another user's profile is flagged too.
+    - -NoExit keeps the console open after the script, so the process is not ended then:
+      https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_powershell_exe
     - RunspacePool.BeginClose closes the pool without blocking the window thread, and
       Environment.Exit ends the process even while a runspace thread is stuck in I/O:
       https://learn.microsoft.com/dotnet/api/system.management.automation.runspaces.runspacepool.beginclose
@@ -287,12 +304,15 @@ function ConvertTo-QuotedArgument {
 
 function Test-UncSharePath {
     # True only for a plain \\server\share path (optionally with folders below it). Device and
-    # long-path forms (\\?\, \\.\), a server without a share, and "." or ".." folders are
-    # refused, so a drive map value can never point the tool somewhere unexpected.
+    # long-path forms (\\?\, \\.\), a server without a share, "/" anywhere, and a server, share
+    # or folder name ending in "." or " " (which covers "." and "..") are refused, so a drive map
+    # value can never point the tool somewhere unexpected. Windows strips a trailing dot or space
+    # from a name, so "share." would open "share":
+    # https://learn.microsoft.com/windows/win32/fileio/naming-a-file
     param([AllowNull()][AllowEmptyString()][string]$Path)
-    if (-not $Path -or $Path -notmatch '^\\\\[^\\?.][^\\]*\\[^\\]+(\\.*)?$') { return $false }
+    if (-not $Path -or $Path.Contains('/') -or $Path -notmatch '^\\\\[^\\?.][^\\]*\\[^\\]+(\\.*)?$') { return $false }
     foreach ($segment in $Path.Substring(2).Split('\')) {
-        if ($segment -eq '.' -or $segment -eq '..') { return $false }
+        if ($segment.EndsWith('.') -or $segment.EndsWith(' ')) { return $false }
     }
     $true
 }
@@ -336,35 +356,55 @@ function ConvertFrom-DriveMapArgument {
     Get-ValidDriveMap -DriveMap $map
 }
 
-function Merge-DriveMap {
-    # Drives this process can see win; the passed-on map fills in the letters it cannot see.
-    param([hashtable]$Primary, [hashtable]$Secondary)
+function Resolve-DriveMapSet {
+    # One letter -> UNC map from three sources, each entry tagged with where it came from, in
+    # this order: Live (this process's own mapped drives, CIM), PassedOn (the -DriveMap of the
+    # first, non-elevated window, which saw the user's live drives), Remembered (the registry).
+    # A remembered mapping can be stale (H: remapped to a new server since), so it only fills a
+    # letter neither of the others has, and the path header says it is remembered.
+    param([hashtable]$Live, [hashtable]$PassedOn, [hashtable]$Remembered)
     $map = @{}
-    foreach ($m in @((Get-ValidDriveMap -DriveMap $Secondary), (Get-ValidDriveMap -DriveMap $Primary))) {
-        foreach ($k in $m.Keys) { $map[$k] = $m[$k] }
+    $source = @{}
+    foreach ($s in @(@('Live', $Live), @('PassedOn', $PassedOn), @('Remembered', $Remembered))) {
+        $valid = Get-ValidDriveMap -DriveMap $s[1]
+        foreach ($k in $valid.Keys) {
+            if ($map.ContainsKey($k)) { continue }
+            $map[$k] = $valid[$k]
+            $source[$k] = $s[0]
+        }
     }
-    $map
+    [PSCustomObject]@{ Map = $map; Source = $source }
 }
 
-function Get-MappedDriveTable {
-    # Letter -> UNC path of the mapped network drives this process can see (CIM), plus the
-    # remembered mappings in HKCU:\Network\<letter> (value RemotePath) for letters CIM does not
-    # list. Both are only read. Values that are not a plain \\server\share are dropped.
+function Merge-DriveMap {
+    # Drives this process can see win; the passed-on map fills in the letters it cannot see, and
+    # remembered mappings only the letters neither has (see Resolve-DriveMapSet).
+    param([hashtable]$Primary, [hashtable]$Secondary, [hashtable]$Remembered)
+    (Resolve-DriveMapSet -Live $Primary -PassedOn $Secondary -Remembered $Remembered).Map
+}
+
+function Get-LiveDriveMap {
+    # Letter -> UNC path of the mapped network drives this process can see. Throws when CIM
+    # cannot be asked. Values that are not a plain \\server\share are dropped.
     # https://learn.microsoft.com/windows/win32/cimwin32prov/win32-mappedlogicaldisk
+    $map = @{}
+    foreach ($d in @(Get-CimInstance -ClassName Win32_MappedLogicalDisk -ErrorAction Stop)) {
+        if ($d.DeviceID -and $d.ProviderName) { $map["$($d.DeviceID)".TrimEnd(':')] = "$($d.ProviderName)" }
+    }
+    Get-ValidDriveMap -DriveMap $map
+}
+
+function Get-RememberedDriveMap {
+    # The remembered (persistent) mappings of this user: HKCU:\Network\<letter>, value
+    # RemotePath. Only read; never throws. Learn documents remembered connections but not this
+    # key's layout, so every value is checked as a plain \\server\share path before it is used.
     # https://learn.microsoft.com/windows/win32/api/winnetwk/nf-winnetwk-wnetaddconnection2w
     # https://learn.microsoft.com/powershell/module/microsoft.powershell.management/get-itemproperty
     $map = @{}
     try {
-        foreach ($d in @(Get-CimInstance -ClassName Win32_MappedLogicalDisk -ErrorAction Stop)) {
-            if ($d.DeviceID -and $d.ProviderName) { $map["$($d.DeviceID)".TrimEnd(':')] = "$($d.ProviderName)" }
-        }
-    }
-    catch { }
-    $map = Get-ValidDriveMap -DriveMap $map
-    try {
         foreach ($key in @(Get-ChildItem -LiteralPath 'HKCU:\Network' -ErrorAction Stop)) {
             $letter = "$($key.PSChildName)"
-            if ($letter -notmatch '^[A-Za-z]$' -or $map.ContainsKey($letter.ToUpper())) { continue }
+            if ($letter -notmatch '^[A-Za-z]$') { continue }
             $remote = $null
             try { $remote = (Get-ItemProperty -LiteralPath "HKCU:\Network\$letter" -Name RemotePath -ErrorAction Stop).RemotePath } catch { }
             if (Test-UncSharePath -Path "$remote") { $map[$letter.ToUpper()] = "$remote" }
@@ -372,6 +412,24 @@ function Get-MappedDriveTable {
     }
     catch { }
     $map
+}
+
+function Get-DriveMapSet {
+    # The window's drive map at startup: this process's live mappings, then the ones the first
+    # window passed on (-DriveMap), then the remembered ones (Resolve-DriveMapSet). When CIM
+    # fails, the remembered mappings still fill in, tagged Remembered.
+    param([AllowNull()][AllowEmptyString()][string]$DriveMapArgument)
+    $live = @{}
+    try { $live = Get-LiveDriveMap } catch { Write-Verbose "Mapped drives could not be read with CIM: $($_.Exception.Message)" }
+    Resolve-DriveMapSet -Live $live -PassedOn (ConvertFrom-DriveMapArgument -Argument $DriveMapArgument) -Remembered (Get-RememberedDriveMap)
+}
+
+function Get-MappedDriveTable {
+    # Letter -> UNC path: the drives this process can see (CIM), plus the remembered mappings for
+    # letters CIM does not list. No passed-on map; the window itself uses Get-DriveMapSet.
+    $live = @{}
+    try { $live = Get-LiveDriveMap } catch { }
+    (Resolve-DriveMapSet -Live $live -Remembered (Get-RememberedDriveMap)).Map
 }
 
 function Resolve-LogFolderArgument {
@@ -383,6 +441,10 @@ function Resolve-LogFolderArgument {
     if (-not $LogFolder) { return $LogFolder }
     $invalid = "Start the tool again with -LogFolder set to a full folder path, for example -LogFolder 'D:\Tickets\12345\PermissionChanges'."
     if ($LogFolder.Contains('"')) { throw "The -LogFolder value cannot contain a double quote (`"). $invalid" }
+    # Device and long-path forms (\\?\C:\..., \\.\C:\...) skip Windows' path checks and would give
+    # the same folder a second spelling (and a second single-instance key):
+    # https://learn.microsoft.com/windows/win32/fileio/naming-a-file
+    if ($LogFolder -match '^[\\/]{2}[?.][\\/]') { throw "The -LogFolder value '$LogFolder' is a device path (\\?\ or \\.\). $invalid" }
     try {
         if ($LogFolder -match '^([A-Za-z]:[\\/]|\\\\|//)') {
             # Already full (possibly on a mapped drive this process cannot see): only tidied.
@@ -402,11 +464,14 @@ function Get-RelaunchArgumentList {
     # powershell.exe arguments to start this script again (in STA, or elevated), passing on
     # -LogFolder (as a full path), -WhatIf and the mapped drives. The script and log folder go
     # as UNC paths when they are on a mapped drive, because the elevated copy cannot see it.
+    # Mappings tagged Remembered in -DriveMapSource are used for those paths but not passed on:
+    # the next copy reads the registry itself and tags them again, so they never pose as live.
     param(
         [Parameter(Mandatory)][string]$ScriptPath,
         [string]$LogFolder,
         [switch]$WhatIfMode,
-        [hashtable]$DriveMap
+        [hashtable]$DriveMap,
+        [hashtable]$DriveMapSource
     )
     $LogFolder = Resolve-LogFolderArgument -LogFolder $LogFolder
     $list = [System.Collections.Generic.List[string]]::new()
@@ -417,11 +482,75 @@ function Get-RelaunchArgumentList {
         $list.Add((ConvertTo-QuotedArgument (Resolve-MappedDrive -Path $LogFolder -DriveMap $DriveMap)))
     }
     if ($WhatIfMode) { $list.Add('-WhatIf') }
-    if ($DriveMap -and $DriveMap.Count -gt 0) {
+    $passOn = @{}
+    if ($DriveMap) {
+        foreach ($k in $DriveMap.Keys) {
+            if ($DriveMapSource -and "$($DriveMapSource[$k])" -eq 'Remembered') { continue }
+            $passOn[$k] = $DriveMap[$k]
+        }
+    }
+    if ((Get-ValidDriveMap -DriveMap $passOn).Count -gt 0) {
         $list.Add('-DriveMap')
-        $list.Add((ConvertTo-DriveMapArgument -DriveMap $DriveMap))
+        $list.Add((ConvertTo-DriveMapArgument -DriveMap $passOn))
     }
     $list.ToArray()
+}
+
+function Get-DriveLetterType {
+    # The DriveType of a drive letter as this process sees it ('Fixed', 'Removable', 'Network',
+    # 'NoRootDirectory' for a letter that does not exist here, ...). Tests replace it.
+    # https://learn.microsoft.com/dotnet/api/system.io.drivetype
+    param([Parameter(Mandatory)][string]$Letter)
+    try { "$((New-Object System.IO.DriveInfo -ArgumentList $Letter).DriveType)" } catch { 'Unknown' }
+}
+
+function Get-DosDeviceTarget {
+    # What a drive letter points at in this session's MS-DOS device names (QueryDosDevice, only
+    # read): a real volume is \Device\HarddiskVolumeN; a SUBST drive points at a folder instead.
+    # $null when it cannot be read. Tests replace it.
+    # https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-querydosdevicew
+    param([Parameter(Mandatory)][string]$Letter)
+    try {
+        if (-not ('FolderPermissionManager.DosDevice' -as [type])) {
+            Add-Type -Namespace FolderPermissionManager -Name DosDevice -MemberDefinition @'
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+public static extern uint QueryDosDevice(string lpDeviceName, System.Text.StringBuilder lpTargetPath, int ucchMax);
+'@
+        }
+        $sb = New-Object System.Text.StringBuilder 1024
+        if ([FolderPermissionManager.DosDevice]::QueryDosDevice("$($Letter.ToUpper()):", $sb, $sb.Capacity) -eq 0) { return $null }
+        $sb.ToString()
+    }
+    catch { $null }
+}
+
+function Get-RelaunchPathProblem {
+    # $null when the administrator copy can reach this path; otherwise a plain message. A drive
+    # letter is fine when it is a local fixed or removable disk, or a mapped drive in the map
+    # (it is passed on as its UNC path). Anything else exists only in this logon session: a
+    # SUBST drive (its letter points at a folder, not a volume) or a drive mapped without the
+    # tool seeing it. Drive letters a non-LocalSystem caller defines are local to its session:
+    # https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-definedosdevicew
+    # https://learn.microsoft.com/troubleshoot/windows-client/networking/mapped-drives-not-available-from-elevated-command
+    param(
+        [AllowNull()][AllowEmptyString()][string]$Path,
+        [hashtable]$DriveMap,
+        [ValidateSet('Script', 'LogFolder')][string]$Kind = 'Script'
+    )
+    if (-not $Path -or $Path -notmatch '^([A-Za-z]):') { return $null }
+    $letter = $Matches[1].ToUpper()
+    if ((Get-ValidDriveMap -DriveMap $DriveMap).ContainsKey($letter)) { return $null }
+    $type = Get-DriveLetterType -Letter $letter
+    if ($type -eq 'Fixed' -or $type -eq 'Removable') {
+        $target = Get-DosDeviceTarget -Letter $letter
+        # Learn's example of a volume target is \Device\HarddiskVolume1; SUBST gives a folder.
+        if (-not $target -or $target.StartsWith('\Device\', [StringComparison]::OrdinalIgnoreCase)) { return $null }
+    }
+    $why = "${letter}: is not a local disk and not a mapped drive this tool knows about (for example a SUBST drive, or a drive mapped only in this window), so the administrator copy of the tool cannot see it."
+    if ($Kind -eq 'LogFolder') {
+        return "The -LogFolder $Path is on drive ${letter}:. $why Start the tool again with -LogFolder set to a folder on a local disk or a \\server\share path."
+    }
+    "Folder Permission Manager is on drive ${letter}: ($Path). $why Copy the FolderPermissionManager folder to a local disk, or start it from its \\server\share path."
 }
 
 function Get-WindowsPowerShellPath {
@@ -435,13 +564,22 @@ function Request-Elevation {
         [Parameter(Mandatory)][string]$ScriptPath,
         [string]$LogFolder,
         [switch]$WhatIfMode,
-        [hashtable]$DriveMap
+        [hashtable]$DriveMap,
+        [hashtable]$DriveMapSource
     )
     try {
-        $arguments = Get-RelaunchArgumentList -ScriptPath $ScriptPath -LogFolder $LogFolder -WhatIfMode:$WhatIfMode -DriveMap $DriveMap
+        $arguments = Get-RelaunchArgumentList -ScriptPath $ScriptPath -LogFolder $LogFolder -WhatIfMode:$WhatIfMode -DriveMap $DriveMap -DriveMapSource $DriveMapSource
     }
     catch {
         Show-AppMessage -Icon Error -Message $_.Exception.Message
+        return $false
+    }
+    # The elevated copy runs in another logon session: a path on a drive only this session has
+    # would not be found there, so say so now instead of failing after the UAC prompt.
+    $problem = Get-RelaunchPathProblem -Path $ScriptPath -DriveMap $DriveMap -Kind Script
+    if (-not $problem) { $problem = Get-RelaunchPathProblem -Path (Resolve-LogFolderArgument -LogFolder $LogFolder) -DriveMap $DriveMap -Kind LogFolder }
+    if ($problem) {
+        Show-AppMessage -Icon Error -Message $problem
         return $false
     }
     try {
@@ -469,11 +607,13 @@ function Get-InstanceMutexName {
     # One name per log folder (case and trailing backslash ignored), in the Global\ namespace so
     # a second window in another session on the same computer is refused too.
     # https://learn.microsoft.com/windows/win32/termserv/kernel-object-namespaces
-    param([Parameter(Mandatory)][string]$LogFolder)
-    # One spelling per folder: GetFullPath resolves "..", "." and "/" before the name is hashed.
-    # The log folder is already a full path here, so the process directory plays no part.
+    param([Parameter(Mandatory)][string]$LogFolder, [hashtable]$DriveMap)
+    # One spelling per folder: a mapped drive letter becomes its UNC path (so H:\X and
+    # \\fs01\home\X share one key), and GetFullPath resolves "..", "." and "/" before the name
+    # is hashed. The log folder is already a full path here, so the process directory plays no
+    # part. Short and fully qualified server names (fs01, fs01.contoso.com) still give two keys.
     # https://learn.microsoft.com/dotnet/api/system.io.path.getfullpath
-    $full = $LogFolder.Trim()
+    $full = (Resolve-MappedDrive -Path $LogFolder.Trim() -DriveMap $DriveMap)
     try { $full = [System.IO.Path]::GetFullPath($full) } catch { }
     $norm = $full.TrimEnd('\', '/').ToLowerInvariant()
     $sha = [System.Security.Cryptography.SHA256]::Create()
@@ -487,8 +627,8 @@ function Enter-SingleInstance {
     # Two windows must never append to the same change log at once. $false (and a message)
     # when another window already uses this log folder; the mutex is kept in
     # $script:InstanceMutex until the window closes.
-    param([Parameter(Mandatory)][string]$LogFolder)
-    $name = Get-InstanceMutexName -LogFolder $LogFolder
+    param([Parameter(Mandatory)][string]$LogFolder, [hashtable]$DriveMap)
+    $name = Get-InstanceMutexName -LogFolder $LogFolder -DriveMap $DriveMap
     $createdNew = $false
     $mutex = $null
     try {
@@ -527,11 +667,16 @@ function Resolve-MappedDrive {
 
 function Get-PathHeaderModel {
     # The path as the tech sees it, and the real location behind a mapped drive letter
-    # ($null when there is none). Nothing is shortened.
-    param([string]$Path, [hashtable]$DriveMap)
+    # ($null when there is none). Nothing is shortened. When that mapping only came from the
+    # remembered (registry) mappings, RealPathNote says so: it may be out of date.
+    param([string]$Path, [hashtable]$DriveMap, [hashtable]$DriveMapSource)
     $real = Resolve-MappedDrive -Path $Path -DriveMap $DriveMap
     if ($real -eq $Path) { $real = $null }
-    [PSCustomObject]@{ Path = $Path; RealPath = $real }
+    $note = $null
+    if ($real -and $DriveMapSource -and $Path -match '^([A-Za-z]):' -and "$($DriveMapSource[$Matches[1].ToUpper()])" -eq 'Remembered') {
+        $note = '(remembered mapping)'
+    }
+    [PSCustomObject]@{ Path = $Path; RealPath = $real; RealPathNote = $note }
 }
 
 function Join-DisplayPath {
@@ -742,10 +887,55 @@ function Get-DefaultExportFileName {
     'Permissions-{0}_{1}.csv' -f $safe, (Get-Date -Format 'yyyy-MM-dd_HHmmss')
 }
 
+function Get-OneDriveSyncRoot {
+    # Every folder the OneDrive client syncs for this user, including SharePoint libraries
+    # (which are not under %OneDrive%): HKCU:\Software\SyncEngines\Providers\OneDrive\<id>,
+    # value MountPoint, and HKCU:\Software\Microsoft\OneDrive\Accounts\<account>, value
+    # UserFolder. Only read, with Get-ChildItem and Get-ItemProperty; never throws.
+    # UNDOCUMENTED: Learn does not describe these keys (searched 2026-10-19), so only values
+    # that are full local paths (C:\...) are used.
+    # https://learn.microsoft.com/powershell/module/microsoft.powershell.management/get-itemproperty
+    $roots = [System.Collections.Generic.List[string]]::new()
+    $sources = @(
+        @('HKCU:\Software\SyncEngines\Providers\OneDrive', 'MountPoint'),
+        @('HKCU:\Software\Microsoft\OneDrive\Accounts', 'UserFolder')
+    )
+    foreach ($s in $sources) {
+        $keys = @()
+        try { $keys = @(Get-ChildItem -LiteralPath $s[0] -ErrorAction Stop) } catch { continue }
+        foreach ($k in $keys) {
+            $value = $null
+            try { $value = (Get-ItemProperty -LiteralPath $k.PSPath -Name $s[1] -ErrorAction Stop).($s[1]) } catch { continue }
+            if ("$value" -match '^[A-Za-z]:\\' -and -not $roots.Contains("$value")) { $roots.Add("$value") }
+        }
+    }
+    $roots.ToArray()
+}
+
 function Get-OneDriveFolder {
-    # The OneDrive folders of the signed-in user, as the OneDrive client sets them in the
-    # environment. Anything saved under one is uploaded to the cloud.
-    @($env:OneDrive, $env:OneDriveCommercial, $env:OneDriveConsumer | Where-Object { "$_".Trim() } | Select-Object -Unique)
+    # The folders this user's OneDrive client syncs: the environment variables it sets, plus
+    # its sync roots in the registry (SharePoint libraries too). Anything saved under one is
+    # uploaded to the cloud.
+    $all = @($env:OneDrive, $env:OneDriveCommercial, $env:OneDriveConsumer) + @(Get-OneDriveSyncRoot)
+    @($all | Where-Object { "$_".Trim() } | Select-Object -Unique)
+}
+
+function Test-OneDriveLikePath {
+    # Backstop for OneDrive folders this account's settings do not describe (another user's
+    # profile): a folder whose name starts with "OneDrive" inside C:\Users\<name>\. Profiles
+    # whose sync folders are known are judged by those folders only, so a local folder named
+    # like one ("OneDrive - Contoso2" next to "OneDrive - Contoso") is not flagged there.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Path, [AllowEmptyCollection()][string[]]$KnownRoot)
+    if ($Path -notmatch '^([A-Za-z]:\\Users\\[^\\]+)\\(.+)$') { return $false }
+    $profileRoot = $Matches[1]
+    $rest = $Matches[2]
+    foreach ($r in @($KnownRoot)) {
+        if ($r -and (Test-PathWithin -Path $r -Root $profileRoot)) { return $false }
+    }
+    foreach ($segment in $rest.Split('\')) {
+        if ($segment.StartsWith('OneDrive', [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    $false
 }
 
 function Get-ExportLocationInfo {
@@ -765,8 +955,12 @@ function Get-ExportLocationInfo {
         $warning = "$Path is on a network, mapped or removable drive, not this computer's own disk."
     }
     else {
-        foreach ($od in @(Get-OneDriveFolder)) {
-            if (Test-PathWithin -Path $Path -Root $od) { $warning = "$Path is inside the OneDrive folder $od, so it is uploaded to the cloud."; break }
+        $roots = @(Get-OneDriveFolder)
+        foreach ($od in $roots) {
+            if (Test-PathWithin -Path $Path -Root $od) { $warning = "$Path is inside the OneDrive sync folder $od (OneDrive or a synced SharePoint library), so it is uploaded to the cloud."; break }
+        }
+        if (-not $warning -and (Test-OneDriveLikePath -Path $Path -KnownRoot $roots)) {
+            $warning = "$Path looks like a OneDrive folder (a folder starting with OneDrive in a user profile), so it may be uploaded to the cloud."
         }
     }
     [PSCustomObject]@{ Path = $Path; IsLocal = ($null -eq $warning); Warning = $warning }
@@ -917,12 +1111,16 @@ function Test-CanClose {
 
 function Test-OwnProcess {
     # True when this PowerShell process was started just to run this script (-File <script>, as
-    # the tool's own relaunch does), so ending the process cannot close a tech's console.
+    # the tool's own relaunch does), so ending the process cannot close a tech's console. Not
+    # with -NoExit before -File: then the console is meant to stay open after the script.
+    # https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_powershell_exe
     param([AllowEmptyCollection()][string[]]$CommandLineArgs, [Parameter(Mandatory)][string]$ScriptPath)
     $leaf = Split-Path -Leaf $ScriptPath
     $words = @($CommandLineArgs)
     for ($i = 0; $i -lt $words.Count - 1; $i++) {
-        if ($words[$i] -eq '-File' -and (Split-Path -Leaf "$($words[$i + 1])".Trim('"')) -eq $leaf) { return $true }
+        # Words after -File belong to the script, so only the ones before it are checked.
+        if ("$($words[$i])" -match '^[-/]noe(x|xi|xit)?$') { return $false }
+        if ($words[$i] -eq '-File') { return ((Split-Path -Leaf "$($words[$i + 1])".Trim('"')) -eq $leaf) }
     }
     $false
 }
@@ -942,7 +1140,9 @@ function Invoke-AppShutdown {
         [AllowEmptyCollection()][object[]]$Tasks,
         [int]$WaitMilliseconds = 3000,
         [switch]$ExitWhenDone,
-        [scriptblock]$ExitAction = { [Environment]::Exit(0) }
+        # Non-zero after a fatal error, so whoever started the tool can tell it failed.
+        [int]$ExitCode = 0,
+        [scriptblock]$ExitAction = { param([int]$Code) [Environment]::Exit($Code) }
     )
     if ($Mutex) {
         try { $Mutex.ReleaseMutex() } catch { }
@@ -962,7 +1162,7 @@ function Invoke-AppShutdown {
     }
     if ($closed -and $Pool) { try { $Pool.Dispose() } catch { } }
     $exited = (-not $closed) -or [bool]$ExitWhenDone
-    if ($exited) { & $ExitAction }
+    if ($exited) { & $ExitAction $ExitCode }
     [PSCustomObject]@{ PoolClosed = $closed; Exited = $exited }
 }
 
@@ -1058,6 +1258,9 @@ function Set-FileAclResult {
     else {
         $err = if ($Result) { "$($Result.Error)" } else { '' }
         foreach ($p in @($Paths)) {
+            # A failed retry never replaces permissions that were already read for that file.
+            $known = $script:FileAclCache[$p]
+            if ($known -and $known.Ok) { continue }
             $script:FileAclCache[$p] = [PSCustomObject]@{ Ok = $false; Path = $p; Owner = $null; AreAccessRulesProtected = $false; Rows = @(); Error = $err }
         }
     }
@@ -1439,8 +1642,9 @@ $script:StylesXaml = @'
     <Setter.Value>
       <ControlTemplate TargetType="CheckBox">
         <StackPanel Orientation="Horizontal" Background="Transparent">
+          <!-- Muted, not BorderStrong: an empty box's edge must reach 3:1 against the box and the row. -->
           <Border x:Name="box" Width="16" Height="16" CornerRadius="3" BorderThickness="1" VerticalAlignment="Center"
-                  BorderBrush="{DynamicResource BorderStrong}" Background="{DynamicResource Input}">
+                  BorderBrush="{DynamicResource Muted}" Background="{DynamicResource Input}">
             <Path x:Name="tick" Data="M3,8 L6.5,11.5 L13,4.5" Stroke="{DynamicResource OnAccent}" StrokeThickness="2" Visibility="Collapsed"/>
           </Border>
           <ContentPresenter Margin="8,0,0,0" VerticalAlignment="Center"/>
@@ -1723,8 +1927,15 @@ $res
                  FontSize="13" Text="No folder chosen yet. Choose one on the left."/>
         <TextBlock x:Name="RealPathLabel" Grid.Row="1" Grid.Column="0" Text="REAL LOCATION" Style="{StaticResource Lbl}" Margin="0,4,12,0"
                    VerticalAlignment="Center" Visibility="Collapsed"/>
-        <TextBox x:Name="RealPathText" Grid.Row="1" Grid.Column="1" Style="{StaticResource SelectableText}" FontFamily="{StaticResource Mono}"
-                 FontSize="12" Foreground="{DynamicResource Muted}" Margin="0,4,0,0" Visibility="Collapsed"/>
+        <DockPanel Grid.Row="1" Grid.Column="1" LastChildFill="True">
+          <!-- Shown when the mapping behind the letter is only remembered by Windows (registry),
+               not seen live: it may point at an old server. -->
+          <TextBlock x:Name="RealPathNote" DockPanel.Dock="Right" Text="(remembered mapping)" Foreground="{DynamicResource Warn}"
+                     FontSize="12" Margin="8,4,0,0" VerticalAlignment="Center" Visibility="Collapsed"
+                     ToolTip="Windows remembers this drive mapping, but this window could not see it live. It may be out of date: check the path."/>
+          <TextBox x:Name="RealPathText" Style="{StaticResource SelectableText}" FontFamily="{StaticResource Mono}"
+                   FontSize="12" Foreground="{DynamicResource Muted}" Margin="0,4,0,0" Visibility="Collapsed"/>
+        </DockPanel>
         <Button x:Name="RefreshBtn" Grid.Row="0" Grid.RowSpan="2" Grid.Column="2" Style="{StaticResource Btn}" VerticalAlignment="Center" Margin="12,0,0,0"
                 ToolTip="Read this folder again: its subfolders, permissions and files (F5)." IsEnabled="False">
           <TextBlock><Run FontFamily="{StaticResource Sym}" Text="&#x21BB;"/><Run Text="  Refresh"/></TextBlock>
@@ -1894,6 +2105,7 @@ $res
                           <Style TargetType="CheckBox" BasedOn="{StaticResource {x:Type CheckBox}}">
                             <Setter Property="IsHitTestVisible" Value="True"/>
                             <Setter Property="Focusable" Value="False"/>
+                            <Setter Property="AutomationProperties.Name" Value="Select file"/>
                             <Setter Property="HorizontalAlignment" Value="Center"/>
                             <Setter Property="VerticalAlignment" Value="Center"/>
                           </Style>
@@ -2297,15 +2509,18 @@ function Select-Folder {
     $script:CurrentNode = $Node
     $script:Current = [PSCustomObject]@{ DisplayPath = $display; RealPath = $real }
 
-    $header = Get-PathHeaderModel -Path $display -DriveMap $script:MappedDrives
+    $header = Get-PathHeaderModel -Path $display -DriveMap $script:MappedDrives -DriveMapSource $script:MappedDriveSources
     $ui.PathText.Text = $header.Path
     if ($header.RealPath) {
         $ui.RealPathText.Text = $header.RealPath
+        $ui.RealPathNote.Text = $header.RealPathNote
+        $ui.RealPathNote.Visibility = if ($header.RealPathNote) { 'Visible' } else { 'Collapsed' }
         $ui.RealPathText.Visibility = 'Visible'
         $ui.RealPathLabel.Visibility = 'Visible'
     }
     else {
         $ui.RealPathText.Visibility = 'Collapsed'
+        $ui.RealPathNote.Visibility = 'Collapsed'
         $ui.RealPathLabel.Visibility = 'Collapsed'
     }
     $ui.RefreshBtn.IsEnabled = $true
@@ -2617,7 +2832,7 @@ function Initialize-PermissionWindow {
     $win = [System.Windows.Markup.XamlReader]::Parse((Get-MainWindowXaml))
     $script:Window = $win
     $script:UI = @{}
-    $names = 'ThemeToggle', 'OpenLogFolderBtn', 'DryRunPill', 'BannerPanel', 'ViewOnlyText', 'PathText', 'RealPathLabel', 'RealPathText',
+    $names = 'ThemeToggle', 'OpenLogFolderBtn', 'DryRunPill', 'BannerPanel', 'ViewOnlyText', 'PathText', 'RealPathLabel', 'RealPathText', 'RealPathNote',
     'RefreshBtn', 'BusyBar', 'BusyText', 'BusyProgress', 'StopExportBtn', 'RefreshDrivesBtn', 'GoBox', 'GoBtn', 'FolderTree',
     'EmptyState', 'FolderView', 'FolderAclTitle', 'OwnerText', 'InheritText', 'FolderAclGrid', 'FolderAclState',
     'AddPermissionBtn', 'RemovePermissionBtn', 'TakeOwnershipBtn', 'TakeOwnershipTreeBtn', 'CopyPermissionsBtn', 'ExportBtn',
@@ -2717,9 +2932,12 @@ catch {
     return
 }
 
-# Mapped drives passed on by the first (non-elevated) window, plus the ones this process sees.
+# The drives this process sees live win, then the ones the first (non-elevated) window passed
+# on, then the remembered ones (tagged, and shown as "(remembered mapping)").
 # Not $script:DriveMap: at script scope that IS the -DriveMap parameter (a string).
-$script:MappedDrives = Merge-DriveMap -Primary (Get-MappedDriveTable) -Secondary (ConvertFrom-DriveMapArgument -Argument $DriveMap)
+$script:DriveMapSet = Get-DriveMapSet -DriveMapArgument $DriveMap
+$script:MappedDrives = $script:DriveMapSet.Map
+$script:MappedDriveSources = $script:DriveMapSet.Source
 
 $isSta = [System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA'
 $principal = [System.Security.Principal.WindowsPrincipal]::new([System.Security.Principal.WindowsIdentity]::GetCurrent())
@@ -2729,7 +2947,7 @@ $action = Get-StartupAction -IsSta $isSta -IsAdmin $isAdmin
 if ($action -eq 'RelaunchSta') {
     # WPF needs a single-threaded apartment; start again in one.
     try {
-        $relaunch = Get-RelaunchArgumentList -ScriptPath $script:ScriptPath -LogFolder $LogFolder -WhatIfMode:$script:WhatIfMode -DriveMap $script:MappedDrives
+        $relaunch = Get-RelaunchArgumentList -ScriptPath $script:ScriptPath -LogFolder $LogFolder -WhatIfMode:$script:WhatIfMode -DriveMap $script:MappedDrives -DriveMapSource $script:MappedDriveSources
         Start-Process -FilePath (Get-WindowsPowerShellPath) -ArgumentList $relaunch -ErrorAction Stop
     }
     catch { Show-AppMessage -Icon Error -Message "Folder Permission Manager could not start a window: $($_.Exception.Message)" }
@@ -2741,9 +2959,13 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 if ($action -eq 'RelaunchElevated') {
     # Elevation is checked here rather than with #Requires so the tests can load the functions,
     # and so "Run with PowerShell" from Explorer just works after a UAC prompt.
-    [void](Request-Elevation -ScriptPath $script:ScriptPath -LogFolder $LogFolder -WhatIfMode:$script:WhatIfMode -DriveMap $script:MappedDrives)
+    [void](Request-Elevation -ScriptPath $script:ScriptPath -LogFolder $LogFolder -WhatIfMode:$script:WhatIfMode -DriveMap $script:MappedDrives -DriveMapSource $script:MappedDriveSources)
     return
 }
+
+# A -LogFolder on a mapped drive is used by its UNC path: this elevated window may not see the
+# letter, and the path then follows the same live-first map as everything else.
+$LogFolder = Resolve-MappedDrive -Path $LogFolder -DriveMap $script:MappedDrives
 
 # Not $script:LogFolder: at script scope that IS the -LogFolder parameter.
 $script:DefaultLogFolder = Join-Path $script:ScriptRoot 'Logs'
@@ -2756,17 +2978,19 @@ catch {
 }
 $script:LogFolderNotice = @(Get-ChangeLogFolderNotice -LogFolder $LogFolder -ResolvedFolder $script:ChangeLogFolder -DefaultFolder $script:DefaultLogFolder)
 
-if (-not (Enter-SingleInstance -LogFolder $script:ChangeLogFolder)) { return }
+if (-not (Enter-SingleInstance -LogFolder $script:ChangeLogFolder -DriveMap $script:MappedDrives)) { return }
 
 #endregion
 
 #region Main
 
+$script:FatalError = $false
 try {
     Initialize-BackgroundPool
     Start-PermissionWindow
 }
 catch {
+    $script:FatalError = $true
     Write-AppError "Fatal: $($_.Exception.Message)`n$($_.ScriptStackTrace)"
     Show-AppMessage -Icon Error -Message "Folder Permission Manager hit an error and has to close:`n`n$($_.Exception.Message)`n`nDetails were written to $($script:ErrorLogPath). Nothing was changed."
 }
@@ -2774,7 +2998,11 @@ finally {
     # Mutex first, then the pool without blocking; a read stuck in network I/O ends with the
     # process instead of keeping it alive. A tech's own console is only closed in that case.
     $ownProcess = Test-OwnProcess -CommandLineArgs ([Environment]::GetCommandLineArgs()) -ScriptPath $script:ScriptPath
-    $null = Invoke-AppShutdown -Pool $script:BgPool -Mutex $script:InstanceMutex -Tasks @($script:BgTasks) -ExitWhenDone:$ownProcess
+    $exitCode = if ($script:FatalError) { 1 } else { 0 }
+    $null = Invoke-AppShutdown -Pool $script:BgPool -Mutex $script:InstanceMutex -Tasks @($script:BgTasks) -ExitWhenDone:$ownProcess -ExitCode $exitCode
 }
+# Reached when the process was not ended above (a tech's own console): the script still ends
+# with a non-zero exit code after a fatal error.
+if ($script:FatalError) { exit 1 }
 
 #endregion

@@ -265,6 +265,24 @@ Describe 'Window markup' {
         $hint = $xml.SelectSingleNode('//*[local-name()="TextBlock"][@*[local-name()="Name"]="FilesHint"]')
         $hint.Text | Should -Be 'Tick files, or Ctrl-click / Shift-click to select several.'
     }
+
+    It 'AC20c_CheckBoxNameAndBorder' {
+        $xml = [xml](Get-MainWindowXaml)
+        # Screen readers name each tick box.
+        $grid = $xml.SelectSingleNode('//*[local-name()="DataGrid"][@*[local-name()="Name"]="FilesGrid"]')
+        $col = $grid.SelectSingleNode('./*[local-name()="DataGrid.Columns"]/*[local-name()="DataGridCheckBoxColumn"]')
+        $col.OuterXml | Should -Match 'Property="AutomationProperties.Name" Value="Select file"'
+        # The empty box's border uses Muted, which reaches 3:1 against the box and the row.
+        $style = $xml.SelectSingleNode('//*[local-name()="Style"][@TargetType="CheckBox"][not(@BasedOn)]')
+        $box = $style.SelectSingleNode('.//*[local-name()="Border"][@*[local-name()="Name"]="box"]')
+        $box.BorderBrush | Should -Be '{DynamicResource Muted}'
+        foreach ($name in 'Dark', 'Light') {
+            $t = $script:Themes[$name]
+            foreach ($bg in 'Input', 'Card', 'CardHover', 'Panel') {
+                (Get-ContrastRatio $t.Muted $t[$bg]) | Should -BeGreaterOrEqual 3 -Because "$name unchecked box border vs $bg"
+            }
+        }
+    }
 }
 
 Describe 'Theme setting' {
@@ -410,6 +428,46 @@ Describe 'Script shape' {
         $closing.IndexOf('Test-CanClose') | Should -BeGreaterOrEqual 0
         $closing.IndexOf('Test-CanClose') | Should -BeLessThan $closing.IndexOf('BeginStop')
     }
+
+    It 'AC8c_OwnConsoleAndExitCode' {
+        # -NoExit means the tech wants the console afterwards: ending the process would close it.
+        Test-OwnProcess -CommandLineArgs @('powershell.exe', '-NoExit', '-File', 'C:\FPM\FolderPermissionManager-GUI.ps1') -ScriptPath 'C:\FPM\FolderPermissionManager-GUI.ps1' | Should -BeFalse
+        Test-OwnProcess -CommandLineArgs @('powershell.exe', '-noexit', '-STA', '-File', 'C:\FPM\FolderPermissionManager-GUI.ps1') -ScriptPath 'C:\FPM\FolderPermissionManager-GUI.ps1' | Should -BeFalse
+        # A -NoExit after the script path is the script's own argument, not powershell.exe's.
+        Test-OwnProcess -CommandLineArgs @('powershell.exe', '-File', 'C:\FPM\FolderPermissionManager-GUI.ps1', '-NoExit') -ScriptPath 'C:\FPM\FolderPermissionManager-GUI.ps1' | Should -BeTrue
+
+        # The exit code reaches the exit action: non-zero after a fatal error.
+        $codes = [System.Collections.Generic.List[int]]::new()
+        $record = { param($code) $codes.Add($code) }.GetNewClosure()
+        $done = New-Object System.Threading.ManualResetEvent $true
+        $okPool = [PSCustomObject]@{}
+        $okPool | Add-Member ScriptMethod BeginClose { param($a, $b) [PSCustomObject]@{ AsyncWaitHandle = $done } }.GetNewClosure()
+        $null = Invoke-AppShutdown -Pool $okPool -Mutex $null -Tasks @() -WaitMilliseconds 50 -ExitWhenDone -ExitCode 1 -ExitAction $record
+        $null = Invoke-AppShutdown -Pool $okPool -Mutex $null -Tasks @() -WaitMilliseconds 50 -ExitWhenDone -ExitAction $record
+        @($codes) | Should -Be @(1, 0)
+
+        # The main block records the fatal error and the script ends with a non-zero exit code.
+        $code = Get-Content -LiteralPath $script:AppPath -Raw
+        $main = $code.Substring($code.IndexOf('#region Main'))
+        $main | Should -Match '(?s)catch \{.*\$script:FatalError = \$true'
+        $main | Should -Match ([regex]::Escape('-ExitCode $exitCode'))
+        $main | Should -Match '(?m)^if \(\$script:FatalError\) \{ exit 1 \}'
+    }
+
+    It 'AC8d_CoreTopLevelHasNoState' {
+        # SQ-018 copies the core's functions into the background pool instead of running the file
+        # there. That only loses nothing while the core's top level holds just its param() block,
+        # function definitions and the -LoadFunctionsOnly guard: any other top-level statement
+        # (a variable, an Add-Type, a module import) would be missing in the pool.
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:CorePath, [ref]$null, [ref]$null)
+        $ast.ParamBlock | Should -Not -BeNullOrEmpty
+        $ast.BeginBlock | Should -BeNullOrEmpty
+        $ast.ProcessBlock | Should -BeNullOrEmpty
+        $ast.DynamicParamBlock | Should -BeNullOrEmpty
+        $other = @($ast.EndBlock.Statements | Where-Object { $_ -isnot [System.Management.Automation.Language.FunctionDefinitionAst] })
+        $other.Count | Should -Be 1 -Because 'only the -LoadFunctionsOnly guard may sit beside the functions'
+        $other[0].Extent.Text | Should -Match '^if \(\$LoadFunctionsOnly\) \{ return \}$'
+    }
 }
 
 Describe 'Startup' {
@@ -498,7 +556,11 @@ Describe 'Startup' {
 
         # Anything that is not a real \\server\share is dropped, and the letter stays unresolved.
         $badValues = '\\?\C:\Windows', '\\?\UNC\fs01\x', '\\.\pipe\x', '\\.\C:', '\\fs01', '\\fs01\', '\\\fs01\x',
-        '\\fs01\share\..\other', '\\fs01\.\x', '\\fs01\share\.', '\\..\x', 'C:\Data', '//fs01/x', '\\.hidden\x', ''
+        '\\fs01\share\..\other', '\\fs01\.\x', '\\fs01\share\.', '\\..\x', 'C:\Data', '//fs01/x', '\\.hidden\x', '',
+        # '/' anywhere, and a folder, share or server name that ends in '.' or ' ' (Windows drops
+        # those, so the name would point somewhere else than it reads).
+        '\\fs01\share/x', '\\fs01/share', '\\fs01\share\sub/..', '\\fs01.\x', '\\fs01 \x', '\\fs01\share.\x',
+        '\\fs01\share \x', '\\fs01\share\x.', '\\fs01\share\x '
         foreach ($v in $badValues) {
             Test-UncSharePath -Path $v | Should -BeFalse -Because "'$v' is not a plain \\server\share path"
             $m = @{ X = $v }
@@ -542,6 +604,126 @@ Describe 'Startup' {
         $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:AppPath, [ref]$null, [ref]$null)
         $netCalls = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -match '^net(\.exe)?$' }, $true))
         $netCalls.Count | Should -Be 0
+    }
+
+    It 'AC13d_LiveAndPassedOnMappingsBeatRemembered' {
+        # Elevated copy: CIM sees no mappings, the registry still remembers H: -> \\fs01\home (stale),
+        # and the first window passed on the live H: -> \\fs02\home. The live one must win, or the
+        # script path, -LogFolder and browsed paths would point at the old server.
+        Mock Get-CimInstance { @() }
+        Mock Get-ChildItem -ParameterFilter { $LiteralPath -eq 'HKCU:\Network' } {
+            @([PSCustomObject]@{ PSChildName = 'H' }, [PSCustomObject]@{ PSChildName = 'R' })
+        }
+        Mock Get-ItemProperty -ParameterFilter { $LiteralPath -like 'HKCU:\Network\*' } {
+            switch (Split-Path -Leaf $LiteralPath) {
+                'H' { [PSCustomObject]@{ RemotePath = '\\fs01\home' } }
+                default { [PSCustomObject]@{ RemotePath = '\\fs01\old' } }
+            }
+        }
+        $passed = ConvertTo-DriveMapArgument -DriveMap @{ H = '\\fs02\home' }
+        $set = Get-DriveMapSet -DriveMapArgument $passed
+        $set.Map['H'] | Should -Be '\\fs02\home'
+        $set.Source['H'] | Should -Be 'PassedOn'
+        # The registry only fills a letter neither CIM nor the first window has.
+        $set.Map['R'] | Should -Be '\\fs01\old'
+        $set.Source['R'] | Should -Be 'Remembered'
+
+        $a = @(Get-RelaunchArgumentList -ScriptPath 'H:\Tools\FPM\FolderPermissionManager-GUI.ps1' -LogFolder 'H:\Tickets\1' -DriveMap $set.Map -DriveMapSource $set.Source)
+        $a[5] | Should -Be '"\\fs02\home\Tools\FPM\FolderPermissionManager-GUI.ps1"'
+        $a[[array]::IndexOf($a, '-LogFolder') + 1] | Should -Be '"\\fs02\home\Tickets\1"'
+        Resolve-MappedDrive -Path 'H:\Tickets\1' -DriveMap $set.Map | Should -Be '\\fs02\home\Tickets\1'
+        Get-InstanceMutexName -LogFolder 'H:\Tickets\1' -DriveMap $set.Map | Should -Be (Get-InstanceMutexName -LogFolder '\\fs02\home\Tickets\1')
+        $h = Get-PathHeaderModel -Path 'H:\Data' -DriveMap $set.Map -DriveMapSource $set.Source
+        $h.RealPath | Should -Be '\\fs02\home\Data'
+        $h.RealPathNote | Should -BeNullOrEmpty
+
+        # This process's own live mappings beat both.
+        Mock Get-CimInstance { @([PSCustomObject]@{ DeviceID = 'H:'; ProviderName = '\\fs03\home' }) }
+        $live = Get-DriveMapSet -DriveMapArgument $passed
+        $live.Map['H'] | Should -Be '\\fs03\home'
+        $live.Source['H'] | Should -Be 'Live'
+        (Merge-DriveMap -Primary @{} -Secondary @{ H = '\\fs02\home' } -Remembered @{ H = '\\fs01\home' })['H'] | Should -Be '\\fs02\home'
+        (Merge-DriveMap -Primary @{ H = '\\fs03\home' } -Secondary @{ H = '\\fs02\home' } -Remembered @{ H = '\\fs01\home' })['H'] | Should -Be '\\fs03\home'
+
+        # The window builds its map this way, not with the remembered drives first.
+        $code = Get-Content -LiteralPath $script:AppPath -Raw
+        $startup = $code.Substring($code.IndexOf('if ($LoadFunctionsOnly) { return }'))
+        $startup | Should -Match ([regex]::Escape('Get-DriveMapSet -DriveMapArgument $DriveMap'))
+        $startup | Should -Not -Match 'Get-MappedDriveTable'
+    }
+
+    It 'AC13e_RememberedMappingWhenCimFails' {
+        # First (non-elevated) window where CIM fails: the remembered mapping may be used, but it
+        # is marked as remembered, and it is not passed on as if it were live.
+        Mock Get-CimInstance { throw 'WMI is not available' }
+        Mock Get-ChildItem -ParameterFilter { $LiteralPath -eq 'HKCU:\Network' } { @([PSCustomObject]@{ PSChildName = 'H' }) }
+        Mock Get-ItemProperty -ParameterFilter { $LiteralPath -like 'HKCU:\Network\*' } { [PSCustomObject]@{ RemotePath = '\\fs01\home' } }
+        $set = Get-DriveMapSet -DriveMapArgument ''
+        $set.Map['H'] | Should -Be '\\fs01\home'
+        $set.Source['H'] | Should -Be 'Remembered'
+
+        $h = Get-PathHeaderModel -Path 'H:\Data\HR' -DriveMap $set.Map -DriveMapSource $set.Source
+        $h.Path | Should -Be 'H:\Data\HR'
+        $h.RealPath | Should -Be '\\fs01\home\Data\HR'
+        $h.RealPathNote | Should -Be '(remembered mapping)'
+        (Get-PathHeaderModel -Path 'C:\Data' -DriveMap $set.Map -DriveMapSource $set.Source).RealPathNote | Should -BeNullOrEmpty
+
+        $a = @(Get-RelaunchArgumentList -ScriptPath 'H:\FPM\FolderPermissionManager-GUI.ps1' -DriveMap $set.Map -DriveMapSource $set.Source)
+        $a[5] | Should -Be '"\\fs01\home\FPM\FolderPermissionManager-GUI.ps1"' -Because 'the script must still be found'
+        $a | Should -Not -Contain '-DriveMap' -Because 'a remembered mapping is not handed on as a live one'
+
+        # The path header shows the note next to the UNC path.
+        $code = Get-Content -LiteralPath $script:AppPath -Raw
+        $code | Should -Match ([regex]::Escape('$ui.RealPathNote.Text = $header.RealPathNote'))
+    }
+
+    It 'AC12c_MutexKeyFollowsMappedDrive' {
+        $map = @{ H = '\\fs01\home' }
+        Get-InstanceMutexName -LogFolder 'H:\X' -DriveMap $map | Should -Be (Get-InstanceMutexName -LogFolder '\\fs01\home\X')
+        Get-InstanceMutexName -LogFolder 'H:\X' | Should -Not -Be (Get-InstanceMutexName -LogFolder '\\fs01\home\X') -Because 'without the map H: stays a letter'
+        $code = Get-Content -LiteralPath $script:AppPath -Raw
+        $code | Should -Match ([regex]::Escape('Enter-SingleInstance -LogFolder $script:ChangeLogFolder -DriveMap $script:MappedDrives'))
+
+        foreach ($bad in '\\?\C:\Logs', '\\.\C:\Logs', '\\?\UNC\fs01\x', '//?/C:/Logs', '//./C:/Logs') {
+            { Resolve-LogFolderArgument -LogFolder $bad } | Should -Throw '*full folder path*' -Because "'$bad' is a device or long-path form"
+        }
+
+        $readme = Get-Content -LiteralPath (Join-Path $script:Root 'README.md') -Raw
+        $readme | Should -Match '(?s)Known limits.*short name.*(FQDN|fully qualified)'
+    }
+
+    It 'AC10d_RelaunchRefusesSessionOnlyDrives' {
+        # The elevated copy cannot see a SUBST drive or a drive letter that exists only in this
+        # session, so the relaunch is refused with a plain message instead of failing later.
+        Mock Get-DriveLetterType {
+            switch ($Letter) { 'C' { 'Fixed' } 'E' { 'Removable' } 'S' { 'Fixed' } 'N' { 'Network' } 'H' { 'Network' } default { 'NoRootDirectory' } }
+        }
+        Mock Get-DosDeviceTarget {
+            switch ($Letter) { 'S' { '\??\C:\Work' } default { '\Device\HarddiskVolume3' } }
+        }
+        $map = @{ H = '\\fs01\home' }
+        Get-RelaunchPathProblem -Path 'C:\Tools\FPM\FolderPermissionManager-GUI.ps1' -DriveMap $map | Should -BeNullOrEmpty
+        Get-RelaunchPathProblem -Path 'E:\FPM\FolderPermissionManager-GUI.ps1' -DriveMap $map | Should -BeNullOrEmpty
+        Get-RelaunchPathProblem -Path 'H:\FPM\FolderPermissionManager-GUI.ps1' -DriveMap $map | Should -BeNullOrEmpty
+        Get-RelaunchPathProblem -Path '\\fs01\tools\FPM\FolderPermissionManager-GUI.ps1' -DriveMap $map | Should -BeNullOrEmpty
+        foreach ($p in 'S:\FPM\FolderPermissionManager-GUI.ps1', 'N:\FPM\FolderPermissionManager-GUI.ps1', 'Q:\FPM\FolderPermissionManager-GUI.ps1') {
+            $text = Get-RelaunchPathProblem -Path $p -DriveMap $map
+            $text | Should -Not -BeNullOrEmpty -Because "$p is on a drive the administrator copy cannot see"
+            $text | Should -Match ([regex]::Escape($p.Substring(0, 2)))
+        }
+
+        Mock Show-AppMessage { }
+        Mock Start-Process { }
+        Request-Elevation -ScriptPath 'S:\FPM\FolderPermissionManager-GUI.ps1' -DriveMap $map | Should -BeFalse
+        Request-Elevation -ScriptPath 'C:\FPM\FolderPermissionManager-GUI.ps1' -LogFolder 'N:\Tickets\1' -DriveMap $map | Should -BeFalse
+        Should -Invoke Start-Process -Times 0 -Exactly
+        Should -Invoke Show-AppMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'S:' -and $Message -match 'local disk' }
+        Should -Invoke Show-AppMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'N:' -and $Message -match '-LogFolder' }
+        Request-Elevation -ScriptPath 'C:\FPM\FolderPermissionManager-GUI.ps1' -LogFolder 'H:\Tickets\1' -DriveMap $map | Should -BeTrue
+        Should -Invoke Start-Process -Times 1 -Exactly
+
+        $readme = Get-Content -LiteralPath (Join-Path $script:Root 'README.md') -Raw
+        $readme | Should -Match '(?s)Known limits.*SUBST'
     }
 
     It 'AC11_ElevationDeclined' {
@@ -801,6 +983,25 @@ Describe 'Viewing' {
         Get-FileAclDiffWarning | Should -Be "Selected files have different permissions $($script:Dash) this operation applies uniformly to all"
     }
 
+    It 'AC21c_FailedRetryKeepsLoadedPermissions' {
+        # A retry that fails must not replace permissions that were already read for a file.
+        $request = New-PaneRequest -Pane 'Files'
+        $script:FileAclPending = @{}
+        $script:FileAclCache = @{}
+        $good = [PSCustomObject]@{ Ok = $true; Path = 'C:\F\a.txt'; Owner = 'BUILTIN\Administrators'; AreAccessRulesProtected = $false
+            Rows = @([PSCustomObject]@{ Identity = 'BUILTIN\Users'; PermissionLevel = 'Read'; Type = 'Allow'; IsInherited = $true }); Error = $null }
+        Set-FileAclResult -Result ([PSCustomObject]@{ Ok = $true; Items = @($good); Error = $null }) -Request $request -Paths @('C:\F\a.txt') | Should -BeTrue
+        $failed = [PSCustomObject]@{ Ok = $false; Items = @(); Error = 'The network path was not found.' }
+        Set-FileAclResult -Result $failed -Request $request -Paths @('C:\F\a.txt', 'C:\F\b.txt') | Should -BeTrue
+        $script:FileAclCache['C:\F\a.txt'].Ok | Should -BeTrue
+        $script:FileAclCache['C:\F\a.txt'].Owner | Should -Be 'BUILTIN\Administrators'
+        $script:FileAclCache['C:\F\b.txt'].Ok | Should -BeFalse
+        $script:FileAclCache['C:\F\b.txt'].Error | Should -Be 'The network path was not found.'
+        # A failed entry can still be replaced by a later failure or success.
+        Set-FileAclResult -Result ([PSCustomObject]@{ Ok = $false; Items = @(); Error = 'Second try failed.' }) -Request $request -Paths @('C:\F\b.txt') | Should -BeTrue
+        $script:FileAclCache['C:\F\b.txt'].Error | Should -Be 'Second try failed.'
+    }
+
     It 'AC21b_DiffWarningLine' {
         $base = "Selected files have different permissions $($script:Dash) this operation applies uniformly to all"
         Get-FileAclDiffWarningText -Checked 3 -Selected 3 | Should -Be "Warning: $base"
@@ -844,6 +1045,73 @@ Describe 'Export' {
         Get-DefaultExportFileName -Path '\\fs01\Data\HR' | Should -Match '^Permissions-__fs01_Data_HR_\d{4}-\d{2}-\d{2}_\d{6}\.csv$'
     }
 
+    It 'AC23f_ExportFormulaGuardEveryColumn' {
+        # Folder names, owners, accounts and the other columns can all start with a character
+        # Excel runs as a formula; every such cell must come out with a leading quote.
+        $root = Join-Path $TestDrive 'exp-formula'
+        $names = '=1+1', '@x', '-x', '+x'
+        foreach ($n in $names) { New-Item -ItemType Directory -Path (Join-Path $root $n) -Force | Out-Null }
+        Mock Get-Acl {
+            $acl = [PSCustomObject]@{}
+            $acl | Add-Member ScriptMethod GetOwner { param($type) [PSCustomObject]@{ Value = '=HYPERLINK("http://x")' } }
+            $acl | Add-Member ScriptMethod GetAccessRules {
+                param($explicit, $inherited, $type)
+                @([PSCustomObject]@{
+                        IdentityReference = [PSCustomObject]@{ Value = '@SUM(A1)' }
+                        FileSystemRights  = '+Modify'
+                        AccessControlType = '-Allow'
+                        IsInherited       = '=TRUE'
+                        InheritanceFlags  = '@ContainerInherit'
+                    })
+            }
+            $acl
+        }
+        $out = Join-Path $TestDrive 'formula.csv'
+        $r = & $script:ExportWork $root $out $null
+        $r.Ok | Should -BeTrue
+        $rows = @(Import-Csv -LiteralPath $out -Encoding UTF8)
+        $rows.Count | Should -Be ($names.Count + 1)
+        foreach ($n in $names) {
+            @($rows | Where-Object { $_.Path -eq (Join-Path $root $n) }).Count | Should -Be 1 -Because "the folder '$n' is in the report"
+        }
+        $columns = 'Path', 'Owner', 'Identity', 'Rights', 'AccessType', 'IsInherited', 'InheritanceFlags'
+        foreach ($row in $rows) {
+            foreach ($c in $columns) {
+                "$($row.$c)" | Should -Not -Match '^[=+\-@\t\r]' -Because "column $c must never start with a formula character"
+            }
+            $row.Owner | Should -Be "'=HYPERLINK(`"http://x`")"
+            $row.Identity | Should -Be "'@SUM(A1)"
+            $row.Rights | Should -Be "'+Modify"
+            $row.AccessType | Should -Be "'-Allow"
+            $row.IsInherited | Should -Be "'=TRUE"
+            $row.InheritanceFlags | Should -Be "'@ContainerInherit"
+        }
+        # A full folder path starts with its drive letter, so the Path column is checked by the
+        # loop above; the leaf names keep their characters unchanged inside it.
+        @($rows | Where-Object { $_.Path -like '*\=1+1' }).Count | Should -Be 1
+    }
+
+    It 'AC23h_OneDriveSyncRootRegistryRead' {
+        Mock Get-ChildItem -ParameterFilter { $LiteralPath -eq 'HKCU:\Software\SyncEngines\Providers\OneDrive' } {
+            @([PSCustomObject]@{ PSPath = 'HKCU:\Software\SyncEngines\Providers\OneDrive\lib1' }, [PSCustomObject]@{ PSPath = 'HKCU:\Software\SyncEngines\Providers\OneDrive\bad' })
+        }
+        Mock Get-ChildItem -ParameterFilter { $LiteralPath -eq 'HKCU:\Software\Microsoft\OneDrive\Accounts' } {
+            @([PSCustomObject]@{ PSPath = 'HKCU:\Software\Microsoft\OneDrive\Accounts\Business1' }, [PSCustomObject]@{ PSPath = 'HKCU:\Software\Microsoft\OneDrive\Accounts\Personal' })
+        }
+        Mock Get-ItemProperty -ParameterFilter { $LiteralPath -like 'HKCU:\Software\*' } {
+            switch -Wildcard ($LiteralPath) {
+                '*\lib1' { [PSCustomObject]@{ MountPoint = 'C:\Users\tech\Contoso\HR - Documents' } }
+                '*\bad' { [PSCustomObject]@{ MountPoint = 'not a path' } }
+                '*\Business1' { [PSCustomObject]@{ UserFolder = 'C:\Users\tech\OneDrive - Contoso' } }
+                default { throw 'Property UserFolder does not exist.' }
+            }
+        }
+        $roots = @(Get-OneDriveSyncRoot)
+        $roots | Should -Contain 'C:\Users\tech\Contoso\HR - Documents'
+        $roots | Should -Contain 'C:\Users\tech\OneDrive - Contoso'
+        $roots.Count | Should -Be 2
+    }
+
     Context 'Where the export is saved' {
         BeforeAll {
             $script:SavedOneDrive = @{ OneDrive = $env:OneDrive; OneDriveCommercial = $env:OneDriveCommercial; OneDriveConsumer = $env:OneDriveConsumer }
@@ -852,6 +1120,8 @@ Describe 'Export' {
             $env:OneDrive = $null; $env:OneDriveCommercial = $null; $env:OneDriveConsumer = $null
             # DriveInfo stand-in: C: is a local fixed disk, every other letter is not.
             Mock Test-LocalFixedPath { "$Path" -match '^[Cc]:' }
+            # This computer's OneDrive sync roots in the registry: none, unless a test says so.
+            Mock Get-OneDriveSyncRoot { @() }
         }
         AfterAll {
             $env:OneDrive = $script:SavedOneDrive.OneDrive
@@ -898,6 +1168,29 @@ Describe 'Export' {
             $env:OneDriveCommercial = 'C:\Users\tech\OneDrive - Contoso'
             Get-DefaultExportFolder -DocumentsPath 'C:\Users\tech\OneDrive - Contoso\Documents' -LocalAppDataPath 'C:\Users\tech\AppData\Local' |
                 Should -Be 'C:\Users\tech\AppData\Local\FolderPermissionManager\Exports'
+        }
+
+        It 'AC23g_OneDriveSyncRootsAndOtherProfiles' {
+            # A synced SharePoint library is not under %OneDrive%; its folder comes from the
+            # OneDrive client's registry keys (read only).
+            Mock Get-OneDriveSyncRoot { @('C:\Users\tech\Contoso\HR - Documents', 'C:\Users\tech\OneDrive - Contoso') }
+            $sp = Get-ExportLocationInfo -Path 'C:\Users\tech\Contoso\HR - Documents\Permissions.csv'
+            $sp.IsLocal | Should -BeFalse -Because 'a synced SharePoint library is uploaded to the cloud'
+            $sp.Warning | Should -Match ([regex]::Escape('C:\Users\tech\Contoso\HR - Documents'))
+            (Get-ExportLocationInfo -Path 'C:\Users\tech\Contoso\Local\x.csv').IsLocal | Should -BeTrue
+
+            # Another user's OneDrive: not in this account's registry or environment, so the
+            # backstop flags a folder starting "OneDrive" in any profile.
+            $other = Get-ExportLocationInfo -Path 'C:\Users\someone.else\OneDrive - Contoso\Exports\Permissions.csv'
+            $other.IsLocal | Should -BeFalse
+            $other.Warning | Should -Match 'OneDrive'
+            (Get-ExportLocationInfo -Path 'C:\Users\someone.else\OneDrive\x.csv').IsLocal | Should -BeFalse
+            (Get-ExportLocationInfo -Path 'C:\Users\someone.else\Documents\x.csv').IsLocal | Should -BeTrue
+
+            # The registry is read for both keys, with Get-ChildItem and Get-ItemProperty only.
+            $code = Get-Content -LiteralPath $script:AppPath -Raw
+            $code | Should -Match ([regex]::Escape('HKCU:\Software\SyncEngines\Providers\OneDrive'))
+            $code | Should -Match ([regex]::Escape('HKCU:\Software\Microsoft\OneDrive\Accounts'))
         }
 
         It 'AC23d_ExportConfirmWhenNotLocal' {

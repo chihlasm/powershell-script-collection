@@ -86,6 +86,27 @@ computer's clipboard. Even in this view-only version and with `-WhatIf`, startin
 creates the `Logs` folder next to the script (when that is a local fixed disk) and writes and
 deletes a small probe file there, to check that backups could be saved.
 
+**Mapped drives.** The real location behind a drive letter comes, in this order, from the
+drives the window itself sees, then the ones the first (non-elevated) window passed on, then
+the mappings Windows remembers in the registry. A remembered mapping can be out of date (the
+drive may have been remapped to a new server since), so it only fills a letter the other two
+do not have, and the path header shows **(remembered mapping)** next to its `\\server\share`
+path. Check that path before you change anything there.
+
+**Known limits:**
+- One window per log folder is checked by the folder's path: `H:\Tickets\1` and the
+  `\\fs01\home\Tickets\1` behind it count as one folder, but a server's short name and its
+  fully qualified name (FQDN) (`\\fs01\...` and `\\fs01.contoso.com\...`) count as two, so two
+  windows could then share one change log. Use one spelling of the server for `-LogFolder`.
+- The script and `-LogFolder` must be on a local fixed or removable disk, a mapped drive the
+  tool can see, or a `\\server\share` path. A SUBST drive, or a drive letter that exists only
+  in your own session, is not visible to the administrator copy, so the tool says so and does
+  not open; copy the folder to a local disk or start it from its `\\server\share` path.
+- The export warns about OneDrive folders it knows from your OneDrive settings (including
+  synced SharePoint libraries) and about any folder starting with "OneDrive" in another user's
+  profile. A sync folder set up some other way is not recognised; save the export in a plain
+  local folder.
+
 To copy files with their permissions, use [RobocopyMigration](../RobocopyMigration/): the
 Windows app has no Robocopy tab and no "Copy Files To...".
 
