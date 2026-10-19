@@ -612,7 +612,7 @@ Describe 'Copy-FolderPermission (SQ-015, add-only)' {
 
 Describe 'GUI replicate endpoint ignores an old client''s recursive flag (SQ-015, AC14)' {
     BeforeAll {
-        $guiPath = (Resolve-Path (Join-Path $PSScriptRoot '..\FolderPermissionManager-GUI.ps1')).Path
+        $guiPath = (Resolve-Path (Join-Path $PSScriptRoot '..\FolderPermissionManager-WebGUI.ps1')).Path
         $ast = [System.Management.Automation.Language.Parser]::ParseFile($guiPath, [ref]$null, [ref]$null)
         $handlers = 'Resolve-MappedDrive', 'Complete-PermissionChange', 'ConvertTo-ChangeResultRow',
             'Send-SingleChangeResult', 'Send-BatchChangeResult', 'Invoke-ReplicatePermissions'
@@ -729,7 +729,7 @@ Describe 'GUI replicate endpoint ignores an old client''s recursive flag (SQ-015
 
 Describe 'GUI page: copy result and dialog wording (SQ-015 fix round 1)' {
     BeforeAll {
-        $script:GuiRaw = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\FolderPermissionManager-GUI.ps1') -Raw
+        $script:GuiRaw = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\FolderPermissionManager-WebGUI.ps1') -Raw
         $script:StatusType = [regex]::Match($script:GuiRaw, '(?s)function changeStatusType\(r\) \{.*?\n\}').Value
         $script:ShowResult = [regex]::Match($script:GuiRaw, '(?s)function showChangeResult\(r\) \{.*?\n\}').Value
     }

@@ -13,7 +13,7 @@
 
 BeforeAll {
     $folder = Join-Path $PSScriptRoot '..'
-    $script:GuiPath = (Resolve-Path (Join-Path $folder 'FolderPermissionManager-GUI.ps1')).Path
+    $script:GuiPath = (Resolve-Path (Join-Path $folder 'FolderPermissionManager-WebGUI.ps1')).Path
     $script:GuiText = Get-Content -LiteralPath $script:GuiPath -Raw
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:GuiPath, [ref]$null, [ref]$null)
     $wanted = 'Send-Json', 'Resolve-MappedDrive', 'Get-AccessDeniedMessage', 'Get-Children'
