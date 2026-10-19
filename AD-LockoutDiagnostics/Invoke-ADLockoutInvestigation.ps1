@@ -40,6 +40,9 @@
     source address (DHCP lease, MAC vendor, AD computer object); step 7 maps the evidence
     to Microsoft's documented lockout causes and prints the specific remediation. The top
     findings are lifted into SUMMARY.txt so the answer is readable without opening a CSV.
+    Step 4 also reports Kerberos encryption-type blocks (sign-ins refused for the
+    encryption type after the 2026 RC4 changes, not for the password); those, and any DC
+    it could not check, appear in SUMMARY.txt under ENCRYPTION-TYPE BLOCKS.
 
     They are found beside this script, and are skipped with a note if absent.
 
@@ -331,6 +334,75 @@ function Invoke-Step {
     return $row
 }
 
+function Find-EtypeFindingsCsv {
+    # The ADLockoutEtype_<sam>_<stamp>.csv Diagnose-ADAccountLockout.ps1 wrote during THIS
+    # run, or $null. Anything older is a previous run's result and must not reach this
+    # run's SUMMARY.txt. The file is named after the resolved sAMAccountName while
+    # -Identity may be DOMAIN\sam or sam@domain, so the bare name is preferred when a file
+    # carries it; otherwise the newest file from this run is used (step 4 runs once, for
+    # this account).
+    param([string]$CaseFolder, [datetime]$Since, [string]$Identity)
+
+    $fresh = @(Get-ChildItem -Path $CaseFolder -Filter 'ADLockoutEtype_*.csv' -Recurse -File -ErrorAction SilentlyContinue |
+               Where-Object { $_.LastWriteTime -ge $Since } | Sort-Object LastWriteTime -Descending)
+    if ($fresh.Count -eq 0) { return $null }
+
+    $bare = ([string]$Identity).Trim()
+    if ($bare -match '\\') { $bare = $bare.Substring($bare.LastIndexOf('\') + 1) }
+    if ($bare -match '@')  { $bare = $bare.Substring(0, $bare.IndexOf('@')) }
+    if ($bare) {
+        $named = @($fresh | Where-Object { $_.Name -like "ADLockoutEtype_$($bare)_*" })
+        if ($named.Count -gt 0) { return $named[0] }
+    }
+    return $fresh[0]
+}
+
+function Import-EtypeFindingsCsv {
+    # Reads the ADLockoutEtype_<sam>_<stamp>.csv that Diagnose-ADAccountLockout.ps1 writes
+    # (Kind, Account, ClientAddress, DC, Sentence, NextStep, Reason) and splits it into the
+    # encryption-type findings and the DCs that couldn't be checked (Kind = CantTell).
+    # Best-effort like the causes CSV: a missing or unreadable file costs only this block
+    # of SUMMARY.txt, never the summary itself.
+    param([string]$Path)
+
+    $result = [PSCustomObject]@{ Findings = @(); CantTell = @() }
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) { return $result }
+    try {
+        $rows = @(Import-Csv -LiteralPath $Path -ErrorAction Stop)
+    } catch {
+        Write-Status WARN "Could not read encryption-type findings for the summary: $($_.Exception.Message)"
+        return $result
+    }
+    $result.Findings = @($rows | Where-Object { $_.Kind -ne 'CantTell' -and $_.Sentence })
+    $result.CantTell = @($rows | Where-Object { $_.Kind -eq 'CantTell' -and $_.DC })
+    return $result
+}
+
+function Format-WrappedLine {
+    # Word-wraps Text after Label so a long instruction stays readable in Notepad;
+    # continuation lines start with Indent. Returns the lines.
+    param([string]$Label, [string]$Indent, [string]$Text, [int]$Width = 96)
+
+    $lines = New-Object 'System.Collections.Generic.List[string]'
+    $line = $Label
+    # Track "nothing on this line yet" explicitly. Inferring it from the line ending in ':'
+    # also fired after any word ending in a colon, so "run: net use" was printed as
+    # "run:net use" in SUMMARY.txt and the Findings tab.
+    $atLineStart = $true
+    foreach ($word in ([string]$Text -split ' ')) {
+        if ($word -eq '') { continue }
+        if (-not $atLineStart -and ($line.Length + $word.Length + 1) -gt $Width) {
+            $lines.Add($line)
+            $line = $Indent + $word
+        } else {
+            $line = if ($atLineStart) { $line + $word } else { $line + ' ' + $word }
+        }
+        $atLineStart = $false
+    }
+    if ($line.Trim()) { $lines.Add($line) }
+    return $lines.ToArray()
+}
+
 function New-CaseSummary {
     # Builds the plain-text SUMMARY.txt. Pure string work so it is testable.
     param(
@@ -346,7 +418,11 @@ function New-CaseSummary {
         # denied - the common case for a helpdesk account without DC admin rights.
         [bool]$LockoutEventsFound = $false,
         # One row per machine from step 8 (SourceActivitySummary CSV): Computer, Verdict, Next.
-        [object[]]$TimelineRows = @()
+        [object[]]$TimelineRows = @(),
+        # SQ-006: encryption-type blocks (Kind Account|Client, Account, ClientAddress, Sentence, NextStep)
+        # and DCs that could not be checked (DC, Reason), from Import-EtypeFindingsCsv.
+        [object[]]$EtypeFindings = @(),
+        [object[]]$EtypeCantTell = @()
     )
 
     $sb = New-Object System.Text.StringBuilder
@@ -370,27 +446,36 @@ function New-CaseSummary {
             $null = $sb.AppendLine("  $rank. $($f.Sentence)")
             if ($f.Confidence) { $null = $sb.AppendLine("     Confidence : $($f.Confidence)") }
             if ($f.Remediation) {
-                # Wrap the remediation so a long instruction stays readable in Notepad.
-                $text = [string]$f.Remediation
-                $line = '     Fix        : '
-                # Track "nothing on this line yet" explicitly. Inferring it from the line
-                # ending in ':' also fired after any word ending in a colon, so "run: net
-                # use" was printed as "run:net use" in SUMMARY.txt and the Findings tab.
-                $atLineStart = $true
-                foreach ($word in ($text -split ' ')) {
-                    if ($word -eq '') { continue }
-                    if (-not $atLineStart -and ($line.Length + $word.Length + 1) -gt 96) {
-                        $null = $sb.AppendLine($line)
-                        $line = '                  ' + $word
-                    } else {
-                        $line = if ($atLineStart) { $line + $word } else { $line + ' ' + $word }
-                    }
-                    $atLineStart = $false
+                foreach ($l in (Format-WrappedLine -Label '     Fix        : ' -Indent '                  ' -Text $f.Remediation)) {
+                    $null = $sb.AppendLine($l)
                 }
-                if ($line.Trim()) { $null = $sb.AppendLine($line) }
             }
             $null = $sb.AppendLine()
         }
+    }
+
+    # Kerberos encryption-type blocks from step 4 (owner decision D-023). Straight after the
+    # findings: a block can be the whole answer when there are no bad passwords at all.
+    # Nothing to report -> no block, so the summary reads exactly as before.
+    $etypeFound = @($EtypeFindings | Where-Object { $_ })
+    $etypeGaps  = @($EtypeCantTell | Where-Object { $_ })
+    if ($etypeFound.Count -gt 0 -or $etypeGaps.Count -gt 0) {
+        $null = $sb.AppendLine('ENCRYPTION-TYPE BLOCKS - KERBEROS REFUSED THE SIGN-IN')
+        $null = $sb.AppendLine('-----------------------------------------------------')
+        foreach ($f in $etypeFound) {
+            foreach ($l in (Format-WrappedLine -Label '  - ' -Indent '    ' -Text $f.Sentence)) { $null = $sb.AppendLine($l) }
+            if ($f.NextStep) {
+                foreach ($l in (Format-WrappedLine -Label '     Next step  : ' -Indent '                  ' -Text $f.NextStep)) {
+                    $null = $sb.AppendLine($l)
+                }
+            }
+        }
+        if ($etypeGaps.Count -gt 0) {
+            if ($etypeFound.Count -gt 0) { $null = $sb.AppendLine() }
+            $null = $sb.AppendLine("  Can't tell on these domain controllers - a block there would not show here:")
+            foreach ($c in $etypeGaps) { $null = $sb.AppendLine("    $($c.DC): $($c.Reason)") }
+        }
+        $null = $sb.AppendLine()
     }
 
     # Step 8's reading of each source machine. Placed straight after the findings because
@@ -478,6 +563,7 @@ function New-CaseSummary {
                 'LockoutCauses'    { 'Ranked likely causes and the fix for each'; break }
                 'SourceActivitySummary' { 'Device timeline verdict for each machine'; break }
                 'SourceActivity'   { 'When each source machine was on, asleep, locked or unlocked'; break }
+                'ADLockoutEtype_'  { 'Kerberos encryption-type blocks for the account'; break }
                 'ADLockout_'       { 'Deep dive on the account'; break }
                 default            { '' }
             }
@@ -549,7 +635,9 @@ Write-Status INFO "Account: $(if ($Identity) { $Identity } else { '(domain-wide 
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
     $OutputPath = Join-Path $scriptRoot 'Account Lockout Diagnostics'
 }
-$stamp = Get-Date -Format 'yyyy-MM-dd_HHmmss'
+# Run start: output files older than this belong to an earlier run.
+$runStart = Get-Date
+$stamp = $runStart.ToString('yyyy-MM-dd_HHmmss')
 $slug  = if ($Identity) { ($Identity -replace '[^a-zA-Z0-9._-]', '_') } else { 'survey' }
 $caseFolder = Join-Path $OutputPath "Case_${slug}_$stamp"
 try {
@@ -745,6 +833,7 @@ $layout = @(
     @{ Match = 'DCSecurityLogRetention'; Folder = '1 - Can We Trust This Data' }
     @{ Match = 'ADLockoutHistory';       Folder = '2 - Who Is Locking Out' }
     @{ Match = '^ADLockout_';            Folder = '3 - Why This Account' }
+    @{ Match = '^ADLockoutEtype_';       Folder = '3 - Why This Account' }
     @{ Match = 'ADLockoutForensics';     Folder = '3 - Why This Account' }
     @{ Match = 'AuthSources_';           Folder = '4 - Which Device' }
     @{ Match = 'AuthEvents_';            Folder = '4 - Which Device' }
@@ -797,7 +886,8 @@ $readmeLines = @(
     ''
     '  3 - Why This Account'
     '      The per-account deep dive: timeline, source hosts, and which DC/forest saw'
-    '      the bad passwords.'
+    '      the bad passwords. ADLockoutEtype lists Kerberos encryption-type blocks (sign-ins'
+    '      refused for the encryption type, not the password) and DCs that could not be checked.'
     ''
     '  4 - Which Device'
     '      The physical machine behind the source addresses - hostname, MAC, hardware'
@@ -884,10 +974,18 @@ if ($timelineCsv) {
     try { $timelineRows = @(Import-Csv -LiteralPath $timelineCsv.FullName -ErrorAction Stop) } catch { }
 }
 
+# --- Encryption-type blocks for the summary ---
+# Step 4 (Diagnose-ADAccountLockout.ps1) writes this only when it found a block or could
+# not check a DC, so a missing file is the normal clean case.
+$etypeSummary = [PSCustomObject]@{ Findings = @(); CantTell = @() }
+$etypeCsv = Find-EtypeFindingsCsv -CaseFolder $caseFolder -Since $runStart -Identity $Identity
+if ($etypeCsv) { $etypeSummary = Import-EtypeFindingsCsv -Path $etypeCsv.FullName }
+
 # --- Summary ---
 $summary = New-CaseSummary -Identity $Identity -DaysBack $DaysBack -Gate $gate -Steps $steps `
     -CaseFolder $caseFolder -GeneratedOn (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') -Findings $findings `
-    -LockoutEventsFound $lockoutEventsFound -TimelineRows $timelineRows
+    -LockoutEventsFound $lockoutEventsFound -TimelineRows $timelineRows `
+    -EtypeFindings $etypeSummary.Findings -EtypeCantTell $etypeSummary.CantTell
 $summaryPath = Join-Path $caseFolder 'SUMMARY.txt'
 try {
     Set-Content -Path $summaryPath -Value $summary -Encoding UTF8 -ErrorAction Stop

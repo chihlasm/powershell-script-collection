@@ -211,6 +211,7 @@ $script:StatusCodes = @{
     '0x0'        = 'Success (KDC_ERR_NONE)'
     '0x6'        = 'Username does not exist (KDC_ERR_C_PRINCIPAL_UNKNOWN)'
     '0xC'        = 'KDC policy rejects request (KDC_ERR_POLICY) - e.g. logon hours or workstation restriction'
+    '0xE'        = 'KDC has no support for the encryption type (KDC_ERR_ETYPE_NOTSUPP) - the account or device cannot use an encryption type the DC allows, e.g. it only offers RC4'
     '0x10'       = 'KDC has no support for PADATA type (KDC_ERR_PADATA_TYPE_NOSUPP) - usually a smart-card/certificate problem'
     '0x12'       = 'Client credentials revoked (KDC_ERR_CLIENT_REVOKED) - account disabled, expired, or LOCKED OUT'
     '0x17'       = 'Password has expired (KDC_ERR_KEY_EXPIRED)'

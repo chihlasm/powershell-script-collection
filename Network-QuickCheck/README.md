@@ -64,11 +64,50 @@ The answer is **YES** when every port connects, **PARTLY** when some do, and **N
 | `-Port` | One or more TCP ports. Default 443. |
 | `-TimeoutMilliseconds` | Wait per port before calling it closed. Default 3000. |
 | `-OutputPath` | Folder for `NetworkQuickCheck_<target>_<timestamp>.txt` and `.csv`. Omit for console only. |
+| `-TicketNumber` | Put the reports and the ticket note in `Ticket_<number>` (see Ticket note). |
+| `-NoClipboard` | Do not copy the ticket note to the clipboard. |
+| `-FullDetail` | Keep IP addresses and share paths in the ticket note. |
 | `-PassThru` | Return the result object instead of setting an exit code (for other scripts). |
-| `-Quiet` | No console output. Use with `-PassThru` or `-OutputPath`. |
+| `-Quiet` | No console output and no clipboard. Use with `-PassThru` or `-OutputPath`. |
 
 **Exit codes** (without `-PassThru`): 0 = reachable, 1 = reachable with warnings, 2 = cannot reach
-(or no target given).
+(or no target given), 3 = a `-TicketNumber` that does not fit.
+
+## Ticket note
+
+Every run ends with a short note on the clipboard, ready to paste into the ticket:
+
+```
+[Ticket note] Network-QuickCheck: Can PC-0423 reach FILESRV01 on port 445? YES, WITH WARNINGS
+
+Checked:
+- Tested from PC-0423 to FILESRV01 on TCP port 445.
+- WARNING: Ping: FILESRV01 did not answer a ping.
+Ruled out:
+- Name lookup (DNS): FILESRV01 resolves to [IP removed].
+- Port 445 (file shares (SMB)): Connected to [IP removed] from [IP removed].
+- Default gateway: Gateway [IP removed] on Ethernet.
+Could not check:
+- (none)
+Next step:
+- Confirm the server name and port are right for the application.
+- Run the same check from a computer that works; if it passes there, the problem is this computer or its network.
+
+Computer: PC-0423 | Ran by: CONTOSO\jtech on PC-0423 | 2026-10-17 09:30:12 (UTC+01:00) | Changed anything: No
+Evidence: NetworkQuickCheck_FILESRV01_2026-10-17_093012.txt, NetworkQuickCheck_FILESRV01_2026-10-17_093012.csv
+```
+
+- **Ruled out** only lists checks that really ran. A ping that could not run at all, or a routing table that could not be read, is listed under **Could not check**. So is the default gateway on Windows versions without `Get-NetRoute` (before Windows 8 / Server 2012).
+- For an IP address there is no name lookup, so it is in neither list; the first line says no lookup was needed.
+- **Where the files go:**
+  - `-TicketNumber 482113`: the text report, the CSV and `Note_<date>_<time>_Network-QuickCheck.txt` go into `Ticket_482113` under `-OutputPath`, or under `%USERPROFILE%\Documents\TicketNotes` when `-OutputPath` is not given. A ticket number that does not fit (letters, digits, `-` or `_`, up to 32 characters) is refused with a `[FAIL]` line and exit code 3, before anything is checked.
+  - `-OutputPath` alone: the note is saved next to the reports.
+  - Neither: no files. The note goes to the clipboard, or is printed on the console if the clipboard is not available (for example on a server with no desktop).
+- IP addresses and share paths are replaced by `[IP removed]` / `[share path removed]`, so the note is safe to paste. Add `-FullDetail` to keep them. Evidence shows file names only.
+- The note never changes the answer or the exit code.
+- Ran several tools on the same ticket? `..\TicketNote\Join-TicketNotes.ps1 -TicketNumber 482113` joins their notes into one.
+- **The clipboard is not private.** The note is copied with the Windows Forms clipboard and marked to stay out of clipboard history (Win+V) and the cloud clipboard (synced to the user's other devices, if turned on). Only if that fails (for example in a PowerShell window started with `-Mta`) is `Set-Clipboard` used instead, and that cannot opt out, so the note can land in both. In a Remote Desktop session the clipboard is shared with the PC you connected from (RDP clipboard redirection). The note names the server you tested, so add `-NoClipboard` when that matters; the note file is still saved when a folder is in play.
+- The note is built by `CaseKit.ps1` in this folder. Keep it next to the script. Without it the check still runs, with no note, and `-TicketNumber` is ignored (the warning says so).
 
 ## Requirements
 
@@ -88,8 +127,9 @@ see `Network-Troubleshooting-Palette`.
 
 `-PassThru -Quiet` returns an object with `CheckId` (`network.quick`), `Status`, `Answer`
 (`YES` / `YES, WITH WARNINGS` / `PARTLY` / `NO`), `Summary`, `Evidence` (Name, Status,
-Detail, Action), `RecommendedNextSteps`, `RawOutput`, `StartedAt`, `FinishedAt` and `Error`.
-Apart from the new `Answer` field, this is the same shape the old `MSP-TroubleshootingWorkbench`
+Detail, Action, NotChecked), `RecommendedNextSteps`, `RawOutput`, `StartedAt`, `FinishedAt`, `Error`
+and `TicketNote` (the note object; `$null` when `CaseKit.ps1` is missing).
+Apart from the new `Answer`, `NotChecked` and `TicketNote` fields, this is the same shape the old `MSP-TroubleshootingWorkbench`
 check returned.
 
 ## Tests
