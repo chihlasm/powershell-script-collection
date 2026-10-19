@@ -32,7 +32,9 @@
     the Windows system folders and the SYSVOL, NETLOGON and PRINT$ shares are refused, under
     any spelling and through junctions, symbolic links and DFS (also links inside the folder),
     unless the caller passes -AllowSystemFolder. A link whose destination cannot be found out
-    is refused the same way, and DFS targets are looked up with NetDfsGetClientInfo.
+    is refused the same way, and DFS targets are looked up with NetDfsGetClientInfo. A path on
+    a mapped network drive is checked by its server path (WNetGetConnection), and a network
+    drive or network path that cannot be resolved is refused.
 
     The change-log columns are shared with other tools that change things (LocalAdminManager):
     Time, Technician, Computer, Action, Target, ItemType, Detail, OldValue, NewValue, Result,
@@ -143,6 +145,17 @@
       a client returns EntryPath with a single leading backslash (Stack Overflow, not Learn):
       https://stackoverflow.com/a/68071399
       https://stackoverflow.com/a/21334006
+    - Mapped network drives (Resolve-NetworkDrivePath): DriveInfo takes "a valid drive letter
+      or fully qualified path" and not a UNC path; DriveType Network is "a network drive";
+      WNetGetConnection(lpLocalName, lpRemoteName, lpnLength) from mpr.dll "retrieves the name
+      of the network resource associated with a local device" and returns NO_ERROR on success,
+      anything else (ERROR_NOT_CONNECTED, ERROR_CONNECTION_UNAVAIL, also for a drive mapped in
+      another logon session) is refused; ERROR_MORE_DATA (234) means a bigger buffer is needed.
+      A SUBST drive (DriveType Fixed) is not resolved:
+      https://learn.microsoft.com/dotnet/api/system.io.driveinfo.-ctor
+      https://learn.microsoft.com/dotnet/api/system.io.drivetype
+      https://learn.microsoft.com/windows/win32/api/winnetwk/nf-winnetwk-wnetgetconnectionw
+      https://learn.microsoft.com/windows/win32/debug/system-error-codes--0-499-
     - An Excel cell holds at most 32,767 characters, so the change log's Detail names at most 20
       folders per list:
       https://support.microsoft.com/office/excel-specifications-and-limits-1672b34d-7043-467e-8e27-269d656771c3
@@ -1036,16 +1049,20 @@ function Get-DfsTargetRefusal {
         checked as text: they are on other servers, which this tool cannot see into.
     .PARAMETER Label
         How the path is named in the text (the link or the folder as the technician gave it).
+    .PARAMETER ChosenFolder
+        The path is the folder the technician chose, not a link: a refusal then carries
+        $script:ChosenFolderUncheckedText, so callers give it its own next step.
     #>
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$Label,
         [switch]$IsDfsLink,
+        [switch]$ChosenFolder,
         [int]$Depth = 0
     )
 
     $what = if ($IsDfsLink) { "$Label is a DFS link" } else { "$Label is on a network path that may be in a DFS namespace" }
-    $tail = 'so it cannot be checked against the Windows system folders.'
+    $tail = if ($ChosenFolder) { "$script:ChosenFolderUncheckedText." } else { 'so it cannot be checked against the Windows system folders.' }
     try {
         $targets = @(Get-DfsTarget -Path $Path)
     } catch {
@@ -1064,10 +1081,107 @@ function Get-DfsTargetRefusal {
         if ($Depth -ge 3) {
             return "$Label leads through more than four DFS links, and $script:UnresolvedDestinationText, $tail"
         }
-        $refusal = Get-DfsTargetRefusal -Path $comparable -Label $Label -Depth ($Depth + 1)
+        $refusal = Get-DfsTargetRefusal -Path $comparable -Label $Label -ChosenFolder:$ChosenFolder -Depth ($Depth + 1)
         if ($refusal) { return $refusal }
     }
     $null
+}
+
+function Get-DriveLetterType {
+    <#
+    .SYNOPSIS
+        What kind of drive a letter is, as a DriveType name: 'Network' (a mapped network drive),
+        'Fixed', 'Removable', 'CDRom', 'Ram', 'NoRootDirectory' or 'Unknown'. Throws when the
+        letter is not a valid drive name. Reads this computer's drive information only.
+    .DESCRIPTION
+        DriveInfo takes "a valid drive letter or fully qualified path" (not a UNC path) and
+        throws ArgumentException when it "does not refer to a valid drive"; DriveType Network is
+        "The drive is a network drive".
+        https://learn.microsoft.com/dotnet/api/system.io.driveinfo.-ctor
+        https://learn.microsoft.com/dotnet/api/system.io.drivetype
+    #>
+    param([Parameter(Mandatory)][ValidatePattern('^[A-Za-z]$')][string]$Letter)
+    "$((New-Object System.IO.DriveInfo -ArgumentList $Letter).DriveType)"
+}
+
+function Import-Win32NetworkDriveType {
+    # Compiles the WNetGetConnection declaration once (mpr.dll, built into Windows, no RSAT):
+    # DWORD WNetGetConnectionW(LPCWSTR lpLocalName, LPWSTR lpRemoteName, LPDWORD lpnLength).
+    # Nothing is called here.
+    # https://learn.microsoft.com/windows/win32/api/winnetwk/nf-winnetwk-wnetgetconnectionw
+    if ('FolderPermissionManager.Win32NetworkDrive' -as [type]) { return }
+    Add-Type -Namespace FolderPermissionManager -Name Win32NetworkDrive -ErrorAction Stop -MemberDefinition @'
+[DllImport("mpr.dll", CharSet = CharSet.Unicode)]
+public static extern uint WNetGetConnectionW(string lpLocalName, System.Text.StringBuilder lpRemoteName, ref uint lpnLength);
+'@
+}
+
+function Get-NetworkDriveRemoteName {
+    <#
+    .SYNOPSIS
+        The server path (\\server\share) a network drive letter is connected to. Throws when
+        Windows does not give one, so callers can refuse.
+    .DESCRIPTION
+        WNetGetConnection "retrieves the name of the network resource associated with a local
+        device" and returns NO_ERROR (0) on success. Any other answer is a failure, among them
+        ERROR_NOT_CONNECTED ("not a redirected device") and ERROR_CONNECTION_UNAVAIL ("not
+        currently connected, but it is a persistent connection"); both are also what a drive
+        mapped in another logon session gives, such as the technician's unelevated session seen
+        from an elevated one. ERROR_MORE_DATA (234) means the buffer was too small and
+        lpnLength now holds the size needed, so the call is made once more with that size.
+        https://learn.microsoft.com/windows/win32/api/winnetwk/nf-winnetwk-wnetgetconnectionw
+        https://learn.microsoft.com/windows/win32/debug/system-error-codes--0-499-
+    #>
+    param([Parameter(Mandatory)][ValidatePattern('^[A-Za-z]$')][string]$Letter)
+
+    Import-Win32NetworkDriveType
+    $device = "$($Letter.ToUpperInvariant()):"
+    [uint32]$length = 1024
+    $status = [uint32]0
+    for ($attempt = 0; $attempt -lt 2; $attempt++) {
+        $buffer = New-Object System.Text.StringBuilder -ArgumentList ([int]$length)
+        $status = [FolderPermissionManager.Win32NetworkDrive]::WNetGetConnectionW($device, $buffer, [ref]$length)
+        if ($status -eq 0) { return $buffer.ToString() }
+        # ERROR_MORE_DATA
+        if ($status -ne 234) { break }
+    }
+    $why = (New-Object System.ComponentModel.Win32Exception -ArgumentList ([int]$status)).Message
+    throw "Windows could not tell which server path drive $device is mapped to (error $($status): $why)"
+}
+
+function Resolve-NetworkDrivePath {
+    <#
+    .SYNOPSIS
+        A path on a mapped network drive (H:\HR) as the server path it stands for
+        (\\contoso.com\dfs\HR), so the D-036 and DFS checks see where it really is. Any other
+        path is returned as given. Throws when the path is on a network drive whose server
+        path Windows does not give, so callers can refuse.
+    .DESCRIPTION
+        The command line keeps the drive letter it is given (Resolve-AclTargetPath), and the
+        GUI only knows the mappings it saw at startup, so both rely on this. A drive letter
+        is looked up when its DriveType (Get-DriveLetterType) is Network, or Unknown (fails
+        closed: a drive that cannot be told apart from a network drive must give a server path
+        too). The server path comes from WNetGetConnection (Get-NetworkDriveRemoteName) and must
+        be a \\server\share path. \\?\H:\ and \\.\H:\ are read as H:\ (ConvertTo-ComparablePath).
+        Not resolved (out of scope): a SUBST drive, which is DriveType Fixed. Its final path
+        (Get-Win32PathName) is expected to show the real local folder, which is then checked
+        like any other (NOT VERIFIED on Learn).
+        https://learn.microsoft.com/dotnet/api/system.io.drivetype
+        https://learn.microsoft.com/windows/win32/api/winnetwk/nf-winnetwk-wnetgetconnectionw
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Path)
+
+    $comparable = ConvertTo-ComparablePath -Path $Path
+    if (-not ($comparable -match '^([A-Za-z]):(?:\\(.*))?$')) { return $Path }
+    $letter = $Matches[1]
+    $rest = "$($Matches[2])"
+    $type = Get-DriveLetterType -Letter $letter
+    if ($type -ne 'Network' -and $type -ne 'Unknown') { return $Path }
+    $remote = ConvertTo-ComparablePath -Path "$(Get-NetworkDriveRemoteName -Letter $letter)"
+    if (-not $remote.StartsWith('\\')) {
+        throw "Windows gave '$remote' as the server path of drive $($letter.ToUpperInvariant()):, which is not a \\server\share path"
+    }
+    if ($rest) { "$remote\$rest" } else { $remote }
 }
 
 # The only reparse tags that count as plain files in a whole-tree take ownership (owner
@@ -1206,10 +1320,23 @@ function Get-LinkListText {
 # the way past a protected folder, not past a destination nobody could check.
 $script:UnresolvedDestinationText = 'where it leads could not be found out'
 
+# The words a "could not be found out" refusal about the chosen folder itself adds, when no link
+# is involved: a network drive whose server path is unknown, a network path that cannot be
+# reached, or a DFS lookup for the folder that failed. "Take ownership of the folders beside the
+# link" makes no sense there, so callers tell it apart (Test-ChosenFolderUncheckedRefusal).
+$script:ChosenFolderUncheckedText = 'so the folder you chose could not be checked against the Windows system folders'
+
 function Test-UnresolvedDestinationRefusal {
-    # True for a refusal given because where a link leads could not be found out.
+    # True for a refusal given because where a link (or the chosen folder) leads could not be
+    # found out.
     param([AllowNull()][AllowEmptyString()][string]$Refusal)
     "$Refusal" -match [regex]::Escape($script:UnresolvedDestinationText)
+}
+
+function Test-ChosenFolderUncheckedRefusal {
+    # True for a refusal about the chosen folder itself, with no link involved.
+    param([AllowNull()][AllowEmptyString()][string]$Refusal)
+    "$Refusal" -match [regex]::Escape($script:ChosenFolderUncheckedText)
 }
 
 function Find-PathLink {
@@ -1240,20 +1367,27 @@ function Get-TreeOwnershipTargetRefusal {
     <#
     .SYNOPSIS
         Get-TreeOwnershipRefusal for a folder as Windows will really reach it: also refused when
-        -Path leads into a protected folder through a junction, a symbolic link or DFS (on the
-        folder or on any folder above it) or is spelt with 8.3 short names (C:\PROGRA~1). The
-        text names -Path as given. $null when it is allowed.
+        -Path leads into a protected folder through a mapped network drive, a junction, a
+        symbolic link or DFS (on the folder or on any folder above it) or is spelt with 8.3
+        short names (C:\PROGRA~1). The text names -Path as given. $null when it is allowed.
     .DESCRIPTION
         Reads the disk (Get-Win32PathName, attributes only; nothing is opened for reading or
-        changed). A path that does not exist is checked as text only. A network path (and a
-        final path on the network, such as a mapped drive's) is looked up in DFS
+        changed). A path on a mapped network drive is first turned into its server path
+        (Resolve-NetworkDrivePath) and every check below uses that; a network drive whose server
+        path Windows does not give is refused. A local path that does not exist is checked as
+        text only; a network path that cannot be reached is refused, because nothing about it
+        can be confirmed. A network path (and a final path on the network) is looked up in DFS
         (Get-DfsTargetRefusal): a DFS target in a protected place, or a lookup that fails,
         refuses it; a path Windows says is in no DFS namespace goes on to the checks below.
+        Refusals about the folder itself, with no link involved, carry
+        $script:ChosenFolderUncheckedText.
         Also refused, because takeown and icacls would go to a place nobody checked:
-        - the folder is, or is inside, a link (Find-PathLink), and its final path is unknown or
-          no different from the path as given. On a share the server follows its own
-          junctions, so the final path the client gets back is the path itself and where the
-          junction leads cannot be seen. A DFS link on a network path is looked up instead.
+        - the folder is, or is inside, a DFS link (Find-PathLink) and the DFS lookup of the
+          link's server path finds no target, a protected one, or fails.
+        - the folder is, or is inside, any other link, and its final path is unknown or no
+          different from the path as given. On a share the server follows its own junctions,
+          so the final path the client gets back is the path itself and where the junction
+          leads cannot be seen.
         - a segment looks like an 8.3 short name (~1) and neither the final nor the long path
           can be read, so the real path cannot be checked.
     #>
@@ -1261,21 +1395,37 @@ function Get-TreeOwnershipTargetRefusal {
 
     $refusal = Get-TreeOwnershipRefusal -Path $Path
     if ($refusal) { return $refusal }
-    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    $chosenTail = "$script:ChosenFolderUncheckedText."
+
+    # A mapped network drive: the checks need the server path, not the letter (D-040).
+    try {
+        $resolved = Resolve-NetworkDrivePath -Path $Path
+    } catch {
+        return "$Path is on a network drive, and $script:UnresolvedDestinationText (Windows did not give the server path it is mapped to), $chosenTail $(Format-Sentence $_.Exception.Message)"
+    }
+    $given = ConvertTo-ComparablePath -Path $resolved
+    if ($given -ine (ConvertTo-ComparablePath -Path $Path)) {
+        $refusal = Get-TreeOwnershipRefusal -Path $given
+        if ($refusal) { return "$Path is on a network drive and leads to $given. $refusal" }
+    }
+    $onNetwork = $given.StartsWith('\\')
+    if (-not (Test-Path -LiteralPath $Path)) {
+        if ($onNetwork) { return "$Path could not be reached, and $script:UnresolvedDestinationText, $chosenTail" }
+        return $null
+    }
 
     $final = Get-Win32PathName -Path $Path -Kind Final
     $long = Get-Win32PathName -Path $Path -Kind Long
-    $given = ConvertTo-ComparablePath -Path $Path
 
     # DFS: the client follows the referral itself, so neither the final path nor the folder's
     # attributes show where a DFS folder really is (D-040).
     $dfsChecked = @{}
-    foreach ($form in @($Path, $final)) {
+    foreach ($form in @($given, $final)) {
         if (-not $form) { continue }
         $comparable = ConvertTo-ComparablePath -Path $form
         if (-not $comparable.StartsWith('\\') -or $dfsChecked.ContainsKey($comparable)) { continue }
         $dfsChecked[$comparable] = $true
-        $refusal = Get-DfsTargetRefusal -Path $comparable -Label $Path
+        $refusal = Get-DfsTargetRefusal -Path $comparable -Label $Path -ChosenFolder
         if ($refusal) { return $refusal }
     }
 
@@ -1293,20 +1443,25 @@ function Get-TreeOwnershipTargetRefusal {
     if (-not $final -and -not $long -and @($given -split '\\' | Where-Object { $_ -match '~\d' }).Count -gt 0) {
         return "$Path looks like a short (8.3) name and Windows could not tell its full name, so the tool could not check the real path against the Windows system folders. Type the folder's full name instead."
     }
-    if (-not $finalLeadsElsewhere) {
-        $link = Find-PathLink -Path $Path
-        if ($link) {
-            $kindName = Get-LinkKind -Path $link
-            $comparableLink = ConvertTo-ComparablePath -Path $link
-            if ($kindName -eq 'DFS link' -and $comparableLink.StartsWith('\\')) {
-                return Get-DfsTargetRefusal -Path $comparableLink -Label $Path -IsDfsLink
-            }
-            $kind = Format-LinkKindWithArticle -Kind $kindName
-            $where = if ($comparableLink -ieq $given) { "$Path is $kind" } else { "$Path is inside $kind ($link)" }
-            return "$where, and $script:UnresolvedDestinationText, so it cannot be checked against the Windows system folders. Choose the real folder it points to instead."
-        }
+
+    $link = Find-PathLink -Path $Path
+    if (-not $link) { return $null }
+    $kindName = Get-LinkKind -Path $link
+    $kind = Format-LinkKindWithArticle -Kind $kindName
+    $linkTail = 'so it cannot be checked against the Windows system folders.'
+    try {
+        $comparableLink = ConvertTo-ComparablePath -Path (Resolve-NetworkDrivePath -Path $link)
+    } catch {
+        return "$Path is inside $kind ($link) on a network drive, and $script:UnresolvedDestinationText, $linkTail $(Format-Sentence $_.Exception.Message)"
     }
-    $null
+    # A DFS link is looked up whatever the final path says: the final path shows one target at
+    # most, and a link Windows has no target for leads somewhere nobody checked.
+    if ($kindName -eq 'DFS link' -and $comparableLink.StartsWith('\\')) {
+        return Get-DfsTargetRefusal -Path $comparableLink -Label $Path -IsDfsLink
+    }
+    if ($finalLeadsElsewhere) { return $null }
+    $where = if ($comparableLink -ieq $given) { "$Path is $kind" } else { "$Path is inside $kind ($link)" }
+    "$where, and $script:UnresolvedDestinationText, $linkTail Choose the real folder it points to instead."
 }
 
 function Get-TreeLinkRefusal {
@@ -1319,15 +1474,19 @@ function Get-TreeLinkRefusal {
     .DESCRIPTION
         Microsoft's documentation does not say whether takeown /R or icacls /T follow links,
         and icacls changes what a symbolic link points to unless /L is given, so every link
-        is checked. These are already known to be links (the listing saw the reparse point and
-        its tag is not on the allowlist, D-040), so a link is refused when its final path
-        cannot be read or cannot be shown to differ from its own path: over SMB the server or
-        the DFS client follows the link itself and hands back the path as given, and asking
-        Get-Item again could show the destination's attributes instead of the link's. A DFS
-        link on a network path is looked up in DFS instead (Get-DfsTargetRefusal): every
-        target is checked, and no target or a failed lookup refuses. A link that leads to an
-        ordinary place outside the folder is allowed (D-040, option A). -Path itself is checked
-        too when the listing found it is a link.
+        is checked. A link on a mapped network drive is first turned into its server path
+        (Resolve-NetworkDrivePath); one whose server path Windows does not give is refused.
+        These are already known to be links (the listing saw the reparse point and its tag is
+        not on the allowlist, D-040), so a link is refused when its final path cannot be read
+        or cannot be shown to differ from its own path: over SMB the server or the DFS client
+        follows the link itself and hands back the path as given, and asking Get-Item again
+        could show the destination's attributes instead of the link's. A DFS link on a network
+        path, however it is spelt, is looked up in DFS instead (Get-DfsTargetRefusal -IsDfsLink):
+        every target is checked, and no target or a failed lookup refuses. Any other link on a
+        network path is looked up in DFS too, on its own path as well as on its final path,
+        because the final path shows only the target the client is using. A link that leads
+        to an ordinary place outside the folder is allowed (D-040, option A). -Path itself is
+        checked too when the listing found it is a link.
         https://learn.microsoft.com/windows-server/administration/windows-commands/icacls
     #>
     param(
@@ -1336,14 +1495,29 @@ function Get-TreeLinkRefusal {
     )
 
     $tail = 'so it cannot be checked against the Windows system folders.'
+    $selfForms = @(ConvertTo-ComparablePath -Path $Path)
+    try { $selfForms += ConvertTo-ComparablePath -Path (Resolve-NetworkDrivePath -Path $Path) } catch { $null = $_ }
     foreach ($link in @($LinkPaths)) {
         if (-not $link) { continue }
         $kindName = Get-LinkKind -Path $link
         $kind = Format-LinkKindWithArticle -Kind $kindName
-        $comparableLink = ConvertTo-ComparablePath -Path $link
+        $asListed = ConvertTo-ComparablePath -Path $link
+        $comparableLink = $asListed
         $refusal = Get-TreeOwnershipRefusal -Path $link
         if (-not $refusal) {
-            if ($kindName -eq 'DFS link' -and $comparableLink.StartsWith('\\')) {
+            try {
+                $comparableLink = ConvertTo-ComparablePath -Path (Resolve-NetworkDrivePath -Path $link)
+            } catch {
+                $refusal = "$link is $kind on a network drive, and $script:UnresolvedDestinationText (Windows did not give the server path it is mapped to), $tail $(Format-Sentence $_.Exception.Message)"
+            }
+        }
+        if (-not $refusal -and $comparableLink -ine $asListed) {
+            $refusal = Get-TreeOwnershipRefusal -Path $comparableLink
+            if ($refusal) { $refusal = "$link is $kind on a network drive that leads to $comparableLink. $refusal" }
+        }
+        if (-not $refusal) {
+            $onNetwork = $comparableLink.StartsWith('\\')
+            if ($kindName -eq 'DFS link' -and $onNetwork) {
                 $refusal = Get-DfsTargetRefusal -Path $comparableLink -Label $link -IsDfsLink
             } else {
                 $final = Get-Win32PathName -Path $link -Kind Final
@@ -1358,10 +1532,15 @@ function Get-TreeLinkRefusal {
                         $refusal = Get-DfsTargetRefusal -Path $comparable -Label $link
                     }
                 }
+                # The final path shows only the target in use; the link's own path may be in
+                # DFS with other targets.
+                if (-not $refusal -and $onNetwork) {
+                    $refusal = Get-DfsTargetRefusal -Path $comparableLink -Label $link
+                }
             }
         }
         if ($refusal) {
-            if ($comparableLink -ieq (ConvertTo-ComparablePath -Path $Path)) { return $refusal }
+            if (@($selfForms | Where-Object { $_ -ieq $asListed -or $_ -ieq $comparableLink }).Count -gt 0) { return $refusal }
             return "$Path contains $kind that takeown and icacls may follow out of the folder. $refusal"
         }
     }

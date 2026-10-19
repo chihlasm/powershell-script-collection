@@ -31,6 +31,21 @@ BeforeAll {
         param([Parameter(Mandatory)][string]$Path)
         throw "Get-DfsTarget ($Path) was called without a mock in a test."
     }
+    # Guard: the real Resolve-NetworkDrivePath reads this computer's drive letters and asks
+    # Windows (WNetGetConnection) which server path a network drive is mapped to. Replaced here
+    # (same parameter) so nothing reaches a real drive mapping, then mocked to hand every path
+    # back as given; tests about mapped drives mock it themselves. The WNetGetConnection
+    # wrapper is replaced the same way, for the tests of the real function.
+    $script:RealResolveNetworkDrivePath = ${function:Resolve-NetworkDrivePath}
+    function Resolve-NetworkDrivePath {
+        param([Parameter(Mandatory)][AllowEmptyString()][string]$Path)
+        throw "Resolve-NetworkDrivePath ($Path) was called without a mock in a test."
+    }
+    function Get-NetworkDriveRemoteName {
+        param([Parameter(Mandatory)][string]$Letter)
+        throw "Get-NetworkDriveRemoteName ($Letter) was called without a mock in a test."
+    }
+    Mock Resolve-NetworkDrivePath { $Path }
     $script:RealGetItemOwner = ${function:Get-ItemOwner}
 
     $script:GuiPath = (Resolve-Path (Join-Path $folder 'FolderPermissionManager-GUI.ps1')).Path
@@ -569,5 +584,111 @@ Describe 'GUI recursive take ownership: DFS targets and unresolvable links' {
             Should -Invoke Save-OwnerSnapshot -Times 0 -Exactly -Scope It
             Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
         }
+    }
+}
+
+# --- Fix round 2 of the D-040 revision (SQ-014 review 2026-10-19) ------------------------------
+# Pinned: Resolve-NetworkDrivePath is mocked everywhere (the file-level stub throws). A drive
+# letter the GUI did not see at startup ($script:driveMappings empty) reaches the core as it
+# is, and the core turns a mapped network drive into its server path before any check.
+Describe 'GUI recursive take ownership: mapped network drives' {
+    BeforeAll {
+        # A folder tree on mapped network drive H: (see Set-MappedDriveTreeMock in
+        # FolderPermissions.Tree.Tests.ps1): nothing is read from a drive or the network.
+        function Set-MappedDriveTreeMock {
+            param([string]$Top, [string]$Unc, [string[]]$Links = @(), [string]$LinkFinal, [switch]$Unresolvable)
+            $script:MapTop = $Top
+            $script:MapUnc = $Unc
+            $script:MapLinks = @($Links)
+            $script:MapLinkFinal = $LinkFinal
+            $script:SnapFile = Join-Path $TestDrive ('snap-' + [guid]::NewGuid().ToString('N') + '_TakeOwnership.csv')
+            Set-Content -LiteralPath $script:SnapFile -Value 'Path,ItemType,Owner,OwnerSid'
+            Mock Test-Path { $true } -ParameterFilter { "$LiteralPath" -like 'H:\*' -or "$LiteralPath" -like '\\*' }
+            Mock Get-Item { [PSCustomObject]@{ FullName = "$LiteralPath"; Attributes = [System.IO.FileAttributes]::Directory } } -ParameterFilter { "$LiteralPath" -like 'H:\*' -or "$LiteralPath" -like '\\*' }
+            Mock Get-Win32PathName {
+                if ($Kind -eq 'Final' -and @($script:MapLinks) -contains $Path -and $script:MapLinkFinal) { return $script:MapLinkFinal }
+                $null
+            } -ParameterFilter { "$Path" -like 'H:\*' }
+            if ($Unresolvable) {
+                Mock Resolve-NetworkDrivePath { throw 'The device is not currently connected, but it is a persistent connection. (test)' } -ParameterFilter { "$Path" -like 'H:*' }
+            } else {
+                Mock Resolve-NetworkDrivePath { $script:MapUnc + "$Path".Substring(2) } -ParameterFilter { "$Path" -like 'H:*' }
+            }
+            Mock Save-OwnerSnapshot {
+                [PSCustomObject]@{
+                    File = $script:SnapFile; Count = 1
+                    Items = @([PSCustomObject]@{ Path = $script:MapTop; ItemType = 'Folder'; Owner = 'CONTOSO\old.owner'; OwnerSid = 'S-1-5-21-1-2-3-1105' })
+                    Unreadable = 0; Unlisted = 0; UnlistedFolders = @(); Links = @($script:MapLinks).Count; LinkPaths = @($script:MapLinks)
+                }
+            }
+            Mock Get-OwnerReadBack { [PSCustomObject]@{ Mine = 1; NotMine = 0; Unchecked = 0; Changed = 1; AdministratorsOnly = $false; WatchedChanged = @(); WatchedUnchecked = @() } }
+        }
+        function Invoke-GuiTreeOwnership {
+            param([string]$Path)
+            $script:Body = [PSCustomObject]@{ path = $Path; recursive = $true }
+            $script:Sent = $null
+            $script:Response = [PSCustomObject]@{ StatusCode = 200 }
+            Invoke-TakeOwnership $null $script:Response
+        }
+    }
+    BeforeEach {
+        $script:driveMappings = @{}
+        $script:ChangeLogFolder = Join-Path $TestDrive ('logs-' + [guid]::NewGuid().ToString('N'))
+        Mock Set-Acl { }
+        Mock takeown { }
+        Mock icacls { }
+        Mock Invoke-AclTool { [PSCustomObject]@{ ExitCode = 0; Output = '' } }
+        Mock Get-DfsTarget { }
+    }
+
+    It 'AC20a_GuiMappedDriveWithNoFinalPathInDfsToNetlogon_IsRefused' {
+        Set-MappedDriveTreeMock -Top 'H:\HR' -Unc '\\contoso.com\dfs'
+        Mock Get-DfsTarget { '\\dc01\NETLOGON' } -ParameterFilter { $Path -eq '\\contoso.com\dfs\HR' }
+
+        Invoke-GuiTreeOwnership -Path 'H:\HR'
+
+        $script:Response.StatusCode | Should -Be 500
+        $script:Sent.error | Should -Match ([regex]::Escape('H:\HR'))
+        $script:Sent.error | Should -Match 'NETLOGON'
+        $script:Sent.error | Should -Match 'Nothing was changed'
+        Should -Invoke Save-OwnerSnapshot -Times 0 -Exactly -Scope It
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+    }
+
+    It 'AC20c_GuiMappedDriveThatCannotBeResolved_IsRefused' {
+        Set-MappedDriveTreeMock -Top 'H:\HR' -Unresolvable
+
+        Invoke-GuiTreeOwnership -Path 'H:\HR'
+
+        $script:Response.StatusCode | Should -Be 500
+        $script:Sent.error | Should -Match ([regex]::Escape('H:\HR'))
+        $script:Sent.error | Should -Match 'where it leads could not be found out'
+        $script:Sent.error | Should -Not -Match 'AllowSystemFolder'
+        Should -Invoke Save-OwnerSnapshot -Times 0 -Exactly -Scope It
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+    }
+
+    It 'AC20c_GuiDfsLinkUnderAMappedDriveWithNoDfsTarget_IsRefused' {
+        Set-MappedDriveTreeMock -Top 'H:\Dept' -Unc '\\fs01\share' -Links @('H:\Dept\Apps') -LinkFinal '\\?\UNC\fs02\Apps$\Current'
+        Mock Get-ReparsePointTag { [uint32]'0x8000000A' } -ParameterFilter { $Path -eq 'H:\Dept\Apps' }
+
+        Invoke-GuiTreeOwnership -Path 'H:\Dept'
+
+        $script:Response.StatusCode | Should -Be 500
+        $script:Sent.error | Should -Match ([regex]::Escape('H:\Dept\Apps'))
+        $script:Sent.error | Should -Match 'DFS link'
+        $script:Sent.error | Should -Match 'where it leads could not be found out'
+        Should -Invoke Get-DfsTarget -Scope It -ParameterFilter { $Path -eq '\\fs01\share\Dept\Apps' }
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+    }
+
+    It 'AC20_GuiMappedDriveToAnOrdinaryShareNotInDfs_IsAllowed' {
+        Set-MappedDriveTreeMock -Top 'H:\HR' -Unc '\\fs01\share'
+
+        Invoke-GuiTreeOwnership -Path 'H:\HR'
+
+        $script:Response.StatusCode | Should -Be 200
+        Should -Invoke Get-DfsTarget -Scope It -ParameterFilter { $Path -eq '\\fs01\share\HR' }
+        Should -Invoke Invoke-AclTool -Times 1 -Exactly -Scope It -ParameterFilter { $Tool -eq 'takeown' }
     }
 }

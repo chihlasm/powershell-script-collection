@@ -32,6 +32,21 @@ BeforeAll {
         param([Parameter(Mandatory)][string]$Path)
         throw "Get-DfsTarget ($Path) was called without a mock in a test."
     }
+    # Guard: the real Resolve-NetworkDrivePath reads this computer's drive letters and asks
+    # Windows (WNetGetConnection) which server path a network drive is mapped to. Replaced here
+    # (same parameter) so nothing reaches a real drive mapping, then mocked to hand every path
+    # back as given; tests about mapped drives mock it themselves. The WNetGetConnection
+    # wrapper is replaced the same way, for the tests of the real function.
+    $script:RealResolveNetworkDrivePath = ${function:Resolve-NetworkDrivePath}
+    function Resolve-NetworkDrivePath {
+        param([Parameter(Mandatory)][AllowEmptyString()][string]$Path)
+        throw "Resolve-NetworkDrivePath ($Path) was called without a mock in a test."
+    }
+    function Get-NetworkDriveRemoteName {
+        param([Parameter(Mandatory)][string]$Letter)
+        throw "Get-NetworkDriveRemoteName ($Letter) was called without a mock in a test."
+    }
+    Mock Resolve-NetworkDrivePath { $Path }
 
     # The real cmdlet object: Pester mocks also intercept the module-qualified name.
     $script:RealGetAcl = Get-Command Get-Acl -CommandType Cmdlet

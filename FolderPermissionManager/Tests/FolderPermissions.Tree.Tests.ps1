@@ -45,6 +45,21 @@ BeforeAll {
         param([Parameter(Mandatory)][string]$Path)
         throw "Get-DfsTarget ($Path) was called without a mock in a test."
     }
+    # Guard: the real Resolve-NetworkDrivePath reads this computer's drive letters and asks
+    # Windows (WNetGetConnection) which server path a network drive is mapped to. Replaced here
+    # (same parameter) so nothing reaches a real drive mapping, then mocked to hand every path
+    # back as given; tests about mapped drives mock it themselves. The WNetGetConnection
+    # wrapper is replaced the same way, for the tests of the real function.
+    $script:RealResolveNetworkDrivePath = ${function:Resolve-NetworkDrivePath}
+    function Resolve-NetworkDrivePath {
+        param([Parameter(Mandatory)][AllowEmptyString()][string]$Path)
+        throw "Resolve-NetworkDrivePath ($Path) was called without a mock in a test."
+    }
+    function Get-NetworkDriveRemoteName {
+        param([Parameter(Mandatory)][string]$Letter)
+        throw "Get-NetworkDriveRemoteName ($Letter) was called without a mock in a test."
+    }
+    Mock Resolve-NetworkDrivePath { $Path }
     $script:RealGetAcl = Get-Command Get-Acl -CommandType Cmdlet
     $script:RealGetItemOwner = ${function:Get-ItemOwner}
     $script:MySid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -2044,6 +2059,14 @@ Describe 'D-040 fix round 1 (review 2026-10-19): DFS targets, unresolvable links
         It 'AC20_GetDfsTarget_ALocalPathIsInNoDfsNamespaceAndTheLookupTypeCompiles' {
             # A local path never reaches NetDfsGetClientInfo or the network; the P/Invoke type is
             # still compiled, so a broken signature fails here rather than on a client's server.
+            # On a build machine whose test folder is itself on the network, the real lookup
+            # would ask the DFS client about a real share, so the test steps aside.
+            $testDriveIsNetwork = "$TestDrive".StartsWith('\\') -or
+                ((New-Object System.IO.DriveInfo -ArgumentList ([System.IO.Path]::GetPathRoot("$TestDrive"))).DriveType -eq [System.IO.DriveType]::Network)
+            if ($testDriveIsNetwork) {
+                Set-ItResult -Skipped -Because "the test folder $TestDrive is on a network path, and the real DFS lookup must not reach a real share"
+                return
+            }
             @(& $script:RealGetDfsTarget -Path $TestDrive).Count | Should -Be 0
             'FolderPermissionManager.Win32Dfs' -as [type] | Should -Not -BeNullOrEmpty
         }
@@ -2056,21 +2079,35 @@ Describe 'Windows PowerShell 5.1 reads the reparse allowlist the same way (D-040
         if (-not (Test-Path -LiteralPath $exe)) { Set-ItResult -Skipped -Because 'Windows PowerShell 5.1 is not installed here'; return }
         $core = (Resolve-Path (Join-Path $PSScriptRoot '..\FolderPermissions.Core.ps1')).Path
         $child = Join-Path $TestDrive 'ps51-allowlist.ps1'
+        # A local path that is never created: the real Get-DfsTarget compiles its P/Invoke type
+        # and returns for a path that is not on the network, without asking the DFS client. On a
+        # build machine whose test folder is on the network, a path on the system drive is used.
+        $localFake = Join-Path $TestDrive 'not-created-dfs-check'
+        if ("$TestDrive".StartsWith('\\') -or
+            (New-Object System.IO.DriveInfo -ArgumentList ([System.IO.Path]::GetPathRoot("$TestDrive"))).DriveType -eq [System.IO.DriveType]::Network) {
+            $localFake = Join-Path $env:SystemDrive 'FolderPermissionManager-not-created'
+        }
         # The child dot-sources the core as the suites do, then replaces Get-ReparsePointTag with
-        # a stub, so no reparse point is created or read: the tag comes from the fake path.
+        # a stub, so no reparse point is created or read: the tag comes from the fake path. The
+        # WNetGetConnection type (Import-Win32NetworkDriveType) is compiled but never called.
         Set-Content -LiteralPath $child -Encoding UTF8 -Value @'
-param([string]$Core)
+param([string]$Core, [string]$LocalFake)
 . $Core -LoadFunctionsOnly
 function Get-ReparsePointTag { param([string]$Path) if ($Path -like '*dedup') { [uint32]'0x80000013' } else { [uint32]'0x8000000A' } }
 function New-FakeItem { param([string]$Path) New-Object PSObject -Property @{ FullName = $Path; Attributes = [System.IO.FileAttributes]'Directory, ReparsePoint' } }
-'{0}|{1}|{2}|{3}|{4}' -f $PSVersionTable.PSVersion.Major,
+$dfsTargets = @(Get-DfsTarget -Path $LocalFake).Count
+Import-Win32NetworkDriveType
+'{0}|{1}|{2}|{3}|{4}|{5}|{6}|{7}' -f $PSVersionTable.PSVersion.Major,
     [uint32]$script:RedirectFreeReparseTags['IO_REPARSE_TAG_DEDUP'],
     [uint32]$script:RedirectFreeReparseTags['IO_REPARSE_TAG_CLOUD_F'],
     (Test-LinkReparsePoint -Item (New-FakeItem 'X:\fake\dedup')),
-    (Test-LinkReparsePoint -Item (New-FakeItem 'X:\fake\dfs'))
+    (Test-LinkReparsePoint -Item (New-FakeItem 'X:\fake\dfs')),
+    $dfsTargets,
+    [bool]('FolderPermissionManager.Win32Dfs' -as [type]),
+    [bool]('FolderPermissionManager.Win32NetworkDrive' -as [type])
 '@
 
-        $out = @(& $exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $child -Core $core 2>&1 | ForEach-Object { "$_" })
+        $out = @(& $exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $child -Core $core -LocalFake $localFake 2>&1 | ForEach-Object { "$_" })
 
         $LASTEXITCODE | Should -Be 0 -Because ($out -join "`n")
         $line = @($out | Where-Object { $_ -match '^\d+\|' })
@@ -2081,6 +2118,9 @@ function New-FakeItem { param([string]$Path) New-Object PSObject -Property @{ Fu
         [uint32]$parts[2] | Should -Be ([uint32]'0x9000F01A')
         $parts[3] | Should -Be 'False' -Because 'a deduplicated file is a plain file'
         $parts[4] | Should -Be 'True' -Because 'a DFS link is a link'
+        $parts[5] | Should -Be '0' -Because 'a local path is in no DFS namespace'
+        $parts[6] | Should -Be 'True' -Because 'the NetDfsGetClientInfo declaration compiles under Windows PowerShell 5.1'
+        $parts[7] | Should -Be 'True' -Because 'the WNetGetConnection declaration compiles under Windows PowerShell 5.1'
     }
 }
 
@@ -2090,5 +2130,357 @@ Describe 'README after the D-040 fix round 1' {
         $readme | Should -Match '\*\*Refused[^*]*\*\*'
         $readme | Should -Match '\*\*Allowed[^*]*\*\*'
         $readme | Should -Match '(?i)DFS[^.]*looked up'
+    }
+}
+
+# --- Fix round 2 of the D-040 revision (SQ-014 review 2026-10-19) ------------------------------
+#
+# Pinned for the implementer:
+#   Resolve-NetworkDrivePath -Path <path>  a path on a mapped network drive (H:\HR) as the
+#          server path it stands for (\\contoso.com\dfs\HR); any other path as given. Throws when
+#          the drive is a network drive whose server path Windows does not give. Uses
+#          Get-DriveLetterType -Letter (DriveInfo.DriveType name) and
+#          Get-NetworkDriveRemoteName -Letter (WNetGetConnection). Mocked in every test (the
+#          file-level stub throws, a file-level mock hands the path back as given).
+#   Get-TreeOwnershipTargetRefusal and Get-TreeLinkRefusal resolve -Path and every link first.
+#          A network drive that cannot be resolved, and a network path that cannot be reached,
+#          are refused ("where it leads could not be found out").
+#   A link whose kind is 'DFS link' is looked up with Get-DfsTarget -IsDfsLink on its server
+#          path whatever its spelling; any link on a network path is also looked up itself.
+#   $script:ChosenFolderUncheckedText marks a refusal about the chosen folder itself (no link
+#          involved); Test-ChosenFolderUncheckedRefusal tells it apart.
+Describe 'D-040 fix round 2 (review 2026-10-19): mapped network drives, network paths fail closed' {
+    BeforeAll {
+        function New-FakeReparseChild {
+            param([string]$Path)
+            [PSCustomObject]@{
+                FullName = $Path; Name = (Split-Path -Leaf $Path); PSIsContainer = $true
+                Attributes = [System.IO.FileAttributes]'Directory, ReparsePoint'
+            }
+        }
+        # A folder tree on mapped network drive H:, with nothing read from a drive or the
+        # network: H:\... and \\... exist and look like plain folders, Resolve-NetworkDrivePath
+        # turns H:\ into -Unc (or throws with -Unresolvable), Get-Win32PathName answers $null for
+        # every H:\ path (CreateFile failed, as access denied on a parent does) unless -Final is
+        # given for -Top or -LinkFinal for a link, and the listing, snapshot and read-back are
+        # faked.
+        function Set-MappedDriveTreeMock {
+            param([string]$Top, [string]$Unc, [string]$Final, [string[]]$Links = @(), [string]$LinkFinal, [switch]$Unresolvable)
+            $script:MapTop = $Top
+            $script:MapUnc = $Unc
+            $script:MapFinal = $Final
+            $script:MapLinks = @($Links)
+            $script:MapLinkFinal = $LinkFinal
+            $script:SnapFile = Join-Path $TestDrive ('snap-' + [guid]::NewGuid().ToString('N') + '_TakeOwnership.csv')
+            Set-Content -LiteralPath $script:SnapFile -Value 'Path,ItemType,Owner,OwnerSid'
+            Mock Test-Path { $true } -ParameterFilter { "$LiteralPath" -like 'H:\*' -or "$LiteralPath" -like '\\*' }
+            Mock Get-Item { [PSCustomObject]@{ FullName = "$LiteralPath"; Attributes = [System.IO.FileAttributes]::Directory } } -ParameterFilter { "$LiteralPath" -like 'H:\*' -or "$LiteralPath" -like '\\*' }
+            Mock Get-Win32PathName {
+                if ($Kind -eq 'Final' -and $Path -eq $script:MapTop -and $script:MapFinal) { return $script:MapFinal }
+                if ($Kind -eq 'Final' -and @($script:MapLinks) -contains $Path -and $script:MapLinkFinal) { return $script:MapLinkFinal }
+                $null
+            } -ParameterFilter { "$Path" -like 'H:\*' }
+            if ($Unresolvable) {
+                Mock Resolve-NetworkDrivePath { throw 'The device is not currently connected, but it is a persistent connection. (test)' } -ParameterFilter { "$Path" -like 'H:*' }
+            } else {
+                Mock Resolve-NetworkDrivePath { $script:MapUnc + "$Path".Substring(2) } -ParameterFilter { "$Path" -like 'H:*' }
+            }
+            Mock Get-OwnerTreeItem { [PSCustomObject]@{ Items = @([PSCustomObject]@{ Path = $script:MapTop; ItemType = 'Folder' }); Unlisted = @(); Links = @($script:MapLinks) } }
+            Mock Save-OwnerSnapshot {
+                [PSCustomObject]@{
+                    File = $script:SnapFile; Count = 1
+                    Items = @([PSCustomObject]@{ Path = $script:MapTop; ItemType = 'Folder'; Owner = 'CONTOSO\old.owner'; OwnerSid = 'S-1-5-21-1-2-3-1105' })
+                    Unreadable = 0; Unlisted = 0; UnlistedFolders = @(); Links = @($script:MapLinks).Count; LinkPaths = @($script:MapLinks)
+                }
+            }
+            Mock Get-OwnerReadBack { [PSCustomObject]@{ Mine = 1; NotMine = 0; Unchecked = 0; Changed = 1; AdministratorsOnly = $false; WatchedChanged = @(); WatchedUnchecked = @() } }
+        }
+    }
+    BeforeEach {
+        $script:Log = Join-Path $TestDrive ('logs-' + [guid]::NewGuid().ToString('N'))
+        Mock Set-Acl { }
+        Mock takeown { }
+        Mock icacls { }
+        Mock Invoke-AclTool { [PSCustomObject]@{ ExitCode = 0; Output = '' } }
+        # A network path is in no DFS namespace (2662) unless a test says otherwise.
+        Mock Get-DfsTarget { }
+    }
+
+    Context 'The chosen folder is on a mapped network drive' {
+        It 'AC20a_MappedDriveWithNoFinalPath_IsLookedUpInDfsByItsServerPathAndRefused' {
+            # H: -> \\contoso.com\dfs; CreateFile failed, so there is no final path to go on.
+            Set-MappedDriveTreeMock -Top 'H:\HR' -Unc '\\contoso.com\dfs'
+            Mock Get-DfsTarget { '\\dc01\NETLOGON' } -ParameterFilter { $Path -eq '\\contoso.com\dfs\HR' }
+
+            $text = Get-TreeOwnershipTargetRefusal -Path 'H:\HR'
+            $rows = @(Set-ItemOwnerToCurrentUser -Path 'H:\HR' -Recurse -LogFolder $script:Log)
+
+            $text | Should -Match ([regex]::Escape('H:\HR'))
+            $text | Should -Match 'NETLOGON'
+            $rows[0].Result | Should -Be 'Failed'
+            $rows[0].Error | Should -Match 'NETLOGON'
+            $rows[0].Error | Should -Match 'Nothing was changed\.$'
+            Should -Invoke Get-DfsTarget -Scope It -ParameterFilter { $Path -eq '\\contoso.com\dfs\HR' }
+            Should -Invoke Save-OwnerSnapshot -Times 0 -Exactly -Scope It
+            Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        }
+
+        It 'AC20a_MappedDriveToASystemShare_IsRefusedByItsServerPath' {
+            Set-MappedDriveTreeMock -Top 'H:\scripts' -Unc '\\dc01\NETLOGON'
+
+            $text = Get-TreeOwnershipTargetRefusal -Path 'H:\scripts'
+
+            $text | Should -Match ([regex]::Escape('H:\scripts'))
+            $text | Should -Match 'NETLOGON'
+            Test-UnresolvedDestinationRefusal -Refusal $text | Should -BeFalse
+        }
+
+        It 'AC20c_MappedDriveThatCannotBeResolved_IsRefusedAsUnresolvedAndAboutTheChosenFolder' {
+            Set-MappedDriveTreeMock -Top 'H:\HR' -Unresolvable
+
+            $text = Get-TreeOwnershipTargetRefusal -Path 'H:\HR'
+            $rows = @(Set-ItemOwnerToCurrentUser -Path 'H:\HR' -Recurse -LogFolder $script:Log)
+
+            $text | Should -Match ([regex]::Escape('H:\HR'))
+            $text | Should -Match 'where it leads could not be found out'
+            Test-UnresolvedDestinationRefusal -Refusal $text | Should -BeTrue
+            Test-ChosenFolderUncheckedRefusal -Refusal $text | Should -BeTrue
+            $rows[0].Result | Should -Be 'Failed'
+            $rows[0].Error | Should -Match 'where it leads could not be found out'
+            Should -Invoke Save-OwnerSnapshot -Times 0 -Exactly -Scope It
+            Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        }
+
+        It 'AC20c_DfsLinkUnderAMappedDriveThatWindowsSaysIsInNoDfsNamespace_IsRefused_FinalPathIs<FinalIs>' -ForEach @(
+            @{ FinalIs = 'unknown'; LinkFinal = '' }
+            @{ FinalIs = 'another server'; LinkFinal = '\\?\UNC\fs02\Apps$\Current' }
+        ) {
+            # H: -> \\fs01\share. The listing found a DFS link; the DFS client answers 2662 for
+            # it (the default mock), so there is no target to check: refused, whatever the
+            # final path says.
+            Set-MappedDriveTreeMock -Top 'H:\Dept' -Unc '\\fs01\share' -Links @('H:\Dept\Apps') -LinkFinal $LinkFinal
+            Mock Get-ReparsePointTag { [uint32]'0x8000000A' } -ParameterFilter { $Path -eq 'H:\Dept\Apps' }
+
+            $text = Get-TreeLinkRefusal -Path 'H:\Dept' -LinkPaths @('H:\Dept\Apps')
+            $rows = @(Set-ItemOwnerToCurrentUser -Path 'H:\Dept' -Recurse -LogFolder $script:Log)
+
+            $text | Should -Match ([regex]::Escape('H:\Dept\Apps'))
+            $text | Should -Match 'DFS link'
+            $text | Should -Match 'where it leads could not be found out'
+            Test-ChosenFolderUncheckedRefusal -Refusal $text | Should -BeFalse
+            Should -Invoke Get-DfsTarget -Scope It -ParameterFilter { $Path -eq '\\fs01\share\Dept\Apps' }
+            $rows[0].Result | Should -Be 'Failed'
+            Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        }
+
+        It 'AC20a_DfsLinkUnderAMappedDriveToAProtectedTarget_IsRefused' {
+            Set-MappedDriveTreeMock -Top 'H:\Dept' -Unc '\\fs01\share' -Links @('H:\Dept\Apps') -LinkFinal '\\?\UNC\fs02\Apps$'
+            Mock Get-ReparsePointTag { [uint32]'0x8000000A' } -ParameterFilter { $Path -eq 'H:\Dept\Apps' }
+            Mock Get-DfsTarget { '\\fs02\Apps$'; '\\dc01\SYSVOL\contoso.com' } -ParameterFilter { $Path -eq '\\fs01\share\Dept\Apps' }
+
+            Get-TreeLinkRefusal -Path 'H:\Dept' -LinkPaths @('H:\Dept\Apps') | Should -Match 'SYSVOL'
+        }
+
+        It 'AC20_MappedDriveToAnOrdinaryShareNotInDfs_IsAllowed' {
+            Set-MappedDriveTreeMock -Top 'H:\HR' -Unc '\\fs01\share'
+
+            Get-TreeOwnershipTargetRefusal -Path 'H:\HR' | Should -BeNullOrEmpty
+            $rows = @(Set-ItemOwnerToCurrentUser -Path 'H:\HR' -Recurse -LogFolder $script:Log)
+
+            $rows[0].Result | Should -Not -Be 'Failed'
+            Should -Invoke Get-DfsTarget -Scope It -ParameterFilter { $Path -eq '\\fs01\share\HR' }
+            Should -Invoke Invoke-AclTool -Times 1 -Exactly -Scope It -ParameterFilter { $Tool -eq 'takeown' }
+        }
+
+        It 'AC20c_ChosenFolderInsideADfsLinkOnAMappedDrive_IsLookedUpAsADfsLink' {
+            # The chosen folder H:\Dept\Apps is itself a DFS link (seen through Find-PathLink);
+            # Windows has no DFS target for it: refused, even though H: is not a UNC spelling.
+            Set-MappedDriveTreeMock -Top 'H:\Dept\Apps' -Unc '\\fs01\share'
+            Mock Get-Item { [PSCustomObject]@{ FullName = 'H:\Dept\Apps'; Attributes = [System.IO.FileAttributes]'Directory, ReparsePoint' } } -ParameterFilter { $LiteralPath -eq 'H:\Dept\Apps' }
+            Mock Get-ReparsePointTag { [uint32]'0x8000000A' } -ParameterFilter { $Path -eq 'H:\Dept\Apps' }
+
+            $text = Get-TreeOwnershipTargetRefusal -Path 'H:\Dept\Apps'
+
+            $text | Should -Match 'DFS link'
+            $text | Should -Match 'where it leads could not be found out'
+            Should -Invoke Get-DfsTarget -Scope It -ParameterFilter { $Path -eq '\\fs01\share\Dept\Apps' }
+        }
+    }
+
+    Context 'A network path that cannot be confirmed fails closed' {
+        It 'AC20c_UncPathThatCannotBeReached_IsRefusedInsteadOfCheckedAsText' {
+            Mock Test-Path { $false } -ParameterFilter { "$LiteralPath" -like '\\*' }
+
+            $text = Get-TreeOwnershipTargetRefusal -Path '\\contoso.com\dfs\HR'
+
+            $text | Should -Match ([regex]::Escape('\\contoso.com\dfs\HR'))
+            $text | Should -Match 'where it leads could not be found out'
+            Test-ChosenFolderUncheckedRefusal -Refusal $text | Should -BeTrue
+        }
+
+        It 'AC20c_MappedDrivePathThatCannotBeReached_IsRefused' {
+            Mock Resolve-NetworkDrivePath { '\\fs01\share' + "$Path".Substring(2) } -ParameterFilter { "$Path" -like 'H:*' }
+            Mock Test-Path { $false } -ParameterFilter { "$LiteralPath" -like 'H:\*' }
+
+            $text = Get-TreeOwnershipTargetRefusal -Path 'H:\HR'
+
+            $text | Should -Match 'where it leads could not be found out'
+            Test-ChosenFolderUncheckedRefusal -Refusal $text | Should -BeTrue
+        }
+
+        It 'AC20_LocalPathThatDoesNotExist_IsStillCheckedAsTextOnly' {
+            $missing = Join-Path $TestDrive ('missing-' + [guid]::NewGuid().ToString('N'))
+
+            Get-TreeOwnershipTargetRefusal -Path $missing | Should -BeNullOrEmpty
+            Should -Invoke Get-DfsTarget -Times 0 -Exactly -Scope It
+        }
+    }
+
+    Context 'Links inside a tree on a network path are looked up themselves' {
+        BeforeEach {
+            $script:Top = '\\fs01\share\Dept'
+            $script:NetLink = '\\fs01\share\Dept\Data'
+            Mock Test-Path { $true } -ParameterFilter { "$LiteralPath" -like '\\*' }
+            Mock Get-Item { [PSCustomObject]@{ FullName = "$LiteralPath"; Attributes = [System.IO.FileAttributes]::Directory } } -ParameterFilter { "$LiteralPath" -like '\\*' }
+        }
+
+        It 'AC20a_JunctionOnANetworkPathWhoseOwnPathIsInDfs_IsRefusedByItsDfsTarget_TagIs<TagIs>' -ForEach @(
+            @{ TagIs = 'a junction'; Tag = [uint32]'0xA0000003' }
+            @{ TagIs = 'unreadable'; Tag = $null }
+        ) {
+            # The final path is an ordinary folder on another server, but the link's own path
+            # is in a DFS namespace with a protected target: the link path is looked up too.
+            $script:Tag = $Tag
+            Mock Get-ReparsePointTag { $script:Tag } -ParameterFilter { $Path -eq $script:NetLink }
+            Mock Get-Win32PathName { '\\?\UNC\fs03\data\x' } -ParameterFilter { $Path -eq $script:NetLink }
+            Mock Get-DfsTarget { '\\dc01\SYSVOL\contoso.com' } -ParameterFilter { $Path -eq $script:NetLink }
+
+            $text = Get-TreeLinkRefusal -Path $script:Top -LinkPaths @($script:NetLink)
+
+            $text | Should -Match ([regex]::Escape($script:NetLink))
+            $text | Should -Match 'SYSVOL'
+            Should -Invoke Get-DfsTarget -Scope It -ParameterFilter { $Path -eq $script:NetLink }
+        }
+
+        It 'AC20c_LinkOnANetworkPathWhoseOwnDfsLookupFails_IsRefused' {
+            Mock Get-ReparsePointTag { $null } -ParameterFilter { $Path -eq $script:NetLink }
+            Mock Get-Win32PathName { '\\?\UNC\fs03\data\x' } -ParameterFilter { $Path -eq $script:NetLink }
+            Mock Get-DfsTarget { throw 'The network path was not found. (test)' } -ParameterFilter { $Path -eq $script:NetLink }
+
+            $text = Get-TreeLinkRefusal -Path $script:Top -LinkPaths @($script:NetLink)
+
+            $text | Should -Match 'where it leads could not be found out'
+            Test-ChosenFolderUncheckedRefusal -Refusal $text | Should -BeFalse
+        }
+
+        It 'AC20_JunctionOnANetworkPathToAnOrdinaryFolderNotInDfs_IsAllowed' {
+            Mock Get-ReparsePointTag { [uint32]'0xA0000003' } -ParameterFilter { $Path -eq $script:NetLink }
+            Mock Get-Win32PathName { '\\?\UNC\fs03\data\x' } -ParameterFilter { $Path -eq $script:NetLink }
+
+            Get-TreeLinkRefusal -Path $script:Top -LinkPaths @($script:NetLink) | Should -BeNullOrEmpty
+            Should -Invoke Get-DfsTarget -Scope It -ParameterFilter { $Path -eq $script:NetLink }
+        }
+
+        It 'AC20c_DfsLinkSpeltWithTheLongPathPrefix_IsLookedUpAsADfsLink' {
+            $prefixed = '\\?\UNC\fs01\share\Dept\Apps'
+            $script:Prefixed = $prefixed
+            Mock Get-ReparsePointTag { [uint32]'0x8000000A' } -ParameterFilter { $Path -eq $script:Prefixed }
+            Mock Get-Win32PathName { '\\?\UNC\fs02\Apps$' } -ParameterFilter { $Path -eq $script:Prefixed }
+
+            $text = Get-TreeLinkRefusal -Path $script:Top -LinkPaths @($prefixed)
+
+            $text | Should -Match 'where it leads could not be found out'
+            Should -Invoke Get-DfsTarget -Scope It -ParameterFilter { $Path -eq '\\fs01\share\Dept\Apps' }
+        }
+    }
+
+    Context 'Refusals about the chosen folder itself are told apart from link refusals' {
+        It 'AC20c_TopLevelDfsLookupThatFails_IsAboutTheChosenFolder' {
+            Mock Test-Path { $true } -ParameterFilter { "$LiteralPath" -like '\\*' }
+            Mock Get-Item { [PSCustomObject]@{ FullName = "$LiteralPath"; Attributes = [System.IO.FileAttributes]::Directory } } -ParameterFilter { "$LiteralPath" -like '\\*' }
+            Mock Get-Win32PathName { $Path } -ParameterFilter { "$Path" -like '\\*' }
+            Mock Get-DfsTarget { throw 'NetDfsGetClientInfo failed (test)' } -ParameterFilter { $Path -eq '\\contoso.com\dfs\HR' }
+
+            $text = Get-TreeOwnershipTargetRefusal -Path '\\contoso.com\dfs\HR'
+
+            Test-UnresolvedDestinationRefusal -Refusal $text | Should -BeTrue
+            Test-ChosenFolderUncheckedRefusal -Refusal $text | Should -BeTrue
+        }
+
+        It 'AC20c_LinkWhoseDestinationCannotBeFoundOut_IsNotAboutTheChosenFolder' {
+            $dir = Join-Path $TestDrive ('r2link-' + [guid]::NewGuid().ToString('N'))
+            $script:R2Link = Join-Path $dir 'x'
+            Mock Get-ReparsePointTag { [uint32]'0x8000ABCD' } -ParameterFilter { $Path -eq $script:R2Link }
+            Mock Get-Win32PathName { $null } -ParameterFilter { $Path -eq $script:R2Link }
+
+            $text = Get-TreeLinkRefusal -Path $dir -LinkPaths @($script:R2Link)
+
+            Test-UnresolvedDestinationRefusal -Refusal $text | Should -BeTrue
+            Test-ChosenFolderUncheckedRefusal -Refusal $text | Should -BeFalse
+        }
+
+        It 'AC20_TheMarkerIsOneSharedConstant' {
+            $script:ChosenFolderUncheckedText | Should -Not -BeNullOrEmpty
+            (Get-Command Test-ChosenFolderUncheckedRefusal).ScriptBlock.ToString() | Should -Match 'ChosenFolderUncheckedText'
+        }
+    }
+
+    Context 'Resolve-NetworkDrivePath (the real one, with the drive and WNetGetConnection faked)' {
+        It 'AC20_NetworkDriveLetter_BecomesItsServerPath_<Spelling>' -ForEach @(
+            @{ Spelling = 'plain'; Given = 'H:\HR\Payroll'; Expected = '\\contoso.com\dfs\HR\Payroll' }
+            @{ Spelling = 'lower case'; Given = 'h:\HR'; Expected = '\\contoso.com\dfs\HR' }
+            @{ Spelling = 'long-path prefix'; Given = '\\?\H:\HR'; Expected = '\\contoso.com\dfs\HR' }
+            @{ Spelling = 'drive root'; Given = 'H:\'; Expected = '\\contoso.com\dfs' }
+        ) {
+            Mock Get-DriveLetterType { 'Network' }
+            Mock Get-NetworkDriveRemoteName { '\\contoso.com\dfs' }
+
+            & $script:RealResolveNetworkDrivePath -Path $Given | Should -BeExactly $Expected
+            Should -Invoke Get-NetworkDriveRemoteName -Scope It -ParameterFilter { $Letter -eq 'H' }
+        }
+
+        It 'AC20_LocalFixedDriveOrUncPath_IsReturnedAsGiven_<Case>' -ForEach @(
+            @{ Case = 'fixed drive'; Given = 'D:\Data\HR' }
+            @{ Case = 'UNC path'; Given = '\\fs01\share\HR' }
+        ) {
+            Mock Get-DriveLetterType { 'Fixed' }
+            Mock Get-NetworkDriveRemoteName { throw 'not called (test)' }
+
+            & $script:RealResolveNetworkDrivePath -Path $Given | Should -BeExactly $Given
+            Should -Invoke Get-NetworkDriveRemoteName -Times 0 -Exactly -Scope It
+        }
+
+        It 'AC20c_NetworkDriveWhoseServerPathCannotBeRead_Throws_<Case>' -ForEach @(
+            @{ Case = 'WNetGetConnection fails'; Type = 'Network'; Remote = 'throw' }
+            @{ Case = 'no server path'; Type = 'Network'; Remote = '' }
+            @{ Case = 'not a server path'; Type = 'Network'; Remote = 'Z:\elsewhere' }
+            @{ Case = 'drive type unknown'; Type = 'Unknown'; Remote = 'throw' }
+        ) {
+            $script:Type = $Type
+            $script:Remote = $Remote
+            Mock Get-DriveLetterType { $script:Type }
+            Mock Get-NetworkDriveRemoteName { if ($script:Remote -eq 'throw') { throw 'The device is not currently connected (test)' } else { $script:Remote } }
+
+            { & $script:RealResolveNetworkDrivePath -Path 'H:\HR' } | Should -Throw
+        }
+
+        It 'AC20c_DriveTypeThatCannotBeRead_Throws' {
+            Mock Get-DriveLetterType { throw 'driveName does not refer to a valid drive (test)' }
+
+            { & $script:RealResolveNetworkDrivePath -Path 'H:\HR' } | Should -Throw
+        }
+
+        It 'AC20_WNetGetConnectionDeclarationCompiles' {
+            # Compiled only, never called: no drive mapping is read.
+            Import-Win32NetworkDriveType
+            'FolderPermissionManager.Win32NetworkDrive' -as [type] | Should -Not -BeNullOrEmpty
+        }
+    }
+}
+
+Describe 'README after the D-040 fix round 2' {
+    It 'AC20_ReadmeSaysMappedNetworkDrivesAreResolvedToTheirServerPath' {
+        $readme = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\README.md') -Raw -Encoding UTF8
+        $readme | Should -Match '(?i)mapped network drives? (is|are) (resolved|turned) (in)?to (its|their) server path'
     }
 }

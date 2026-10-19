@@ -191,9 +191,15 @@ function Get-CliRefusalNextStep {
         What the [FAIL] line of a refused folder tells the technician to do next. Only a
         protected folder (D-036) gets the -AllowSystemFolder hint: a link whose destination
         could not be found out (Test-UnresolvedDestinationRefusal) leads somewhere nobody has
-        checked, so the way forward is the folders beside it, or someone more senior.
+        checked, so the way forward is the folders beside it, or someone more senior. When no
+        link is involved (Test-ChosenFolderUncheckedRefusal: the chosen folder's network drive,
+        network path or DFS lookup could not be resolved), the way forward is the real server
+        path instead.
     #>
     param([Parameter(Mandatory)][string]$Refusal)
+    if (Test-ChosenFolderUncheckedRefusal -Refusal $Refusal) {
+        return 'Check the path is reachable and run this against the real server path (Properties > DFS tab), or ask a senior engineer.'
+    }
     if (Test-UnresolvedDestinationRefusal -Refusal $Refusal) {
         return 'Take ownership of the folders beside the link instead, or ask a senior engineer.'
     }

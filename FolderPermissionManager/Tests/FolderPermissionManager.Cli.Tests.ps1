@@ -41,6 +41,21 @@ BeforeAll {
         param([Parameter(Mandatory)][string]$Path)
         throw "Get-DfsTarget ($Path) was called without a mock in a test."
     }
+    # Guard: the real Resolve-NetworkDrivePath reads this computer's drive letters and asks
+    # Windows (WNetGetConnection) which server path a network drive is mapped to. Replaced here
+    # (same parameter) so nothing reaches a real drive mapping, then mocked to hand every path
+    # back as given; tests about mapped drives mock it themselves. The WNetGetConnection
+    # wrapper is replaced the same way, for the tests of the real function.
+    $script:RealResolveNetworkDrivePath = ${function:Resolve-NetworkDrivePath}
+    function Resolve-NetworkDrivePath {
+        param([Parameter(Mandatory)][AllowEmptyString()][string]$Path)
+        throw "Resolve-NetworkDrivePath ($Path) was called without a mock in a test."
+    }
+    function Get-NetworkDriveRemoteName {
+        param([Parameter(Mandatory)][string]$Letter)
+        throw "Get-NetworkDriveRemoteName ($Letter) was called without a mock in a test."
+    }
+    Mock Resolve-NetworkDrivePath { $Path }
 }
 
 Describe 'FolderPermissionManager.ps1 (command line)' {
@@ -747,5 +762,145 @@ Describe 'FolderPermissionManager.ps1 (command line): DFS targets, unresolvable 
             $fail[0] | Should -Not -Match 'AllowSystemFolder'
             Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
         }
+    }
+}
+
+# --- Fix round 2 of the D-040 revision (SQ-014 review 2026-10-19) ------------------------------
+# Pinned: Resolve-NetworkDrivePath is mocked everywhere (the file-level stub throws). The command
+# line keeps the drive letter it was given (Resolve-AclTargetPath), and the core turns a mapped
+# network drive into its server path before any check. A refusal about the chosen folder itself
+# (no link involved: a network drive or a DFS lookup that could not be resolved) tells the
+# technician to check the path and use the real server path, not "the folders beside the link".
+Describe 'FolderPermissionManager.ps1 (command line): mapped network drives and network paths' {
+    BeforeAll {
+        $script:BesideTheLink = 'Take ownership of the folders beside the link instead, or ask a senior engineer.'
+        $script:CheckThePath = 'Check the path is reachable and run this against the real server path (Properties > DFS tab), or ask a senior engineer.'
+        # A folder tree on mapped network drive H: (see Set-MappedDriveTreeMock in
+        # FolderPermissions.Tree.Tests.ps1): nothing is read from a drive or the network.
+        function Set-MappedDriveTreeMock {
+            param([string]$Top, [string]$Unc, [string[]]$Links = @(), [string]$LinkFinal, [switch]$Unresolvable)
+            $script:MapTop = $Top
+            $script:MapUnc = $Unc
+            $script:MapLinks = @($Links)
+            $script:MapLinkFinal = $LinkFinal
+            $script:SnapFile = Join-Path $TestDrive ('snap-' + [guid]::NewGuid().ToString('N') + '_TakeOwnership.csv')
+            Set-Content -LiteralPath $script:SnapFile -Value 'Path,ItemType,Owner,OwnerSid'
+            $script:LocalAcl = Get-Acl -LiteralPath $TestDrive
+            Mock Test-Path { $true } -ParameterFilter { "$LiteralPath" -like 'H:\*' -or "$LiteralPath" -like '\\*' }
+            Mock Get-Item { [PSCustomObject]@{ FullName = "$LiteralPath"; Attributes = [System.IO.FileAttributes]::Directory } } -ParameterFilter { "$LiteralPath" -like 'H:\*' -or "$LiteralPath" -like '\\*' }
+            Mock Get-Win32PathName {
+                if ($Kind -eq 'Final' -and @($script:MapLinks) -contains $Path -and $script:MapLinkFinal) { return $script:MapLinkFinal }
+                $null
+            } -ParameterFilter { "$Path" -like 'H:\*' }
+            Mock Get-Acl { $script:LocalAcl } -ParameterFilter { "$LiteralPath" -like 'H:\*' }
+            if ($Unresolvable) {
+                Mock Resolve-NetworkDrivePath { throw 'The device is not currently connected, but it is a persistent connection. (test)' } -ParameterFilter { "$Path" -like 'H:*' }
+            } else {
+                Mock Resolve-NetworkDrivePath { $script:MapUnc + "$Path".Substring(2) } -ParameterFilter { "$Path" -like 'H:*' }
+            }
+            Mock Get-OwnerTreeItem { [PSCustomObject]@{ Items = @([PSCustomObject]@{ Path = $script:MapTop; ItemType = 'Folder' }); Unlisted = @(); Links = @($script:MapLinks) } }
+            Mock Save-OwnerSnapshot {
+                [PSCustomObject]@{
+                    File = $script:SnapFile; Count = 1
+                    Items = @([PSCustomObject]@{ Path = $script:MapTop; ItemType = 'Folder'; Owner = 'CONTOSO\old.owner'; OwnerSid = 'S-1-5-21-1-2-3-1105' })
+                    Unreadable = 0; Unlisted = 0; UnlistedFolders = @(); Links = @($script:MapLinks).Count; LinkPaths = @($script:MapLinks)
+                }
+            }
+            Mock Get-OwnerReadBack { [PSCustomObject]@{ Mine = 1; NotMine = 0; Unchecked = 0; Changed = 1; AdministratorsOnly = $false; WatchedChanged = @(); WatchedUnchecked = @() } }
+        }
+    }
+    BeforeEach {
+        $script:Log = Join-Path $TestDrive ('cli-r2-logs-' + [guid]::NewGuid().ToString('N'))
+        $script:Lines = [System.Collections.Generic.List[string]]::new()
+        Mock Set-Acl { }
+        Mock takeown { }
+        Mock icacls { }
+        Mock Invoke-AclTool { [PSCustomObject]@{ ExitCode = 0; Output = '' } }
+        Mock Read-Host { 'n' }
+        Mock Write-Host { $script:Lines.Add("$Object") }
+        Mock Get-DfsTarget { }
+    }
+
+    It 'AC20a_Cli_MappedDriveWithNoFinalPathInDfsToNetlogon_IsRefused' {
+        Set-MappedDriveTreeMock -Top 'H:\HR' -Unc '\\contoso.com\dfs'
+        Mock Get-DfsTarget { '\\dc01\NETLOGON' } -ParameterFilter { $Path -eq '\\contoso.com\dfs\HR' }
+
+        $code = Invoke-FolderPermissionCli -Path 'H:\HR' -LogFolder $script:Log -Force
+
+        $code | Should -Be 1
+        $fail = @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' })
+        $fail.Count | Should -Be 1
+        $fail[0] | Should -Match ([regex]::Escape('H:\HR'))
+        $fail[0] | Should -Match 'NETLOGON'
+        $fail[0] | Should -Match 'Nothing was changed\.'
+        Should -Invoke Get-OwnerTreeItem -Times 0 -Exactly -Scope It
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+    }
+
+    It 'AC20c_Cli_MappedDriveThatCannotBeResolved_IsRefusedWithTheCheckThePathNextStep' {
+        Set-MappedDriveTreeMock -Top 'H:\HR' -Unresolvable
+
+        $code = Invoke-FolderPermissionCli -Path 'H:\HR' -LogFolder $script:Log -Force
+
+        $code | Should -Be 1
+        $fail = @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' })
+        $fail.Count | Should -Be 1
+        $fail[0] | Should -Match ([regex]::Escape('H:\HR'))
+        $fail[0] | Should -Match 'where it leads could not be found out'
+        $fail[0] | Should -Match ([regex]::Escape($script:CheckThePath))
+        $fail[0] | Should -Not -Match ([regex]::Escape($script:BesideTheLink))
+        $fail[0] | Should -Not -Match 'AllowSystemFolder'
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+    }
+
+    It 'AC20c_Cli_DfsLinkUnderAMappedDriveWithNoDfsTarget_IsRefused' {
+        Set-MappedDriveTreeMock -Top 'H:\Dept' -Unc '\\fs01\share' -Links @('H:\Dept\Apps') -LinkFinal '\\?\UNC\fs02\Apps$\Current'
+        Mock Get-ReparsePointTag { [uint32]'0x8000000A' } -ParameterFilter { $Path -eq 'H:\Dept\Apps' }
+
+        $code = Invoke-FolderPermissionCli -Path 'H:\Dept' -LogFolder $script:Log -Force
+
+        $code | Should -Be 1
+        $fail = @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' })
+        $fail.Count | Should -Be 1
+        $fail[0] | Should -Match ([regex]::Escape('H:\Dept\Apps'))
+        $fail[0] | Should -Match 'DFS link'
+        $fail[0] | Should -Match 'where it leads could not be found out'
+        $fail[0] | Should -Match ([regex]::Escape($script:BesideTheLink))
+        Should -Invoke Get-DfsTarget -Scope It -ParameterFilter { $Path -eq '\\fs01\share\Dept\Apps' }
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+    }
+
+    It 'AC20_Cli_MappedDriveToAnOrdinaryShareNotInDfs_IsAllowed' {
+        Set-MappedDriveTreeMock -Top 'H:\HR' -Unc '\\fs01\share'
+
+        $null = Invoke-FolderPermissionCli -Path 'H:\HR' -LogFolder $script:Log -Force
+
+        @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' }).Count | Should -Be 0
+        Should -Invoke Get-DfsTarget -Scope It -ParameterFilter { $Path -eq '\\fs01\share\HR' }
+        Should -Invoke Invoke-AclTool -Times 1 -Exactly -Scope It -ParameterFilter { $Tool -eq 'takeown' }
+    }
+
+    It 'AC20c_Cli_TopLevelDfsLookupThatFails_SuggestsCheckingThePathNotTheFoldersBesideALink' {
+        $top = '\\contoso.com\dfs\HR'
+        $script:Top = $top
+        Mock Test-Path { $true } -ParameterFilter { "$LiteralPath" -like '\\*' }
+        Mock Get-Item { [PSCustomObject]@{ FullName = "$LiteralPath"; Attributes = [System.IO.FileAttributes]::Directory } } -ParameterFilter { "$LiteralPath" -like '\\*' }
+        Mock Get-Win32PathName { $Path } -ParameterFilter { "$Path" -like '\\*' }
+        Mock Get-DfsTarget { throw 'NetDfsGetClientInfo failed (test)' } -ParameterFilter { $Path -eq $script:Top }
+
+        $code = Invoke-FolderPermissionCli -Path $top -LogFolder $script:Log -Force
+
+        $code | Should -Be 1
+        $fail = @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' })
+        $fail.Count | Should -Be 1
+        $fail[0] | Should -Match ([regex]::Escape($script:CheckThePath))
+        $fail[0] | Should -Not -Match ([regex]::Escape($script:BesideTheLink))
+        $fail[0] | Should -Not -Match 'AllowSystemFolder'
+    }
+
+    It 'AC20_Cli_NextStep_IsPickedByTheSharedMarkers' {
+        Get-CliRefusalNextStep -Refusal "x is on a network path, and $script:UnresolvedDestinationText, $script:ChosenFolderUncheckedText." | Should -BeExactly $script:CheckThePath
+        Get-CliRefusalNextStep -Refusal "x is a junction, and $script:UnresolvedDestinationText, so it cannot be checked." | Should -BeExactly $script:BesideTheLink
+        Get-CliRefusalNextStep -Refusal 'x is in a Windows system folder.' | Should -Match '-AllowSystemFolder'
     }
 }

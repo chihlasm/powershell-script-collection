@@ -143,7 +143,12 @@ share where the server follows the link itself. **DFS targets are looked up**: f
 on a network path, and for a chosen folder on a network path (`\\contoso.com\dfs\HR`), the tool
 asks the DFS client on this computer where the path really is (`NetDfsGetClientInfo`, built
 into Windows) and checks every target; a target such as `\\dc01\NETLOGON`, or a lookup that
-fails, refuses the folder. The result is `Failed`, names the link, and nothing is changed. The
+fails, refuses the folder. Mapped network drives are resolved to their server path (`H:\HR`
+becomes `\\contoso.com\dfs\HR`) and checked the same way; a mapped drive whose server path
+Windows will not give, or a network folder that cannot be reached, is refused. For those, and
+for a chosen folder whose DFS lookup fails, check the path is reachable and run the tool against
+the real server path (Properties > DFS tab), or ask a senior engineer. Any other link on a
+network path is looked up in DFS too. The result is `Failed`, names the link, and nothing is changed. The
 command-line script says so before asking anything; the GUI finds out while saving the owner
 snapshot, and keeps that snapshot (the change log row names it, and nothing needs to be put back
 from it). Take ownership of the folders beside the link instead, or ask a senior engineer. The
