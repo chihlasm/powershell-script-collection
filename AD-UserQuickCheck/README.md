@@ -115,6 +115,7 @@ This looks at the **on-premises Active Directory account only**. It does not che
 - Cloud password expiry (use `Get-EntraPasswordPolicy` in this repository)
 - The user's device, network, VPN or licensing
 - Why an account keeps locking (use the AD-LockoutDiagnostics tools)
+- Kerberos encryption-type blocks: since the 2026 RC4 changes, a domain controller can refuse a sign-in because the account or the device only uses RC4, with nothing wrong with the password. Everything here can look fine while the user still can't sign in. `AD-LockoutDiagnostics\Diagnose-ADAccountLockout.ps1 -Identity <user>` (or the lockout workbench) checks every domain controller for this and says "Not a password problem: encryption type blocked" with the next step.
 
 ## Tests
 

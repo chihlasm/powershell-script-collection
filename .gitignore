@@ -5,6 +5,11 @@ work-in-progress/
 Get-M365SecurityEvidence/*_SecurityEvidence_*/
 AD-GroupMembership-Export/Uploads/
 AD-LockoutDiagnostics/**/Case_*/
+# Diagnose-ADAccountLockout's encryption-type findings (account names, client IPs) when
+# written outside a case folder, e.g. to its default Reports\ folder.
+**/ADLockoutEtype_*.csv
+# The lockout tools' default output folder (HTML reports name accounts, hosts and IPs).
+AD-LockoutDiagnostics/Reports/
 # Ticket folders from -TicketNumber (ticket notes and reports; same reason as Case_*).
 **/Ticket_*/
 # Notes and reports saved outside a Ticket_* folder (-OutputPath without -TicketNumber).
