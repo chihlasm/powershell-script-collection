@@ -53,7 +53,7 @@ tenant without Entra ID P1 the headline is PROBABLY YES with "sign-in history no
 (D-006). Read-only whatever account is used. Builds after SQ-001. Split per D-004.
 
 ## SQ-011 · M365 user check: is it a sync problem? (on-prem AD comparison)
-- status: review
+- status: done
 - priority: P1
 - type: feature
 - branch: squad/SQ-011-m365-sync-check
@@ -201,7 +201,7 @@ optional (D-018); DFS namespace paths are detected (D-019). Read-only, with a re
 the past primary-group bug. Split per D-004.
 
 ## SQ-013 · Folder access: what to do about it
-- status: review
+- status: done
 - priority: P2
 - type: feature
 - branch: squad/SQ-013-folder-access-next-step
@@ -214,7 +214,7 @@ ticket note, and a next step pointing to FolderPermissionManager. Builds after S
 Split from SQ-004 per D-004.
 
 ## SQ-006 · Lockout tools recognize Kerberos encryption-type blocks (RC4 enforcement)
-- status: review
+- status: done
 - priority: P2
 - type: feature
 - branch: squad/SQ-006-kerberos-etype-block
@@ -227,7 +227,8 @@ password problem, encryption type blocked") with the next step, in the report an
 (D-022, D-023, D-024). Per-DC gate says "can't tell" where a DC can't log the events. Read-only.
 
 ## SQ-007 · Mailbox check: the facts, with "do NOT reset yet" on takeover signs
-- status: review
+- status: ready
+- revision: merge to main failed one test at review 2026-10-18 (see spec Revision notes)
 - priority: P2
 - type: feature
 - branch: squad/SQ-007-mailbox-check
@@ -242,6 +243,8 @@ Second entry script in the SQ-002 folder; builds after SQ-002.
 
 ## SQ-016 · Mailbox check: when were rules, forwarding and delegates added?
 - status: review
+- waiting: SQ-007 (stacked on it; SQ-007 went back to ready at review 2026-10-18). Owner approved
+  the merge; merge right after SQ-007 lands.
 - priority: P2
 - type: feature
 - branch: squad/SQ-016-mailbox-audit-log (stacked on squad/SQ-007-mailbox-check; merge SQ-007 first)
@@ -255,7 +258,7 @@ line, with when, who and whether it was the user's own account (D-032). "Could n
 the audit role is missing or auditing is off. Builds after SQ-007.
 
 ## SQ-009 · LocalAdminManager: make remote changes work, and log every add and remove
-- status: review
+- status: done
 - priority: P2
 - type: fix
 - branch: squad/SQ-009-localadmin-remote-log
