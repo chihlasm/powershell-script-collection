@@ -77,7 +77,8 @@
 
     Files written:
       <log folder>  At startup, even with -WhatIf: the Logs folder next to this script is
-                    created (when it is on a local fixed disk) and a small probe file is written
+                    created (when it is on a local fixed disk and not in a OneDrive
+                    or SharePoint sync folder) and a small probe file is written
                     and deleted there, to check it can be written. Each change writes its
                     "Started" rows, its backup (Backups\) and its result rows
                     (Changes_<yyyy-MM-dd>.csv) here, plus a "Done, with items to check" row for
@@ -1535,7 +1536,8 @@ $script:WorkHelperFunctions = 'Get-InnermostErrorText', 'Test-AccessDeniedError'
 'Get-AclOwnerName', 'ConvertTo-AclViewModel', 'Read-ItemAclModel', 'Format-FileSize', 'ConvertTo-FileRows',
 'Get-DriveListModel', 'Get-ValidDriveMap', 'Test-UncSharePath', 'Write-ChangeStartedLog', 'New-ChangeWorkResult',
 'New-ChangeNotStartedResult', 'Invoke-AppChange', 'Add-ChangeReadBack', 'Get-ReadBackProblem', 'ConvertTo-IdentitySid',
-'Save-UnloggedChangeRows',
+'Save-UnloggedChangeRows', 'ConvertTo-SidAccountName', 'Get-RemoveIdentityProblem', 'New-ChangeRefusedResult',
+'Get-ResolvedRootRefusal', 'Get-TreeLinkTargetRefusal',
 # Where a change lands (Resolve-ChangeTargetSet and everything it calls), looked up in the pool.
 'Resolve-ChangeTargetSet', 'Get-ChangeTarget', 'New-ChangeTarget', 'Get-StreamRefusal', 'Resolve-MappedDrive',
 'Test-ThisComputerName', 'Get-ThisComputerNames', 'ConvertFrom-Ipv6LiteralName', 'Test-SameIPAddress',
@@ -1568,12 +1570,16 @@ function Write-ChangeStartedLog {
 function New-ChangeWorkResult {
     # What a change work block returns: the core's rows (with the read-back's CheckProblem and
     # NothingRemoved notes, Add-ChangeReadBack), the log file, the core's message, and where the
-    # rows went when the log could not be written (UnloggedPath).
+    # rows went when the log could not be written (UnloggedPath), and whether the read-back's
+    # "Done, with items to check" rows could not be written to the log (ReadBackUnlogged) and
+    # where they went instead (ReadBackUnloggedPath).
     param(
         [AllowEmptyCollection()][AllowNull()][object[]]$Entries,
         [AllowNull()][string]$LogPath,
         [Parameter(Mandatory)][string]$LogFolder,
-        [AllowNull()][string]$UnloggedPath
+        [AllowNull()][string]$UnloggedPath,
+        [bool]$ReadBackUnlogged,
+        [AllowNull()][string]$ReadBackUnloggedPath
     )
     $all = @($Entries | Where-Object { $null -ne $_ })
     $path = if ($LogPath) { $LogPath } else { $null }
@@ -1583,6 +1589,8 @@ function New-ChangeWorkResult {
         LogPath      = $path
         Message      = Get-ChangeResultMessage -Entries $all -LogPath $path -LogFolder $LogFolder
         UnloggedPath = $(if ($UnloggedPath) { $UnloggedPath } else { $null })
+        ReadBackUnlogged     = $ReadBackUnlogged
+        ReadBackUnloggedPath = $(if ($ReadBackUnloggedPath) { $ReadBackUnloggedPath } else { $null })
         Error        = $null
     }
 }
@@ -1613,6 +1621,65 @@ function ConvertTo-IdentitySid {
         (New-Object System.Security.Principal.NTAccount -ArgumentList $id).Translate([System.Security.Principal.SecurityIdentifier]).Value
     }
     catch { $null }
+}
+
+function ConvertTo-SidAccountName {
+    # The account name a SID stands for now, or $null when Windows cannot translate it (the
+    # account was deleted, or its domain cannot be reached).
+    # https://learn.microsoft.com/dotnet/api/system.security.principal.securityidentifier.translate
+    param([AllowNull()][AllowEmptyString()][string]$Sid)
+    $s = "$Sid".Trim()
+    if (-not $s) { return $null }
+    try { ([System.Security.Principal.SecurityIdentifier]$s).Translate([System.Security.Principal.NTAccount]).Value }
+    catch { $null }
+}
+
+function Get-RemoveIdentityProblem {
+    # The core removes by name (Remove-FolderPermission builds an NTAccount from -Identity and
+    # calls RemoveAccessRuleAll), so the name is looked up again when the change runs. Before it
+    # does, this checks that the name still stands for the SID of the entry chosen in the remove
+    # dialog: "the change acts on the same identifier it matched (the SID), not a name that could
+    # resolve differently" (destructive-operations profile). Returns Problem (the text, or $null)
+    # and Sid (the SID the name stands for).
+    #   - The entry's account no longer exists (an orphaned SID, shown as S-1-...): refused; the
+    #     core cannot remove it by name. icacls removes it by SID: "/remove[:g|:d] Sid" removes
+    #     all occurrences of the SID's granted (g) or denied (d) rights, and "If you use a
+    #     numerical form, affix the wildcard character * to the beginning of the SID".
+    #     https://learn.microsoft.com/windows-server/administration/windows-commands/icacls
+    #   - The name now stands for another SID (a domain migration, a rename and a new account
+    #     with the old name): refused.
+    # Without -Sid (no entry was chosen) only the name is translated.
+    # https://learn.microsoft.com/dotnet/api/system.security.principal.ntaccount.translate
+    param(
+        [Parameter(Mandatory)][string]$Identity,
+        [string]$Sid,
+        [AllowEmptyCollection()][string[]]$Path,
+        [string]$Type
+    )
+    $orphan = {
+        param($sidText)
+        $switch = if ($Type -eq 'Deny') { '/remove:d' } else { '/remove:g' }
+        $first = @($Path | Where-Object { $_ })[0]
+        $command = "icacls `"$first`" $switch *$sidText"
+        $howTo = if (@($Path).Count -gt 1) { "for each item, for example $command" } else { $command }
+        "This entry belongs to an account that no longer exists ($sidText). This tool can't remove orphaned entries yet; ask a senior admin ($howTo). Nothing was changed."
+    }
+    $id = $Identity.Trim()
+    if ($id -match '^S-1-\d+(-\d+)+$') { return [PSCustomObject]@{ Problem = (& $orphan $(if ($Sid) { $Sid } else { $id })); Sid = $null } }
+    $now = ConvertTo-IdentitySid -Identity $id
+    if (-not $Sid) {
+        if (-not $now) { return [PSCustomObject]@{ Problem = "Windows could not find the account $id, so nothing was changed. Check the name, or ask a senior admin."; Sid = $null } }
+        return [PSCustomObject]@{ Problem = $null; Sid = $now }
+    }
+    if (-not $now) {
+        $current = ConvertTo-SidAccountName -Sid $Sid
+        if (-not $current) { return [PSCustomObject]@{ Problem = (& $orphan $Sid); Sid = $null } }
+        return [PSCustomObject]@{ Problem = "Windows can no longer find $id, though the account of the entry you chose ($Sid) is now called $current (it was renamed), so nothing was changed. Press Refresh and choose it again."; Sid = $null }
+    }
+    if ($now -ne $Sid) {
+        return [PSCustomObject]@{ Problem = "$id now resolves to a different account than the entry you chose (for example after a domain migration or rename), so nothing was changed. Ask a senior admin. (The entry is $Sid; the name is now $now.)"; Sid = $null }
+    }
+    [PSCustomObject]@{ Problem = $null; Sid = $Sid }
 }
 
 function Get-ReadBackProblem {
@@ -1687,6 +1754,9 @@ function Add-ChangeReadBack {
     # core's row itself is not changed. A remove whose permissions are byte for byte the same
     # before and after (OldValue = NewValue) and whose SID has no explicit entry of that type
     # gets NothingRemoved instead: there was nothing to remove.
+    # Returns $null, or, when those check rows could not be written to the change log, Unlogged
+    # and UnloggedPath: the rows went to the Unlogged_ file instead (Save-UnloggedChangeRows;
+    # $null when that failed too).
     param(
         [Parameter(Mandatory)][ValidateSet('Add', 'Remove', 'Owner', 'Copy')][string]$Kind,
         [AllowEmptyCollection()][AllowNull()][object[]]$Entries,
@@ -1738,7 +1808,9 @@ function Add-ChangeReadBack {
                         -ErrorText "Read back after the change: $problem." -BackupFile "$($e.BackupFile)"))
         }
     }
-    if ($rows.Count -gt 0 -and $LogFolder) { $null = Write-PermissionChangeLog -Entries $rows.ToArray() -LogFolder $LogFolder }
+    if ($rows.Count -gt 0 -and $LogFolder -and -not (Write-PermissionChangeLog -Entries $rows.ToArray() -LogFolder $LogFolder)) {
+        return [PSCustomObject]@{ Unlogged = $true; UnloggedPath = (Save-UnloggedChangeRows -Entries $rows.ToArray()) }
+    }
 }
 
 function Save-UnloggedChangeRows {
@@ -1780,10 +1852,12 @@ function Complete-AppChangeWork {
         [hashtable]$ReadBack
     )
     $entries = @($Done.Entries | Where-Object { $null -ne $_ })
-    if (-not $WhatIfMode -and $ReadBack) { Add-ChangeReadBack @ReadBack -Entries $entries -LogFolder $LogFolder }
+    $checkRows = $null
+    if (-not $WhatIfMode -and $ReadBack) { $checkRows = Add-ChangeReadBack @ReadBack -Entries $entries -LogFolder $LogFolder }
     $unlogged = $null
     if (-not $WhatIfMode -and -not $Done.LogPath -and $entries.Count -gt 0) { $unlogged = Save-UnloggedChangeRows -Entries $entries }
-    New-ChangeWorkResult -Entries $entries -LogPath $Done.LogPath -LogFolder $LogFolder -UnloggedPath $unlogged
+    New-ChangeWorkResult -Entries $entries -LogPath $Done.LogPath -LogFolder $LogFolder -UnloggedPath $unlogged `
+        -ReadBackUnlogged ([bool]$checkRows) -ReadBackUnloggedPath $(if ($checkRows) { $checkRows.UnloggedPath } else { $null })
 }
 
 function New-ChangeNotStartedResult {
@@ -1797,6 +1871,12 @@ function New-ChangeNotStartedResult {
         Message    = $null
         Error      = "Nothing was changed: the change log in $LogFolder could not be written, so the change was not started. Check that you can write to that folder, or start the tool again with -LogFolder set to another folder."
     }
+}
+
+function New-ChangeRefusedResult {
+    # A work block refused the change before anything was written or changed (the text says why).
+    param([Parameter(Mandatory)][string]$Text)
+    [PSCustomObject]@{ Ok = $false; NotStarted = $true; Entries = @(); LogPath = $null; Message = $null; Error = $Text }
 }
 
 function Get-CoreFunctionNames {
@@ -1970,13 +2050,18 @@ $script:AddPermissionWork = {
     }
 }
 
-# -Sid: the account chosen in the remove dialog, so the read-back checks that SID (the core
-# removes by name, Remove-FolderPermission -Identity); empty means the name is translated.
+# -Sid: the account chosen in the remove dialog. The core removes by name
+# (Remove-FolderPermission -Identity), so before it runs the name must still stand for that SID
+# and the entry must not be an orphaned SID (Get-RemoveIdentityProblem); otherwise nothing is
+# logged or changed. The read-back checks the SID. Empty means the name is translated.
 $script:RemovePermissionWork = {
     param([string[]]$Paths, [string]$Identity, [string]$Rights, [string]$Type, [string]$LogFolder, [bool]$WhatIf, [string]$Sid, [string]$CorePath)
     try {
         if ($CorePath -and -not (Get-Command -Name Get-ItemOwner -CommandType Function -ErrorAction SilentlyContinue)) { . $CorePath -LoadFunctionsOnly }
         $Paths = @($Paths | Where-Object { "$_".Trim() })
+        $match = Get-RemoveIdentityProblem -Identity $Identity -Sid $Sid -Path $Paths -Type $Type
+        if ($match.Problem) { return (New-ChangeRefusedResult -Text $match.Problem) }
+        $Sid = $match.Sid
         if (-not (Write-ChangeStartedLog -Action 'Remove permission' -Detail "$Type $Rights for $Identity" -Path $Paths -LogFolder $LogFolder -WhatIfMode $WhatIf)) {
             return (New-ChangeNotStartedResult -LogFolder $LogFolder)
         }
@@ -2055,27 +2140,29 @@ $script:ChangeTargetWork = {
 # Read only: what a whole-tree take ownership would cover, counted the way the core's owner
 # snapshot lists it (Get-OwnerTreeItem: hidden and system items too, links listed but not gone
 # into, folders that cannot be opened counted but not what is inside them). Folders includes
-# the chosen folder itself.
+# the chosen folder itself. LinkRefusal: why a junction or symbolic link in it stops the change
+# (Get-TreeLinkTargetRefusal), checked here so the confirm never opens for it.
 $script:TreeCountWork = {
     param([string]$Path, [string]$CorePath)
     try {
         if ($CorePath -and -not (Get-Command -Name Get-ItemOwner -CommandType Function -ErrorAction SilentlyContinue)) { . $CorePath -LoadFunctionsOnly }
         if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
-            return [PSCustomObject]@{ Ok = $false; Path = $Path; Folders = 0; Files = 0; NotOpened = 0; Links = 0; Error = "'$Path' was not found. It may have been moved, renamed or deleted; press Refresh." }
+            return [PSCustomObject]@{ Ok = $false; Path = $Path; Folders = 0; Files = 0; NotOpened = 0; Links = 0; LinkRefusal = $null; Error = "'$Path' was not found. It may have been moved, renamed or deleted; press Refresh." }
         }
         $tree = Get-OwnerTreeItem -Path $Path
         [PSCustomObject]@{
-            Ok        = $true
-            Path      = $Path
-            Folders   = @($tree.Items | Where-Object { $_.ItemType -eq 'Folder' }).Count
-            Files     = @($tree.Items | Where-Object { $_.ItemType -eq 'File' }).Count
-            NotOpened = @($tree.Unlisted).Count
-            Links     = @($tree.Links).Count
-            Error     = $null
+            Ok          = $true
+            Path        = $Path
+            Folders     = @($tree.Items | Where-Object { $_.ItemType -eq 'Folder' }).Count
+            Files       = @($tree.Items | Where-Object { $_.ItemType -eq 'File' }).Count
+            NotOpened   = @($tree.Unlisted).Count
+            Links       = @($tree.Links).Count
+            LinkRefusal = Get-TreeLinkTargetRefusal -Path $Path -LinkPaths @($tree.Links)
+            Error       = $null
         }
     }
     catch {
-        [PSCustomObject]@{ Ok = $false; Path = $Path; Folders = 0; Files = 0; NotOpened = 0; Links = 0; Error = "Could not count what is in '$Path': $(Get-InnermostErrorText $_)" }
+        [PSCustomObject]@{ Ok = $false; Path = $Path; Folders = 0; Files = 0; NotOpened = 0; Links = 0; LinkRefusal = $null; Error = "Could not count what is in '$Path': $(Get-InnermostErrorText $_)" }
     }
 }
 
@@ -3655,7 +3742,7 @@ function Get-ChangeControlState {
     if ($script:ChangePending) {
         return [PSCustomObject]@{
             Enabled = $false
-            Reason  = "A change on $($script:ChangePending.Path) is being prepared (checking where it is, counting what is in it, or waiting for your answer). Finish or cancel it first."
+            Reason  = "A change on $($script:ChangePending.Path) is being prepared (checking where it is, counting what is in it, or waiting for your answer). Wait for it to finish, or close its dialog."
         }
     }
     if (-not $script:Current) { return [PSCustomObject]@{ Enabled = $false; Reason = 'Choose a folder first.' } }
@@ -3830,6 +3917,11 @@ function Complete-ChangeTask {
     }
     elseif (-not $Result.LogPath -and $entries.Count -gt 0 -and -not $whatIfOnly) {
         $text += ' The results could not be saved to a file either: copy this message into the ticket.'
+    }
+    if ($Result.PSObject.Properties['ReadBackUnlogged'] -and $Result.ReadBackUnlogged) {
+        $text += if ($Result.ReadBackUnloggedPath) { " The 'Done, with items to check' rows could not be written to the change log, so they were saved to $($Result.ReadBackUnloggedPath) instead: attach that file to the ticket." }
+        else { " The 'Done, with items to check' rows could not be written to the change log or to a file: copy this message into the ticket." }
+        if ($kind -eq 'Success' -or $kind -eq 'Info') { $kind = 'Warning' }
     }
     Set-Status -Kind $kind -Text $text
     if ($State) { Invoke-ChangeRefresh -State $State }
@@ -4049,7 +4141,10 @@ function Get-AppReparseInfo {
     # FILE_ATTRIBUTE_REPARSE_POINT attribute, then the dwReserved0 member specifies the reparse
     # point" tag). Unlike the core's Get-ReparsePointTag it tells "not there" (ERROR_FILE_NOT_FOUND
     # 2, ERROR_PATH_NOT_FOUND 3) apart from "could not be read" (throws), so a check built on it
-    # fails closed. Tests replace it.
+    # fails closed. Find-DfsReparsePoint compares the tag with IO_REPARSE_TAG_DFS (0x8000000A,
+    # "Used by the DFS filter ... Server-side interpretation only", MS-FSCC 2.1.2.1 Reparse Tags).
+    # Tests replace it.
+    # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
     # https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-findfirstfilew
     # https://learn.microsoft.com/windows/win32/api/minwinbase/ns-minwinbase-win32_find_dataw
     # https://learn.microsoft.com/windows/win32/debug/system-error-codes--0-499-
@@ -4188,12 +4283,14 @@ public static extern bool GetProfilesDirectoryW(System.Text.StringBuilder lpProf
 function Get-HighImpactRootRefusal {
     # Why a whole-tree change is refused on a high-impact root ("C:\Users, System Volume
     # Information and $Recycle.Bin on data volumes", destructive-operations profile), or $null:
-    #   - the folder that holds every user profile: this computer's profiles folder
-    #     (Get-AppProfilesDirectory) and %SystemDrive%\Users; on another computer
-    #     \\server\<letter>$\Users, because its profiles folder cannot be read from here.
-    #     One profile folder below it (C:\Users\bob) is allowed;
+    #   - a folder that holds user profiles: the Users folder at the top of any drive, here
+    #     (<letter>:\Users) and on another computer (\\server\<letter>$\Users), and this
+    #     computer's profiles folder wherever it is (Get-AppProfilesDirectory). Another
+    #     computer's profiles folder cannot be read from here, so one it has moved elsewhere is
+    #     not detected. One profile folder below it (C:\Users\bob) is allowed;
     #   - anything in System Volume Information or $Recycle.Bin, on any drive.
-    # Text only, apart from reading this computer's profiles folder.
+    # Text only, apart from reading this computer's profiles folder. Get-ResolvedRootRefusal
+    # applies it to where a path really leads (junctions, symbolic links, 8.3 names).
     param([Parameter(Mandatory)][string]$Path)
     $p = ConvertTo-ComparablePath -Path $Path
     if (-not $p) { return $null }
@@ -4206,15 +4303,59 @@ function Get-HighImpactRootRefusal {
     if ($p -match '^\\\\([^\\]+)\\([A-Za-z])\$\\Users$') {
         return "$Path is the Users folder of drive $($Matches[2].ToUpper()): on $($Matches[1]), where Windows keeps every user profile. $profileTail"
     }
+    if ($p -match '^([A-Za-z]):\\Users$') {
+        return "$Path is the Users folder of drive $($Matches[1].ToUpper()):, where Windows keeps user profiles. $profileTail"
+    }
     if ($p -match '^[A-Za-z]:\\') {
-        $roots = @()
-        if ($env:SystemDrive) { $roots += "$($env:SystemDrive)\Users" }
         $profiles = Get-AppProfilesDirectory
-        if ($profiles) { $roots += "$profiles" }
-        foreach ($r in $roots) {
-            $c = (ConvertTo-ComparablePath -Path $r).TrimEnd('\')
-            if ($c -and $p.TrimEnd('\') -ieq $c) { return "$Path is the folder that holds every user profile on this computer ($r). $profileTail" }
-        }
+        $c = if ($profiles) { (ConvertTo-ComparablePath -Path $profiles).TrimEnd('\') } else { '' }
+        if ($c -and $p.TrimEnd('\') -ieq $c) { return "$Path is the folder that holds every user profile on this computer ($profiles). $profileTail" }
+    }
+    $null
+}
+
+function Get-ResolvedRootRefusal {
+    # A whole-tree change on -Path, checked where Windows really reaches it: the final path (the
+    # core's Get-Win32PathName -Kind Final follows every junction and symbolic link on the way,
+    # and gives long names) and the long-name form (-Kind Long expands 8.3 short names such as
+    # PROGRA~1). Each form that differs from -Path gets D-036 (Get-TreeOwnershipRefusal) and the
+    # high-impact roots (Get-HighImpactRootRefusal). A final path that cannot be told is refused:
+    # "a guard that cannot resolve the path fails closed" (destructive-operations profile). On a
+    # share the server follows its own junctions, so the final path seen from here is the share
+    # path itself. $null when it is allowed.
+    param([Parameter(Mandatory)][string]$Path)
+    $final = Get-Win32PathName -Path $Path -Kind Final
+    if (-not $final) {
+        return "Windows could not tell where $Path really is (it may have been moved or deleted, or this account cannot open it), so it cannot be checked against the root of a drive, the Windows system folders and the user profiles folder. Nothing was changed. Press Refresh and try again, or ask a senior admin."
+    }
+    $long = Get-Win32PathName -Path $Path -Kind Long
+    $given = ConvertTo-ComparablePath -Path $Path
+    foreach ($form in @($final, $long)) {
+        if (-not $form) { continue }
+        $c = ConvertTo-ComparablePath -Path $form
+        if (-not $c -or $c -ieq $given) { continue }
+        $refusal = Get-TreeOwnershipRefusal -Path $c
+        if (-not $refusal) { $refusal = Get-HighImpactRootRefusal -Path $c }
+        if ($refusal) { return "$Path leads to $c (through a junction, a symbolic link or a short name). $refusal" }
+    }
+    $null
+}
+
+function Get-TreeLinkTargetRefusal {
+    # The junctions and symbolic links inside a whole tree (Get-OwnerTreeItem Links), checked
+    # before the confirm opens: the core's own check (Get-TreeLinkRefusal: D-036 on where each
+    # link leads, and a link whose destination cannot be found out), then the high-impact roots
+    # on the link and on where it leads (Get-ResolvedRootRefusal). -Path itself is checked by the
+    # lookup before the count. $null when every link is allowed.
+    param([Parameter(Mandatory)][string]$Path, [AllowEmptyCollection()][string[]]$LinkPaths = @())
+    $links = @($LinkPaths | Where-Object { $_ -and $_ -ne $Path })
+    if ($links.Count -eq 0) { return $null }
+    $refusal = Get-TreeLinkRefusal -Path $Path -LinkPaths $links
+    if ($refusal) { return $refusal }
+    foreach ($link in $links) {
+        $r = Get-HighImpactRootRefusal -Path $link
+        if (-not $r) { $r = Get-ResolvedRootRefusal -Path $link }
+        if ($r) { return "$Path contains a junction or symbolic link that takeown and icacls may follow out of the folder ($link). $r" }
     }
     $null
 }
@@ -4275,8 +4416,11 @@ function Get-ChangeTarget {
         - With -WholeTree, on the resolved path, never the display path: D-036 (the core's
           Get-TreeOwnershipRefusal: drive roots, X$ roots, ADMIN$, SYSVOL, NETLOGON, PRINT$,
           Windows folders) plus IPC$, which is not a folder at all; the high-impact roots
-          (Get-HighImpactRootRefusal); and for an ordinary share on a server, the same checks
-          on the folder it is on that server (Get-ShareTreeRefusal).
+          (Get-HighImpactRootRefusal); for an ordinary share on a server, the same checks on
+          the folder it is on that server (Get-ShareTreeRefusal); then both again on where
+          Windows really reaches the path, through junctions, symbolic links and 8.3 names
+          (Get-ResolvedRootRefusal). That last check reads the disk and needs the folder to
+          exist.
     #>
     param([Parameter(Mandatory)][string]$Path, [hashtable]$DriveMap, [hashtable]$DriveMapSource, [switch]$WholeTree)
     if (-not $PSBoundParameters.ContainsKey('DriveMap')) { $DriveMap = $script:MappedDrives }
@@ -4370,6 +4514,7 @@ function Get-ChangeTarget {
                 $refusal = Get-ShareTreeRefusal -Path $resolved -Server $tServer -Share $tShare -Rest $tRest
             }
         }
+        if (-not $refusal) { $refusal = Get-ResolvedRootRefusal -Path $resolved }
         if ($refusal) {
             if ($resolved -ne $display) { $refusal = "$display is $resolved. $refusal" }
             return (& $refuse $refusal $resolved $local)
@@ -4623,13 +4768,15 @@ function Get-ChangeStatus {
     #   - something failed or was not found (every item not found too), the log was not
     #     written, or items cannot be restored from the backup: Warning; else Success.
     # A Warning starts "Partly done: " when some items were done and others failed or were not
-    # found, else "Done, with items to check: ", unless the message already starts "Partly done:".
+    # found, "Nothing was changed: " when nothing was done (every item not found), else "Done,
+    # with items to check: ", unless the message already starts "Partly done:".
     # Deliberate deviation: a dry run (every row Skipped (WhatIf)) is Info; the browser showed it
     # as an error.
     # Added by the app's read-back (Add-ChangeReadBack), which the browser did not have: an item
     # whose read-back did not show the intended state (CheckProblem) makes a Success or Info a
-    # Warning and is named after "Check this: "; a remove that had nothing to remove anywhere
-    # (NothingRemoved on every row) is Info "Nothing was removed: ...".
+    # Warning and is named after "Check this: <path> - <reason>"; a remove that had nothing to
+    # remove anywhere (NothingRemoved on every row) is Info "Nothing was removed: ...", and one
+    # that had nothing to remove on some items only is a Warning that names them.
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Entries,
         [AllowNull()][string]$LogPath,
@@ -4645,8 +4792,11 @@ function Get-ChangeStatus {
     $who = 'that user or group'; $type = 'Allow or Deny'
     if ($noops.Count -gt 0 -and "$($noops[0].Detail)" -match '^(Allow|Deny) (.+?) for (.+)$') { $type = $Matches[1]; $who = $Matches[3] }
     if ($noops.Count -gt 0 -and $noops.Count -eq $all.Count) {
-        $text = if ($all.Count -eq 1) { "Nothing was removed: $who had no explicit $type entry here." }
-        else { "Nothing was removed: $who had no explicit $type entry on any of these $($all.Count) items." }
+        $names = @($noops | Select-Object -First 3 | ForEach-Object { "$($_.Target)" }) -join ', '
+        if ($noops.Count -gt 3) { $names += " and $($noops.Count - 3) more" }
+        $text = if ($all.Count -eq 1) { "Nothing was removed: $who had no explicit $type entry here. $names was left as it was." }
+        else { "Nothing was removed: $who had no explicit $type entry on any of these $($all.Count) items ($names)." }
+        $text += ' It may be inherited: remove it on the folder above.'
         if ($LogPath) { $text += " Logged to $LogPath." }
         return (& $result 'Info' $text)
     }
@@ -4666,23 +4816,24 @@ function Get-ChangeStatus {
     elseif ($unchanged -eq $all.Count) { 'Info' }
     elseif ($failed -gt 0 -or $notFound -gt 0 -or -not $LogPath -or (Get-UnrestorableItemCount -Entries $all) -gt 0) { 'Warning' }
     else { 'Success' }
-    if ($problems.Count -gt 0 -and ($kind -eq 'Success' -or $kind -eq 'Info')) { $kind = 'Warning' }
+    if (($problems.Count -gt 0 -or $noops.Count -gt 0) -and ($kind -eq 'Success' -or $kind -eq 'Info')) { $kind = 'Warning' }
 
     $text = $Message
     if ($noops.Count -gt 0) {
         $names = @($noops | Select-Object -First 3 | ForEach-Object { "$($_.Target)" }) -join ', '
         if ($noops.Count -gt 3) { $names += " and $($noops.Count - 3) more" }
-        $text += " Nothing was removed from $($names): $who had no explicit $type entry there."
+        $text += " Nothing was removed from $($names): $who had no explicit $type entry there. It may be inherited: remove it on the folder above."
     }
     if ($problems.Count -gt 0) {
-        $named = @($problems | Select-Object -First 3 | ForEach-Object { "$($_.Target): $($_.CheckProblem)" }) -join '; '
+        $named = @($problems | Select-Object -First 3 | ForEach-Object { "$($_.Target) - $($_.CheckProblem)" }) -join '; '
         if ($problems.Count -gt 3) { $named += " (and $($problems.Count - 3) more)" }
-        $text += " Check this: $named. Press Refresh to see what is there now."
+        $text += " Check this: $named. Press Refresh to see what is there now. If it is still wrong after Refresh, check the change log or ask a senior admin."
     }
     if ($kind -eq 'Warning' -and -not $Message.StartsWith('Partly done:')) {
         $someDone = $done -gt 0
         $someShort = $failed -gt 0 -or $notFound -gt 0
-        $text = $(if ($someDone -and $someShort) { 'Partly done: ' } else { 'Done, with items to check: ' }) + $text
+        $prefix = if ($someDone -and $someShort) { 'Partly done: ' } elseif (-not $someDone -and $partly -eq 0) { 'Nothing was changed: ' } else { 'Done, with items to check: ' }
+        $text = $prefix + $text
     }
     & $result $kind $text
 }
@@ -4994,11 +5145,17 @@ function Invoke-TakeOwnership {
 }
 function Confirm-TreeOwnership {
     # The count for a whole-tree take ownership arrived: ask with it, then start the change.
-    # When the count failed nothing goes ahead (the scope must be shown before confirming).
+    # When the count failed, or a link in the tree is refused (LinkRefusal), nothing goes ahead
+    # and no confirm opens (the scope must be shown before confirming).
     param([AllowNull()]$Count, [Parameter(Mandatory)]$Target, $Node)
     if (-not ($Count -and $Count.Ok)) {
         $why = if ($Count -and "$($Count.Error)".Trim()) { "$($Count.Error)".Trim() } else { 'No reason was given.' }
         Set-Status -Kind Error -Text "Could not count what is in $($Target.DisplayPath), so nothing was changed. $why"
+        return
+    }
+    # A junction or symbolic link in it leads into a protected folder, or nobody can tell where.
+    if ($Count.PSObject.Properties['LinkRefusal'] -and "$($Count.LinkRefusal)".Trim()) {
+        Show-ChangeRefusal -Text "$("$($Count.LinkRefusal)".Trim()) Nothing was changed."
         return
     }
     if ($script:ChangeTask) {
@@ -5083,7 +5240,12 @@ function Get-AppDefaultLogFolder {
 function Get-SyncedLogFolderNotice {
     # The banner warnings about a log folder and the OneDrive or SharePoint sync folders: a
     # -LogFolder inside one is used as given, with a warning; a script inside one logs to
-    # %LOCALAPPDATA% instead (Get-AppDefaultLogFolder), and the banner says why.
+    # %LOCALAPPDATA% instead (Get-AppDefaultLogFolder), and the banner says why; when
+    # %LOCALAPPDATA% is not known either, the script's own Logs folder is used and the banner
+    # warns that it is uploaded. -LogFolder is the folder the change log really goes to (startup
+    # passes the resolved one); a relative path is made full against the current location
+    # first, so it is compared with the sync folders where it really is.
+    # https://learn.microsoft.com/dotnet/api/system.management.automation.pathintrinsics.getunresolvedproviderpathfrompspath
     param(
         [AllowNull()][AllowEmptyString()][string]$LogFolder,
         [Parameter(Mandatory)][string]$ScriptLogsFolder,
@@ -5091,16 +5253,19 @@ function Get-SyncedLogFolderNotice {
         [AllowEmptyCollection()][AllowNull()][string[]]$SyncRoot
     )
     if ($LogFolder) {
+        if ($LogFolder -notmatch '^([A-Za-z]:\\|\\\\)') {
+            try { $LogFolder = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LogFolder) } catch { Write-Verbose "Could not make $LogFolder a full path: $($_.Exception.Message)" }
+        }
         $where = Get-SyncFolderOf -Path $LogFolder -SyncRoot $SyncRoot
         if (-not $where) { return @() }
         return , @("The log folder $LogFolder is inside $where (OneDrive or a synced SharePoint library), so backups and the change log, which hold client folder paths and account names, are uploaded to the cloud. Start the tool again with -LogFolder set to a local folder outside OneDrive.")
     }
+    $where = Get-SyncFolderOf -Path $ScriptLogsFolder -SyncRoot $SyncRoot
+    if (-not $where) { return @() }
     if ($DefaultFolder -ne $ScriptLogsFolder) {
-        $where = Get-SyncFolderOf -Path $ScriptLogsFolder -SyncRoot $SyncRoot
-        if (-not $where) { return @() }
         return , @("This script is inside $where (OneDrive or a synced SharePoint library), so backups and the change log go to $DefaultFolder on this computer instead of $($ScriptLogsFolder): they hold client folder paths and account names and must not be uploaded.")
     }
-    @()
+    , @("This script is inside $where (OneDrive or a synced SharePoint library), and this session has no %LOCALAPPDATA% folder to use instead, so backups and the change log go to $ScriptLogsFolder and are uploaded to the cloud. They hold client folder paths and account names: start the tool again with -LogFolder set to a local folder outside OneDrive.")
 }
 function Get-LogFolderMappingNotice {
     # A warning for the window's banner when -LogFolder is on a drive letter that only Windows'
@@ -5179,7 +5344,7 @@ function Show-PermissionDialog {
         $combo = $dlg.FindName('PermIdentityCombo')
         $combo.ItemsSource = @($Choices | ForEach-Object { $_.Label })
         $combo.Visibility = 'Visible'
-        $combo.Add_SelectionChanged({ param($s, $e) $w = [System.Windows.Window]::GetWindow($s); if ($w) { Set-RemoveTypeCombo -Dialog $w } })
+        $combo.Add_SelectionChanged({ param($s, $e) $w = [System.Windows.Window]::GetWindow($s); if ($w) { $w.FindName('PermDialogError').Visibility = 'Collapsed'; Set-RemoveTypeCombo -Dialog $w } })
         $combo.SelectedIndex = 0
         Set-RemoveTypeCombo -Dialog $dlg
         $dlg.FindName('PermIdentityHint').Text = 'Only entries set on this item itself are listed. Every one of the chosen type is removed, whatever its level. Inherited entries stay: remove them on the folder above.'
@@ -5294,15 +5459,27 @@ function Get-ChangeRequest {
     }
 }
 
+function Get-ChangeRequestStaleReason {
+    # Why a click's lookup no longer fits what the window shows, or $null when it still does:
+    # another folder is open, or (for files) the file list was read again or other files are
+    # selected now than at the click.
+    param([Parameter(Mandatory)][hashtable]$Request)
+    if (-not $script:Current -or "$($script:Current.DisplayPath)" -ne "$($Request.CurrentPath)") { return 'Folder' }
+    if ($Request.Scope -eq 'Files') {
+        if ([int]$script:PaneRequests['Files'] -ne [int]$Request.FilesRequest) { return 'Files' }
+        $now = [string[]]@(Get-SelectedFileRows | ForEach-Object { "$($_.Path)" } | Where-Object { $_.Trim() })
+        if (($now -join "`n") -ne (@($Request.Paths) -join "`n")) { return 'Files' }
+    }
+    $null
+}
+
 function Test-ChangeRequestCurrent {
     # The stale-request guard for a click's lookup: true when the window still shows what the
-    # click asked about (the same folder and, for files, the same file list). A lookup that
-    # comes back for anything else is dropped, so no dialog opens for a folder that is no
-    # longer on screen.
+    # click asked about (the same folder and, for files, the same file list and the same files
+    # selected). A lookup that comes back for anything else is dropped, so no dialog opens for a
+    # folder or files that are no longer what the tech chose.
     param([Parameter(Mandatory)][hashtable]$Request)
-    if (-not $script:Current -or "$($script:Current.DisplayPath)" -ne "$($Request.CurrentPath)") { return $false }
-    if ($Request.Scope -eq 'Files' -and [int]$script:PaneRequests['Files'] -ne [int]$Request.FilesRequest) { return $false }
-    $true
+    -not (Get-ChangeRequestStaleReason -Request $Request)
 }
 
 function Start-ChangeLookup {
@@ -5328,7 +5505,12 @@ function Start-ChangeLookup {
         -ArgumentList @([string[]]$Paths, $script:MappedDrives, $script:MappedDriveSources, [bool]$WholeTree, $FolderDisplayPath, $FolderRealPath, $script:CorePath) `
         -State @{ OnResolved = $OnResolved; State = $State; Label = $Label; Verb = $verb; Request = $Request } -OnDone {
         param($result, $s)
-        if ($s.Request -and -not (Test-ChangeRequestCurrent -Request $s.Request)) {
+        $stale = if ($s.Request) { Get-ChangeRequestStaleReason -Request $s.Request } else { $null }
+        if ($stale -eq 'Files') {
+            Set-Status -Text "The files selected when you clicked are not the ones selected now ($($s.Label) was being checked), so nothing was changed. Select the files again and click the button again."
+            return
+        }
+        if ($stale) {
             Set-Status -Text "Another folder was opened while $($s.Label) was being checked, so nothing was changed. Open it again and click the button again."
             return
         }
@@ -5572,8 +5754,10 @@ catch {
     Show-AppMessage -Icon Error -Message $_.Exception.Message
     return
 }
+# The sync-folder check looks at the folder the change log really goes to, when one was given.
+$explicitLogFolder = if ($LogFolder) { $script:ChangeLogFolder } else { $null }
 $script:LogFolderNotice = @(Get-ChangeLogFolderNotice -LogFolder $LogFolder -ResolvedFolder $script:ChangeLogFolder -DefaultFolder $script:DefaultLogFolder) +
-@(Get-SyncedLogFolderNotice -LogFolder $LogFolder -ScriptLogsFolder $script:ScriptLogsFolder -DefaultFolder $script:DefaultLogFolder -SyncRoot $syncRoots) + $mappingNotice
+@(Get-SyncedLogFolderNotice -LogFolder $explicitLogFolder -ScriptLogsFolder $script:ScriptLogsFolder -DefaultFolder $script:DefaultLogFolder -SyncRoot $syncRoots) + $mappingNotice
 
 if (-not (Enter-SingleInstance -LogFolder $script:ChangeLogFolder -DriveMap $script:MappedDrives)) { return }
 

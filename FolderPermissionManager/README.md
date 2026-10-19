@@ -88,7 +88,12 @@ change is refused with "Another change is still running on `<path>`. Wait for it
 - **Remove Permission** lists only the entries set on the folder or file itself (an
   inherited entry is removed on the folder above), once per account, with Allow or Deny
   already set to the type it has. Every explicit entry of that type for the account goes,
-  whatever its level, so no level is asked.
+  whatever its level, so no level is asked. Just before the change, the account's name is
+  looked up again: if it now stands for a different account than the entry you chose (after a
+  domain migration, or a rename and a new account with the old name), nothing is changed and
+  the status line says so. An entry whose account no longer exists (shown as `S-1-...`, an
+  orphaned SID) cannot be removed here yet: the status line gives the command for a senior
+  admin, for example `icacls "D:\Data" /remove:g *S-1-5-21-...` (`:d` for a Deny entry).
 - **It asks first.** Remove Permission and every Take Ownership open a dialog that names the
   path, its real location and how many items, with the action on the button ("Take ownership
   of 12,408 items") and **Cancel** as the default (Enter and Esc both cancel). For the whole
@@ -104,14 +109,22 @@ change is refused with "Another change is still running on `<path>`. Wait for it
 - **Refused, nothing changed:** taking ownership of a whole tree on the root of a drive
   (`D:\`, `\\server\D$`), on a Windows folder (`%SystemRoot%`, `%ProgramFiles%`,
   `%ProgramFiles(x86)%`, `%ProgramData%`) or on `ADMIN$`, `SYSVOL`, `NETLOGON`, `PRINT$` or
-  `IPC$` (D-036); on the folder that holds every user profile (`C:\Users`, the profiles folder
-  if it was moved, and `\\server\<letter>$\Users`; one profile folder such as `C:\Users\bob`
+  `IPC$` (D-036); on a folder that holds user profiles (the `Users` folder at the top of any
+  drive, `D:\Users` as well as `C:\Users`, here and as `\\server\<letter>$\Users`, and this
+  computer's profiles folder wherever it was moved; one profile folder such as `C:\Users\bob`
   is allowed); and on anything in `System Volume Information` or `$Recycle.Bin`. This is
   checked on the real location: a mapped drive, a DFS path and this computer's own name
   (`\\<this computer>\C$\Windows`) are resolved first, and for an ordinary share on a server
   (`\\fs01\Data`) the tool asks that server which folder the share is (it needs administrator
   rights there) and checks that folder; when the server does not say, the whole-tree change
-  is refused. Any change on a path that points at hidden data inside a file (an alternate data
+  is refused. Then the same checks run on where Windows really reaches the folder: through a
+  junction or symbolic link on it or above it, and with 8.3 short names (`D:\USERPR~1`)
+  expanded; when Windows cannot tell where the folder really is, the change is refused. Every
+  junction and symbolic link found inside the tree while counting is checked the same way,
+  and one that leads into a protected folder, or somewhere nobody can tell, stops the change
+  before the confirm opens. The profiles folder on another server is only recognised as
+  `<letter>$\Users`: one that server has moved elsewhere (its ProfilesDirectory setting) is not
+  detected, so check the folder before taking ownership of everything in it. Any change on a path that points at hidden data inside a file (an alternate data
   stream, `file.txt:stream`), on a DFS path Windows cannot look up, or on a DFS folder that
   points to several servers (open the one you mean) is refused too, and so is a DFS folder of
   a namespace this computer hosts that cannot be looked up. A refusal shows in the status line
@@ -122,11 +135,16 @@ change is refused with "Another change is still running on `<path>`. Wait for it
   and the "Escalate: `<n>` folder(s) could not be opened..." line after a whole-tree take
   ownership. Each item that was done is then **read back**: when the entry that was added is
   not there, the removed one is still there, the owner is not you, or a copied permission is
-  missing, the result is "Done, with items to check: ... Check this: `<path>`: `<reason>`", and
-  the change log gets a row with Result `Done, with items to check`. A remove that found no
-  entry of that type set on the item says "Nothing was removed: `<user or group>` had no
-  explicit `<Allow or Deny>` entry here." Then the folder (or the changed files' permissions)
-  is read again, also after a change that failed.
+  missing, the result is "Done, with items to check: ... Check this: `<path>` - `<reason>`. ...
+  If it is still wrong after Refresh, check the change log or ask a senior admin.", and the
+  change log gets a row with Result `Done, with items to check` (when that row cannot be
+  written, it goes to the `Unlogged_` file below and the status line names it). A remove that
+  found no entry of that type set on the item says "Nothing was removed: `<user or group>` had
+  no explicit `<Allow or Deny>` entry here. `<path>` was left as it was. It may be inherited:
+  remove it on the folder above."; when that happens on only some of the items, the result is a
+  warning that names them. When nothing was done because no item was found, the result starts
+  "Nothing was changed: ". Then the folder (or the changed files' permissions) is read again,
+  also after a change that failed.
 - **Closing** is refused while a change runs ("A permission change is still running on
   `<path>`. Wait for it to finish: closing now could leave it half done."). Changes have no
   cancel button: stopping takeown or a batch midway would leave it half done.
@@ -153,7 +171,9 @@ change is refused with "Another change is still running on `<path>`. Wait for it
 - **Log folder in OneDrive.** When the script itself is in a OneDrive or synced SharePoint
   folder, backups and the change log go to `%LOCALAPPDATA%\FolderPermissionManager\Logs`
   instead of the `Logs` folder next to it, and the bar under the title says so. A `-LogFolder`
-  inside such a folder is used as given, with a warning.
+  inside such a folder is used as given, with a warning (a relative `-LogFolder` is checked as
+  the full path it stands for). When the script is in such a folder and the session has no
+  `%LOCALAPPDATA%`, the `Logs` folder next to it is used and the bar warns that it is uploaded.
 
 **Client data in what it saves.** The export CSV holds the folder paths, owners and account
 names of the client's whole folder tree. `gui-errors.log` holds the raw text of unexpected
@@ -164,7 +184,7 @@ share), attach it to the ticket, then delete the local copy. The status line and
 boxes show raw paths and error text: they are not ticket-note-safe, and anything you copy from
 them goes into Windows clipboard history and, in a Remote Desktop (RDP) session, to the other
 computer's clipboard. Even with `-WhatIf`, starting the app creates the `Logs` folder next to
-the script (when that is a local fixed disk) and writes and deletes a small probe file there,
+the script (when that is a local fixed disk and not in a OneDrive or SharePoint sync folder) and writes and deletes a small probe file there,
 to check that backups could be saved.
 
 **Mapped drives.** The real location behind a drive letter comes, in this order, from the
