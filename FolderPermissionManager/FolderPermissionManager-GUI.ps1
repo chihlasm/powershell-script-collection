@@ -1420,6 +1420,9 @@ $script:ExportWork = {
 
 function Initialize-BackgroundPool {
     # One pool of 1-4 runspaces for every read; workers never touch the window.
+    # -FunctionOverride (name -> function body) replaces those definitions in the pool: a test hook
+    # (SQ-018) so a pool run can be given recording stand-ins for the write cmdlets.
+    param([hashtable]$FunctionOverride)
     $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
     # The pool only runs this script's own work blocks and the core next to it, which the
     # window has already loaded; the process policy may not reach a new runspace.
@@ -1436,12 +1439,12 @@ function Initialize-BackgroundPool {
 }
 
 function Start-BgTask {
-    param([scriptblock]$Work, [object[]]$ArgumentList, [scriptblock]$OnDone, $State)
+    param([scriptblock]$Work, [object[]]$ArgumentList, [scriptblock]$OnDone, $State, [ValidateSet('Read', 'Change')][string]$Kind = 'Read')
     $ps = [System.Management.Automation.PowerShell]::Create()
     $ps.RunspacePool = $script:BgPool
     [void]$ps.AddScript($Work.ToString())
     foreach ($a in $ArgumentList) { [void]$ps.AddArgument($a) }
-    $task = [PSCustomObject]@{ PS = $ps; Handle = $ps.BeginInvoke(); OnDone = $OnDone; State = $State; Stopped = $false }
+    $task = [PSCustomObject]@{ PS = $ps; Handle = $ps.BeginInvoke(); OnDone = $OnDone; State = $State; Stopped = $false; Kind = $Kind }
     $script:BgTasks.Add($task)
     $task
 }
@@ -2910,6 +2913,84 @@ function Start-PermissionWindow {
     [void]$win.ShowDialog()
     $timer.Stop()
 }
+
+#endregion
+
+#region SQ-018 stubs (signatures only; the tests in FolderPermissionManager-AppChanges.Tests.ps1 define what they must do)
+
+$script:AddPermissionWork = { throw 'not implemented' }
+$script:RemovePermissionWork = { throw 'not implemented' }
+$script:TakeOwnershipWork = { throw 'not implemented' }
+$script:CopyPermissionsWork = { throw 'not implemented' }
+$script:TreeCountWork = { throw 'not implemented' }
+
+function Get-ChangeControlNames { throw 'not implemented' }
+function Start-ChangeTask {
+    param(
+        [Parameter(Mandatory)][string]$Action,
+        [string]$Path,
+        [Parameter(Mandatory)][scriptblock]$Work,
+        [object[]]$ArgumentList,
+        [Parameter(Mandatory)][scriptblock]$OnDone
+    )
+    throw 'not implemented'
+}
+function Get-AppDfsTarget { param([Parameter(Mandatory)][string]$Path) throw 'not implemented' }
+function Get-ThisComputerNames { throw 'not implemented' }
+function Get-ChangeTarget {
+    param([Parameter(Mandatory)][string]$Path, [hashtable]$DriveMap, [hashtable]$DriveMapSource, [switch]$WholeTree)
+    throw 'not implemented'
+}
+function Get-ConfirmSpec {
+    param(
+        [Parameter(Mandatory)][ValidateSet('AddPermission', 'RemovePermission', 'TakeOwnershipFolder', 'TakeOwnershipFiles', 'TakeOwnershipTree', 'CopyPermissions')][string]$Action,
+        [Parameter(Mandatory)][object[]]$Targets,
+        $Counts,
+        [string]$Detail
+    )
+    throw 'not implemented'
+}
+function Show-ConfirmDialog { param([Parameter(Mandatory)]$Spec) throw 'not implemented' }
+function Set-ConfirmDialog {
+    param([Parameter(Mandatory)]$Spec, [Parameter(Mandatory)]$TitleBlock, [Parameter(Mandatory)]$BodyBox, [Parameter(Mandatory)]$ActionButton, $DangerStyle, $NormalStyle)
+    throw 'not implemented'
+}
+function Get-ChangeStatus {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Entries,
+        [AllowNull()][string]$LogPath,
+        [Parameter(Mandatory)][string]$Message
+    )
+    throw 'not implemented'
+}
+function Get-RefreshPlan {
+    param(
+        [Parameter(Mandatory)][ValidateSet('Folder', 'Files', 'Tree')][string]$Scope,
+        [Parameter(Mandatory)][string]$Path,
+        [AllowNull()][string]$CurrentPath,
+        [string[]]$ChangedFiles,
+        [string[]]$ShownFiles
+    )
+    throw 'not implemented'
+}
+function Remove-CachedFileAcl { param([Parameter(Mandatory)][string[]]$Path) throw 'not implemented' }
+function Get-RemoveIdentityChoices { param([Parameter(Mandatory)][ValidateSet('Folder', 'Files')][string]$Scope) throw 'not implemented' }
+function Get-PermissionInputError { param([AllowNull()][AllowEmptyString()][string]$Identity) throw 'not implemented' }
+function Invoke-AddPermission {
+    param([Parameter(Mandatory)][ValidateSet('Folder', 'Files')][string]$Scope, [string]$Identity, [string]$Rights, [ValidateSet('Allow', 'Deny')][string]$Type = 'Allow')
+    throw 'not implemented'
+}
+function Invoke-RemovePermission {
+    param([Parameter(Mandatory)][ValidateSet('Folder', 'Files')][string]$Scope, [string]$Identity, [string]$Rights, [ValidateSet('Allow', 'Deny')][string]$Type = 'Allow')
+    throw 'not implemented'
+}
+function Invoke-TakeOwnership { param([Parameter(Mandatory)][ValidateSet('Folder', 'Files', 'Tree')][string]$Scope) throw 'not implemented' }
+function Invoke-CopyPermissions { param([AllowNull()][AllowEmptyString()][string]$TargetText) throw 'not implemented' }
+function Wait-ChangeTasks {
+    param([AllowNull()][AllowEmptyCollection()][object[]]$Tasks, [int]$PollMilliseconds = 200, [int]$TimeoutMilliseconds = 0)
+    throw 'not implemented'
+}
+function Get-LogFolderMappingNotice { param([string]$LogFolder, [hashtable]$DriveMap, [hashtable]$DriveMapSource) throw 'not implemented' }
 
 #endregion
 
