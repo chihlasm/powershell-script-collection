@@ -23,10 +23,10 @@ why it matters, and anything you already know (screens, edge cases, examples).
 ---
 
 ## SQ-001 · Ticket note from every quick check (kit, joiner, AD-UserQuickCheck)
-- status: ready
+- status: done
 - priority: P1
 - type: feature
-- branch:
+- branch: squad/SQ-001-clipboard-history
 - spec: squad/specs/SQ-001.md (Part A, AC1-AC26)
 - idea: squad/ideas/sessions/2026-10-16/cards/I-03-ticket-note.md
 
@@ -39,10 +39,10 @@ joiner, the parity test, and AD-UserQuickCheck adopting the note (plus `-PassThr
 Approved by Michael in the 2026-10-17 pitch session; split per D-004.
 
 ## SQ-002 · M365 user check: can this user sign in? (Graph stage)
-- status: ready
+- status: done
 - priority: P1
 - type: feature
-- branch:
+- branch: squad/SQ-002-m365-user-check
 - spec: squad/specs/SQ-002.md (AC1-AC17, AC26-AC29)
 - idea: squad/ideas/sessions/2026-10-16/cards/I-01-m365-user-signin-check.md
 
@@ -53,10 +53,10 @@ tenant without Entra ID P1 the headline is PROBABLY YES with "sign-in history no
 (D-006). Read-only whatever account is used. Builds after SQ-001. Split per D-004.
 
 ## SQ-011 · M365 user check: is it a sync problem? (on-prem AD comparison)
-- status: ready
+- status: done
 - priority: P1
 - type: feature
-- branch:
+- branch: squad/SQ-011-m365-sync-check
 - spec: squad/specs/SQ-002.md (AC18-AC25)
 - idea: squad/ideas/sessions/2026-10-16/cards/I-01-m365-user-signin-check.md
 
@@ -65,11 +65,29 @@ another object, an enabled mismatch (with the M365-SyncedUserFixes block marker)
 sync, and a UPN mismatch. Says "could not check" when no DC answers (D-014). Builds after SQ-002.
 Split from SQ-002 per D-004.
 
+
+## SQ-019 · M365 user check: blocked synced user advice must escalate, not "change it" (D-017)
+- status: new
+- priority: P1
+- type: fix
+- branch:
+- spec:
+
+Found in the SQ-011 destructive-operations review (2026-10-18), pre-existing from SQ-002.
+`M365UserCheck.Core.ps1` SignInBlocked next step for a synced user when no AD comparison ran
+(no RSAT, -SkipOnPremises, AD failed) tells tier 1 "...block marker... Change it in on-premises AD
+if it is wrong". With AD data the same case already says "Check with the senior engineer".
+Reword it the D-017 way. Widen D017_NoRemovalStepForTier1 to catch reversal verbs too (clear,
+change it, undo, enable, anything that mentions the block marker) across the with-AD and no-AD
+branches, and add a regression test for the no-AD synced-blocked path. Same pass:
+AdDisabledCloudEnabled "enable the AD account" gets the manager/ticket check used for
+cloud-only users. Builds on SQ-011 (same files).
+
 ## SQ-003 · "Why did this user get a temporary profile?" one-user VDI verdict
-- status: ready
+- status: done
 - priority: P1
 - type: feature
-- branch:
+- branch: squad/SQ-003-temp-profile-verdict
 - spec: squad/specs/SQ-003.md
 - idea: squad/ideas/sessions/2026-10-16/cards/I-08-vdi-temp-profile-verdict.md
 
@@ -80,10 +98,10 @@ step, with the evidence for each candidate cause. A second entry script in Citri
 (D-015). Destructive fixes say "Escalate" plus the reason (D-017). Builds after SQ-001.
 
 ## SQ-008 · FolderPermissionManager: back up permissions and log every change (single items)
-- status: ready
+- status: done
 - priority: P1
 - type: fix
-- branch:
+- branch: squad/SQ-008-fpm-backup-log
 - spec: squad/specs/SQ-008.md (ACs 1-13 and 21)
 - idea: squad/ideas/sessions/2026-10-16/brief.md (I-12, "Worth a look")
 
@@ -93,10 +111,11 @@ the shared change-log format (D-030), and SDDL backup plus logging for every sin
 in the GUI. A change whose backup can't be written is refused. Split per D-004.
 
 ## SQ-014 · FolderPermissionManager: whole-tree actions and the CLI script
-- status: ready
+- status: done
+- revision: D-040 allowlist for reparse tags (spec SQ-008.md Revision notes 2026-10-18, AC20a-d)
 - priority: P1
 - type: fix
-- branch:
+- branch: squad/SQ-014-fpm-tree-cli
 - spec: squad/specs/SQ-008.md (ACs 16-20, minus the copy case of AC17; see Revision notes)
 - idea: squad/ideas/sessions/2026-10-16/brief.md (I-12, "Worth a look")
 
@@ -108,9 +127,10 @@ ownership, `-Force` and a help block (D-010). Builds after SQ-008. Split per D-0
 
 ## SQ-015 · FolderPermissionManager: fix recursive copy permissions
 - status: ready
+- revision: merge onto main failed 2 CLI tests at review 2026-10-19 (spec Revision notes, AC-R1..R3)
 - priority: P1
 - type: fix
-- branch:
+- branch: squad/SQ-015-fpm-recursive-copy (stacked on SQ-014; SQ-014's tip 33d09c5 merged in at 43ca5a3, owner 2026-10-19, D-041)
 - spec: squad/specs/SQ-015.md
 
 Bugs found while planning SQ-008: the recursive copy maps rights with `switch -Wildcard` and no
@@ -120,11 +140,53 @@ turns inherited rules into explicit ones, and handlers use `-Path`, which breaks
 `[ ]`. Copy becomes add-only with the checkbox dropped: one `Set-Acl` on the target, locked
 subfolders untouched (D-031). Fix with a regression test for each. Builds after SQ-014 (D-011).
 
-## SQ-010 · Ticket note in Network-QuickCheck and Citrix-FSLogix-Triage
+## SQ-017 · FolderPermissionManager as a WPF app: the window, browsing and viewing (read-only)
+- status: review
+- priority: P1
+- type: feature
+- branch: squad/SQ-017-fpm-wpf-window (stacked: create it from squad/SQ-015-fpm-recursive-copy as SQ-015 finishes this run, not from main; D-041)
+- spec: squad/specs/SQ-017.md (AC1-AC25)
+
+Rewrite FolderPermissionManager-GUI.ps1 as a WPF window in the style of RobocopyMigration-GUI.ps1,
+replacing the HttpListener web server (owner, 2026-10-18: performance and a cleaner tool; the
+server handles one request at a time and listens on localhost with no origin check or token).
+This first half changes nothing: startup (STA/UAC relaunch, single instance, -LogFolder, -WhatIf,
+mapped drives), runspace-pool background reads with busy state and stale-result guard, drives,
+tree, folder and file permissions, path header, log-folder banner, export CSV. Core reused
+unchanged. The browser version is renamed FolderPermissionManager-WebGUI.ps1 (D-038) and stays
+until the owner's lab test. Robocopy tab and Copy Files To are dropped (D-037). Builds after
+SQ-014 and SQ-015 (same core and GUI file). Split per D-039.
+
+## SQ-018 · FolderPermissionManager WPF app: every change, confirmations and results
 - status: ready
+- revision: D-043/D-044/D-045 (spec SQ-017.md Revision notes, SQ-018, AC47-AC53)
+- priority: P1
+- type: feature
+- branch: squad/SQ-018-fpm-wpf-changes (stacked: create it from squad/SQ-017-fpm-wpf-window as SQ-017 finishes this run; D-041)
+- spec: squad/specs/SQ-017.md (AC26-AC46)
+
+Second half of the WPF rewrite: add/remove permission (folders and files), take ownership
+(folder, files, whole tree with an item count before the confirm and the D-036 refusal), copy
+permissions, a themed confirm dialog (verb on the button, Cancel default), one change at a time,
+closing blocked while a change runs, result-status parity with the browser GUI, -WhatIf end to
+end, README and root README. Destructive-operations checklist applies in full. Builds after
+SQ-017. Split from SQ-017 per D-039. Follow-up after the owner's lab test (not planned): remove
+FolderPermissionManager-WebGUI.ps1 and its two test files.
+
+## SQ-020 · Whole-tree take ownership: WindowsApps aliases and Azure File Sync files count as plain files (D-042)
+- status: ready
+- priority: P1
+- type: fix
+- branch:
+- spec: squad/specs/SQ-020.md
+
+Add IO_REPARSE_TAG_APPEXECLINK and IO_REPARSE_TAG_STORAGE_SYNC to the D-040 allowlist so profile folders and Azure File Sync shares can be taken over as a whole tree. Branch from main after SQ-014 merges.
+
+## SQ-010 · Ticket note in Network-QuickCheck and Citrix-FSLogix-Triage
+- status: done
 - priority: P2
 - type: feature
-- branch:
+- branch: squad/SQ-010-ticket-note-network-triage
 - spec: squad/specs/SQ-001.md (Part B, AC27-AC33)
 - idea: squad/ideas/sessions/2026-10-16/cards/I-03-ticket-note.md
 
@@ -133,10 +195,10 @@ results are marked so they land under "Could not check", not "Ruled out". Builds
 Split from SQ-001 per D-004.
 
 ## SQ-004 · "Can this user open this folder?" access evidence and hedged verdict
-- status: ready
+- status: done
 - priority: P2
 - type: feature
-- branch:
+- branch: squad/SQ-004-folder-access-check
 - spec: squad/specs/SQ-004.md (ACs 1-27)
 - idea: squad/ideas/sessions/2026-10-16/cards/I-07-folder-access-evidence.md
 
@@ -147,10 +209,10 @@ optional (D-018); DFS namespace paths are detected (D-019). Read-only, with a re
 the past primary-group bug. Split per D-004.
 
 ## SQ-013 · Folder access: what to do about it
-- status: ready
+- status: done
 - priority: P2
 - type: feature
-- branch:
+- branch: squad/SQ-013-folder-access-next-step
 - spec: squad/specs/SQ-004.md (ACs 28-36)
 - idea: squad/ideas/sessions/2026-10-16/cards/I-07-folder-access-evidence.md
 
@@ -160,10 +222,10 @@ ticket note, and a next step pointing to FolderPermissionManager. Builds after S
 Split from SQ-004 per D-004.
 
 ## SQ-006 · Lockout tools recognize Kerberos encryption-type blocks (RC4 enforcement)
-- status: ready
+- status: done
 - priority: P2
 - type: feature
-- branch:
+- branch: squad/SQ-006-kerberos-etype-block
 - spec: squad/specs/SQ-006.md
 - idea: squad/ideas/sessions/2026-10-16/cards/I-06-kerberos-enforcement-check.md
 
@@ -174,9 +236,10 @@ password problem, encryption type blocked") with the next step, in the report an
 
 ## SQ-007 · Mailbox check: the facts, with "do NOT reset yet" on takeover signs
 - status: ready
+- revision: merge to main failed one test at review 2026-10-18 (see spec Revision notes)
 - priority: P2
 - type: feature
-- branch:
+- branch: squad/SQ-007-mailbox-check
 - spec: squad/specs/SQ-007.md
 - idea: squad/ideas/sessions/2026-10-16/cards/I-02-mailbox-check.md
 
@@ -187,10 +250,12 @@ with "Check CIPP's BEC report" as the next step. Subjects stay out of the ticket
 Second entry script in the SQ-002 folder; builds after SQ-002.
 
 ## SQ-016 · Mailbox check: when were rules, forwarding and delegates added?
-- status: ready
+- status: review
+- waiting: SQ-007 (stacked on it; SQ-007 went back to ready at review 2026-10-18). Owner approved
+  the merge; merge right after SQ-007 lands.
 - priority: P2
 - type: feature
-- branch:
+- branch: squad/SQ-016-mailbox-audit-log (stacked on squad/SQ-007-mailbox-check; merge SQ-007 first)
 - spec: squad/specs/SQ-016.md
 - idea: squad/ideas/sessions/2026-10-16/cards/I-02-mailbox-check.md
 
@@ -201,10 +266,10 @@ line, with when, who and whether it was the user's own account (D-032). "Could n
 the audit role is missing or auditing is off. Builds after SQ-007.
 
 ## SQ-009 · LocalAdminManager: make remote changes work, and log every add and remove
-- status: ready
+- status: done
 - priority: P2
 - type: fix
-- branch:
+- branch: squad/SQ-009-localadmin-remote-log
 - spec: squad/specs/SQ-009.md
 - idea: squad/ideas/sessions/2026-10-16/brief.md (I-12, "Worth a look")
 

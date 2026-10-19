@@ -35,7 +35,8 @@
         "CopyFileToServer/**",
         "FolderPermissionManager/**",
         "LocalAdminManager/**",
-        "M365-SyncedUserFixes/**"
+        "M365-SyncedUserFixes/**",
+        "TestLab-Setup/**"
       ],
       "keywords": [
         "Remove-Item",
@@ -89,7 +90,13 @@
         "FSLogix-Profile-Backup/**",
         "Entra-DeviceActivityTimeline/**",
         "AD-GroupMembership-Export/**",
-        "DriveMap-Diagnostics/**"
+        "DriveMap-Diagnostics/**",
+        "TicketNote/**",
+        "M365-UserQuickCheck/**",
+        "FolderAccess-Check/**",
+        "AD-UserQuickCheck/**",
+        "Network-QuickCheck/**",
+        "Citrix-FSLogix-Triage/**"
       ],
       "keywords": [
         "Export-Csv",
@@ -101,6 +108,23 @@
         "AccessToken",
         "ClientSecret",
         "Login Data"
+      ]
+    },
+    {
+      "name": "read-only-advisory",
+      "file": "squad/risks/read-only-advisory.md",
+      "paths": [
+        "AD-UserQuickCheck/**",
+        "M365-UserQuickCheck/**",
+        "FolderAccess-Check/**",
+        "Network-QuickCheck/**",
+        "Citrix-FSLogix-Triage/**",
+        "TicketNote/**"
+      ],
+      "keywords": [
+        "Escalate",
+        "NextStep",
+        "Clipboard"
       ]
     }
   ],

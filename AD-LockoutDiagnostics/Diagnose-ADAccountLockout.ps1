@@ -10,6 +10,13 @@
     Password Policy) from the PDC emulator, builds a lockout timeline from event 4740,
     traces bad-password sources via 4625/4771 across all DCs, flags admin resets (4724),
     and writes a ranked-verdict HTML report.
+
+    It also checks every DC for Kerberos encryption-type blocks (the 2026 RC4 changes,
+    KB5073381): 4768/4769 failures with status 0xE and the Kdcsvc events 203/204/208/209.
+    When those explain the problem and there are no lockouts or bad passwords, the
+    headline says "Not a password problem: encryption type blocked" with the account or
+    device and the next step. A DC that can't be checked is named as "Can't tell" with the
+    reason, never reported as clean. Read-only.
 .PARAMETER Identity
     SamAccountName, UPN, or DN of the user to investigate.
 .PARAMETER OutputPath
@@ -70,6 +77,43 @@
       PTA agent behaviour - agents validate passwords via the Win32 LogonUser API, so
       failures surface on a DC as ordinary 4625/4771 events sourced from the agent host:
         https://learn.microsoft.com/entra/identity/hybrid/connect/how-to-connect-pta-quick-start
+
+      Encryption-type blocks (verified 2026-10-18):
+      Events 4768 (Kerberos Authentication Service) and 4769 (Kerberos Service Ticket
+      Operations) are written for success AND failure; 0xE = KDC_ERR_ETYPE_NOTSUPP is a
+      listed failure code; fields TargetUserName, ServiceName, IpAddress, Status:
+        https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4768
+        https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4769
+      Kerberos Service Ticket Operations GUID (Audit_AccountLogon_Kerberos) 0cce9240-...:
+        https://learn.microsoft.com/windows/win32/secauthz/auditing-constants
+      StandardEventKeywords.AuditFailure = 4503599627370496 (filters failures on a system
+      field, no EventData XPath):
+        https://learn.microsoft.com/dotnet/api/system.diagnostics.eventing.reader.standardeventkeywords
+      KB5073381 / CVE-2026-20833 - Kdcsvc events in the System log, 203/204/208/209 are
+      the block ("Error event") events, 201/202/206/207 the will-break-later warnings; who
+      fixes what; the RC4 exception (msDS-SupportedEncryptionTypes 0x24) as a last resort:
+        https://support.microsoft.com/topic/1ebcda33-720a-4da8-93c1-b0496e1910dc
+      "Changing the account password generates these keys" (an account without AES keys):
+        https://learn.microsoft.com/windows-server/security/kerberos/detect-remediate-rc4-kerberos
+      Get-WinEvent -ListProvider / -FilterHashtable with -ComputerName; provider event list:
+        https://learn.microsoft.com/powershell/module/microsoft.powershell.diagnostics/get-winevent
+        https://learn.microsoft.com/dotnet/api/system.diagnostics.eventing.reader.providermetadata.events
+
+    NOT VERIFIED
+      KB5073381 documents only the rendered message of the Kdcsvc events, not their XML
+      EventData element names. ConvertFrom-KdcsvcEvent reads known element names first,
+      then the documented message labels ("Account Name:", "Service Name:", "Client
+      Address:"), then position in the documented message order.
+      That the Kdcsvc provider lists its events through -ListProvider (a manifest
+      provider) is not documented either. If it does not, every DC reports the KDC-events
+      check as "Can't tell" (never as clean) until real events have been read from it.
+      Try once against a patched test DC.
+
+    PERMISSIONS
+      Reading the Security and System logs needs Event Log Readers (or admin) on each DC.
+      The Kerberos Service Ticket Operations audit setting is read with auditpol over
+      WinRM and needs administrator rights on the DC; without them the 4768/4769 check
+      says "Can't tell" for that DC.
 #>
 [CmdletBinding()]
 param(
@@ -134,6 +178,25 @@ function ConvertFrom-LockoutEvent {
     }
 }
 
+function ConvertTo-DisplayAddress {
+    # Normalize a client address from a Kerberos/logon event for display.
+    #
+    # Windows renders an IPv4 client in IPv4-mapped IPv6 notation, e.g.
+    # "::ffff:192.168.105.128" - Microsoft's own 4771 sample shows this form. The prefix
+    # carries no diagnostic value and makes the address harder to read, copy, or resolve,
+    # so strip it. ::1 and 127.0.0.1 both mean the attempt originated on the DC itself.
+    # https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4771
+    param([string]$Address)
+    $a = if ($null -eq $Address) { '' } else { $Address.Trim() }
+    if ([string]::IsNullOrEmpty($a) -or $a -in @('-', '::1', '127.0.0.1')) {
+        return '(on the DC itself)'
+    }
+    if ($a -match '^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$') {
+        return $Matches[1]
+    }
+    return $a
+}
+
 function ConvertFrom-BadLogonEvent {
     # Parses event 4625 (failed logon) OR 4771 (Kerberos pre-auth failure) into a
     # normalized row. The two event types have different field layouts, so the caller
@@ -174,18 +237,7 @@ function ConvertFrom-BadLogonEvent {
         $status     = $d['Status']
     }
 
-    # Normalize the source address for display.
-    #
-    # Windows renders an IPv4 client in IPv4-mapped IPv6 notation, e.g.
-    # "::ffff:192.168.105.128" - Microsoft's own 4771 sample shows this form. The prefix
-    # carries no diagnostic value and makes the address harder to read, copy, or resolve,
-    # so strip it. ::1 and 127.0.0.1 both mean the attempt originated on the DC itself.
-    # https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4771
-    if ([string]::IsNullOrEmpty($sourceIp) -or $sourceIp -in @('-', '::1', '127.0.0.1')) {
-        $sourceIp = '(on the DC itself)'
-    } elseif ($sourceIp -match '^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$') {
-        $sourceIp = $Matches[1]
-    }
+    $sourceIp = ConvertTo-DisplayAddress -Address $sourceIp
 
     # Event 4771 has no workstation field at all - only IpAddress and IpPort. A blank
     # cell reads as "collection failed"; say plainly that the field does not exist so the
@@ -811,7 +863,9 @@ function Get-LockoutVerdict {
         [object[]]$Lockouts,    # rows from ConvertFrom-LockoutEvent (have .CallerComputer)
         [object[]]$BadLogons,   # rows from ConvertFrom-BadLogonEvent (.SourceHost/.SourceIp/.LogonType)
         [object]$Policy,        # has .LockoutThreshold (int)
-        [object]$EntraConnectDiagnostics
+        [object]$EntraConnectDiagnostics,
+        [object[]]$EtypeEvidence = @(),   # SQ-006: rows from ConvertFrom-EtypeFailureEvent / ConvertFrom-KdcsvcEvent
+        [object[]]$EtypeGate = @()        # SQ-006: rows from Get-EtypeGate
     )
 
     # Treat null arrays as empty so callers can pass $null without guarding.
@@ -820,9 +874,50 @@ function Get-LockoutVerdict {
 
     $findings = (New-Object 'System.Collections.Generic.List[string]')
 
+    # Encryption-type blocks (SQ-006). They lead only when nothing else explains the
+    # problem: a real stale-password lockout must not be hidden behind them, so with
+    # lockouts or bad passwords present they are listed after the existing findings.
+    # A clean result (no rows, every DC checked) adds nothing, so the verdict reads exactly
+    # as it did before this check existed.
+    $passwordEvidence = ($Lockouts.Count -gt 0 -or $BadLogons.Count -gt 0)
+    $etypeLines = (New-Object 'System.Collections.Generic.List[string]')
+    $etypeTail  = (New-Object 'System.Collections.Generic.List[string]')
+    $etypeFindings = @(Get-EtypeFindings -Rows $EtypeEvidence -PasswordEvidence $passwordEvidence)
+    # A block whose account couldn't be read is not known to be this account's, so it never
+    # leads or explains the problem; it is listed after the other findings.
+    $etypeKnown  = @($etypeFindings | Where-Object { $_.Kind -ne 'NotRecorded' })
+    $etypeUnread = @($etypeFindings | Where-Object { $_.Kind -eq 'NotRecorded' })
+    $etypeShown = 5
+    foreach ($f in @($etypeKnown | Select-Object -First $etypeShown)) {
+        $etypeLines.Add("$($f.Sentence) Next step: $($f.NextStep)")
+    }
+    if ($etypeKnown.Count -gt $etypeShown) {
+        $etypeLines.Add("$($etypeKnown.Count - $etypeShown) more encryption type blocked finding(s) are listed in the report's Encryption-type blocks section.")
+    }
+    foreach ($f in $etypeUnread) {
+        $etypeTail.Add("$($f.Sentence) Next step: $($f.NextStep)")
+    }
+    $gaps = @(Get-EtypeGapRows -Gate $EtypeGate)
+    if ($gaps.Count -gt 0) {
+        # Name every DC that could not be checked, with its reason. Never "none found":
+        # a block on one of these DCs would not show anywhere in this report.
+        $named = ($gaps | ForEach-Object { "$($_.DC) ($($_.Reason))" }) -join '; '
+        $etypeTail.Add("Couldn't check $($gaps.Count) domain controller(s) for Kerberos encryption-type blocks: $named. A block recorded there would not show in this report.")
+    }
+    if (@($etypeFindings | Where-Object { $_.Kind -eq 'Client' }).Count -gt 0 -and $script:EtypeRef -and $script:EtypeRef.Rc4Exception) {
+        # Owner decision D-024: the RC4 exception comes last, after "update or replace the
+        # device", labelled as keeping RC4 on and needing sign-off, with Microsoft's link.
+        $etypeTail.Add("$($script:EtypeRef.Rc4Exception) $($script:EtypeRef.Rc4ExceptionReference)")
+    }
+
     # 4) No evidence: nothing in either bucket -> single guidance line, return early.
     if ($Lockouts.Count -eq 0 -and $BadLogons.Count -eq 0) {
-        $findings.Add("Found no on-prem lockout or bad-password events in the searched window. Consider widening -DaysBack. If the account is synced with Password Hash Sync (PHS), failed Entra sign-ins may not create matching on-prem bad-password events; investigate Entra ID sign-in logs, Smart Lockout, and SSPR activity.")
+        if ($etypeLines.Count -gt 0) {
+            foreach ($line in $etypeLines) { $findings.Add($line) }
+            $findings.Add("Found no on-prem lockout or bad-password events in the searched window, so the encryption type block above - not a wrong password - is the most likely reason this account can't sign in.")
+        } else {
+            $findings.Add("Found no on-prem lockout or bad-password events in the searched window. Consider widening -DaysBack. If the account is synced with Password Hash Sync (PHS), failed Entra sign-ins may not create matching on-prem bad-password events; investigate Entra ID sign-in logs, Smart Lockout, and SSPR activity.")
+        }
         # Still surface an aggressive-policy note if the threshold is low.
         if ($Policy -and $Policy.LockoutThreshold -gt 0 -and $Policy.LockoutThreshold -le 3) {
             $findings.Add("Lockout policy threshold is $($Policy.LockoutThreshold) - this is an aggressively low threshold; a few stray bad passwords will lock the account.")
@@ -830,6 +925,7 @@ function Get-LockoutVerdict {
         foreach ($hint in (Get-EntraConnectVerdictHints -Diagnostics $EntraConnectDiagnostics)) {
             $findings.Add($hint)
         }
+        foreach ($line in $etypeTail) { $findings.Add($line) }
         return $findings.ToArray()
     }
 
@@ -907,7 +1003,618 @@ function Get-LockoutVerdict {
         $findings.Add($hint)
     }
 
+    foreach ($line in $etypeLines) { $findings.Add($line) }
+    foreach ($line in $etypeTail)  { $findings.Add($line) }
+
     return $findings.ToArray()
+}
+
+# ---------------------------------------------------------------------------
+# Kerberos encryption-type blocks (RC4 enforcement, CVE-2026-20833 / KB5073381).
+#
+# Since the 2026 KDC changes a sign-in can fail with nothing wrong with the password: the
+# DC refused the ticket because the account or the device can't use an encryption type it
+# still allows. That looks like "can't sign in / keeps locking" but no bad password is
+# ever recorded, so without this the report said "no bad-password events" and stopped.
+#
+# The verdict rests ONLY on events the DCs actually wrote - no patch-level or date logic,
+# because Microsoft's enforcement dates have shifted - and a DC whose evidence could not
+# be read is reported as "Can't tell", never as "none found". The facts (status code,
+# event IDs, who-fixes-what, next steps) live in EncryptionTypeBlocks in
+# LockoutReference.psd1; there is no built-in fallback copy, so without that file the
+# feature reports "Can't tell" rather than guessing.
+# ---------------------------------------------------------------------------
+
+function Get-EtypeEventInfo {
+    # The psd1 entry for a Kdcsvc block event (Who, Meaning, NextStep, Reference), or $null
+    # when the ID is not one of the documented block events.
+    param([int]$EventId)
+    if (-not $script:EtypeRef -or -not $script:EtypeRef.KdcsvcEvents) { return $null }
+    if ($script:EtypeRef.KdcsvcEvents.ContainsKey($EventId)) { return $script:EtypeRef.KdcsvcEvents[$EventId] }
+    return $null
+}
+
+function ConvertFrom-EtypeFailureEvent {
+    # Parses a 4768 (TGT request) or 4769 (service ticket request) event and returns a row
+    # ONLY when its Status is 0xE (KDC_ERR_ETYPE_NOTSUPP). Both events are written for
+    # success AND failure - 0x0 is a successful ticket and 0x18/0x12 are password/lockout
+    # failures already covered elsewhere - so the status is the only discriminator.
+    # Field names TargetUserName, ServiceName, IpAddress, Status are from the Learn pages.
+    # https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4768
+    # https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4769
+    param([string]$EventXml, [int]$EventId, [string]$DcName)
+
+    $x = [xml]$EventXml
+    $d = @{}
+    foreach ($node in $x.Event.EventData.Data) { $d[$node.Name] = $node.'#text' }
+
+    # The logs render the same code as 0xe, 0xE or 0x0000000E; compare the bare hex digits.
+    $want = if ($script:EtypeRef -and $script:EtypeRef.StatusCode) { [string]$script:EtypeRef.StatusCode } else { '0xE' }
+    $status = if ($d['Status']) { ([string]$d['Status']).Trim() } else { '' }
+    if ($status -notmatch '^0x0*([0-9a-fA-F]+)$') { return }
+    $bare = $Matches[1]
+    if ($want -notmatch '^0x0*([0-9a-fA-F]+)$' -or $Matches[1] -ne $bare) { return }
+
+    [PSCustomObject]@{
+        Time          = [datetime]$x.Event.System.TimeCreated.SystemTime
+        EventId       = [int]$EventId
+        Account       = $d['TargetUserName']
+        Service       = $d['ServiceName']
+        Accounts      = @(@($d['TargetUserName'], $d['ServiceName']) | Where-Object { $_ -and $_ -ne '-' })
+        ClientAddress = ConvertTo-DisplayAddress -Address $d['IpAddress']
+        Status        = $want
+        DC            = $DcName
+        # 4768/4769 do not say which side lacks the encryption type; the Kdcsvc events do.
+        Who           = 'Unknown'
+        NextStep      = if ($script:EtypeRef) { $script:EtypeRef.FailureNextStep } else { '' }
+    }
+}
+
+function ConvertFrom-KdcsvcEvent {
+    # Parses a Kdcsvc System-log event and returns a row only for the documented BLOCK
+    # events (203/204/208/209 in LockoutReference.psd1). The warnings 201/202/206/207
+    # describe what WILL break when enforcement starts, which is not why this account
+    # can't sign in today, so they are not returned.
+    # https://support.microsoft.com/topic/1ebcda33-720a-4da8-93c1-b0496e1910dc
+    #
+    # NOT VERIFIED: KB5073381 documents the rendered message ("Account Name:", "Service
+    # Name:", "Client Address:" ...) but not the EventData element names. The fields are
+    # read tolerantly: known element names first, then the documented message labels when
+    # the rendered message is supplied, then position in the documented message order
+    # whenever none of the known element names is present (an unknown layout).
+    #
+    # A block event whose account can't be read is still returned, flagged
+    # AccountNotRecorded, whatever else it names: a readable service or address doesn't say
+    # who asked for the ticket, so it may well be this account's, and dropping it would turn
+    # "a block was logged, check it" into a clean result.
+    param([string]$EventXml, [int]$EventId, [string]$DcName, [string]$Message)
+
+    $info = Get-EtypeEventInfo -EventId $EventId
+    if (-not $info) { return }
+
+    $x = [xml]$EventXml
+    $named = @{}
+    $positional = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($node in @($x.Event.EventData.Data)) {
+        if ($null -eq $node) { continue }
+        if ($node -is [System.Xml.XmlElement]) {
+            $text = $node.InnerText
+            $name = $node.GetAttribute('Name')
+            if ($name) { $named[$name] = $text }
+        } else {
+            # <Data> without a Name attribute comes back from the XML adapter as a string.
+            $text = [string]$node
+        }
+        $positional.Add($text)
+    }
+
+    $accountNames = @('AccountName', 'TargetUserName', 'ClientName', 'UserName')
+    $serviceNames = @('ServiceName', 'TargetServiceName')
+    $addressNames = @('ClientAddress', 'IpAddress', 'ClientIpAddress')
+    # Positions only mean something when the layout is not one of the known named ones.
+    $knownLayout = @(@($accountNames + $serviceNames + $addressNames) | Where-Object { $named.ContainsKey($_) }).Count -gt 0
+
+    $pick = {
+        param([string[]]$Names, [string]$Label, [int]$Position)
+        foreach ($n in $Names) {
+            if ($named.ContainsKey($n) -and -not [string]::IsNullOrWhiteSpace($named[$n])) { return $named[$n].Trim() }
+        }
+        if ($Message -and $Message -match "(?m)^\s*$([regex]::Escape($Label)):\s*(\S[^\r\n]*?)\s*$") { return $Matches[1] }
+        # Message order from the KB: Account Name(0), Supplied Realm Name, msds-SET,
+        # Available Keys, Service Name(4), Service ID, msds-SET, Available Keys,
+        # DC msds-SET, DefaultDomainSupportedEncTypes, DC Available Keys, Client Address(11).
+        if (-not $knownLayout -and $positional.Count -gt $Position -and
+            -not [string]::IsNullOrWhiteSpace($positional[$Position])) { return $positional[$Position].Trim() }
+        return ''
+    }
+    $account = & $pick $accountNames 'Account Name' 0
+    $service = & $pick $serviceNames 'Service Name' 4
+    $address = & $pick $addressNames 'Client Address' 11
+    $accounts = @(@($account, $service) | Where-Object { $_ -and $_ -ne '-' } | Select-Object -Unique)
+
+    [PSCustomObject]@{
+        Time          = [datetime]$x.Event.System.TimeCreated.SystemTime
+        EventId       = [int]$EventId
+        Account       = $account
+        Service       = $service
+        Accounts      = $accounts
+        ClientAddress = if ($address) { ConvertTo-DisplayAddress -Address $address } else { '' }
+        Status        = ''
+        DC            = $DcName
+        Who           = $info.Who
+        NextStep      = $info.NextStep
+        Message       = $Message
+        AccountNotRecorded = ([string]::IsNullOrWhiteSpace($account) -or $account -eq '-')
+    }
+}
+
+function Select-EtypeEvidenceForAccount {
+    # Keeps the rows that concern the investigated account: as the account asking for the
+    # ticket OR as the service it was trying to reach - a user hitting an RC4-only service
+    # is this ticket's problem too. Events name accounts as sam, DOMAIN\sam or sam@realm,
+    # so all three forms match, case-insensitively. A block event whose account couldn't
+    # be read (AccountNotRecorded) is always kept: it can't be ruled out, and the report
+    # and verdict tell the tech to open the event instead of treating it as this account's.
+    # If such a row still names this account (as the service), it does concern it, so a
+    # copy is returned with the flag cleared and it becomes a normal finding.
+    param([object[]]$Rows, [string]$SamAccountName)
+
+    if ([string]::IsNullOrWhiteSpace($SamAccountName)) { return @() }
+    $kept = foreach ($r in @($Rows | Where-Object { $_ })) {
+        $names = @(@($r.Account, $r.Service) + @($r.Accounts) | Where-Object { $_ })
+        $hit = $false
+        foreach ($n in $names) {
+            $bare = ([string]$n).Trim()
+            if ($bare -match '\\') { $bare = $bare.Substring($bare.LastIndexOf('\') + 1) }
+            if ($bare -match '@')  { $bare = $bare.Substring(0, $bare.IndexOf('@')) }
+            if ($bare -ieq $SamAccountName) { $hit = $true; break }
+        }
+        if ($hit -and $r.AccountNotRecorded) {
+            $copy = $r.PSObject.Copy()
+            $copy.AccountNotRecorded = $false
+            $copy
+        } elseif ($hit -or $r.AccountNotRecorded) { $r }
+    }
+    return @($kept)
+}
+
+function Import-AuditPolicyParser {
+    # Makes Test-ADAuditPolicy.ps1's ConvertFrom-AuditPolCsv and Test-SubcategorySetting
+    # available to this script, so the audit-setting rules are not carried in a third copy.
+    # The file ships in this folder and in the toolkit zip. It is dot-sourced inside this
+    # function so its parameters and its own Write-Status stay here, then only the two
+    # parsers are promoted to script scope. Returns $true when both are available.
+    $names = @('ConvertFrom-AuditPolCsv', 'Test-SubcategorySetting')
+    if (@(Get-Command -Name $names -CommandType Function -ErrorAction SilentlyContinue).Count -eq $names.Count) { return $true }
+
+    $helper = Join-Path $PSScriptRoot 'Test-ADAuditPolicy.ps1'
+    if (-not (Test-Path -LiteralPath $helper)) { return $false }
+    try {
+        . $helper -LoadFunctionsOnly
+        foreach ($n in $names) {
+            Set-Item -LiteralPath "function:script:$n" -Value (Get-Command -Name $n -CommandType Function -ErrorAction Stop).ScriptBlock
+        }
+        return $true
+    } catch {
+        Write-Verbose "Could not load ${helper}: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Get-EtypeGate {
+    # Pure per-DC decision: could each kind of evidence be checked on this DC?
+    #   KdcEvents      - the Kdcsvc block events (System log). Needs the January 2026 or
+    #                    later update; detected by asking the DC whether its Kdcsvc provider
+    #                    defines event 203, which works on any OS without a build table.
+    #   TicketFailures - 4768/4769 with 0xE (Security log). Only Kerberos Service Ticket
+    #                    Operations failure auditing (4769) is checked here; 4768's
+    #                    subcategory, Kerberos Authentication Service, is checked by
+    #                    Test-ADAuditPolicy (the investigation's audit gate).
+    # Returns 'Checked' or "Can't tell" with a plain reason. "Can't tell" is never turned
+    # into "none found": an empty result from a DC that cannot record the evidence looks
+    # exactly like a clean one. Only a DC with no Kdcsvc provider, or one whose provider
+    # lacks event 203, is said to be missing the update; a list that could not be read (or
+    # came back empty) proves nothing about the patch level.
+    param(
+        [string]$DcName,
+        [string]$QueryError,        # the DC could not be queried at all
+        [int[]]$KdcEventIds,        # event IDs the DC's Kdcsvc provider defines; $null = unknown
+        [string]$AuditSetting,      # auditpol Inclusion Setting for the subcategory; empty = unreadable
+        [string]$KdcError,          # the System log could not be read for the Kdcsvc events
+        [switch]$KdcEventsSeen,     # Kdcsvc block events were actually read from this DC
+        [switch]$KdcProviderMissing,# the DC has no Kdcsvc event provider registered
+        [string]$KdcListError,      # the Kdcsvc provider's event list could not be read
+        [string]$TicketError,       # the 4768/4769 events were returned but could not be read
+        [string]$AuditError,        # overrides the default "couldn't be read" reason
+        [string]$Unavailable        # the whole check could not run (e.g. psd1 missing)
+    )
+
+    $kdc = 'Checked'; $kdcReason = ''
+    $tkt = 'Checked'; $tktReason = ''
+    $kb  = if ($script:EtypeRef -and $script:EtypeRef.KdcUpdateKb) { $script:EtypeRef.KdcUpdateKb } else { 'KB5073381' }
+    $capability = if ($script:EtypeRef -and $script:EtypeRef.KdcCapabilityEventId) { [int]$script:EtypeRef.KdcCapabilityEventId } else { 203 }
+
+    if ($Unavailable) {
+        $kdc = "Can't tell"; $kdcReason = $Unavailable
+        $tkt = "Can't tell"; $tktReason = $Unavailable
+    } elseif ($QueryError) {
+        $why = "couldn't reach ${DcName}: $QueryError"
+        $kdc = "Can't tell"; $kdcReason = $why
+        $tkt = "Can't tell"; $tktReason = $why
+    } else {
+        if ($KdcError) {
+            $kdc = "Can't tell"; $kdcReason = "couldn't read the KDC events on ${DcName}: $KdcError"
+        } elseif ($KdcEventsSeen) {
+            # Events were read, so the DC demonstrably writes them.
+        } elseif ($KdcProviderMissing) {
+            $kdc = "Can't tell"
+            $kdcReason = "$DcName doesn't have the $kb updates (January 2026 or later) that write the KDC encryption-type events - it has no Kdcsvc event provider"
+        } elseif ($KdcListError) {
+            $kdc = "Can't tell"; $kdcReason = "couldn't read the Kdcsvc event list on ${DcName}: $KdcListError"
+        } elseif ($null -eq $KdcEventIds -or @($KdcEventIds).Count -eq 0) {
+            $kdc = "Can't tell"
+            $kdcReason = "couldn't read the Kdcsvc event list on $DcName (it came back empty), so it isn't known whether this DC writes these events"
+        } elseif (@($KdcEventIds) -notcontains $capability) {
+            $kdc = "Can't tell"
+            $kdcReason = "$DcName doesn't have the $kb updates (January 2026 or later) that write the KDC encryption-type events - its KDC event list has no event $capability"
+        }
+
+        if ($TicketError) {
+            $tkt = "Can't tell"; $tktReason = $TicketError
+        } elseif ($AuditError) {
+            $tkt = "Can't tell"; $tktReason = $AuditError
+        } elseif ([string]::IsNullOrWhiteSpace($AuditSetting)) {
+            $tkt = "Can't tell"; $tktReason = "audit policy couldn't be read - needs admin rights on the DC"
+        } elseif (-not (Import-AuditPolicyParser)) {
+            $tkt = "Can't tell"
+            $tktReason = "Test-ADAuditPolicy.ps1 not found beside this script, so the audit setting couldn't be checked"
+        } elseif (-not (Test-SubcategorySetting -Setting $AuditSetting -Needs 'Failure').Logs) {
+            # Same rule as the investigation's audit gate (Test-ADAuditPolicy.ps1).
+            $tkt = "Can't tell"
+            $tktReason = "not logging failures - Kerberos Service Ticket Operations auditing is '$($AuditSetting.Trim())' on $DcName (only this subcategory, which writes 4769, is checked here; Kerberos Authentication Service, which writes 4768, is checked by Test-ADAuditPolicy.ps1)"
+        }
+    }
+
+    $reason = if ($kdcReason -and $kdcReason -eq $tktReason) { $kdcReason }
+              else {
+                  @(@($(if ($kdcReason) { "KDC events: $kdcReason" }), $(if ($tktReason) { "4768/4769 failures: $tktReason" })) |
+                    Where-Object { $_ }) -join '; '
+              }
+
+    [PSCustomObject]@{
+        DC             = $DcName
+        KdcEvents      = $kdc
+        KdcReason      = $kdcReason
+        TicketFailures = $tkt
+        TicketReason   = $tktReason
+        Reason         = $reason
+    }
+}
+
+function Get-EtypeEvidence {
+    # Collects encryption-type block evidence from every DC for one account. Per DC:
+    #   (a) Security 4768/4769, filtered on SYSTEM fields only (Id + audit-failure keyword +
+    #       StartTime) with the 0xE status checked client-side. An EventData XPath filter
+    #       forces a full log scan (measured at 11-52 s per DC, see
+    #       Export-ADAuthSourceEvidence.ps1 .NOTES) and 4769 is one of the busiest events.
+    #   (b) the Kdcsvc provider's event list (-ListProvider) - does this DC write them?
+    #       Used only to explain why none were seen.
+    #   (c) System log, Kdcsvc block events 203/204/208/209 - always read.
+    #   (d) the Kerberos Service Ticket Operations audit setting via auditpol on the DC,
+    #       parsed with Test-ADAuditPolicy.ps1's ConvertFrom-AuditPolCsv.
+    # Each DC has its own try/catch so one unreachable DC never halts the sweep. Read-only:
+    # the only remote command is `auditpol /get`.
+    # https://learn.microsoft.com/powershell/module/microsoft.powershell.diagnostics/get-winevent
+    # https://learn.microsoft.com/dotnet/api/system.diagnostics.eventing.reader.providermetadata.events
+    param([string[]]$DomainControllers, [string]$SamAccountName, [int]$DaysBack)
+
+    $rows = New-Object 'System.Collections.Generic.List[object]'
+    $gate = New-Object 'System.Collections.Generic.List[object]'
+    $ref  = $script:EtypeRef
+
+    if (-not $ref) {
+        foreach ($dc in @($DomainControllers)) {
+            $gate.Add((Get-EtypeGate -DcName $dc -Unavailable 'LockoutReference.psd1 not found beside this script, so this check did not run'))
+        }
+        Write-Status WARN "LockoutReference.psd1 not found; encryption-type blocks can't be checked."
+        return [PSCustomObject]@{ Rows = @(); Gate = $gate.ToArray() }
+    }
+
+    # Reuse Test-ADAuditPolicy's auditpol parser rather than carrying a third copy; if it is
+    # missing, the 4768/4769 feature says "Can't tell" for every DC instead of guessing.
+    $auditParserReady = Import-AuditPolicyParser
+
+    $start = (Get-Date).AddDays(-$DaysBack)
+    $securityFilter = @{
+        LogName   = 'Security'
+        Id        = @($ref.FailureEvents)
+        Keywords  = [long]$ref.AuditFailureKeyword
+        StartTime = $start
+    }
+    $kdcIds = @($ref.KdcsvcEvents.Keys | ForEach-Object { [int]$_ } | Sort-Object)
+    $guid   = [string]$ref.AuditSubcategoryGuid
+
+    foreach ($dc in @($DomainControllers)) {
+        # (a) 4768/4769 failures. This is also the reachability test for the DC.
+        $events = @()
+        try {
+            $events = @(Get-WinEvent -ComputerName $dc -FilterHashtable $securityFilter -ErrorAction Stop)
+        } catch {
+            if ($_.Exception.Message -notmatch 'No events were found') {
+                $g = Get-EtypeGate -DcName $dc -QueryError $_.Exception.Message
+                $gate.Add($g)
+                Write-Status WARN "${dc}: encryption-type blocks - can't tell ($($g.Reason))."
+                continue
+            }
+            # "No events" is a reachable DC with nothing to report, not a gap.
+        }
+        # A malformed event is skipped and counted: the DC's 4768/4769 column becomes
+        # "Can't tell" (an unread event could be a block), but every event that could be
+        # read is kept and the sweep carries on.
+        $dcRows = 0
+        $ticketError = $null
+        $badEvents = 0
+        $firstError = $null
+        foreach ($e in $events) {
+            try {
+                $r = ConvertFrom-EtypeFailureEvent -EventXml $e.ToXml() -EventId $e.Id -DcName $dc
+                if ($r) { $rows.Add($r); $dcRows++ }
+            } catch {
+                $badEvents++
+                if (-not $firstError) { $firstError = $_.Exception.Message }
+            }
+        }
+        if ($badEvents -gt 0) {
+            $ticketError = "couldn't read the 4768/4769 events on ${dc}: $badEvents event(s) couldn't be read (first error: $firstError)"
+        }
+
+        # (b) Does this DC's Kdcsvc provider define the block events? This only explains
+        # an empty System-log result; it never decides whether the System log is read.
+        $providerNotRegistered = 'not an event provider|no event provider'
+        $providerIds = $null
+        $providerMissing = $false
+        $listError = $null
+        try {
+            $provider = @(Get-WinEvent -ComputerName $dc -ListProvider $ref.KdcProvider -ErrorAction Stop)[0]
+            $providerIds = @(@($provider.Events) | Where-Object { $_ } | ForEach-Object { [int]$_.Id })
+        } catch {
+            if ($_.Exception.Message -match $providerNotRegistered) { $providerMissing = $true }
+            else { $listError = $_.Exception.Message }
+        }
+
+        # (c) Kdcsvc block events in the System log - always read, whatever (b) said.
+        $kdcSeen = 0
+        $kdcError = $null
+        $sys = @()
+        try {
+            $sys = @(Get-WinEvent -ComputerName $dc -FilterHashtable @{
+                    LogName      = $ref.KdcLogName
+                    ProviderName = $ref.KdcProvider
+                    Id           = $kdcIds
+                    StartTime    = $start
+                } -ErrorAction Stop)
+        } catch {
+            if ($_.Exception.Message -match $providerNotRegistered) { $providerMissing = $true }
+            elseif ($_.Exception.Message -notmatch 'No events were found') { $kdcError = $_.Exception.Message }
+        }
+        # Same rule as the 4768/4769 loop: skip and count a malformed event, keep the rest.
+        $badEvents = 0
+        $firstError = $null
+        foreach ($e in $sys) {
+            try {
+                $msg = $null
+                try { $msg = $e.Message } catch { $msg = $null }
+                $r = ConvertFrom-KdcsvcEvent -EventXml $e.ToXml() -EventId $e.Id -DcName $dc -Message $msg
+                if ($r) { $rows.Add($r); $dcRows++; $kdcSeen++ }
+            } catch {
+                $badEvents++
+                if (-not $firstError) { $firstError = $_.Exception.Message }
+            }
+        }
+        if ($badEvents -gt 0) {
+            $kdcError = "$badEvents event(s) couldn't be read (first error: $firstError)"
+        }
+
+        # (d) Kerberos Service Ticket Operations audit setting. auditpol reports the
+        # EFFECTIVE local policy, so it must run on the DC itself (needs admin + WinRM).
+        $setting = $null
+        $auditError = $null
+        if (-not $auditParserReady) {
+            $auditError = "Test-ADAuditPolicy.ps1 not found beside this script, so the audit setting couldn't be read"
+        } else {
+            try {
+                $csv = Invoke-Command -ComputerName $dc -ErrorAction Stop -ArgumentList $guid -ScriptBlock {
+                    param($SubcategoryGuid)
+                    & auditpol.exe /get "/subcategory:$SubcategoryGuid" /r 2>$null | Out-String
+                }
+                $match = @(ConvertFrom-AuditPolCsv -CsvText ([string](@($csv) -join "`r`n")) |
+                           Where-Object { $_.Guid -eq $guid }) | Select-Object -First 1
+                if ($match) { $setting = $match.Setting }
+            } catch {
+                # Access denied is the common case (no admin on the DC): keep the default reason.
+                if ($_.Exception.Message -notmatch 'Access is denied|AccessDenied|0x80070005|Unauthorized') {
+                    $auditError = "audit policy couldn't be read on ${dc}: $($_.Exception.Message)"
+                }
+            }
+        }
+
+        $g = Get-EtypeGate -DcName $dc -KdcEventIds $providerIds -KdcError $kdcError -KdcEventsSeen:($kdcSeen -gt 0) `
+                -KdcProviderMissing:$providerMissing -KdcListError $listError -TicketError $ticketError `
+                -AuditSetting $setting -AuditError $auditError
+        $gate.Add($g)
+        if ($g.KdcEvents -eq 'Checked' -and $g.TicketFailures -eq 'Checked') {
+            Write-Status PASS "${dc}: checked for encryption-type blocks ($dcRows event(s) before filtering to the account)."
+        } else {
+            Write-Status WARN "${dc}: encryption-type blocks - can't tell for part of the check ($($g.Reason))."
+        }
+    }
+
+    return [PSCustomObject]@{
+        Rows = @(Select-EtypeEvidenceForAccount -Rows $rows.ToArray() -SamAccountName $SamAccountName)
+        Gate = $gate.ToArray()
+    }
+}
+
+function Get-EtypeFindings {
+    # Pure: groups etype rows into one finding per thing to fix, in the order a tech should
+    # act on them. Shared by the verdict, the report and the case-summary CSV so all three
+    # say the same thing.
+    #   Account - Kdcsvc 204/209: the (service) account has no AES keys -> reset password.
+    #   Client  - Kdcsvc 203/208: the device at the client address only offers RC4.
+    #   Unknown - 4768/4769 with 0xE: the side isn't recorded; both checks are named.
+    #   NotRecorded - a Kdcsvc block whose account couldn't be read: it may not be this
+    #             account's, so it is never "not a password problem"; the tech is told to
+    #             open the event. Listed last.
+    # A 4768/4769 row whose service or address is already explained by a Kdcsvc finding is
+    # the same refusal seen twice, so it is folded into that finding rather than repeated.
+    param(
+        [object[]]$Rows,
+        # True when real lockouts/bad passwords were also found: the block is then an
+        # additional finding, not "not a password problem".
+        [bool]$PasswordEvidence = $false
+    )
+
+    $rows = @($Rows | Where-Object { $_ })
+    if ($rows.Count -eq 0) { return @() }
+
+    $prefix = if ($PasswordEvidence) { 'Also found, separate from the bad passwords: ' } else { 'Not a password problem: ' }
+    $statusName = if ($script:EtypeRef -and $script:EtypeRef.StatusName) { $script:EtypeRef.StatusName } else { 'KDC_ERR_ETYPE_NOTSUPP' }
+
+    $keyed = foreach ($r in $rows) {
+        $who = if ($r.AccountNotRecorded) { 'NotRecorded' } elseif ($r.Who -in @('Account', 'Client')) { $r.Who } else { 'Unknown' }
+        $accounts = @(@($r.Accounts) | Where-Object { $_ })
+        $subject = switch ($who) {
+            'Account'     { if ($r.Service) { $r.Service } elseif ($r.Account) { $r.Account } elseif ($accounts.Count) { $accounts[0] } else { '(account not recorded)' } }
+            'Client'      { if ($r.ClientAddress) { $r.ClientAddress } else { '(address not recorded)' } }
+            'NotRecorded' { $r.DC }
+            default       { if ($r.Account) { $r.Account } elseif ($accounts.Count) { $accounts[0] } else { '(account not recorded)' } }
+        }
+        [PSCustomObject]@{ Key = "$who|$subject"; Who = $who; Subject = $subject; Row = $r }
+    }
+
+    $kdcServices  = @($keyed | Where-Object { $_.Who -eq 'Account' } | ForEach-Object { $_.Subject })
+    $kdcAddresses = @($keyed | Where-Object { $_.Who -eq 'Client' }  | ForEach-Object { $_.Subject })
+
+    $findings = foreach ($g in @($keyed | Group-Object Key)) {
+        $who     = $g.Group[0].Who
+        $subject = $g.Group[0].Subject
+        $gRows   = @($g.Group | ForEach-Object { $_.Row })
+
+        if ($who -eq 'Unknown') {
+            $covered = @($gRows | Where-Object {
+                ($_.Service -and $kdcServices -contains $_.Service) -or
+                ($_.ClientAddress -and $kdcAddresses -contains $_.ClientAddress) })
+            if ($covered.Count -eq $gRows.Count) { continue }
+        }
+
+        $ids      = @($gRows | ForEach-Object { [int]$_.EventId } | Sort-Object -Unique)
+        $dcs      = @($gRows | ForEach-Object { $_.DC } | Where-Object { $_ } | Sort-Object -Unique)
+        $services = @($gRows | ForEach-Object { $_.Service } | Where-Object { $_ -and $_ -ne '-' } | Sort-Object -Unique)
+        $addrs    = @($gRows | ForEach-Object { $_.ClientAddress } | Where-Object { $_ } | Sort-Object -Unique)
+        $names    = @($gRows | ForEach-Object { @($_.Accounts) + @($_.Account) } | Where-Object { $_ } | Sort-Object -Unique)
+        $times    = if ($gRows.Count -eq 1) { '1 time' } else { "$($gRows.Count) times" }
+        $where    = "event $($ids -join '/') on $($dcs -join ', '), $times"
+
+        $info    = Get-EtypeEventInfo -EventId $ids[0]
+        $meaning = if ($info -and $info.Meaning) { $info.Meaning } else { 'the account and the device have no encryption type in common' }
+        $next    = @($gRows | ForEach-Object { $_.NextStep } | Where-Object { $_ }) | Select-Object -First 1
+        if (-not $next) { $next = if ($info) { $info.NextStep } elseif ($script:EtypeRef) { $script:EtypeRef.FailureNextStep } else { '' } }
+
+        $sentencePrefix = $prefix
+        switch ($who) {
+            'NotRecorded' {
+                # Not known to be this account's, so neither "not a password problem" nor
+                # "also found": the tech opens the event and decides.
+                $detail  = "an encryption-type block was logged on $subject but the account couldn't be read - check the event ($where)."
+                $account = ''
+                $sentencePrefix = 'Possibly related: '
+                $next    = "Open event $($ids -join '/') in the System log on $subject and check whether it names this account or a service it uses. If it does: $next"
+            }
+            'Account' {
+                $detail  = "encryption type blocked for $subject - the domain controller refused Kerberos tickets because $meaning ($where)."
+                $account = $subject
+            }
+            'Client' {
+                $used    = if ($names.Count) { " (accounts in the event: $($names -join ', '))" } else { '' }
+                $detail  = "encryption type blocked for the device at $subject$used - $meaning ($where)."
+                $account = $names -join ', '
+            }
+            default {
+                $svc     = if ($services.Count) { " for $($services -join ', ')" } else { '' }
+                $from    = if ($addrs.Count) { " from $($addrs -join ', ')" } else { '' }
+                $detail  = "encryption type blocked for $subject - Kerberos refused a ticket$svc$from with status 0xE ($statusName, no encryption type both sides can use) ($where)."
+                $account = $subject
+            }
+        }
+
+        [PSCustomObject]@{
+            Kind          = $who
+            Account       = $account
+            Service       = $services -join ', '
+            ClientAddress = $addrs -join ', '
+            DC            = $dcs -join ', '
+            Count         = $gRows.Count
+            EventIds      = $ids -join ', '
+            Detail        = $detail
+            Sentence      = $sentencePrefix + $detail
+            NextStep      = $next
+            Order         = $(switch ($who) { 'Unknown' { 1 } 'NotRecorded' { 2 } default { 0 } })
+        }
+    }
+
+    return @(@($findings) | Where-Object { $_ } | Sort-Object Order, @{ Expression = 'Count'; Descending = $true })
+}
+
+function Get-EtypeGapRows {
+    # Pure: the gate rows with at least one "Can't tell" feature.
+    param([object[]]$Gate)
+    return @(@($Gate) | Where-Object { $_ -and ($_.KdcEvents -ne 'Checked' -or $_.TicketFailures -ne 'Checked') })
+}
+
+function ConvertTo-CsvSafeText {
+    # Prefixes text that Excel would run as a formula (starts with = + - @, tab or carriage
+    # return) with a single quote so it opens as text. Local copy of the helper in
+    # FolderPermissionManager\FolderPermissions.Core.ps1 (tool folders are self-contained).
+    # https://owasp.org/www-community/attacks/CSV_Injection
+    param([AllowNull()][AllowEmptyString()][string]$Text)
+    if ($Text -match '^[=+\-@\t\r]') { "'" + $Text } else { $Text }
+}
+
+function Export-EtypeFindingsCsv {
+    # Writes ADLockoutEtype_<sam>_<stamp>.csv for Invoke-ADLockoutInvestigation's
+    # SUMMARY.txt (owner decision D-023). One row per finding (Kind Account/Client/Unknown)
+    # and one per DC that couldn't be checked (Kind CantTell). Nothing to report -> no file,
+    # so a clean result stays quiet in the summary. Returns the path, or $null.
+    param(
+        [object[]]$Findings,
+        [object[]]$Gate,
+        [string]$SamAccountName,
+        [string]$OutputPath
+    )
+
+    # Account, service and DC names and event text come from the client's directory and
+    # logs, so every cell goes through ConvertTo-CsvSafeText before Excel can see it.
+    $safe = { param($v) ConvertTo-CsvSafeText ([string]$v) }
+    $out = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($f in @($Findings | Where-Object { $_ })) {
+        $out.Add([PSCustomObject]@{ Kind = (& $safe $f.Kind); Account = (& $safe $f.Account); ClientAddress = (& $safe $f.ClientAddress)
+                                    DC = (& $safe $f.DC); Sentence = (& $safe $f.Sentence); NextStep = (& $safe $f.NextStep); Reason = '' })
+    }
+    foreach ($g in (Get-EtypeGapRows -Gate $Gate)) {
+        $out.Add([PSCustomObject]@{ Kind = 'CantTell'; Account = ''; ClientAddress = ''
+                                    DC = (& $safe $g.DC); Sentence = ''; NextStep = ''; Reason = (& $safe $g.Reason) })
+    }
+    if ($out.Count -eq 0) { return $null }
+
+    $path = Join-Path $OutputPath ("ADLockoutEtype_{0}_{1}.csv" -f $SamAccountName, (Get-Date -Format 'yyyy-MM-dd_HHmmss'))
+    try {
+        if (-not (Test-Path -LiteralPath $OutputPath)) { New-Item -ItemType Directory -Force -Path $OutputPath | Out-Null }
+        $out.ToArray() | Export-Csv -LiteralPath $path -NoTypeInformation -Encoding UTF8 -ErrorAction Stop
+        return $path
+    } catch {
+        Write-Status WARN "Could not write the encryption-type findings CSV: $($_.Exception.Message)"
+        return $null
+    }
 }
 
 function Get-LockoutEvents {
@@ -1063,6 +1770,7 @@ $script:StatusCodes = @{
     '0x0'        = 'Success (KDC_ERR_NONE)'
     '0x6'        = 'Username does not exist (KDC_ERR_C_PRINCIPAL_UNKNOWN)'
     '0xC'        = 'KDC policy rejects request (KDC_ERR_POLICY) - e.g. logon hours or workstation restriction'
+    '0xE'        = 'KDC has no support for the encryption type (KDC_ERR_ETYPE_NOTSUPP) - the account or device cannot use an encryption type the DC allows, e.g. it only offers RC4'
     '0x10'       = 'KDC has no support for PADATA type (KDC_ERR_PADATA_TYPE_NOSUPP) - usually a smart-card/certificate problem'
     '0x12'       = 'Client credentials revoked (KDC_ERR_CLIENT_REVOKED) - account disabled, expired, or LOCKED OUT'
     '0x17'       = 'Password has expired (KDC_ERR_KEY_EXPIRED)'
@@ -1089,6 +1797,7 @@ $script:StatusCodes = @{
     '0xC0000413' = 'Machine is protected by an authentication firewall; account not allowed to authenticate to it'
 }
 $script:LockoutReferenceFile = Join-Path $PSScriptRoot 'LockoutReference.psd1'
+$script:RefData = $null
 if (Test-Path -LiteralPath $script:LockoutReferenceFile) {
     try {
         $script:RefData = Import-ReferenceDataFile -Path $script:LockoutReferenceFile
@@ -1096,6 +1805,9 @@ if (Test-Path -LiteralPath $script:LockoutReferenceFile) {
         if ($script:RefData.SuccessStatusCodes) { $script:SuccessStatusCodes = $script:RefData.SuccessStatusCodes }
     } catch { }
 }
+# Encryption-type block facts have no built-in copy: without the psd1 the check reports
+# "Can't tell" on every DC rather than running on guessed constants.
+$script:EtypeRef = if ($script:RefData -and $script:RefData.EncryptionTypeBlocks) { $script:RefData.EncryptionTypeBlocks } else { $null }
 
 function Get-StatusMeaning {
     <#
@@ -1188,7 +1900,9 @@ function Write-LockoutReport {
         [string]$OutputPath,
         [int]$DaysBack,
         [string[]]$DcList,
-        [string]$Pdc
+        [string]$Pdc,
+        [object[]]$EtypeEvidence = @(),   # SQ-006
+        [object[]]$EtypeGate = @()        # SQ-006
     )
 
     if (-not (Test-Path -LiteralPath $OutputPath)) {
@@ -1348,6 +2062,76 @@ function Write-LockoutReport {
         -EmptyText "No bad-password events (4625 / 4771) found in the last $DaysBack day(s)." `
         -Classes  @('time','num','host','ip','type','status','dc')
 
+    # 5b) Encryption-type blocks (4768/4769 0xE + Kdcsvc 203/204/208/209).
+    # Gaps first: a DC that could not be checked is the thing most likely to be misread,
+    # so it leads, before any evidence. "None found" is only ever said about the DCs that
+    # were actually checked.
+    $etypeRows  = @($EtypeEvidence | Where-Object { $_ })
+    $etypeGate  = @($EtypeGate | Where-Object { $_ })
+    $etypeGaps  = @(Get-EtypeGapRows -Gate $etypeGate)
+    $etypeClean = @($etypeGate | Where-Object { $_.KdcEvents -eq 'Checked' -and $_.TicketFailures -eq 'Checked' })
+    $etypeGateHtml = if ($etypeGate.Count -gt 0) {
+        New-DataTable -Rows @($etypeGaps + $etypeClean) `
+            -Headers @('DC','KDC events','4768/4769 failures','Reason') `
+            -Props   @('DC','KdcEvents','TicketFailures','Reason') `
+            -EmptyText 'No domain controllers were checked.' `
+            -Classes  @('dc','status','status','status')
+    } else { '' }
+
+    $etypeEvidenceHtml = if ($etypeRows.Count -gt 0) {
+        $etypeFindings = @(Get-EtypeFindings -Rows $etypeRows -PasswordEvidence ((@($Lockouts | Where-Object { $_ }).Count + @($BadLogons | Where-Object { $_ }).Count) -gt 0))
+        $etypeRaw = @($etypeRows | Sort-Object Time | ForEach-Object {
+            [PSCustomObject]@{
+                Time          = $_.Time
+                EventId       = $_.EventId
+                Account       = $(if ($_.AccountNotRecorded) { "(account couldn't be read)" }
+                                  elseif ($_.Account) { $_.Account } else { @($_.Accounts) -join ', ' })
+                Service       = $_.Service
+                ClientAddress = $_.ClientAddress
+                DC            = $_.DC
+                # The event's own text is the only way to tell whose block it was.
+                Message       = $(if ($_.AccountNotRecorded) { ([string]$_.Message -replace '\s+', ' ').Trim() } else { '' })
+            }
+        })
+        $rawHeaders = @('Time','Event','Account','Service','Client address','DC')
+        $rawProps   = @('Time','EventId','Account','Service','ClientAddress','DC')
+        $rawClasses = @('time','num','host','host','ip','dc')
+        if (@($etypeRows | Where-Object { $_.AccountNotRecorded }).Count -gt 0) {
+            $rawHeaders += 'Event message'; $rawProps += 'Message'; $rawClasses += 'status'
+        }
+        $etypeTableRows = @($etypeFindings | ForEach-Object {
+            [PSCustomObject]@{
+                What     = $(if ($_.Detail) { $_.Detail.Substring(0, 1).ToUpper() + $_.Detail.Substring(1) } else { '' })
+                NextStep = $_.NextStep
+                EventIds = $_.EventIds
+                DC       = $_.DC
+            }
+        })
+        $summaryTable = New-DataTable -Rows $etypeTableRows `
+            -Headers @('What was blocked','Next step','Events','DC') `
+            -Props   @('What','NextStep','EventIds','DC') `
+            -EmptyText 'None.' `
+            -Classes  @('status','status','num','dc')
+        $rawTable = New-DataTable -Rows $etypeRaw -Headers $rawHeaders -Props $rawProps -EmptyText 'None.' -Classes $rawClasses
+        @"
+<div class="tablewrap">
+$summaryTable
+</div>
+<details>
+  <summary>Every encryption-type event ($($etypeRows.Count))</summary>
+  <div class="tablewrap">
+$rawTable
+  </div>
+</details>
+"@
+    } elseif ($etypeGate.Count -eq 0) {
+        '    <p class="empty">Not checked in this run.</p>'
+    } elseif ($etypeGaps.Count -eq 0) {
+        "    <p class=`"empty`">None found on the $($etypeGate.Count) domain controller(s) checked.</p>"
+    } else {
+        "    <p class=`"empty`">None found on the $($etypeClean.Count) domain controller(s) that could be fully checked. The $($etypeGaps.Count) marked Can't tell above were not fully checked, so a block there would not show here.</p>"
+    }
+
     # 6) Admin / Helpdesk Resets (4724)
     $resetHtml = New-DataTable -Rows $Resets `
         -Headers @('Time','Reset By','DC') `
@@ -1432,7 +2216,11 @@ $notesHtml
     # Colour the verdict by what was actually found rather than by severity of wording.
     $lockCount = @($Lockouts).Count
     $badCount  = @($BadLogons).Count
-    $verdictClass = if ($lockCount -gt 0 -or $badCount -gt 0) { 'bad' }
+    # An encryption-type block is a found cause too, even with no lockouts or bad passwords.
+    # A block whose account couldn't be read is not known to be this account's, so on its
+    # own it does not count as a found cause.
+    $etypeKnownCount = @($etypeRows | Where-Object { -not $_.AccountNotRecorded }).Count
+    $verdictClass = if ($lockCount -gt 0 -or $badCount -gt 0 -or $etypeKnownCount -gt 0) { 'bad' }
                     elseif ($verdictArr.Count -gt 0) { 'warn' } else { 'unknown' }
 
     $supportingHtml = if ($supporting.Count -gt 0) {
@@ -1493,6 +2281,17 @@ $badHtml
   </div>
 </details>
 
+<h2>Encryption-type blocks</h2>
+<p class="meta">Kerberos sign-ins a domain controller refused because the account or the
+device can't use an encryption type the DC allows (the 2026 RC4 changes). These are not
+bad passwords and do not show above. Each DC is listed with whether it could be checked.
+For 4768/4769 only the Kerberos Service Ticket Operations audit setting is checked here;
+Kerberos Authentication Service (which writes 4768) is checked by Test-ADAuditPolicy.ps1.</p>
+<div class="tablewrap">
+$etypeGateHtml
+</div>
+$etypeEvidenceHtml
+
 <h2>When it locked</h2>
 <div class="tablewrap">
 $lockoutHtml
@@ -1533,7 +2332,11 @@ $entraHtml
   <b>10</b> = RDP, <b>4</b> = scheduled task.<br><br>
   Lockout events (4740) come from the PDC emulator; bad-password events (4625/4771) are
   collected from every domain controller. Entra Connect diagnostics require
-  <code>-EntraConnectServer</code>.
+  <code>-EntraConnectServer</code>.<br><br>
+  Encryption-type blocks come from each DC's Security log (4768/4769 with status 0xE) and
+  System log (Kdcsvc events 203/204/208/209, written once the DC has the KB5073381
+  updates); reading the audit setting that decides whether 4769 failures are logged needs
+  administrator rights on the DC.
 </footer>
 </body>
 </html>
@@ -1605,9 +2408,15 @@ if (-not $LoadFunctionsOnly) {
         Write-Status INFO "Entra Connect diagnostics not run. Supply -EntraConnectServer to include sync-server evidence."
     }
 
+    # Kerberos encryption-type blocks: same DCs and window as the bad-logon sweep.
+    $etype = Get-EtypeEvidence -DomainControllers $dcList -SamAccountName $user.SamAccountName -DaysBack $DaysBack
+    if (@($etype.Rows).Count -gt 0) {
+        Write-Status WARN "Found $(@($etype.Rows).Count) encryption-type block event(s) for $($user.SamAccountName)."
+    }
+
     # --- Verdict ---
     $verdict = Get-LockoutVerdict -Lockouts $lockouts -BadLogons $badLogons -Policy $policy `
-        -EntraConnectDiagnostics $entraConnectDiagnostics
+        -EntraConnectDiagnostics $entraConnectDiagnostics -EtypeEvidence $etype.Rows -EtypeGate $etype.Gate
     Write-Status INFO "Verdict:"
     foreach ($line in $verdict) { Write-Host "    - $line" -ForegroundColor White }
 
@@ -1615,6 +2424,13 @@ if (-not $LoadFunctionsOnly) {
     $reportPath = Write-LockoutReport -User $user -Policy $policy -Lockouts $lockouts `
         -BadLogons $badLogons -Resets $resets -Verdict $verdict `
         -EntraConnectDiagnostics $entraConnectDiagnostics -OutputPath $OutputPath `
-        -DaysBack $DaysBack -DcList $dcList -Pdc $pdc
+        -DaysBack $DaysBack -DcList $dcList -Pdc $pdc -EtypeEvidence $etype.Rows -EtypeGate $etype.Gate
     Write-Status PASS "Report written: $reportPath"
+
+    # Encryption-type findings for Invoke-ADLockoutInvestigation's SUMMARY.txt. Written only
+    # when there is a finding or a DC that couldn't be checked.
+    $passwordEvidence = (@($lockouts | Where-Object { $_ }).Count + @($badLogons | Where-Object { $_ }).Count) -gt 0
+    $etypeCsv = Export-EtypeFindingsCsv -SamAccountName $user.SamAccountName -OutputPath $OutputPath `
+        -Findings (Get-EtypeFindings -Rows $etype.Rows -PasswordEvidence $passwordEvidence) -Gate $etype.Gate
+    if ($etypeCsv) { Write-Status INFO "Encryption-type findings: $etypeCsv" }
 }

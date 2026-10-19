@@ -25,3 +25,11 @@ faster troubleshooting and faster, more accurate data collection.
 - **P-003 Runs where the problem is.** Works on the oldest supported server (PowerShell 3.0
   floor where possible), needs no installs, and targets remote machines with
   `-ComputerName` rather than assuming it runs on the target.
+- **P-004 Tier 1 never gets a destructive or privileged step.** When the fix removes,
+  deletes, re-enables, unblocks or grants privileged access, the next step is "Escalate" plus
+  the reason. When privilege can't be established, the step carries an approval gate
+  ("Get senior approval first"). From D-017, D-024, SQ-013 and SQ-019.
+- **P-005 Anything bound for a ticket is paste-safe by default.** Notes and clipboard text
+  carry the verdict, checks and next step. IPs, paths, raw error text and third-party data
+  stay in the local reports, and no new files are left on client servers. `-FullDetail` is
+  the explicit opt-out. From D-009, D-013, D-025 and D-033.

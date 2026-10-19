@@ -201,6 +201,27 @@ function Write-CliChangeResult {
     @($results | Where-Object { $_ -eq 'Failed' -or $_ -eq 'Partly done' }).Count -gt 0 -or $incomplete.Count -gt 0
 }
 
+function Get-CliRefusalNextStep {
+    <#
+    .SYNOPSIS
+        What the [FAIL] line of a refused folder tells the technician to do next. Only a
+        protected folder (D-036) gets the -AllowSystemFolder hint: a link whose destination
+        could not be found out (Test-UnresolvedDestinationRefusal) leads somewhere nobody has
+        checked, so the way forward is the folders beside it, or someone more senior. When no
+        link is involved (Test-ChosenFolderUncheckedRefusal: the chosen folder's network drive,
+        network path or DFS lookup could not be resolved), the way forward is the real server
+        path instead.
+    #>
+    param([Parameter(Mandatory)][string]$Refusal)
+    if (Test-ChosenFolderUncheckedRefusal -Refusal $Refusal) {
+        return 'Check the path is reachable and run this against the real server path (Properties > DFS tab), or ask a senior engineer.'
+    }
+    if (Test-UnresolvedDestinationRefusal -Refusal $Refusal) {
+        return 'Take ownership of the folders beside the link instead, or ask a senior engineer.'
+    }
+    'If you are sure, run the script again with -AllowSystemFolder.'
+}
+
 function Confirm-CliStep {
     # True when the technician types y or Y. Anything else, including Enter, is no (the
     # capital N says so). Read-Host throws when the host cannot ask; the caller catches it.
@@ -307,7 +328,7 @@ function Invoke-FolderPermissionCli {
     # or a short name.
     $refusal = if ($AllowSystemFolder) { $null } else { Get-TreeOwnershipTargetRefusal -Path $Path }
     if ($refusal) {
-        Write-Host "[FAIL] $refusal If you are sure, run the script again with -AllowSystemFolder. Nothing was changed." -ForegroundColor Red
+        Write-Host "[FAIL] $refusal $(Get-CliRefusalNextStep -Refusal $refusal) Nothing was changed." -ForegroundColor Red
         return 1
     }
 
@@ -322,7 +343,7 @@ function Invoke-FolderPermissionCli {
     # saved (the core checks again after its snapshot).
     $linkRefusal = if ($AllowSystemFolder) { $null } else { Get-TreeLinkRefusal -Path $Path -LinkPaths @($tree.Links) }
     if ($linkRefusal) {
-        Write-Host "[FAIL] $linkRefusal If you are sure, run the script again with -AllowSystemFolder. Nothing was changed." -ForegroundColor Red
+        Write-Host "[FAIL] $linkRefusal $(Get-CliRefusalNextStep -Refusal $linkRefusal) Nothing was changed." -ForegroundColor Red
         return 1
     }
     $scope = "$(@($tree.Items).Count) item(s): $Path and every subfolder and file under it"
@@ -336,7 +357,8 @@ function Invoke-FolderPermissionCli {
     }
     $links = @($tree.Links)
     if ($links.Count -gt 0) {
-        $warning += " It contains $($links.Count) junction(s) or symbolic link(s), which are listed but not gone into. Microsoft's documentation does not say whether takeown and icacls follow them, and icacls changes what a symbolic link points to, so check them afterwards: $($links -join '; ')."
+        $linkText = Get-LinkListText -LinkPaths $links
+        $warning += " It contains $($linkText.Noun), which are listed but not gone into. Microsoft's documentation does not say whether takeown and icacls follow them, and icacls changes what a symbolic link points to, so check them afterwards: $(@($linkText.Items) -join '; ')."
     }
     Write-Host $warning -ForegroundColor Yellow
     $takeOwnership = $whatIf -or $Force

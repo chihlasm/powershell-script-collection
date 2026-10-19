@@ -412,6 +412,7 @@ Investigates why an Active Directory account keeps locking out and traces the **
 - **Domain-joined machine** — run from a domain controller or a management workstation with RSAT
 - Permission to **read the Security event log** on the domain controllers (the script reads 4740/4625/4771/4724 events remotely via `Get-WinEvent`)
 - For optional Entra Connect diagnostics: permission to query services via CIM and read Application / PTA agent event logs on the Entra Connect server
+- For the encryption-type check: permission to read the **System** log on each DC, and **administrator rights on the DC over WinRM** to read the Kerberos Service Ticket Operations audit setting with `auditpol`. Without admin rights that part of the check says "Can't tell" for the DC instead of "none found". `Test-ADAuditPolicy.ps1` must be in the same folder (it supplies the auditpol parser).
 
 #### Installing RSAT AD Tools
 
@@ -467,6 +468,35 @@ Queries event **4740** (account locked out) on the PDC emulator, which reliably 
 ### 4. Bad-password source tracing — Events 4625 / 4771 (all DCs)
 Queries every discovered DC (or those named in `-DomainController`) for failed-logon (**4625**) and Kerberos pre-auth failure (**4771**) events, extracting the **source host / IP** and **logon type** so you can tell a mapped drive (type 3) from an RDP session (type 10) from a service (type 5). Each DC is queried in its own `try/catch` so one unreachable DC doesn't halt the run.
 
+### 4b. Encryption-type blocks — Events 4768 / 4769 and Kdcsvc 203 / 204 / 208 / 209 (all DCs)
+
+Since the 2026 Kerberos RC4 changes ([KB5073381](https://support.microsoft.com/topic/1ebcda33-720a-4da8-93c1-b0496e1910dc), CVE-2026-20833), a domain controller can refuse a sign-in because the account or the device can't use an encryption type it still allows. It looks like "can't sign in / keeps locking", but no bad password is ever recorded. Each DC is checked for:
+
+- **4768 / 4769 failures with status `0xE`** (`KDC_ERR_ETYPE_NOTSUPP`) in the Security log. Both events are written for success and failure, so only `0xE` counts. The query filters on the event ID and the audit-failure keyword only (no EventData filter, which would scan the whole log).
+- **Kdcsvc events 203, 204, 208 and 209** in the System log, written by DCs with the January 2026 or later updates. These say which side to fix:
+  - **204 / 209: the account.** The service account has no AES keys. Next step: reset its password so Active Directory generates AES keys, then update the password wherever the service uses it.
+  - **203 / 208: the device.** The device at the client address only offers RC4. Next step: update or replace it. Only as a last resort, Microsoft documents allowing RC4 on that one service account (`msDS-SupportedEncryptionTypes` `0x24`). That keeps RC4 on and needs senior or security sign-off first.
+  - The warnings 201/202/206/207 ("will break when enforced") are not reported.
+
+Rows for the investigated account match whether it was the account asking for the ticket or the service it was trying to reach, in `sam`, `DOMAIN\sam` or UPN form. A Kdcsvc block whose account can't be read from the event is kept rather than dropped: the verdict says "an encryption-type block was logged on *DC* but the account couldn't be read - check the event", and the report shows the event's message text so you can see whose it was.
+
+When there are no lockouts and no bad passwords, the headline says **"Not a password problem: encryption type blocked"** and names the account or device and the next step. When there are real lockouts or bad passwords, they stay the headline and the block is listed after them, so a stale-password problem is never hidden.
+
+Each DC gets a **Checked / Can't tell** row for each kind of evidence, with the reason:
+
+| Can't tell because | What it means |
+|---|---|
+| couldn't reach the DC | The Security log query failed (DC down, RPC/firewall, no rights). |
+| the DC doesn't have the KB5073381 updates | It has no Kdcsvc event provider, or its Kdcsvc event list has no event 203, so it can't write these events. |
+| couldn't read the Kdcsvc event list | The list came back empty or couldn't be read, so it isn't known whether the DC writes these events. The System log is still read; any event found there counts. |
+| couldn't read the 4768/4769 events | The Security log returned an event that couldn't be parsed. |
+| not logging failures | Kerberos Service Ticket Operations auditing is `Success` or `No Auditing`, so 4769 failures are never written. Only this subcategory is checked here; Kerberos Authentication Service (which writes 4768) is checked by `Test-ADAuditPolicy.ps1`, the investigation's audit gate. |
+| audit policy couldn't be read | `auditpol` needs administrator rights on the DC. |
+
+A DC marked Can't tell is never reported as "none found". The report's **Encryption-type blocks** section lists those DCs first, then the findings, then every event behind a collapsed list. When every DC was checked and nothing was found, it says "None found on the *n* domain controller(s) checked" and the verdict stays exactly as it would be without this check.
+
+When there is a finding or a DC that couldn't be checked, the script also writes `ADLockoutEtype_<user>_<stamp>.csv` beside the report (cells starting with `=`, `+`, `-` or `@` are prefixed with `'` so Excel opens them as text); `Invoke-ADLockoutInvestigation.ps1` lifts the one written during its own run into `SUMMARY.txt` under **ENCRYPTION-TYPE BLOCKS**, straight after the findings.
+
 ### 5. Admin / helpdesk resets — Event 4724 (all DCs)
 Queries event **4724** to show whether someone keeps manually resetting the password — which explains the "forced to reset" perception and distinguishes human resets from automated lockouts.
 
@@ -517,7 +547,7 @@ A self-contained, dark-themed `.html` file written to `-OutputPath`, which defau
 ```
 AD-LockoutDiagnostics\Reports\ADLockout_jdoe_2026-08-12_141602.html
 ```
-Sections: **Likely Cause → Account State → Effective Lockout Policy → Lockout Timeline (4740) → Bad-Password Sources (4625/4771) → Admin Resets (4724) → Entra Connect / Hybrid Auth Diagnostics**.
+Sections: **Likely Cause → Account State → Effective Lockout Policy → Lockout Timeline (4740) → Bad-Password Sources (4625/4771) → Encryption-type blocks (4768/4769, Kdcsvc) → Admin Resets (4724) → Entra Connect / Hybrid Auth Diagnostics**.
 
 ### How to Read the Report
 
@@ -534,6 +564,10 @@ Sections: **Likely Cause → Account State → Effective Lockout Policy → Lock
 | 4625 | Security — per DC       | Failed logon             | TargetUserName, IpAddress, WorkstationName, LogonType    |
 | 4771 | Security — per DC       | Kerberos pre-auth failed | TargetUserName, IpAddress (`Status 0x18` = bad password) |
 | 4724 | Security — per DC       | Password reset attempt   | TargetUserName, SubjectUserName (who did it)             |
+| 4768 | Security — per DC       | Kerberos TGT request (success or failure) | TargetUserName, IpAddress (`Status 0xE` = encryption type not supported) |
+| 4769 | Security — per DC       | Kerberos service ticket request (success or failure) | TargetUserName, ServiceName, IpAddress (`Status 0xE` = encryption type not supported) |
+| 203, 208 | System — per DC, source Kdcsvc | KDC blocked: the device only offers RC4 | Account Name, Service Name, Client Address |
+| 204, 209 | System — per DC, source Kdcsvc | KDC blocked: the service account has no AES keys | Account Name, Service Name, Client Address |
 
 ## Error Handling
 
