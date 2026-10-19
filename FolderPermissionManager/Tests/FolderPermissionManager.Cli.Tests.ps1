@@ -11,8 +11,8 @@
       Invoke-FolderPermissionCli -Path <dir> [-LogFolder <dir>] [-Force] [-WhatIf] [-Confirm]
         [CmdletBinding(SupportsShouldProcess)]; never throws for a declined prompt.
       Confirmations are asked with Read-Host (as the old script did); 'y'/'Y' means yes, anything
-      else means no. Taking ownership asks BEFORE the take-ownership call, and copying the
-      top-level permissions to the subfolders asks again on its own. -Force asks nothing.
+      else means no. Taking ownership asks BEFORE the take-ownership call; there is no
+      copy-to-subfolders step (D-035). -Force asks nothing.
       -WhatIf never prompts. Changes go through the core (backups and change log).
       The script is #Requires -Version 4.0 or lower. If it adds -RunAsAdministrator, check
       elevation at run time instead: a #Requires -RunAsAdministrator line stops these tests
@@ -73,6 +73,8 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         Mock takeown { }
         Mock icacls { }
         Mock Invoke-AclTool { [PSCustomObject]@{ ExitCode = 0; Output = '' } }
+        # The test host may be non-interactive; these tests are about a technician at a console.
+        Mock Test-CliHostInteractive { $true }
         Mock Read-Host {
             $script:Prompts.Add("$Prompt")
             if ($script:Answers.Count -gt 0) { $script:Answers.Dequeue() } else { 'n' }
@@ -106,25 +108,11 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
 
         Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
 
-        # Two questions: ownership (declined), then the copy step (default answer: no).
-        Should -Invoke Read-Host -Times 2 -Exactly -Scope It
+        # One question: ownership (declined). There is no copy step to ask about (D-035).
+        Should -Invoke Read-Host -Times 1 -Exactly -Scope It
         Test-Path -LiteralPath (Join-Path $script:Log 'Backups') | Should -BeFalse -Because 'nothing was backed up, so nothing was about to change'
         Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It -Because 'ownership must not be taken before the user agrees'
         Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
-        Should -Invoke takeown -Times 0 -Exactly -Scope It
-        Should -Invoke icacls -Times 0 -Exactly -Scope It
-    }
-
-    It 'AC20_Cli_CopyConfirmationDeclined_PermissionsAreNotCopied' {
-        $script:Answers.Enqueue('y')   # take ownership: yes
-        $script:Answers.Enqueue('n')   # copy permissions to subfolders: no
-
-        Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
-
-        $script:Prompts.Count | Should -BeGreaterOrEqual 2
-        Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
-        # Ownership was agreed to, so it went through the wrapper (backed up first).
-        Should -Invoke Invoke-AclTool -Times 1 -Exactly -ParameterFilter { $Tool -eq 'takeown' } -Scope It
         Should -Invoke takeown -Times 0 -Exactly -Scope It
         Should -Invoke icacls -Times 0 -Exactly -Scope It
     }
@@ -155,22 +143,6 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
     }
 
     # --- Fix round 1 (SQ-014 review) ---------------------------------------------------------
-
-    It 'AC20_Cli_OwnershipDeclinedThenCopyAccepted_CopiesThroughTheCoreWithABackupAndLeavesOwnersAlone' {
-        $script:Answers.Enqueue('n')   # take ownership: no
-        $script:Answers.Enqueue('y')   # copy permissions to subfolders: yes
-
-        $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
-
-        $code | Should -Be 0
-        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It -Because 'ownership was declined'
-        Should -Invoke Set-Acl -Times 2 -Exactly -Scope It -Because 'one write per subfolder (sub1, sub2), through Copy-FolderPermission'
-        @(Get-ChildItem -LiteralPath (Join-Path $script:Log 'Backups') -Filter '*_CopyPermissions.csv').Count | Should -Be 1
-        @(Get-ChildItem -LiteralPath (Join-Path $script:Log 'Backups') -Filter '*_TakeOwnership.csv').Count | Should -Be 0
-        @($script:Lines | Where-Object { $_ -like '`[INFO`] Copying permissions (next) does not depend on taking ownership*' }).Count | Should -Be 1
-        $log = @(Import-Csv -LiteralPath @(Get-ChildItem -LiteralPath $script:Log -Filter 'Changes_*.csv')[0].FullName)
-        @($log | ForEach-Object { $_.Action } | Sort-Object -Unique) | Should -Be @('Copy permissions')
-    }
 
     It 'AC20_Cli_ShowsTheItemCountBeforeAskingAndAsksYesNoWithNoAsTheDefault' {
         Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
@@ -273,13 +245,11 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         @($script:Lines | Where-Object { $_ -like '`[WARN`] Took ownership*' }).Count | Should -Be 1
     }
 
-    It 'AC16_Cli_JunctionIsCountedInTheWarningAndTheResultAndIsSkippedByTheCopy' {
+    It 'AC16_Cli_JunctionIsCountedInTheWarningAndTheResult' {
         $elsewhere = Join-Path $TestDrive ('cli-junction-target-' + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path (Join-Path $elsewhere 'inside') -Force | Out-Null
         $link = Join-Path $script:Dir 'link'
         New-Item -ItemType Junction -Path $link -Target $elsewhere | Out-Null
-        $script:SetAclPaths = [System.Collections.Generic.List[string]]::new()
-        Mock Set-Acl { $script:SetAclPaths.Add("$LiteralPath") }
 
         $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log -Force
 
@@ -287,22 +257,6 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         $scope = @($script:Lines | Where-Object { $_ -like '`[WARN`] Taking ownership makes *' })
         $scope[0] | Should -BeLike "*It contains 1 junction(s) or symbolic link(s), which are listed but not gone into. Microsoft's documentation does not say whether takeown and icacls follow them*$link*"
         @($script:Lines | Where-Object { $_ -like '`[WARN`] Took ownership*1 junction(s) or symbolic link(s)*' }).Count | Should -Be 1
-        @($script:SetAclPaths | Sort-Object) | Should -Be @((Join-Path $script:Dir 'sub1'), (Join-Path $script:Dir 'sub2')) -Because 'the copy goes to real subfolders only, not into or onto the junction'
-        @($script:Lines | Where-Object { $_ -like '`[INFO`] 1 junction(s) or symbolic link(s) are skipped*' }).Count | Should -Be 1
-    }
-
-    It 'AC20_Cli_CopyStepListsSubfoldersWithoutRecursingGetChildItem' {
-        New-Item -ItemType Directory -Path (Join-Path $script:Dir 'sub1\deeper') -Force | Out-Null
-        $script:Answers.Enqueue('n')   # take ownership: no
-        $script:Answers.Enqueue('y')   # copy: yes
-        # Whether Get-ChildItem -Recurse follows links depends on the PowerShell version; the CLI
-        # lists each folder on its own (Get-OwnerTreeItem) instead.
-        Mock Get-ChildItem { throw 'Get-ChildItem -Recurse must not be used (test)' } -ParameterFilter { $Recurse }
-
-        $null = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
-
-        Should -Invoke Get-ChildItem -Times 0 -Exactly -Scope It -ParameterFilter { $Recurse }
-        Should -Invoke Set-Acl -Times 3 -Exactly -Scope It -Because 'sub1, sub1\deeper and sub2'
     }
 
     It 'AC20_Cli_SaysHowToRecogniseAnInterruptedRunBeforeTakingOwnership' {
@@ -347,7 +301,6 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
             & $script:RealGetItemOwner -Path $Path
         }
         $script:Answers.Enqueue('y')   # take ownership: yes
-        $script:Answers.Enqueue('n')   # copy permissions to subfolders: no
 
         $code = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
 
@@ -535,7 +488,6 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         })
         Mock Get-ChildItem { throw 'Access to the path is denied. (test)' } -ParameterFilter { $script:LockedSet -contains $LiteralPath }
         $script:Answers.Enqueue('y')   # take ownership: yes
-        $script:Answers.Enqueue('n')   # copy: no
 
         $null = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log
 
@@ -685,10 +637,8 @@ Describe 'FolderPermissionManager.ps1 (command line): DFS targets, unresolvable 
             $scope[0] | Should -Match 'DFS link'
             $scope[0] | Should -Match ([regex]::Escape($script:DfsLink))
             $scope[0] | Should -Not -Match ([regex]::Escape('junction(s) or symbolic link(s)'))
-            $skipped = @($script:Lines | Where-Object { $_ -like '`[INFO`] *are skipped*' })
-            $skipped.Count | Should -Be 1
-            $skipped[0] | Should -Match 'DFS link'
-            $skipped[0] | Should -Not -Match ([regex]::Escape('junction(s) or symbolic link(s)'))
+            # The "[INFO] ... are skipped" line came from the copy-to-subfolders step, which D-035
+            # removed from the CLI, so it is no longer asserted here.
         }
 
         It 'AC20c_Cli_DfsLinkWhoseTargetCannotBeFound_IsRefusedWithoutTheAllowSystemFolderHint' {

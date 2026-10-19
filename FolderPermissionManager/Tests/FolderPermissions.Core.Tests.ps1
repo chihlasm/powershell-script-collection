@@ -140,6 +140,8 @@ Describe 'FolderPermissions.Core' {
             $dir = New-TestFolder "ac2-$Which"
             $src = New-TestFolder "ac2-src-$Which"
             $log = Join-Path $TestDrive "ac2-logs-$Which"
+            # Fixture (SQ-015): copy only copies the source's own rules, and a new $TestDrive folder only inherits.
+            $script:Seed[$src] = Get-SeededSddl $src
             Mock New-Item { throw 'disk full (test)' }
             Mock Export-Csv { throw 'disk full (test)' }
 
@@ -269,6 +271,8 @@ Describe 'FolderPermissions.Core' {
             $dir = New-TestFolder 'ac8'
             $src = New-TestFolder 'ac8-src'
             $log = Join-Path $TestDrive 'ac8-logs'
+            # Fixture (SQ-015): copy only copies the source's own rules, and a new $TestDrive folder only inherits.
+            $script:Seed[$src] = Get-SeededSddl $src
 
             $rows = @()
             $rows += Add-FolderPermission -Path $dir -Identity 'BUILTIN\Users' -Rights 'Modify' -LogFolder $log -WhatIf
@@ -439,6 +443,8 @@ Describe 'FolderPermissions.Core' {
             $script:Locked = New-TestFolder "locked-$Which"
             $src = New-TestFolder "locked-src-$Which"
             $log = Join-Path $TestDrive "locked-logs-$Which"
+            # Fixture (SQ-015): copy only copies the source's own rules, and a new $TestDrive folder only inherits.
+            $script:Seed[$src] = Get-SeededSddl $src
 
             $rows = @(switch ($Which) {
                 'Add'    { Add-FolderPermission -Path $script:Locked -Identity 'BUILTIN\Users' -Rights 'Modify' -LogFolder $log }
@@ -504,6 +510,8 @@ Describe 'FolderPermissions.Core' {
             $dir = New-TestFolder "empty-$Which"
             $src = New-TestFolder "empty-src-$Which"
             $log = Join-Path $TestDrive "empty-logs-$Which"
+            # Fixture (SQ-015): copy only copies the source's own rules, and a new $TestDrive folder only inherits.
+            $script:Seed[$src] = Get-SeededSddl $src
 
             $rows = @(switch ($Which) {
                 'Add'           { Add-FolderPermission -Path @('', $dir) -Identity 'BUILTIN\Users' -Rights 'Modify' -LogFolder $log }
@@ -582,6 +590,8 @@ Describe 'FolderPermissions.Core' {
         It 'text Excel would run as a formula is quoted in the change log and the backup, and the backup still verifies' {
             $log = Join-Path $TestDrive 'formula-logs'
             $src = New-TestFolder 'formula-src'
+            # Fixture (SQ-015): copy only copies the source's own rules, and a new $TestDrive folder only inherits.
+            $script:Seed[$src] = Get-SeededSddl $src
 
             $rows = @(Copy-FolderPermission -SourcePath $src -TargetPath '=1+1' -LogFolder $log)
             $rows[0].Result | Should -Be 'Skipped (not found)'

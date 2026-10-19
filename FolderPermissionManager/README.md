@@ -13,7 +13,7 @@ A browser-based interface for managing folder permissions across local drives an
 - View ownership, inheritance status, and full ACL entries for any folder
 - Take ownership (single folder or recursive)
 - Add and remove permission entries (identity, rights, allow/deny)
-- Replicate parent permissions to selected child folders
+- Copy a folder's own permissions to other folders (adds only, nothing is removed)
 - Export permissions report as CSV
 - Dark/light theme toggle
 
@@ -43,11 +43,45 @@ why. This covers:
 
 - Add permission and Remove permission (folder, or selected files)
 - Take ownership of this folder only, or of selected files
-- Copy permissions to other folders, when "apply recursively" is not ticked
+- Copy permissions to other folders
 - Take ownership of a folder **and all its subfolders and files**: the current owner of every
   item is saved first (see the owner snapshot below)
 
-Copying permissions with "apply recursively" ticked is **not backed up or logged yet**.
+### Copy Permissions To...
+
+**Copy only adds.** It takes the permissions set directly on the current folder and adds them
+to each folder you list. Nothing already on a target folder is removed.
+
+- Only the current folder's **own** permissions are copied. Permissions it only inherits from
+  its parent are not, so later changes higher up the share still reach the target. If the
+  folder has no permissions of its own, nothing changes and the status bar says
+  `Nothing to copy: <folder> has no permissions of its own. All of its permissions come from <parent>. Open a folder that has its own permissions, or use Add Permission.`
+- Each permission arrives exactly as it is: the same person or group, the same level of access
+  (Read & execute stays Read & execute; special combinations stay as they are), Allow or Deny,
+  and the same "applies to" setting.
+- A target that already has every one of those permissions is not changed
+  (`Skipped (nothing to copy)`, "Already has these permissions; nothing changed."). The status
+  bar shows this as information, not as a problem. For a target inside the current folder, a
+  permission it already inherits from the current folder counts as already there: it is not
+  added again as the target's own, so removing it from the current folder later still removes
+  it everywhere below.
+- If the current folder has a Deny permission of its own, the dialog says so before you copy:
+  a Deny is copied too and blocks access even where another permission allows it.
+- Each target folder is changed once. **Subfolders and files under it that inherit permissions
+  get the new ones automatically**, as they would in Explorer.
+- A target that is a file is refused: "<path> is a file. Copy permissions copies to folders only."
+- Folder names with `[` or `]` (such as `HR [old]`) work, here and everywhere else in the tool.
+
+**Known limitation: subfolders that block inheritance are not changed.** A subfolder under a
+target with inheritance turned off (often on purpose, such as `HR\Confidential`) keeps exactly
+the permissions it had. Windows only passes inheritable permissions to children that inherit
+([SetNamedSecurityInfo](https://learn.microsoft.com/windows/win32/api/aclapi/nf-aclapi-setnamedsecurityinfow),
+[SE_DACL_PROTECTED](https://learn.microsoft.com/windows/win32/secauthz/security-descriptor-control)).
+Add the permission to such a subfolder yourself if it needs it. The status bar says this after
+every copy.
+
+The older "Apply recursively" option is gone. It reset every custom permission below the target
+and could turn Read & execute into a broken command.
 
 After each change the status bar says what was done and where it was logged, for example
 `Added Allow Modify for CONTOSO\HR-Staff on \\FS01\Data\HR. Backed up to ...\Backups\2026-10-17_142233_AddPermission.csv and logged to ...\Changes_2026-10-17.csv.`
@@ -60,7 +94,7 @@ The console shows the log folder at startup.
 | `Logs\Backups\<yyyy-MM-dd_HHmmss>_TakeOwnership.csv` (whole folder) | The owner snapshot written before taking ownership of a folder and everything under it: `Path`, `ItemType`, `Owner`, `OwnerSid`, one row for the folder and every subfolder and file under it (hidden ones too). |
 | `Logs\Backups\<yyyy-MM-dd_HHmmss>_NotOpened.txt` (whole folder) | Written after taking ownership when some folders could not be opened: all of them, one path per line, for the escalation. Not a backup: their permissions were not changed. |
 
-`Result` is one of `Done`, `Partly done`, `Failed`, `Skipped (not found)` or `Skipped (WhatIf)`. A `Failed`
+`Result` is one of `Done`, `Partly done`, `Failed`, `Skipped (not found)`, `Skipped (nothing to copy)` or `Skipped (WhatIf)`. A `Failed`
 row whose `NewValue` differs from its `OldValue` was **partly changed** (for example, takeown
 gave the folder to Administrators but the owner could not then be set to you); the status bar
 says so and points at the backup. Each row is written as soon as that item is done, so a batch
@@ -221,6 +255,11 @@ foreach ($row in Import-Csv -LiteralPath $backup) {
 }
 ```
 
+A Copy permissions backup can also hold rows for folders that turned out to need no change:
+they already had the permissions by the time of the change, and the change log shows them as
+`Skipped (nothing to copy)`. The tool did not change those folders: leave their rows out when
+you restore, or a later change to them made by someone else would be undone.
+
 Remove the rows for items you do not want to restore first. Use `-LiteralPath`, not `-Path`:
 folder names with `[` or `]` are otherwise read as wildcards. Run this in an elevated
 PowerShell window: changing permissions with `Set-Acl` needs the right to change them, and
@@ -297,18 +336,33 @@ decides the result by reading the owners back and only shows the tools' output.
 
 ### FolderPermissionManager.ps1 (CLI)
 
-For servers without a browser. It takes ownership of a folder and everything under it, shows
-the permissions and the owner of each subfolder, and then copies the top folder's permissions to
-every subfolder (entries a subfolder lacks are added; nothing is removed). **It asks before
-taking ownership and again before copying**, and every change is backed up and logged exactly
-as in the GUI (owner snapshot before taking ownership, SDDL backup before copying, same
-`Changes_<yyyy-MM-dd>.csv`). Changes anything? **Yes**: owners and permissions.
+For servers without a browser. It takes ownership of a folder and everything under it, then
+shows the permissions and the owner of each subfolder. **It asks before taking ownership**, and
+the change is backed up and logged exactly as in the GUI (owner snapshot first, same
+`Changes_<yyyy-MM-dd>.csv`). Changes anything? **Yes**: owners. It does not change permissions.
+
+To give someone access: add it on the folder they need. Adding it on a folder gives them
+everything inside it that inherits, so adding it on a share or home-folder root gives them
+everything below. Subfolders that block inheritance (inheritance turned off, often locked down
+on purpose) do not get it, nor do the folders inside them; the script names them after the
+owner list. An explicit Deny on a subfolder still wins. Add it with Add Permission in the GUI
+or on Explorer's Security tab (Properties > Security > Edit > Add). Without a browser:
+
+```powershell
+icacls "D:\Shares\HR\Finance" /grant "DOMAIN\user:(OI)(CI)RX"
+```
+
+`(OI)(CI)` lets the files and subfolders inherit it and `RX` is read and execute; use M only
+if they must change or delete files (`(OI)(CI)M`, Modify). The script prints the same command
+with a placeholder under your folder, not the folder itself. Do not add /T: it writes the
+permission onto every subfolder and file, including the ones that block inheritance
+([icacls](https://learn.microsoft.com/windows-server/administration/windows-commands/icacls)).
 
 ```powershell
 # Dry run: shows what would change; nothing is changed, backed up or logged
 .\FolderPermissionManager.ps1 -Path 'D:\Shares\HR' -WhatIf
 
-# Asks before each step
+# Asks before taking ownership
 .\FolderPermissionManager.ps1 -Path 'D:\Shares\HR'
 
 # No questions; backups and log in the ticket folder
@@ -319,16 +373,29 @@ as in the GUI (owner snapshot before taking ownership, SDDL backup before copyin
 |-----------|---------|-------------|
 | `-Path` | asks | The top folder |
 | `-LogFolder` | `Logs` next to the script | Where backups and the change log go (same rules as the GUI) |
-| `-Force` | — | Do not ask before taking ownership or copying permissions |
+| `-Force` | — | Do not ask before taking ownership (needed, or `-WhatIf`, on a host that cannot ask) |
 | `-AllowSystemFolder` | — | Take ownership even of a drive root or a folder in `%SystemRoot%`, `%ProgramFiles%`, `%ProgramFiles(x86)%` or `%ProgramData%`, on `SYSVOL`, `NETLOGON` or `PRINT$`, or with a junction or symbolic link inside that leads into one, which is refused otherwise (see above) |
 | `-WhatIf` | — | Show what would be changed and change nothing |
 
-Before each step it prints what will change with `[WARN]` (for ownership, how many items:
-the folder is counted first, read only, and `-WhatIf` shows the count too), then asks
-`Continue? (y/N)`. Answer `y` to go ahead; anything else (including Enter) skips that step.
-Declining ownership, or ownership failing, still shows the permissions and offers the copy: it
-does not depend on ownership. Run it in an elevated window: it stops with `[FAIL]` otherwise
-(except with `-WhatIf`). See "Undo a change" above to put owners or permissions back.
+Before taking ownership it prints what will change with `[WARN]` (how many items: the folder is
+counted first, read only, and `-WhatIf` shows the count too), then asks `Continue? (y/N)`.
+Answer `y` to go ahead; anything else (including Enter) leaves the owners alone. Declining
+ownership, or ownership failing, still shows the permissions. Run it in an elevated window: it
+stops with `[FAIL]` otherwise (except with `-WhatIf`). See "Undo a change" above to put owners
+back.
+
+A remote console (Enter-PSSession, or psexec) is asked like a local one. A host that cannot
+ask (a scheduled task, or PowerShell started with `-NonInteractive`) needs `-Force` or
+`-WhatIf`. Started with `-NonInteractive`, the script stops with `[FAIL] Run with -Force, or
+-WhatIf for a dry run; this host cannot ask.` and exit code `1` before anything is counted,
+saved or changed. Any other host whose question fails stops at the question with `[FAIL]
+This host cannot ask; run with -Force, or -WhatIf for a dry run. Nothing was changed.` and exit
+code `1`; the log folder is only set up after you answer `y`. With `-Force` but no `-Path` it
+stops the same way and asks for `-Path`.
+
+After the owner list the script names the subfolders that block inheritance. A subfolder whose
+permissions it cannot read is counted as "could not be checked" (it may block inheritance too),
+so check those by hand.
 
 A drive root or a Windows folder is refused straight away, before any question, with one
 `[FAIL]` line that names the folder and `-AllowSystemFolder`, and exit code `1`. Nothing is
@@ -338,15 +405,17 @@ names the link, and nothing is saved or changed. When the folder or a link is re
 where it leads could not be found out, the `[FAIL]` line does not offer `-AllowSystemFolder`; it
 says to take ownership of the folders beside the link instead, or to ask a senior engineer.
 
-The script exits with `1` when a step `Failed` or was only `Partly done`, when taking ownership
-could not be checked everywhere (folders it could not open, owners it could not read back, or
-junctions and symbolic links in the folder), or when the folder or the log folder could not be
-used; and `0` otherwise, including `-WhatIf` and declined steps.
+The script exits with `1` when taking ownership `Failed`, was only `Partly done` or could not be
+checked everywhere (folders it could not open, owners it could not read back, or junctions and
+symbolic links in the folder), or when the folder, the log folder or the host could not be
+used; and `0` otherwise, including `-WhatIf` and a declined question.
 
-The copy step lists the subfolders the same way as the owner snapshot: it does not go into
-junctions or symbolic links and skips them (they can point outside the folder), and it skips
-folders it cannot open; both are named in the console. If taking ownership is interrupted, see
-the note on interrupted runs above.
+The owners of the subfolders are shown for the folders counted before taking ownership:
+junctions and symbolic links are not gone into, and folders that could not be opened are named
+in the `[WARN]` instead. The heading says how many it leaves out, for example
+`Subfolders and their owners (12, not counting 1 that could not be opened and 2 junctions or
+symbolic links, listed above):`. If taking ownership is interrupted, see the note on
+interrupted runs above.
 
 ## Requirements
 
