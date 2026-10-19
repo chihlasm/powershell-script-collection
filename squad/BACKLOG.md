@@ -157,7 +157,7 @@ until the owner's lab test. Robocopy tab and Copy Files To are dropped (D-037). 
 SQ-014 and SQ-015 (same core and GUI file). Split per D-039.
 
 ## SQ-018 · FolderPermissionManager WPF app: every change, confirmations and results
-- status: ready
+- status: review
 - revision: D-043/D-044/D-045 (spec SQ-017.md Revision notes, SQ-018, AC47-AC53)
 - priority: P1
 - type: feature
@@ -176,10 +176,10 @@ README as "Changes anything? Yes" (owner, 2026-10-19: distribute only once the W
 make changes, via the toolkit bundle).
 
 ## SQ-020 · Whole-tree take ownership: WindowsApps aliases and Azure File Sync files count as plain files (D-042)
-- status: ready
+- status: review
 - priority: P1
 - type: fix
-- branch:
+- branch: squad/SQ-020-allowlist-appexec-storagesync
 - spec: squad/specs/SQ-020.md
 
 Add IO_REPARSE_TAG_APPEXECLINK and IO_REPARSE_TAG_STORAGE_SYNC to the D-040 allowlist so profile folders and Azure File Sync shares can be taken over as a whole tree. Branch from main after SQ-014 merges.
@@ -305,3 +305,62 @@ AD-Audit gains an "End of support" section listing every Windows Server by OS ve
 Microsoft's lifecycle end date (cited per row from Learn), days left or since, and last logon,
 hedged for ESU. The existing Unsupported OS list draws its server entries from the same table
 (D-020). Dated CSV; no automatic comparison in v1 (D-021).
+
+## SQ-021 · FolderPermissionManager: admin-share route skips the server-side junction check
+- status: new
+- priority: P2
+- type: follow-up
+- found-in: SQ-018
+- branch:
+
+When NetShareGetInfo fails, Get-ShareTreeRefusal tells the tech to open the folder by its
+administrative share path (\\server\D$\...). The D-045 server-side junction check
+(Get-ServerSideLinkRefusal) only runs for ordinary shares, so that advice sends the tech down
+the one route that skips it: a whole-tree takeown on \\fs01\D$\Shares\Data where Shares is a
+server-side junction into C:\Windows or C:\Users would go ahead. Either run the junction check
+for whole-tree changes on \\server\X$\... paths too, or change the advice to "run the tool on
+the server itself, or ask a senior admin". (Advisory review of SQ-018 rev2, major.)
+
+## SQ-022 · FolderPermissionManager: D-044 copy refusals and confirms only exist in the WPF app
+- status: new
+- priority: P2
+- type: follow-up
+- found-in: SQ-018
+
+The D-044 protections (protected Copy targets refused, Deny/root confirms) live only in
+FolderPermissionManager-GUI.ps1. The core work function Copy-FolderPermission accepts any
+target, so the browser GUI and any CLI copy path can still copy Deny entries onto ADMIN$,
+SYSVOL, C:\Windows or C:\Users. Move Get-CopyTargetRefusal (with path resolution) into the core
+and enforce it inside Copy-FolderPermission. Moot for the browser GUI once it is removed after
+the SQ-018 lab test, but the CLI still needs it. (Destructive-operations review of SQ-018 rev2, major.)
+
+## SQ-023 · FolderPermissionManager: CLI and browser whole-tree paths lack the D-045 and resolved high-impact checks
+- status: new
+- priority: P2
+- type: follow-up
+- found-in: SQ-018
+
+The D-045 server-side junction check and the resolved-path high-impact check run only in the
+WPF app's lookup. Through the CLI or the browser GUI, a whole-tree take ownership on
+\\server\share whose server-side folder is reached through a junction lands on an unchecked
+server folder. Move Get-ShareTreeRefusal, Get-ServerSideLinkRefusal, Get-RemoteShareLocalPath
+and Get-AppReparseInfo into the core and call them from Get-TreeOwnershipTargetRefusal.
+(Destructive-operations review of SQ-018 rev2, major.)
+
+## SQ-024 · FolderPermissionManager: a typed `..` in a share path makes the checks look at a different folder
+- status: new
+- priority: P2
+- type: follow-up
+- found-in: SQ-018
+
+Get-ShareTreeRefusal builds the server-side path from the typed rest of a UNC path, and
+ConvertTo-ComparablePath resolves `..` against the server's folder, so it can climb above the
+share's own folder (it keeps only `\\server\X$`). Windows stops `..` at `\\server\share`.
+Get-ChangeTarget never rejects `.` or `..` segments. Example: AppShare is
+C:\ProgramData\App\Share and the tech types `\\fs01\AppShare\..\..\..\Data`. D-036, the
+high-impact check and D-045 look at `\\fs01\C$\Data`, while takeown and icacls change
+C:\ProgramData\App\Share\Data, inside a D-036 folder. Refuse typed paths with `.` or `..`
+segments in Get-ChangeTarget, or normalise the client UNC first (stopping `..` at
+`\\server\share`), then map to the server. Fix the comment in Get-ServerSideLinkRefusal that
+says `.`/`..` segments do not skip the check, and add a regression test.
+(Destructive-operations re-review of SQ-018 fix round 1, major.)
