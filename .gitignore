@@ -73,6 +73,9 @@ M365-SyncedUserFixes/Logs/
 # FolderPermissionManager: permission backups and the change log (client paths, accounts, SIDs)
 FolderPermissionManager/Logs/
 
+# LocalAdminManager: change log of local Administrators adds and removes (client account names)
+LocalAdminManager/Logs/
+
 # Squad plugin (runtime state and logs)
 squad/.state/
 squad/logs/
