@@ -126,7 +126,7 @@ The copy-permissions tree backup is no longer needed (D-031). The old CLI
 ownership, `-Force` and a help block (D-010). Builds after SQ-008. Split per D-004.
 
 ## SQ-015 · FolderPermissionManager: fix recursive copy permissions
-- status: ready
+- status: review
 - priority: P1
 - type: fix
 - branch: squad/SQ-015-fpm-recursive-copy (stacked on SQ-014; SQ-014's tip 33d09c5 merged in at 43ca5a3, owner 2026-10-19, D-041)
