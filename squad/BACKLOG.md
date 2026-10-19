@@ -157,7 +157,8 @@ until the owner's lab test. Robocopy tab and Copy Files To are dropped (D-037). 
 SQ-014 and SQ-015 (same core and GUI file). Split per D-039.
 
 ## SQ-018 · FolderPermissionManager WPF app: every change, confirmations and results
-- status: ready
+- status: blocked
+- waiting: Q-007, Q-008, Q-009 (owner answers; branch gates green)
 - priority: P1
 - type: feature
 - branch: squad/SQ-018-fpm-wpf-changes (stacked: create it from squad/SQ-017-fpm-wpf-window as SQ-017 finishes this run; D-041)

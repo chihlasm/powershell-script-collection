@@ -130,3 +130,52 @@ Format:
 - consequence: A) Profile folders and Azure File Sync shares work; the aliases are taken over like
   any file, which is harmless. B) Azure File Sync works; profiles are refused with a clear message.
   C) Both are refused; techs fix those folders one level down or escalate.
+
+### Q-007 · SQ-018 · Changes on a DFS folder that points to more than one server
+- status: open
+- blocks: SQ-018 (with Q-008).
+- context: When a tech changes permissions through a DFS path (for example `\\contoso.com\Files\HR`), the WPF app looks up where it really is. If the DFS folder points to two or more servers (DFS Replication), the app can't tell which copy Windows will open. It therefore refuses every change there and lists the servers: "a DFS folder that points to N servers; open the one you mean". The browser GUI simply changed whichever copy Windows happened to pick.
+- options:
+  - A) Keep refusing; the tech opens the real `\\server\share` path they mean (recommended).
+  - B) Allow the change on the copy Windows picks, and say in the confirm which server that is.
+  - C) Apply the change to every listed server, one after another (a bigger change; needs its own item).
+- consequence:
+  - A) Safest. Changes on replicated DFS folders take one extra step, and DFS Replication copies the ACL to the other servers anyway.
+  - B) Works like before, but the change could land on a copy the tech didn't expect.
+  - C) Most convenient, but the most to build and test.
+
+### Q-008 · SQ-018 · Should Add Permission and Copy Permissions ask before changing, like Remove does?
+- status: open
+- blocks: SQ-018 (with Q-007).
+- context:
+  - Today (per AC36), Add and Copy are not treated as destructive. Clicking the dialog's button is the confirmation, and a second "are you sure" appears only when the drive letter came from a remembered mapping. The destructive-operations reviewer raised two cases:
+    - An Add with Deny (for example "Deny Everyone Full Control") on a share root locks everyone out, admins included, after one click on a normal-styled button.
+    - A copy whose typed target is a drive or share root (`D:\`, `\\fs01\D$`) adds the source's permissions to the whole volume, because Windows passes them down through inheritance (D-031). Copy targets get no drive-root or system-folder check.
+  - The Add dialog now shows the real location of its target. The Copy dialog shows the source's real location, but the typed target folders are looked up after the dialog closes and the copy then starts straight away. Their real locations appear only in the status line.
+  - Also in scope:
+    - Copy carries the source's own Deny entries onto the targets.
+    - The Add and Copy submit buttons are the default button (Enter).
+    - An Allow add such as "Everyone Full Control" on a drive or share root opens the whole volume through inheritance.
+- options:
+  - A) Treat as destructive (red button, not the default, plus a confirm that shows real locations):
+    - an Add with Deny;
+    - a Copy whose source has Deny entries;
+    - any Add or Copy whose target is a drive or share root.
+    Also refuse copy targets that are admin shares or protected folders (D-036), and show a confirm with the real locations whenever a typed copy target resolves somewhere other than what was typed. Plain Allow adds on ordinary folders keep today's single click (recommended).
+  - B) Always show the confirm (with real location and scope) for every Add and Copy.
+  - C) Keep AC36 as is; the real location in the dialog is enough.
+- consequence:
+  - A) Stops the two dangerous cases. Everyday "give Bob access" stays one click.
+  - B) Safest, but every add costs an extra click.
+  - C) No change; the two cases above stay possible.
+
+### Q-009 · SQ-018 · Junctions on the file server behind a share (whole-tree take ownership)
+- status: open
+- blocks: SQ-018 (with Q-007 and Q-008). This is the last open major after two fix rounds.
+- context: For a whole-tree take ownership on `\\fs01\Data`, the app asks the server where the share really is (`D:\Shares\Data`) and checks that against the protected folders. It checks only the text of that path. If `D:\Shares\Data`, or a folder above it, is a junction on the server pointing somewhere sensitive (for example `D:\Users`), Windows follows it on the server, and nothing in the app or the core sees it from the client. The risk checklist names "server-side junctions on SMB".
+- options:
+  - A) Next run: check the server-side path through the admin share for reparse points (the parent listing over `D$` shows them) and refuse when one is found or can't be checked (recommended).
+  - B) Accept it as a known limit, and say in the README that server-side junctions on the share path are not detected.
+- consequence:
+  - A) Closes the gap. A share that sits on a junction can't be taken over as a whole tree from the client; the tech runs it on the server.
+  - B) Nothing more to build, but a rare share on a junction could take ownership of every profile or system folder on that server (restorable from the owner snapshot).
