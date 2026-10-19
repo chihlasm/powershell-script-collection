@@ -59,9 +59,17 @@
     the browser version.
 
     Files written:
+      <log folder>  At startup, even view-only and with -WhatIf: the Logs folder next to this
+                    script is created (when it is on a local fixed disk) and a small probe file
+                    is written and deleted there, to check it can be written. Backups and the
+                    change log go here once changes are made.
       %LOCALAPPDATA%\FolderPermissionManager\settings.json   theme (dark or light)
-      %LOCALAPPDATA%\FolderPermissionManager\gui-errors.log  unexpected errors, for support
-      The export CSV where you save it.
+      %LOCALAPPDATA%\FolderPermissionManager\gui-errors.log  unexpected errors with their raw
+                    text (may name client folders), for support; trimmed to the last 1 MB at
+                    startup
+      The export CSV where you save it (the Save dialog starts in Documents when that is a local
+      fixed disk outside OneDrive, else %LOCALAPPDATA%\FolderPermissionManager\Exports). It
+      holds the folder paths, owners and account names of the whole tree.
 
     REFERENCES
     - WPF windows need a single-threaded apartment (STA); powershell.exe -STA starts one:
@@ -90,13 +98,42 @@
       it, so trailing backslashes are doubled):
       https://learn.microsoft.com/cpp/c-language/parsing-c-command-line-arguments
     - Named Mutex (createdNew says whether this call created it) and the Global\ prefix (one
-      name for every session on the computer):
+      name for every session on the computer); Path.GetFullPath makes one spelling of the log
+      folder (".." and "/" resolved) before the name is hashed:
       https://learn.microsoft.com/dotnet/api/system.threading.mutex.-ctor
       https://learn.microsoft.com/windows/win32/termserv/kernel-object-namespaces
+      https://learn.microsoft.com/dotnet/api/system.io.path.getfullpath
+    - A relative -LogFolder is made full against the PowerShell location before a relaunch
+      (the elevated copy starts elsewhere):
+      https://learn.microsoft.com/dotnet/api/system.management.automation.pathintrinsics.getunresolvedproviderpathfrompspath
+    - Start-Process -Verb RunAs fails with Win32 error 1223 (ERROR_CANCELLED) when the UAC
+      prompt is declined; any other error is shown with its text:
+      https://learn.microsoft.com/windows/win32/debug/system-error-codes--1000-1299-
     - Mapped drives are not available in an elevated process (UAC gives the elevated session
       its own logon session), and Win32_MappedLogicalDisk.ProviderName is the UNC path:
       https://learn.microsoft.com/troubleshoot/windows-client/networking/mapped-drives-not-available-from-elevated-command
       https://learn.microsoft.com/windows/win32/cimwin32prov/win32-mappedlogicaldisk
+    - Remembered (persistent) drive mappings are kept in the user profile; the fallback reads
+      them read-only from HKCU:\Network\<letter>, value RemotePath, with Get-ItemProperty.
+      Learn documents remembered connections and Get-ItemProperty, but not that key's layout
+      (DriveMap-Diagnostics reads the same key), so every value is checked as a plain
+      \\server\share path before it is used:
+      https://learn.microsoft.com/windows/win32/api/winnetwk/nf-winnetwk-wnetaddconnection2w
+      https://learn.microsoft.com/powershell/module/microsoft.powershell.management/get-itemproperty
+    - RunspacePool.BeginClose closes the pool without blocking the window thread, and
+      Environment.Exit ends the process even while a runspace thread is stuck in I/O:
+      https://learn.microsoft.com/dotnet/api/system.management.automation.runspaces.runspacepool.beginclose
+      https://learn.microsoft.com/dotnet/api/system.environment.exit
+    - DataGridCheckBoxColumn (the tick box per file, bound to the row's IsSelected):
+      https://learn.microsoft.com/dotnet/api/system.windows.controls.datagridcheckboxcolumn
+    - AutomationProperties.LiveSetting (Polite: screen readers announce a new status message;
+      it needs .NET Framework 4.7.1 or later, so it is set only where it exists):
+      https://learn.microsoft.com/dotnet/api/system.windows.automation.automationproperties.livesetting
+    - Contrast of the selection colours, checked by the tests: WCAG 2 contrast ratio
+      (3:1 for the selection fill and focus ring, 4.5:1 for text):
+      https://learn.microsoft.com/windows/apps/design/accessibility/accessible-text-requirements
+    - Known Folder Move puts Documents inside OneDrive, so exports do not default there:
+      https://learn.microsoft.com/sharepoint/redirect-known-folders
     - Get-PSDrive -PSProvider FileSystem lists fixed drives and mapped network drives:
       https://learn.microsoft.com/powershell/module/microsoft.powershell.management/get-psdrive
     - Microsoft.Win32.SaveFileDialog (OverwritePrompt) and MessageBox.Show:
@@ -180,6 +217,37 @@ function Write-AppError {
     catch { }
 }
 
+function Limit-AppErrorLog {
+    # Keeps gui-errors.log small: when it is larger than MaxBytes, only the newest entries are
+    # kept, starting at a whole line. Run once at startup. Never throws.
+    param([Parameter(Mandatory)][string]$Path, [long]$MaxBytes = 1MB)
+    try {
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        if ($bytes.Length -le $MaxBytes) { return }
+        $start = $bytes.Length - $MaxBytes
+        # Begin after the first line break in the kept part, so no entry is cut in half.
+        while ($start -lt $bytes.Length -and $bytes[$start - 1] -ne 10) { $start++ }
+        $kept = New-Object byte[] ($bytes.Length - $start)
+        [Array]::Copy($bytes, $start, $kept, 0, $kept.Length)
+        [System.IO.File]::WriteAllBytes($Path, $kept)
+    }
+    catch {
+        Write-Verbose "Could not trim ${Path}: $($_.Exception.Message)"
+    }
+}
+
+function Show-AppQuestion {
+    # A Yes/No question; No is the default button. $true only for Yes. Tests replace it.
+    # https://learn.microsoft.com/dotnet/api/system.windows.messagebox.show
+    param(
+        [Parameter(Mandatory)][string]$Message,
+        [string]$Title = $script:AppTitle
+    )
+    $answer = [System.Windows.MessageBox]::Show($Message, $Title, 'YesNo', 'Warning', 'No')
+    "$answer" -eq 'Yes'
+}
+
 function Show-AppMessage {
     # Every message box goes through here, so the tests can replace it.
     param(
@@ -217,84 +285,136 @@ function ConvertTo-QuotedArgument {
     '"' + $Value + $trail + '"'
 }
 
+function Test-UncSharePath {
+    # True only for a plain \\server\share path (optionally with folders below it). Device and
+    # long-path forms (\\?\, \\.\), a server without a share, and "." or ".." folders are
+    # refused, so a drive map value can never point the tool somewhere unexpected.
+    param([AllowNull()][AllowEmptyString()][string]$Path)
+    if (-not $Path -or $Path -notmatch '^\\\\[^\\?.][^\\]*\\[^\\]+(\\.*)?$') { return $false }
+    foreach ($segment in $Path.Substring(2).Split('\')) {
+        if ($segment -eq '.' -or $segment -eq '..') { return $false }
+    }
+    $true
+}
+
+function Get-ValidDriveMap {
+    # Only single drive letters that point at a plain \\server\share; anything else is dropped
+    # (that letter then shows unresolved).
+    param([hashtable]$DriveMap)
+    $clean = @{}
+    if (-not $DriveMap) { return $clean }
+    foreach ($k in $DriveMap.Keys) {
+        $value = "$($DriveMap[$k])"
+        if ("$k" -match '^[A-Za-z]$' -and (Test-UncSharePath -Path $value)) { $clean["$k".ToUpper()] = $value }
+    }
+    $clean
+}
+
 function ConvertTo-DriveMapArgument {
     # The mapped drives as one command-line word: Base64 of JSON, so spaces and quotes in share
     # names cannot break the command line.
     param([hashtable]$DriveMap)
+    $valid = Get-ValidDriveMap -DriveMap $DriveMap
     $clean = [ordered]@{}
-    if ($DriveMap) {
-        foreach ($k in ($DriveMap.Keys | Sort-Object)) {
-            if ("$k" -match '^[A-Za-z]$' -and "$($DriveMap[$k])" -like '\\*') { $clean["$k".ToUpper()] = "$($DriveMap[$k])" }
-        }
-    }
+    foreach ($k in ($valid.Keys | Sort-Object)) { $clean[$k] = $valid[$k] }
     $json = ConvertTo-Json -InputObject ([PSCustomObject]$clean) -Compress
     [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
 }
 
 function ConvertFrom-DriveMapArgument {
-    # The reverse of ConvertTo-DriveMapArgument; anything unreadable gives an empty map.
+    # The reverse of ConvertTo-DriveMapArgument; anything unreadable gives an empty map, and
+    # entries that are not a plain \\server\share are dropped.
     param([AllowNull()][AllowEmptyString()][string]$Argument)
     $map = @{}
     if (-not $Argument) { return $map }
     try {
         $json = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Argument.Trim().Trim('"')))
         $obj = ConvertFrom-Json -InputObject $json -ErrorAction Stop
-        foreach ($p in $obj.PSObject.Properties) {
-            if ($p.Name -match '^[A-Za-z]$' -and "$($p.Value)" -like '\\*') { $map[$p.Name.ToUpper()] = "$($p.Value)" }
-        }
+        foreach ($p in $obj.PSObject.Properties) { $map[$p.Name] = "$($p.Value)" }
     }
-    catch { }
-    $map
+    catch { $map = @{} }
+    Get-ValidDriveMap -DriveMap $map
 }
 
 function Merge-DriveMap {
     # Drives this process can see win; the passed-on map fills in the letters it cannot see.
     param([hashtable]$Primary, [hashtable]$Secondary)
     $map = @{}
-    foreach ($m in @($Secondary, $Primary)) {
-        if (-not $m) { continue }
-        foreach ($k in $m.Keys) { $map["$k".ToUpper()] = $m[$k] }
+    foreach ($m in @((Get-ValidDriveMap -DriveMap $Secondary), (Get-ValidDriveMap -DriveMap $Primary))) {
+        foreach ($k in $m.Keys) { $map[$k] = $m[$k] }
     }
     $map
 }
 
 function Get-MappedDriveTable {
-    # Letter -> UNC path of the mapped network drives this process can see.
+    # Letter -> UNC path of the mapped network drives this process can see (CIM), plus the
+    # remembered mappings in HKCU:\Network\<letter> (value RemotePath) for letters CIM does not
+    # list. Both are only read. Values that are not a plain \\server\share are dropped.
     # https://learn.microsoft.com/windows/win32/cimwin32prov/win32-mappedlogicaldisk
+    # https://learn.microsoft.com/windows/win32/api/winnetwk/nf-winnetwk-wnetaddconnection2w
+    # https://learn.microsoft.com/powershell/module/microsoft.powershell.management/get-itemproperty
     $map = @{}
     try {
-        Get-CimInstance -ClassName Win32_MappedLogicalDisk -ErrorAction Stop | ForEach-Object {
-            if ($_.DeviceID -and $_.ProviderName) { $map[$_.DeviceID.TrimEnd(':').ToUpper()] = $_.ProviderName }
+        foreach ($d in @(Get-CimInstance -ClassName Win32_MappedLogicalDisk -ErrorAction Stop)) {
+            if ($d.DeviceID -and $d.ProviderName) { $map["$($d.DeviceID)".TrimEnd(':')] = "$($d.ProviderName)" }
         }
     }
     catch { }
+    $map = Get-ValidDriveMap -DriveMap $map
     try {
-        $netUse = & net.exe use 2>$null
-        foreach ($line in $netUse) {
-            if ($line -match '^\s*(?:OK|Disconnected|Unavailable)?\s*([A-Z]):\s+(\\\\\S+)') {
-                if (-not $map.ContainsKey($Matches[1])) { $map[$Matches[1]] = $Matches[2] }
-            }
+        foreach ($key in @(Get-ChildItem -LiteralPath 'HKCU:\Network' -ErrorAction Stop)) {
+            $letter = "$($key.PSChildName)"
+            if ($letter -notmatch '^[A-Za-z]$' -or $map.ContainsKey($letter.ToUpper())) { continue }
+            $remote = $null
+            try { $remote = (Get-ItemProperty -LiteralPath "HKCU:\Network\$letter" -Name RemotePath -ErrorAction Stop).RemotePath } catch { }
+            if (Test-UncSharePath -Path "$remote") { $map[$letter.ToUpper()] = "$remote" }
         }
     }
     catch { }
     $map
 }
 
+function Resolve-LogFolderArgument {
+    # A -LogFolder value as a full path, made against the PowerShell location it was typed in
+    # (an elevated copy starts in System32, where a relative path would point somewhere else).
+    # Empty stays empty. Throws a plain message for a value it cannot pass on safely.
+    # https://learn.microsoft.com/dotnet/api/system.management.automation.pathintrinsics.getunresolvedproviderpathfrompspath
+    param([AllowNull()][AllowEmptyString()][string]$LogFolder)
+    if (-not $LogFolder) { return $LogFolder }
+    $invalid = "Start the tool again with -LogFolder set to a full folder path, for example -LogFolder 'D:\Tickets\12345\PermissionChanges'."
+    if ($LogFolder.Contains('"')) { throw "The -LogFolder value cannot contain a double quote (`"). $invalid" }
+    try {
+        if ($LogFolder -match '^([A-Za-z]:[\\/]|\\\\|//)') {
+            # Already full (possibly on a mapped drive this process cannot see): only tidied.
+            # https://learn.microsoft.com/dotnet/api/system.io.path.getfullpath
+            $full = [System.IO.Path]::GetFullPath($LogFolder)
+        }
+        else {
+            $full = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LogFolder)
+        }
+    }
+    catch { throw "The -LogFolder value '$LogFolder' is not a folder path this tool can use. $invalid" }
+    if ("$full" -notmatch '^([A-Za-z]:\\|\\\\)') { throw "The -LogFolder value '$LogFolder' is not a folder on a disk or share. $invalid" }
+    $full
+}
+
 function Get-RelaunchArgumentList {
     # powershell.exe arguments to start this script again (in STA, or elevated), passing on
-    # -LogFolder, -WhatIf and the mapped drives.
+    # -LogFolder (as a full path), -WhatIf and the mapped drives. The script and log folder go
+    # as UNC paths when they are on a mapped drive, because the elevated copy cannot see it.
     param(
         [Parameter(Mandatory)][string]$ScriptPath,
         [string]$LogFolder,
         [switch]$WhatIfMode,
         [hashtable]$DriveMap
     )
+    $LogFolder = Resolve-LogFolderArgument -LogFolder $LogFolder
     $list = [System.Collections.Generic.List[string]]::new()
     foreach ($a in '-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File') { $list.Add($a) }
-    $list.Add((ConvertTo-QuotedArgument $ScriptPath))
+    $list.Add((ConvertTo-QuotedArgument (Resolve-MappedDrive -Path $ScriptPath -DriveMap $DriveMap)))
     if ($LogFolder) {
         $list.Add('-LogFolder')
-        $list.Add((ConvertTo-QuotedArgument $LogFolder))
+        $list.Add((ConvertTo-QuotedArgument (Resolve-MappedDrive -Path $LogFolder -DriveMap $DriveMap)))
     }
     if ($WhatIfMode) { $list.Add('-WhatIf') }
     if ($DriveMap -and $DriveMap.Count -gt 0) {
@@ -317,14 +437,30 @@ function Request-Elevation {
         [switch]$WhatIfMode,
         [hashtable]$DriveMap
     )
-    $arguments = Get-RelaunchArgumentList -ScriptPath $ScriptPath -LogFolder $LogFolder -WhatIfMode:$WhatIfMode -DriveMap $DriveMap
+    try {
+        $arguments = Get-RelaunchArgumentList -ScriptPath $ScriptPath -LogFolder $LogFolder -WhatIfMode:$WhatIfMode -DriveMap $DriveMap
+    }
+    catch {
+        Show-AppMessage -Icon Error -Message $_.Exception.Message
+        return $false
+    }
     try {
         Start-Process -FilePath (Get-WindowsPowerShellPath) -Verb RunAs -ArgumentList $arguments -ErrorAction Stop
         return $true
     }
     catch {
-        Show-AppMessage -Icon Warning -Message ('Folder Permission Manager needs to run as administrator to read and change permissions on folders it does not own. ' +
-            'Start it again and choose Yes when Windows asks, or right-click PowerShell, choose "Run as administrator", and start the script from there.')
+        $text = 'Folder Permission Manager needs to run as administrator to read and change permissions on folders it does not own. ' +
+        'Start it again and choose Yes when Windows asks, or right-click PowerShell, choose "Run as administrator", and start the script from there.'
+        # 1223 (ERROR_CANCELLED) is the tech choosing No; anything else is worth showing.
+        # https://learn.microsoft.com/windows/win32/debug/system-error-codes--1000-1299-
+        $cancelled = $false
+        $e = $_.Exception
+        while ($e) {
+            if ($e -is [System.ComponentModel.Win32Exception] -and $e.NativeErrorCode -eq 1223) { $cancelled = $true }
+            $e = $e.InnerException
+        }
+        if (-not $cancelled) { $text += " (Windows said: $(Get-InnermostErrorText $_))" }
+        Show-AppMessage -Icon Warning -Message $text
         return $false
     }
 }
@@ -334,7 +470,12 @@ function Get-InstanceMutexName {
     # a second window in another session on the same computer is refused too.
     # https://learn.microsoft.com/windows/win32/termserv/kernel-object-namespaces
     param([Parameter(Mandatory)][string]$LogFolder)
-    $norm = $LogFolder.Trim().TrimEnd('\', '/').ToLowerInvariant()
+    # One spelling per folder: GetFullPath resolves "..", "." and "/" before the name is hashed.
+    # The log folder is already a full path here, so the process directory plays no part.
+    # https://learn.microsoft.com/dotnet/api/system.io.path.getfullpath
+    $full = $LogFolder.Trim()
+    try { $full = [System.IO.Path]::GetFullPath($full) } catch { }
+    $norm = $full.TrimEnd('\', '/').ToLowerInvariant()
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try { $bytes = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($norm)) }
     finally { $sha.Dispose() }
@@ -370,13 +511,14 @@ function Enter-SingleInstance {
 
 function Resolve-MappedDrive {
     # An elevated process does not see the user's mapped drives, so drive letters are turned
-    # into the UNC path they point at. Anything else is returned unchanged.
+    # into the UNC path they point at. Anything else is returned unchanged, and so is a letter
+    # whose map entry is not a plain \\server\share (it stays unresolved).
     param([string]$Path, [hashtable]$DriveMap)
     if ($Path -and $DriveMap -and $Path -match '^([A-Za-z]):(\\.*)?$') {
         $unc = $DriveMap[$Matches[1].ToUpper()]
-        if ($unc) {
-            $rest = $Matches[2]
-            if (-not $rest) { $rest = '' }
+        $rest = $Matches[2]
+        if (-not $rest) { $rest = '' }
+        if (Test-UncSharePath -Path "$unc") {
             return ("$unc".TrimEnd('\') + $rest)
         }
     }
@@ -412,6 +554,7 @@ function Get-DriveListModel {
     # mapped drives, so those come from the map.
     # https://learn.microsoft.com/powershell/module/microsoft.powershell.management/get-psdrive
     param([hashtable]$DriveMap)
+    $DriveMap = Get-ValidDriveMap -DriveMap $DriveMap
     $rows = [System.Collections.Generic.List[object]]::new()
     $seen = @{}
     foreach ($d in @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue)) {
@@ -584,10 +727,74 @@ function Get-FileAclDiffWarning {
     "Selected files have different permissions $($script:Dash) this operation applies uniformly to all"
 }
 
+function Get-FileAclDiffWarningText {
+    # The line under the selected files: says it is a warning, and how many of the selected
+    # files were compared when not all of them have been read.
+    param([Parameter(Mandatory)][int]$Checked, [Parameter(Mandatory)][int]$Selected)
+    $text = "Warning: $(Get-FileAclDiffWarning)"
+    if ($Checked -lt $Selected) { $text += " (checked $Checked of $Selected selected files)" }
+    $text
+}
+
 function Get-DefaultExportFileName {
     param([Parameter(Mandatory)][string]$Path)
     $safe = $Path.TrimEnd('\', '/') -replace '[\\/:*?"<>|]', '_'
     'Permissions-{0}_{1}.csv' -f $safe, (Get-Date -Format 'yyyy-MM-dd_HHmmss')
+}
+
+function Get-OneDriveFolder {
+    # The OneDrive folders of the signed-in user, as the OneDrive client sets them in the
+    # environment. Anything saved under one is uploaded to the cloud.
+    @($env:OneDrive, $env:OneDriveCommercial, $env:OneDriveConsumer | Where-Object { "$_".Trim() } | Select-Object -Unique)
+}
+
+function Get-ExportLocationInfo {
+    # Whether a chosen export file is on this computer's local fixed disk, outside OneDrive.
+    # The report holds client paths, owners and account names, so a share, a mapped, network or
+    # removable drive, or a synced OneDrive folder gets a warning naming the location.
+    # https://learn.microsoft.com/dotnet/api/system.io.driveinfo.drivetype (Test-LocalFixedPath, in the core)
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Path, [hashtable]$DriveMap)
+    $warning = $null
+    if ($Path -match '^(\\\\|//)') {
+        $warning = "$Path is on a network share."
+    }
+    elseif ($Path -match '^([A-Za-z]):' -and $DriveMap -and $DriveMap[$Matches[1].ToUpper()]) {
+        $warning = "$Path is on mapped drive $($Matches[1].ToUpper()): ($($DriveMap[$Matches[1].ToUpper()]))."
+    }
+    elseif (-not (Test-LocalFixedPath -Path $Path)) {
+        $warning = "$Path is on a network, mapped or removable drive, not this computer's own disk."
+    }
+    else {
+        foreach ($od in @(Get-OneDriveFolder)) {
+            if (Test-PathWithin -Path $Path -Root $od) { $warning = "$Path is inside the OneDrive folder $od, so it is uploaded to the cloud."; break }
+        }
+    }
+    [PSCustomObject]@{ Path = $Path; IsLocal = ($null -eq $warning); Warning = $warning }
+}
+
+function Get-DefaultExportFolder {
+    # Where the Save dialog starts: Documents when it is a local fixed disk outside OneDrive
+    # (Known Folder Move and folder redirection often move it), else a local folder for exports.
+    # https://learn.microsoft.com/sharepoint/redirect-known-folders
+    param(
+        [string]$DocumentsPath = [Environment]::GetFolderPath([Environment+SpecialFolder]::MyDocuments),
+        [string]$LocalAppDataPath = (Get-LocalAppDataFolder)
+    )
+    if ($DocumentsPath -and (Get-ExportLocationInfo -Path $DocumentsPath).IsLocal) { return $DocumentsPath }
+    if (-not $LocalAppDataPath) { $LocalAppDataPath = $env:TEMP }
+    Join-Path $LocalAppDataPath 'FolderPermissionManager\Exports'
+}
+
+function Confirm-ExportLocation {
+    # $true when the export may be written there: a local fixed disk outside OneDrive, or the
+    # tech said Yes after the warning. The warning also goes to the status line.
+    param([Parameter(Mandatory)][string]$Path)
+    $info = Get-ExportLocationInfo -Path $Path -DriveMap $script:MappedDrives
+    if ($info.IsLocal) { return $true }
+    Set-Status -Kind Warning -Text "$($info.Warning) The report holds client folder paths, owners and account names."
+    $question = "$($info.Warning)`n`nThe report holds client folder paths, owners and account names for the whole folder tree. " +
+    "Save it on this computer instead (for example in Documents, if that is not in OneDrive), attach it to the ticket, then delete it.`n`nSave it here anyway?"
+    Show-AppQuestion -Message $question
 }
 
 function Get-LogFolderBanner {
@@ -640,9 +847,26 @@ function Format-Elapsed {
 }
 
 function Get-BusyLine {
+    # "Opening folder D:\Data\HR... (3s)": the action is the start of a sentence that the path
+    # completes.
     param([Parameter(Mandatory)][string]$Action, [string]$Path, [Parameter(Mandatory)][TimeSpan]$Elapsed)
-    if ($Path) { return ('{0} on {1}... {2}' -f $Action, $Path, (Format-Elapsed -Elapsed $Elapsed)) }
-    '{0}... {1}' -f $Action, (Format-Elapsed -Elapsed $Elapsed)
+    if ($Path) { return ('{0} {1}... ({2})' -f $Action, $Path, (Format-Elapsed -Elapsed $Elapsed)) }
+    '{0}... ({1})' -f $Action, (Format-Elapsed -Elapsed $Elapsed)
+}
+
+function Get-StatusText {
+    # Warnings and errors say so in words, not only in colour.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text, [ValidateSet('Info', 'Success', 'Warning', 'Error')][string]$Kind = 'Info')
+    $prefix = @{ Warning = 'Warning: '; Error = 'Error: ' }[$Kind]
+    if (-not $prefix -or $Text.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { return $Text }
+    $prefix + $Text
+}
+
+function Get-ThemeToggleText {
+    # The theme button names what it does.
+    param([Parameter(Mandatory)][ValidateSet('Dark', 'Light')][string]$Current)
+    if ($Current -eq 'Dark') { return "$([char]0x2600)  Switch to light" }
+    "$([char]0x263E)  Switch to dark"
 }
 
 function Get-SavedTheme {
@@ -682,6 +906,87 @@ function Set-SavedTheme {
     catch {
         Write-AppError "Could not save the theme to ${SettingsPath}: $($_.Exception.Message)"
     }
+}
+
+function Test-CanClose {
+    # Asked by the window's Closing handler before anything is stopped. Nothing in this version
+    # changes permissions, so the window can always close.
+    # SQ-018: return $false (and show why) while a change task runs; reads can always be dropped.
+    $true
+}
+
+function Test-OwnProcess {
+    # True when this PowerShell process was started just to run this script (-File <script>, as
+    # the tool's own relaunch does), so ending the process cannot close a tech's console.
+    param([AllowEmptyCollection()][string[]]$CommandLineArgs, [Parameter(Mandatory)][string]$ScriptPath)
+    $leaf = Split-Path -Leaf $ScriptPath
+    $words = @($CommandLineArgs)
+    for ($i = 0; $i -lt $words.Count - 1; $i++) {
+        if ($words[$i] -eq '-File' -and (Split-Path -Leaf "$($words[$i + 1])".Trim('"')) -eq $leaf) { return $true }
+    }
+    $false
+}
+
+function Invoke-AppShutdown {
+    # Closing must never hang on a background read stuck in network I/O:
+    #   1. release the single-instance mutex, so the tool can be opened again straight away;
+    #   2. ask every task to stop and close the pool without blocking (BeginClose);
+    #   3. wait a bounded time for the pool; if it did not close, end the process, which a stuck
+    #      runspace thread would otherwise keep alive. With -ExitWhenDone the process also ends
+    #      when the pool closed in time (only used when the process exists just for this window).
+    # https://learn.microsoft.com/dotnet/api/system.management.automation.runspaces.runspacepool.beginclose
+    # https://learn.microsoft.com/dotnet/api/system.environment.exit
+    param(
+        $Pool,
+        $Mutex,
+        [AllowEmptyCollection()][object[]]$Tasks,
+        [int]$WaitMilliseconds = 3000,
+        [switch]$ExitWhenDone,
+        [scriptblock]$ExitAction = { [Environment]::Exit(0) }
+    )
+    if ($Mutex) {
+        try { $Mutex.ReleaseMutex() } catch { }
+        try { $Mutex.Dispose() } catch { }
+    }
+    foreach ($t in @($Tasks)) {
+        if ($t -and $t.PS) { try { [void]$t.PS.BeginStop($null, $null) } catch { } }
+    }
+    $closed = $true
+    if ($Pool) {
+        $closed = $false
+        try {
+            $handle = $Pool.BeginClose($null, $null)
+            $closed = [bool]$handle.AsyncWaitHandle.WaitOne($WaitMilliseconds)
+        }
+        catch { $closed = $false }
+    }
+    if ($closed -and $Pool) { try { $Pool.Dispose() } catch { } }
+    $exited = (-not $closed) -or [bool]$ExitWhenDone
+    if ($exited) { & $ExitAction }
+    [PSCustomObject]@{ PoolClosed = $closed; Exited = $exited }
+}
+
+function Select-TaskResult {
+    # A work block returns one result object (it has an Ok property). Stray output from a
+    # command inside it must not be taken for it: the object with Ok wins, else the last one.
+    param([AllowNull()][AllowEmptyCollection()][object[]]$Output)
+    $items = @($Output | Where-Object { $null -ne $_ })
+    if ($items.Count -eq 0) { return $null }
+    $withOk = @($items | Where-Object { $_.PSObject.Properties['Ok'] })
+    if ($withOk.Count -gt 0) { return $withOk[$withOk.Count - 1] }
+    $items[$items.Count - 1]
+}
+
+function Enable-LiveRegion {
+    # Marks the status box as a polite live region, so screen readers announce new messages.
+    # LiveSetting exists from .NET Framework 4.7.1; on older frameworks nothing is set ($false).
+    # https://learn.microsoft.com/dotnet/api/system.windows.automation.automationproperties.livesetting
+    param([Parameter(Mandatory)]$Element)
+    $field = [System.Windows.Automation.AutomationProperties].GetField('LiveSettingProperty')
+    if (-not $field) { return $false }
+    $dp = $field.GetValue($null)
+    $Element.SetValue($dp, [Enum]::Parse($dp.PropertyType, 'Polite'))
+    $true
 }
 
 #endregion
@@ -764,16 +1069,25 @@ function Set-FileAclResult {
 
 #region Background work (blocks run in the runspace pool; they return plain data)
 
-# App functions the work blocks call. They are copied into every runspace of the pool; the
-# core is dot-sourced by each block. Tests run the blocks directly with $CorePath = $null.
+# App functions the work blocks call. They and every function of the core are copied into the
+# pool's session state once, when the pool opens (Initialize-BackgroundPool), so a work block
+# does not load the core again on every call. $CorePath is only a fallback for a runspace that
+# does not have the core. Tests run the blocks directly with $CorePath = $null.
 $script:WorkHelperFunctions = 'Get-InnermostErrorText', 'Test-AccessDeniedError', 'Get-AccessDeniedMessage',
 'Get-AclOwnerName', 'ConvertTo-AclViewModel', 'Read-ItemAclModel', 'Format-FileSize', 'ConvertTo-FileRows',
-'Get-DriveListModel'
+'Get-DriveListModel', 'Get-ValidDriveMap', 'Test-UncSharePath'
+
+function Get-CoreFunctionNames {
+    # The functions FolderPermissions.Core.ps1 defines at its top level (not nested ones).
+    param([Parameter(Mandatory)][string]$CorePath)
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($CorePath, [ref]$null, [ref]$null)
+    @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false) | ForEach-Object { $_.Name })
+}
 
 $script:DrivesWork = {
     param([hashtable]$DriveMap, [string]$CorePath)
     try {
-        if ($CorePath) { . $CorePath -LoadFunctionsOnly }
+        if ($CorePath -and -not (Get-Command -Name Get-ItemOwner -CommandType Function -ErrorAction SilentlyContinue)) { . $CorePath -LoadFunctionsOnly }
         [PSCustomObject]@{ Ok = $true; Drives = @(Get-DriveListModel -DriveMap $DriveMap); Error = $null }
     }
     catch {
@@ -784,7 +1098,7 @@ $script:DrivesWork = {
 $script:ListChildrenWork = {
     param([string]$Path, [string]$CorePath)
     try {
-        if ($CorePath) { . $CorePath -LoadFunctionsOnly }
+        if ($CorePath -and -not (Get-Command -Name Get-ItemOwner -CommandType Function -ErrorAction SilentlyContinue)) { . $CorePath -LoadFunctionsOnly }
         if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
             return [PSCustomObject]@{ Ok = $false; Path = $Path; Children = @(); Error = "'$Path' was not found. It may have been moved, renamed or deleted; press Refresh." }
         }
@@ -807,7 +1121,7 @@ $script:ListChildrenWork = {
 $script:FolderAclWork = {
     param([string]$Path, [string]$CorePath)
     try {
-        if ($CorePath) { . $CorePath -LoadFunctionsOnly }
+        if ($CorePath -and -not (Get-Command -Name Get-ItemOwner -CommandType Function -ErrorAction SilentlyContinue)) { . $CorePath -LoadFunctionsOnly }
         Read-ItemAclModel -Path $Path -ItemKind Folder
     }
     catch {
@@ -818,7 +1132,7 @@ $script:FolderAclWork = {
 $script:FilesWork = {
     param([string]$Path, [string]$CorePath)
     try {
-        if ($CorePath) { . $CorePath -LoadFunctionsOnly }
+        if ($CorePath -and -not (Get-Command -Name Get-ItemOwner -CommandType Function -ErrorAction SilentlyContinue)) { . $CorePath -LoadFunctionsOnly }
         if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
             return [PSCustomObject]@{ Ok = $false; Path = $Path; Files = @(); Error = "'$Path' was not found. It may have been moved, renamed or deleted; press Refresh." }
         }
@@ -839,7 +1153,7 @@ $script:FilesWork = {
 $script:FileAclWork = {
     param([string[]]$Paths, [string]$CorePath)
     try {
-        if ($CorePath) { . $CorePath -LoadFunctionsOnly }
+        if ($CorePath -and -not (Get-Command -Name Get-ItemOwner -CommandType Function -ErrorAction SilentlyContinue)) { . $CorePath -LoadFunctionsOnly }
         $items = @(foreach ($p in $Paths) { Read-ItemAclModel -Path $p -ItemKind File })
         [PSCustomObject]@{ Ok = $true; Items = $items; Error = $null }
     }
@@ -854,7 +1168,7 @@ $script:ExportWork = {
     # through the core's formula guard (ConvertTo-CsvSafeText).
     param([string]$Path, [string]$OutputPath, [string]$CorePath)
     try {
-        if ($CorePath) { . $CorePath -LoadFunctionsOnly }
+        if ($CorePath -and -not (Get-Command -Name Get-ItemOwner -CommandType Function -ErrorAction SilentlyContinue)) { . $CorePath -LoadFunctionsOnly }
         $row = {
             param($Folder, $Owner, $Identity, $Rights, $AccessType, $IsInherited, $InheritanceFlags)
             [PSCustomObject]@{
@@ -869,7 +1183,8 @@ $script:ExportWork = {
         }
         $rows = [System.Collections.Generic.List[object]]::new()
         $listErrors = $null
-        $subfolders = @(Get-ChildItem -LiteralPath $Path -Recurse -Directory -ErrorAction SilentlyContinue -ErrorVariable listErrors | ForEach-Object { $_.FullName })
+        # -Force: hidden and system subfolders are part of the report too.
+        $subfolders = @(Get-ChildItem -LiteralPath $Path -Recurse -Directory -Force -ErrorAction SilentlyContinue -ErrorVariable listErrors | ForEach-Object { $_.FullName })
         foreach ($folder in @($Path) + $subfolders) {
             try {
                 $acl = Get-Acl -LiteralPath $folder -ErrorAction Stop
@@ -906,7 +1221,9 @@ function Initialize-BackgroundPool {
     # The pool only runs this script's own work blocks and the core next to it, which the
     # window has already loaded; the process policy may not reach a new runspace.
     $iss.ExecutionPolicy = [Microsoft.PowerShell.ExecutionPolicy]::Bypass
-    foreach ($name in $script:WorkHelperFunctions) {
+    # The core was loaded once when the window started; its functions are copied from there.
+    $names = @($script:WorkHelperFunctions) + @(Get-CoreFunctionNames -CorePath $script:CorePath) | Select-Object -Unique
+    foreach ($name in $names) {
         $definition = (Get-Command -Name $name -CommandType Function -ErrorAction Stop).Definition
         $iss.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new($name, $definition))
     }
@@ -943,7 +1260,7 @@ function Update-BgTasks {
         $result = $null
         try {
             $out = $t.PS.EndInvoke($t.Handle)
-            if ($out.Count -gt 0) { $result = $out[0] }
+            $result = Select-TaskResult -Output @($out)
             if ($null -eq $result) {
                 $why = @($t.PS.Streams.Error | Select-Object -First 1)
                 $text = if ($why.Count -gt 0) { "$($why[0])" } else { 'The background task returned nothing.' }
@@ -956,7 +1273,10 @@ function Update-BgTasks {
         }
         finally { $t.PS.Dispose() }
         try { & $t.OnDone $result $t.State }
-        catch { Write-AppError "Background task callback: $($_.Exception.Message)" }
+        catch {
+            Write-AppError "Background task callback: $($_.Exception.Message)"
+            Set-Status -Kind Error -Text "Something went wrong while showing a result: $($_.Exception.Message) Press Refresh to try again."
+        }
     }
 }
 
@@ -964,19 +1284,25 @@ function Update-BgTasks {
 
 #region Window markup and themes
 
+# Selection: an accent fill at least 3:1 against the row (Card, CardHover) and the tree (Input),
+# text on it at least 4.5:1, plus a 2px bar (SelBar) at the left of a selected row. FocusRing
+# marks keyboard focus and differs from every fill it sits on. The tests compute these ratios
+# (WCAG 2): https://learn.microsoft.com/windows/apps/design/accessibility/accessible-text-requirements
 $script:Themes = @{
     Dark  = @{
-        Bg = '#16181D'; Panel = '#101216'; Card = '#1C1F26'; CardHover = '#232833'; SelBg = '#1A2733'
+        Bg = '#16181D'; Panel = '#101216'; Card = '#1C1F26'; CardHover = '#232833'
+        SelBg = '#3276AB'; SelText = '#FFFFFF'; SelBar = '#BFE3FA'; FocusRing = '#FFFFFF'
         Input = '#0F1115'; Border = '#262A33'; BorderStrong = '#343A46'
         BtnBg = '#232731'; BtnHover = '#2C313D'; BtnPressed = '#1B1F27'
         Text = '#D7DBE2'; TextStrong = '#F0F3F6'; Muted = '#8B949E'
-        Accent = '#5DADE2'; AccentBtn = '#2E86C1'; AccentBtnHover = '#3B97D3'; OnAccent = '#FFFFFF'
+        Accent = '#5DADE2'; AccentBtn = '#2A7AB0'; AccentBtnHover = '#236D9F'; OnAccent = '#FFFFFF'
         Danger = '#F08A7C'; Ok = '#6FD39B'; Warn = '#F2CC60'
         PillWarnBg = '#463A12'; BannerBg = '#14202A'; BannerBorder = '#22384A'
         Track = '#2B303A'; ScrollThumb = '#3C4350'
     }
     Light = @{
-        Bg = '#F3F4F6'; Panel = '#FFFFFF'; Card = '#FFFFFF'; CardHover = '#F2F6FA'; SelBg = '#EAF3FB'
+        Bg = '#F3F4F6'; Panel = '#FFFFFF'; Card = '#FFFFFF'; CardHover = '#F2F6FA'
+        SelBg = '#1F6FA8'; SelText = '#FFFFFF'; SelBar = '#05080C'; FocusRing = '#0F1318'
         Input = '#FFFFFF'; Border = '#DDE1E7'; BorderStrong = '#C5CBD3'
         BtnBg = '#FFFFFF'; BtnHover = '#EEF1F5'; BtnPressed = '#E2E6EC'
         Text = '#2A2F37'; TextStrong = '#0F1318'; Muted = '#5F6875'
@@ -1005,7 +1331,7 @@ $script:StylesXaml = @'
   <ControlTemplate.Triggers>
     <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="{DynamicResource BtnHover}"/></Trigger>
     <Trigger Property="IsPressed" Value="True"><Setter TargetName="b" Property="Background" Value="{DynamicResource BtnPressed}"/></Trigger>
-    <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="{DynamicResource Accent}"/></Trigger>
+    <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="{DynamicResource FocusRing}"/></Trigger>
     <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger>
   </ControlTemplate.Triggers>
 </ControlTemplate>
@@ -1044,7 +1370,7 @@ $script:StylesXaml = @'
         <ControlTemplate.Triggers>
           <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="{DynamicResource AccentBtnHover}"/></Trigger>
           <Trigger Property="IsPressed" Value="True"><Setter TargetName="b" Property="Opacity" Value="0.85"/></Trigger>
-          <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="{DynamicResource Accent}"/></Trigger>
+          <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="{DynamicResource FocusRing}"/></Trigger>
           <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger>
         </ControlTemplate.Triggers>
       </ControlTemplate>
@@ -1072,7 +1398,7 @@ $script:StylesXaml = @'
         </Border>
         <ControlTemplate.Triggers>
           <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="{DynamicResource Muted}"/></Trigger>
-          <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="{DynamicResource Accent}"/></Trigger>
+          <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="{DynamicResource FocusRing}"/></Trigger>
           <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger>
         </ControlTemplate.Triggers>
       </ControlTemplate>
@@ -1121,10 +1447,10 @@ $script:StylesXaml = @'
         </StackPanel>
         <ControlTemplate.Triggers>
           <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="box" Property="BorderBrush" Value="{DynamicResource Accent}"/></Trigger>
-          <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="box" Property="BorderBrush" Value="{DynamicResource Accent}"/></Trigger>
+          <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="box" Property="BorderBrush" Value="{DynamicResource FocusRing}"/></Trigger>
           <Trigger Property="IsChecked" Value="True">
             <Setter TargetName="box" Property="Background" Value="{DynamicResource AccentBtn}"/>
-            <Setter TargetName="box" Property="BorderBrush" Value="{DynamicResource AccentBtn}"/>
+            <Setter TargetName="box" Property="BorderBrush" Value="{DynamicResource OnAccent}"/>
             <Setter TargetName="tick" Property="Visibility" Value="Visible"/>
           </Trigger>
           <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger>
@@ -1178,8 +1504,10 @@ $script:StylesXaml = @'
   </Style.Triggers>
 </Style>
 
+<!-- Splitters are dragged with the mouse; they take no Tab stop. -->
 <Style TargetType="GridSplitter">
   <Setter Property="Background" Value="{DynamicResource Border}"/>
+  <Setter Property="IsTabStop" Value="False"/>
   <Setter Property="HorizontalAlignment" Value="Stretch"/>
   <Setter Property="VerticalAlignment" Value="Stretch"/>
 </Style>
@@ -1259,6 +1587,20 @@ $script:StylesXaml = @'
     </Setter.Value>
   </Setter>
 </Style>
+<!-- One row look for both grids: a selected row gets the accent fill, its text colour and a
+     2px bar at the left; the row holding keyboard focus gets a FocusRing border. -->
+<ControlTemplate x:Key="RowTemplate" TargetType="DataGridRow">
+  <Border x:Name="rowBorder" Background="{TemplateBinding Background}" BorderBrush="Transparent" BorderThickness="1" SnapsToDevicePixels="True">
+    <Grid>
+      <DataGridCellsPresenter ItemsPanel="{TemplateBinding ItemsPanel}" SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}"/>
+      <Rectangle x:Name="selBar" Width="2" HorizontalAlignment="Left" Fill="{DynamicResource SelBar}" Visibility="Collapsed"/>
+    </Grid>
+  </Border>
+  <ControlTemplate.Triggers>
+    <Trigger Property="IsSelected" Value="True"><Setter TargetName="selBar" Property="Visibility" Value="Visible"/></Trigger>
+    <Trigger Property="IsKeyboardFocusWithin" Value="True"><Setter TargetName="rowBorder" Property="BorderBrush" Value="{DynamicResource FocusRing}"/></Trigger>
+  </ControlTemplate.Triggers>
+</ControlTemplate>
 <Style x:Key="AclGrid" TargetType="DataGrid" BasedOn="{StaticResource BaseGrid}">
   <Setter Property="SelectionMode" Value="Single"/>
   <Setter Property="RowStyle">
@@ -1266,10 +1608,12 @@ $script:StylesXaml = @'
       <Style TargetType="DataGridRow">
         <Setter Property="Background" Value="Transparent"/>
         <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+        <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+        <Setter Property="Template" Value="{StaticResource RowTemplate}"/>
         <Style.Triggers>
           <DataTrigger Binding="{Binding Type}" Value="Deny"><Setter Property="Foreground" Value="{DynamicResource Danger}"/></DataTrigger>
           <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="{DynamicResource CardHover}"/></Trigger>
-          <Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="{DynamicResource SelBg}"/></Trigger>
+          <Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="{DynamicResource SelBg}"/><Setter Property="Foreground" Value="{DynamicResource SelText}"/></Trigger>
         </Style.Triggers>
       </Style>
     </Setter.Value>
@@ -1283,9 +1627,11 @@ $script:StylesXaml = @'
         <Setter Property="Background" Value="Transparent"/>
         <Setter Property="Foreground" Value="{DynamicResource Text}"/>
         <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+        <Setter Property="Template" Value="{StaticResource RowTemplate}"/>
         <Style.Triggers>
           <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="{DynamicResource CardHover}"/></Trigger>
-          <Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="{DynamicResource SelBg}"/></Trigger>
+          <Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="{DynamicResource SelBg}"/><Setter Property="Foreground" Value="{DynamicResource SelText}"/></Trigger>
         </Style.Triggers>
       </Style>
     </Setter.Value>
@@ -1308,7 +1654,7 @@ function Get-MainWindowXaml {
     $res = Get-AppResourcesXaml
     @"
 <Window $ns
-        Title="Folder Permission Manager" Width="1320" Height="860" MinWidth="1000" MinHeight="640"
+        Title="Folder Permission Manager" Width="1320" Height="860" MinWidth="1000" MinHeight="560"
         WindowStartupLocation="CenterScreen" FontFamily="Segoe UI" FontSize="13"
         Background="{DynamicResource Bg}" Foreground="{DynamicResource Text}"
         UseLayoutRounding="True" TextOptions.TextFormattingMode="Display">
@@ -1340,12 +1686,14 @@ $res
             <TextBlock Text="Dry run (WhatIf)" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource Warn}"/>
           </Border>
         </StackPanel>
-        <Button x:Name="OpenLogFolderBtn" DockPanel.Dock="Right" Style="{StaticResource Btn}" VerticalAlignment="Center"
-                ToolTip="Open the folder where backups and the change log are kept.">
-          <TextBlock><Run FontFamily="{StaticResource Sym}" Text="&#x1F4C1;"/><Run Text="  Open log folder"/></TextBlock>
-        </Button>
-        <Button x:Name="ThemeToggle" DockPanel.Dock="Right" Style="{StaticResource GhostBtn}" VerticalAlignment="Center" Margin="0,0,10,0"
-                ToolTip="Switch between dark and light. The choice is remembered."/>
+        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+          <Button x:Name="ThemeToggle" Style="{StaticResource GhostBtn}" VerticalAlignment="Center" Margin="0,0,10,0"
+                  ToolTip="Switch between dark and light. The choice is remembered."/>
+          <Button x:Name="OpenLogFolderBtn" Style="{StaticResource Btn}" VerticalAlignment="Center"
+                  ToolTip="Open the folder where backups and the change log are kept.">
+            <TextBlock><Run FontFamily="{StaticResource Sym}" Text="&#x1F4C1;"/><Run Text="  Open log folder"/></TextBlock>
+          </Button>
+        </StackPanel>
       </DockPanel>
     </Border>
 
@@ -1360,29 +1708,28 @@ $res
 
     <!-- Path header: always shows where you are -->
     <Border Grid.Row="2" Background="{DynamicResource Panel}" BorderBrush="{DynamicResource Border}" BorderThickness="0,0,0,1" Padding="16,8">
-      <DockPanel>
-        <Button x:Name="RefreshBtn" DockPanel.Dock="Right" Style="{StaticResource Btn}" VerticalAlignment="Center" Margin="12,0,0,0"
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <TextBlock Grid.Row="0" Grid.Column="0" Text="FOLDER" Style="{StaticResource Lbl}" Margin="0,2,12,0" VerticalAlignment="Center"/>
+        <TextBox x:Name="PathText" Grid.Row="0" Grid.Column="1" Style="{StaticResource SelectableText}" FontFamily="{StaticResource Mono}"
+                 FontSize="13" Text="No folder chosen yet. Choose one on the left."/>
+        <TextBlock x:Name="RealPathLabel" Grid.Row="1" Grid.Column="0" Text="REAL LOCATION" Style="{StaticResource Lbl}" Margin="0,4,12,0"
+                   VerticalAlignment="Center" Visibility="Collapsed"/>
+        <TextBox x:Name="RealPathText" Grid.Row="1" Grid.Column="1" Style="{StaticResource SelectableText}" FontFamily="{StaticResource Mono}"
+                 FontSize="12" Foreground="{DynamicResource Muted}" Margin="0,4,0,0" Visibility="Collapsed"/>
+        <Button x:Name="RefreshBtn" Grid.Row="0" Grid.RowSpan="2" Grid.Column="2" Style="{StaticResource Btn}" VerticalAlignment="Center" Margin="12,0,0,0"
                 ToolTip="Read this folder again: its subfolders, permissions and files (F5)." IsEnabled="False">
           <TextBlock><Run FontFamily="{StaticResource Sym}" Text="&#x21BB;"/><Run Text="  Refresh"/></TextBlock>
         </Button>
-        <Grid>
-          <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="Auto"/>
-            <ColumnDefinition Width="*"/>
-          </Grid.ColumnDefinitions>
-          <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-          </Grid.RowDefinitions>
-          <TextBlock Grid.Row="0" Grid.Column="0" Text="FOLDER" Style="{StaticResource Lbl}" Margin="0,2,12,0" VerticalAlignment="Center"/>
-          <TextBox x:Name="PathText" Grid.Row="0" Grid.Column="1" Style="{StaticResource SelectableText}" FontFamily="{StaticResource Mono}"
-                   FontSize="13" Text="No folder chosen yet. Choose one on the left."/>
-          <TextBlock x:Name="RealPathLabel" Grid.Row="1" Grid.Column="0" Text="REAL LOCATION" Style="{StaticResource Lbl}" Margin="0,4,12,0"
-                     VerticalAlignment="Center" Visibility="Collapsed"/>
-          <TextBox x:Name="RealPathText" Grid.Row="1" Grid.Column="1" Style="{StaticResource SelectableText}" FontFamily="{StaticResource Mono}"
-                   FontSize="12" Foreground="{DynamicResource Muted}" Margin="0,4,0,0" Visibility="Collapsed"/>
-        </Grid>
-      </DockPanel>
+      </Grid>
     </Border>
 
     <!-- Busy line -->
@@ -1418,21 +1765,19 @@ $res
                   ToolTip="List the drives again, for example after mapping a new one."/>
           <TextBlock Text="FOLDERS" Style="{StaticResource Lbl}" Margin="0" VerticalAlignment="Center"/>
         </DockPanel>
-        <DockPanel Grid.Row="1" Margin="0,8,0,0">
-          <Button x:Name="GoBtn" DockPanel.Dock="Right" Style="{StaticResource Btn}" Content="Open" Margin="6,0,0,0"/>
-          <TextBox x:Name="GoBox" FontFamily="{StaticResource Mono}" ToolTip="Type a folder or share, such as \\fs01\Data, and press Enter."/>
-        </DockPanel>
+        <Grid Grid.Row="1" Margin="0,8,0,0">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
+          <TextBox x:Name="GoBox" Grid.Column="0" FontFamily="{StaticResource Mono}" ToolTip="Type a folder or share, such as \\fs01\Data, and press Enter."/>
+          <Button x:Name="GoBtn" Grid.Column="1" Style="{StaticResource Btn}" Content="Open" Margin="6,0,0,0"/>
+        </Grid>
         <TextBlock Grid.Row="2" Style="{StaticResource Hint}" Margin="0,4,0,8"
                    Text="Type a path like \\fs01\Data and press Enter, or pick a drive below. Folders open in the background, so a slow server won't freeze this window."/>
+        <!-- Its selection colours are set from the theme by Set-AppTheme. -->
         <TreeView x:Name="FolderTree" Grid.Row="3" Background="{DynamicResource Input}" BorderBrush="{DynamicResource BorderStrong}"
-                  Foreground="{DynamicResource Text}" Padding="4">
-          <TreeView.Resources>
-            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#2E86C1"/>
-            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
-            <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightBrushKey}" Color="#3A6E94"/>
-            <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightTextBrushKey}" Color="#FFFFFF"/>
-          </TreeView.Resources>
-        </TreeView>
+                  Foreground="{DynamicResource Text}" Padding="4"/>
       </Grid>
 
       <GridSplitter Grid.Column="1" ResizeDirection="Columns" ResizeBehavior="PreviousAndNext"/>
@@ -1523,20 +1868,37 @@ $res
             <Grid Grid.Column="0" Margin="0,0,8,0">
               <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
                 <RowDefinition Height="*"/>
                 <RowDefinition Height="Auto"/>
               </Grid.RowDefinitions>
-              <DockPanel Grid.Row="0" Margin="0,0,0,6">
+              <DockPanel Grid.Row="0" Margin="0,0,0,2">
                 <CheckBox x:Name="SelectAllCheck" DockPanel.Dock="Right" Content="Select all" IsEnabled="False" VerticalAlignment="Center"/>
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                   <TextBlock Text="FILES" Style="{StaticResource Lbl}" Margin="0"/>
                   <TextBlock x:Name="FilesCountText" Foreground="{DynamicResource Muted}" FontSize="11" Margin="8,0,0,0"/>
                 </StackPanel>
               </DockPanel>
-              <Border Grid.Row="1" Background="{DynamicResource Card}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="4">
+              <TextBlock x:Name="FilesHint" Grid.Row="1" Style="{StaticResource Hint}" Margin="0,0,0,6"
+                         Text="Tick files, or Ctrl-click / Shift-click to select several."/>
+              <Border Grid.Row="2" Background="{DynamicResource Card}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="4">
                 <Grid>
                   <DataGrid x:Name="FilesGrid" Style="{StaticResource FileGrid}">
                     <DataGrid.Columns>
+                      <!-- A tick box per file, bound to the row's selection both ways. The grid's own check box
+                           cannot be clicked; this one can, so a tick adds the file to the selection. It takes no
+                           Tab stop: the row has the keyboard focus (Space or Ctrl+Space selects). -->
+                      <DataGridCheckBoxColumn Width="40" CanUserSort="False" CanUserResize="False"
+                                              Binding="{Binding Path=IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged, RelativeSource={RelativeSource AncestorType={x:Type DataGridRow}}}">
+                        <DataGridCheckBoxColumn.ElementStyle>
+                          <Style TargetType="CheckBox" BasedOn="{StaticResource {x:Type CheckBox}}">
+                            <Setter Property="IsHitTestVisible" Value="True"/>
+                            <Setter Property="Focusable" Value="False"/>
+                            <Setter Property="HorizontalAlignment" Value="Center"/>
+                            <Setter Property="VerticalAlignment" Value="Center"/>
+                          </Style>
+                        </DataGridCheckBoxColumn.ElementStyle>
+                      </DataGridCheckBoxColumn>
                       <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="2*"/>
                       <DataGridTextColumn Header="Size" Binding="{Binding SizeText}" SortMemberPath="Length" Width="90"/>
                       <DataGridTextColumn Header="Modified" Binding="{Binding Modified}" Width="150"/>
@@ -1545,8 +1907,8 @@ $res
                   <TextBlock x:Name="FilesState" Style="{StaticResource PaneState}" Visibility="Collapsed"/>
                 </Grid>
               </Border>
-              <Border x:Name="FileActionBar" Grid.Row="2" Visibility="Collapsed" Margin="0,8,0,0" Padding="10,8" CornerRadius="4"
-                      Background="{DynamicResource SelBg}" BorderBrush="{DynamicResource BorderStrong}" BorderThickness="1">
+              <Border x:Name="FileActionBar" Grid.Row="3" Visibility="Collapsed" Margin="0,8,0,0" Padding="10,8" CornerRadius="4"
+                      Background="{DynamicResource BannerBg}" BorderBrush="{DynamicResource BorderStrong}" BorderThickness="1">
                 <StackPanel>
                   <WrapPanel>
                     <TextBlock x:Name="SelectedCountText" FontWeight="SemiBold" Foreground="{DynamicResource TextStrong}" VerticalAlignment="Center" Margin="0,0,14,6"/>
@@ -1715,10 +2077,19 @@ function Set-AppTheme {
         $script:Window.Resources[$key] = $brush
     }
     $script:CurrentTheme = $Name
-    if ($script:UI -and $script:UI.ThemeToggle) {
-        # The button names the theme it switches to.
-        if ($Name -eq 'Dark') { $script:UI.ThemeToggle.Content = "$([char]0x2600)  Light" }
-        else { $script:UI.ThemeToggle.Content = "$([char]0x263E)  Dark" }
+    if ($script:UI -and $script:UI.ThemeToggle) { $script:UI.ThemeToggle.Content = Get-ThemeToggleText -Current $Name }
+    if ($script:UI -and $script:UI.FolderTree) {
+        # The tree's default item template draws selection with these system brush keys; they
+        # are replaced with the theme's selection colours (active and inactive look the same).
+        $sel = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString($palette.SelBg))
+        $selText = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString($palette.SelText))
+        $sel.Freeze()
+        $selText.Freeze()
+        $res = $script:UI.FolderTree.Resources
+        $res[[System.Windows.SystemColors]::HighlightBrushKey] = $sel
+        $res[[System.Windows.SystemColors]::HighlightTextBrushKey] = $selText
+        $res[[System.Windows.SystemColors]::InactiveSelectionHighlightBrushKey] = $sel
+        $res[[System.Windows.SystemColors]::InactiveSelectionHighlightTextBrushKey] = $selText
     }
 }
 
@@ -1731,8 +2102,17 @@ function Set-Status {
     param([Parameter(Mandatory)][string]$Text, [ValidateSet('Info', 'Success', 'Warning', 'Error')][string]$Kind = 'Info')
     if (-not ($script:UI -and $script:UI.StatusText)) { return }
     $key = @{ Info = 'Text'; Success = 'Ok'; Warning = 'Warn'; Error = 'Danger' }[$Kind]
-    $script:UI.StatusText.Text = $Text
-    $script:UI.StatusText.SetResourceReference([System.Windows.Controls.Control]::ForegroundProperty, $key)
+    $box = $script:UI.StatusText
+    $box.Text = Get-StatusText -Text $Text -Kind $Kind
+    $box.SetResourceReference([System.Windows.Controls.Control]::ForegroundProperty, $key)
+    if ($script:StatusIsLiveRegion) {
+        # Tell screen readers the live region changed (.NET Framework 4.7.1 and later).
+        try {
+            $peer = [System.Windows.Automation.Peers.UIElementAutomationPeer]::CreatePeerForElement($box)
+            if ($peer) { $peer.RaiseAutomationEvent([System.Windows.Automation.Peers.AutomationEvents]::LiveRegionChanged) }
+        }
+        catch { }
+    }
 }
 
 function Set-PaneStateView {
@@ -1767,14 +2147,35 @@ function Start-ReadTask {
         [Parameter(Mandatory)][scriptblock]$OnDone,
         $State
     )
+    # Every way out calls OnDone exactly once with a result (a failed one if need be), so no
+    # pane is left on "Loading..." and the busy line is always cleared.
     $key = [guid]::NewGuid().ToString('N')
     $script:BusyEntries[$key] = [PSCustomObject]@{ Action = $Action; Path = $Path; Started = [DateTime]::UtcNow }
     Update-BusyLine
-    Start-BgTask -Work $Work -ArgumentList $ArgumentList -State @{ Key = $key; OnDone = $OnDone; State = $State } -OnDone {
+    $taskState = @{ Key = $key; OnDone = $OnDone; State = $State; Action = $Action; Path = $Path }
+    $finish = {
         param($result, $s)
         $script:BusyEntries.Remove($s.Key)
         try { & $s.OnDone $result $s.State }
+        catch {
+            # Showing the result failed: say so, and let the same callback put its pane into
+            # its Failed state with that error.
+            $why = "$($_.Exception.Message)"
+            Write-AppError "Showing the result of '$($s.Action) $($s.Path)': $why"
+            Set-Status -Kind Error -Text "Something went wrong while showing the result ($($s.Action) $($s.Path)): $why Press Refresh to try again."
+            try { & $s.OnDone ([PSCustomObject]@{ Ok = $false; Path = $s.Path; Error = $why }) $s.State }
+            catch { Write-AppError "Showing the failure of '$($s.Action) $($s.Path)': $($_.Exception.Message)" }
+        }
         finally { Update-BusyLine }
+    }
+    try {
+        Start-BgTask -Work $Work -ArgumentList $ArgumentList -State $taskState -OnDone $finish
+    }
+    catch {
+        $why = "Could not start in the background: $(Get-InnermostErrorText $_)"
+        Write-AppError "Starting '$Action $Path': $why"
+        $null = & $finish ([PSCustomObject]@{ Ok = $false; Path = $Path; Error = $why }) $taskState
+        return $null
     }
 }
 
@@ -1825,7 +2226,7 @@ function Expand-FolderNode {
     if (-not ($Node -is [System.Windows.Controls.TreeViewItem]) -or -not $Node.Tag -or $Node.Tag.State -ne 'NotLoaded') { return }
     $Node.Tag.State = 'Loading'
     $real = Resolve-MappedDrive -Path $Node.Tag.Path -DriveMap $script:MappedDrives
-    [void](Start-ReadTask -Action 'Opening' -Path $Node.Tag.Path -Work $script:ListChildrenWork -ArgumentList @($real, $script:CorePath) -State $Node -OnDone {
+    [void](Start-ReadTask -Action 'Opening folder' -Path $Node.Tag.Path -Work $script:ListChildrenWork -ArgumentList @($real, $script:CorePath) -State $Node -OnDone {
             param($result, $node)
             Set-FolderNodeChildren -Node $node -Result $result
         })
@@ -1852,7 +2253,7 @@ function Update-DriveList {
     $tree = $script:UI.FolderTree
     $tree.Items.Clear()
     [void]$tree.Items.Add((New-TreeInfoItem -Text 'Loading drives...'))
-    [void](Start-ReadTask -Action 'Loading drives' -Work $script:DrivesWork -ArgumentList @($script:MappedDrives, $script:CorePath) -OnDone {
+    [void](Start-ReadTask -Action 'Loading the drive list' -Work $script:DrivesWork -ArgumentList @($script:MappedDrives, $script:CorePath) -OnDone {
             param($result, $s)
             $tree = $script:UI.FolderTree
             $tree.Items.Clear()
@@ -1926,12 +2327,12 @@ function Select-Folder {
     Update-FileSelection
 
     $aclRequest = New-PaneRequest -Pane 'FolderPermissions'
-    [void](Start-ReadTask -Action 'Loading permissions' -Path $display -Work $script:FolderAclWork -ArgumentList @($real, $script:CorePath) -State $aclRequest -OnDone {
+    [void](Start-ReadTask -Action 'Loading the permissions of' -Path $display -Work $script:FolderAclWork -ArgumentList @($real, $script:CorePath) -State $aclRequest -OnDone {
             param($result, $request)
             [void](Set-FolderPermissionsResult -Result $result -Request $request)
         })
     $filesRequest = New-PaneRequest -Pane 'Files'
-    [void](Start-ReadTask -Action 'Loading files' -Path $display -Work $script:FilesWork -ArgumentList @($real, $script:CorePath) -State $filesRequest -OnDone {
+    [void](Start-ReadTask -Action 'Listing the files in' -Path $display -Work $script:FilesWork -ArgumentList @($real, $script:CorePath) -State $filesRequest -OnDone {
             param($result, $request)
             [void](Set-FilesResult -Result $result -Request $request)
         })
@@ -2017,7 +2418,7 @@ function Update-FileSelection {
         foreach ($p in $missing) { $script:FileAclPending[$p] = $true }
         $request = [int]$script:PaneRequests['Files']
         $label = if ($missing.Count -eq 1) { "1 file in $($script:Current.DisplayPath)" } else { "$($missing.Count) files in $($script:Current.DisplayPath)" }
-        [void](Start-ReadTask -Action 'Loading file permissions' -Path $label -Work $script:FileAclWork -ArgumentList @([string[]]$missing, $script:CorePath) `
+        [void](Start-ReadTask -Action 'Loading the permissions of' -Path $label -Work $script:FileAclWork -ArgumentList @([string[]]$missing, $script:CorePath) `
                 -State @{ Request = $request; Paths = [string[]]$missing } -OnDone {
                 param($result, $s)
                 [void](Set-FileAclResult -Result $result -Request $s.Request -Paths $s.Paths)
@@ -2094,7 +2495,7 @@ function Show-FileDetails {
     }
     $models = @($selected | ForEach-Object { $script:FileAclCache[$_.Path] } | Where-Object { $_ -and $_.Ok })
     if (Test-FileAclDiffers -Model $models) {
-        $ui.DiffWarning.Text = Get-FileAclDiffWarning
+        $ui.DiffWarning.Text = Get-FileAclDiffWarningText -Checked $models.Count -Selected $selected.Count
         $ui.DiffWarning.Visibility = 'Visible'
     }
     else { $ui.DiffWarning.Visibility = 'Collapsed' }
@@ -2113,22 +2514,37 @@ function Start-PermissionExport {
     $dlg.DefaultExt = '.csv'
     $dlg.AddExtension = $true
     $dlg.OverwritePrompt = $true
-    $dlg.InitialDirectory = [Environment]::GetFolderPath([Environment+SpecialFolder]::MyDocuments)
+    # Documents only when it is this computer's own disk and not synced to OneDrive; otherwise
+    # a local Exports folder (created here, so the dialog can open in it).
+    $start = Get-DefaultExportFolder
+    if (-not (Test-Path -LiteralPath $start -PathType Container)) {
+        try { New-Item -ItemType Directory -Path $start -Force -WhatIf:$false -ErrorAction Stop | Out-Null }
+        catch { Write-AppError "Could not create the export folder ${start}: $($_.Exception.Message)" }
+    }
+    $dlg.InitialDirectory = $start
     $dlg.FileName = Get-DefaultExportFileName -Path $display
     if (-not $dlg.ShowDialog($script:Window)) { return }
     $out = $dlg.FileName
+    # A share, a mapped, network or removable drive, or OneDrive: warn and ask first.
+    if (-not (Confirm-ExportLocation -Path $out)) {
+        Set-Status -Text "Export cancelled: nothing was saved to $out." -Kind Info
+        return
+    }
 
+    $where = Get-ExportLocationInfo -Path $out -DriveMap $script:MappedDrives
     $script:UI.ExportBtn.IsEnabled = $false
     $script:UI.StopExportBtn.Visibility = 'Visible'
-    Set-Status -Text "Exporting the permissions of $display and all its subfolders to $out..." -Kind Info
-    $script:ExportTask = Start-ReadTask -Action 'Exporting permissions (folder and all subfolders)' -Path $display -Work $script:ExportWork `
+    if ($where.IsLocal) { Set-Status -Text "Exporting the permissions of $display and all its subfolders to $out..." -Kind Info }
+    else { Set-Status -Text "Exporting the permissions of $display and all its subfolders to $out... $($where.Warning)" -Kind Warning }
+    $script:ExportTask = Start-ReadTask -Action 'Exporting the permissions (with all subfolders) of' -Path $display -Work $script:ExportWork `
         -ArgumentList @($real, $out, $script:CorePath) -State @{ Display = $display; Out = $out } -OnDone {
         param($result, $s)
         $script:ExportTask = $null
         $script:UI.ExportBtn.IsEnabled = $true
         $script:UI.StopExportBtn.Visibility = 'Collapsed'
         if ($result -and $result.Ok) {
-            Set-Status -Text "Exported $($result.RowCount) permission row(s) for $($s.Display) and its subfolders to $($result.OutputPath)." -Kind Success
+            Set-Status -Text ("Exported $($result.RowCount) permission row(s) for $($s.Display) and its subfolders to $($result.OutputPath). " +
+                'It holds client folder paths, owners and account names: attach it to the ticket, then delete it.') -Kind Success
         }
         elseif ($result -and $result.Stopped) {
             Set-Status -Text "Export stopped. If $($s.Out) was created, it is incomplete: delete it or export again." -Kind Warning
@@ -2150,7 +2566,7 @@ function Stop-PermissionExport {
 function Open-LogFolder {
     $folder = $script:ChangeLogFolder
     if (-not (Test-Path -LiteralPath $folder -PathType Container)) {
-        Set-Status -Text "Nothing has been logged yet: $folder is created with the first change." -Kind Info
+        Set-Status -Text "The log folder $folder does not exist yet: nothing has been backed up or logged there. It is created when the first change is backed up." -Kind Info
         return
     }
     try { Start-Process -FilePath 'explorer.exe' -ArgumentList (ConvertTo-QuotedArgument $folder) -ErrorAction Stop }
@@ -2220,6 +2636,7 @@ function Initialize-PermissionWindow {
     if ($win.Width -gt $wa.Width - 20) { $win.Width = [Math]::Max($win.MinWidth, $wa.Width - 20) }
 
     Set-AppTheme -Name (Get-SavedTheme -SettingsPath $script:SettingsPath)
+    try { $script:StatusIsLiveRegion = Enable-LiveRegion -Element $ui.StatusText } catch { $script:StatusIsLiveRegion = $false }
     Show-Banner -Rows (Get-LogFolderBanner -LogFolder $script:ChangeLogFolder -Notice $script:LogFolderNotice -WhatIfMode:$script:WhatIfMode)
     if ($script:WhatIfMode) { $ui.DryRunPill.Visibility = 'Visible' }
 
@@ -2255,6 +2672,9 @@ function Initialize-PermissionWindow {
             if ($e.Key -eq 'F5') { Update-CurrentFolder; $e.Handled = $true }
         })
     $win.Add_Closing({
+            param($s, $e)
+            # Asked first, before anything is stopped (SQ-018 refuses while a change runs).
+            if (-not (Test-CanClose)) { $e.Cancel = $true; return }
             # Reads and the export can simply be dropped; nothing in this version changes anything.
             foreach ($t in @($script:BgTasks)) { if ($t) { try { [void]$t.PS.BeginStop($null, $null) } catch { } } }
         })
@@ -2287,6 +2707,16 @@ if ($LoadFunctionsOnly) { return }
 $script:WhatIfMode = [bool]$WhatIfPreference
 $WhatIfPreference = $false
 
+Limit-AppErrorLog -Path $script:ErrorLogPath
+
+# A relative -LogFolder is made full now, against the location it was typed in: a relaunched
+# copy starts in another folder.
+try { $LogFolder = Resolve-LogFolderArgument -LogFolder $LogFolder }
+catch {
+    Show-AppMessage -Icon Error -Message $_.Exception.Message
+    return
+}
+
 # Mapped drives passed on by the first (non-elevated) window, plus the ones this process sees.
 # Not $script:DriveMap: at script scope that IS the -DriveMap parameter (a string).
 $script:MappedDrives = Merge-DriveMap -Primary (Get-MappedDriveTable) -Secondary (ConvertFrom-DriveMapArgument -Argument $DriveMap)
@@ -2298,8 +2728,10 @@ $action = Get-StartupAction -IsSta $isSta -IsAdmin $isAdmin
 
 if ($action -eq 'RelaunchSta') {
     # WPF needs a single-threaded apartment; start again in one.
-    $relaunch = Get-RelaunchArgumentList -ScriptPath $script:ScriptPath -LogFolder $LogFolder -WhatIfMode:$script:WhatIfMode -DriveMap $script:MappedDrives
-    try { Start-Process -FilePath (Get-WindowsPowerShellPath) -ArgumentList $relaunch -ErrorAction Stop }
+    try {
+        $relaunch = Get-RelaunchArgumentList -ScriptPath $script:ScriptPath -LogFolder $LogFolder -WhatIfMode:$script:WhatIfMode -DriveMap $script:MappedDrives
+        Start-Process -FilePath (Get-WindowsPowerShellPath) -ArgumentList $relaunch -ErrorAction Stop
+    }
     catch { Show-AppMessage -Icon Error -Message "Folder Permission Manager could not start a window: $($_.Exception.Message)" }
     return
 }
@@ -2339,11 +2771,10 @@ catch {
     Show-AppMessage -Icon Error -Message "Folder Permission Manager hit an error and has to close:`n`n$($_.Exception.Message)`n`nDetails were written to $($script:ErrorLogPath). Nothing was changed."
 }
 finally {
-    if ($script:BgPool) { try { $script:BgPool.Close(); $script:BgPool.Dispose() } catch { } }
-    if ($script:InstanceMutex) {
-        try { $script:InstanceMutex.ReleaseMutex() } catch { }
-        try { $script:InstanceMutex.Dispose() } catch { }
-    }
+    # Mutex first, then the pool without blocking; a read stuck in network I/O ends with the
+    # process instead of keeping it alive. A tech's own console is only closed in that case.
+    $ownProcess = Test-OwnProcess -CommandLineArgs ([Environment]::GetCommandLineArgs()) -ScriptPath $script:ScriptPath
+    $null = Invoke-AppShutdown -Pool $script:BgPool -Mutex $script:InstanceMutex -Tasks @($script:BgTasks) -ExitWhenDone:$ownProcess
 }
 
 #endregion

@@ -1118,7 +1118,8 @@ public static extern uint GetShortPathNameW(string lpszLongPath, System.Text.Str
         It 'AC16b_NoTakeownCallInAnyScriptPassesYAfterD' {
             # Learn: "You must use this option in conjunction with the /r option"; Y replaces permissions.
             # https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
-            foreach ($name in 'FolderPermissions.Core.ps1', 'FolderPermissionManager.ps1', 'FolderPermissionManager-GUI.ps1') {
+            # -GUI.ps1 is the WPF app; -WebGUI.ps1 is the browser version it replaces (D-038). Both are scanned.
+            foreach ($name in 'FolderPermissions.Core.ps1', 'FolderPermissionManager.ps1', 'FolderPermissionManager-GUI.ps1', 'FolderPermissionManager-WebGUI.ps1') {
                 $path = (Resolve-Path (Join-Path $PSScriptRoot "..\$name")).Path
                 $tokens = $null; $errors = $null
                 $null = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)

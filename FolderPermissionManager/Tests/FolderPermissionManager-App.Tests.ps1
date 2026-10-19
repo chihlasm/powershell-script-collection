@@ -64,6 +64,40 @@ BeforeAll {
     $script:RealGetAcl = Get-Command Get-Acl -CommandType Cmdlet
     if ($script:IsSta) { Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase }
 
+    # Isolation: the app's own files (settings, gui-errors.log) go to $TestDrive, never to the
+    # real %LOCALAPPDATA%. Set again after each 'Script shape' test, because AC8 loads the app a
+    # second time.
+    function script:Set-TestAppPaths {
+        $script:AppDataFolder = Join-Path $TestDrive 'appdata\FolderPermissionManager'
+        $script:SettingsPath = Join-Path $script:AppDataFolder 'settings.json'
+        $script:ErrorLogPath = Join-Path $script:AppDataFolder 'gui-errors.log'
+    }
+    Set-TestAppPaths
+
+    # Backstop: nothing in SQ-017 changes a permission. If a test ever reaches a real ACL write,
+    # it fails loudly instead of touching the machine.
+    Mock Set-Acl { throw 'Set-Acl must not run in the SQ-017 tests.' }
+    Mock Invoke-AclTool { throw 'Invoke-AclTool must not run in the SQ-017 tests.' }
+
+    function script:Get-Luminance {
+        # WCAG 2 relative luminance of a #RRGGBB colour.
+        # https://www.w3.org/TR/WCAG21/#dfn-relative-luminance
+        param([Parameter(Mandatory)][string]$Hex)
+        $h = $Hex.TrimStart('#')
+        $c = foreach ($i in 0..2) {
+            $v = [Convert]::ToInt32($h.Substring($i * 2, 2), 16) / 255.0
+            if ($v -le 0.04045) { $v / 12.92 } else { [math]::Pow(($v + 0.055) / 1.055, 2.4) }
+        }
+        0.2126 * $c[0] + 0.7152 * $c[1] + 0.0722 * $c[2]
+    }
+    function script:Get-ContrastRatio {
+        # https://www.w3.org/TR/WCAG21/#dfn-contrast-ratio
+        param([Parameter(Mandatory)][string]$A, [Parameter(Mandatory)][string]$B)
+        $x = Get-Luminance $A
+        $y = Get-Luminance $B
+        ([math]::Max($x, $y) + 0.05) / ([math]::Min($x, $y) + 0.05)
+    }
+
     function script:Get-AllXaml {
         # The four XAML documents the app defines, as strings, keyed by getter name.
         $h = [ordered]@{}
@@ -135,6 +169,102 @@ Describe 'Window markup' {
         }
         finally { $script:Window.Close() }
     }
+
+    It 'AC4b_SelectionContrast' {
+        # Pinned so a palette edit has to come back through this test.
+        $script:Themes.Dark.SelBg | Should -Be '#3276AB'
+        $script:Themes.Dark.SelText | Should -Be '#FFFFFF'
+        $script:Themes.Dark.SelBar | Should -Be '#BFE3FA'
+        $script:Themes.Dark.FocusRing | Should -Be '#FFFFFF'
+        $script:Themes.Dark.AccentBtn | Should -Be '#2A7AB0'
+        $script:Themes.Light.SelBg | Should -Be '#1F6FA8'
+        $script:Themes.Light.SelText | Should -Be '#FFFFFF'
+        $script:Themes.Light.SelBar | Should -Be '#05080C'
+        $script:Themes.Light.FocusRing | Should -Be '#0F1318'
+        foreach ($name in 'Dark', 'Light') {
+            $t = $script:Themes[$name]
+            # Rows are transparent on the Card background (and CardHover under the mouse).
+            (Get-ContrastRatio $t.SelBg $t.Card) | Should -BeGreaterOrEqual 3 -Because "$name selection fill vs the row"
+            (Get-ContrastRatio $t.SelBg $t.CardHover) | Should -BeGreaterOrEqual 3 -Because "$name selection fill vs a hovered row"
+            (Get-ContrastRatio $t.SelBg $t.Input) | Should -BeGreaterOrEqual 3 -Because "$name tree selection vs the tree background"
+            (Get-ContrastRatio $t.SelText $t.SelBg) | Should -BeGreaterOrEqual 4.5 -Because "$name text on a selected row"
+            (Get-ContrastRatio $t.SelBar $t.SelBg) | Should -BeGreaterOrEqual 3 -Because "$name selection bar vs the fill"
+            (Get-ContrastRatio $t.OnAccent $t.AccentBtn) | Should -BeGreaterOrEqual 4.5 -Because "$name text on the primary button"
+            foreach ($bg in 'Card', 'SelBg', 'AccentBtn', 'BtnBg', 'Input') {
+                $t.FocusRing | Should -Not -Be $t[$bg]
+                (Get-ContrastRatio $t.FocusRing $t[$bg]) | Should -BeGreaterOrEqual 3 -Because "$name focus ring vs $bg"
+            }
+        }
+
+        # Both grids: selected rows get the fill, the selected text colour and a 2px bar; a row
+        # with keyboard focus gets a FocusRing border; keyboard focus never uses the fill colour.
+        $xml = [xml](Get-MainWindowXaml)
+        $tpl = @($xml.SelectNodes('//*[local-name()="ControlTemplate"][@TargetType="DataGridRow"]'))
+        $tpl.Count | Should -Be 1 -Because 'one shared row template'
+        $bar = @($tpl[0].SelectNodes('.//*[local-name()="Rectangle"][@Width="2"]'))
+        $bar.Count | Should -Be 1
+        $bar[0].Fill | Should -Be '{DynamicResource SelBar}'
+        $tplText = $tpl[0].OuterXml
+        $tplText | Should -Match 'Property="IsKeyboardFocusWithin" Value="True"><Setter TargetName="\w+" Property="BorderBrush" Value="\{DynamicResource FocusRing\}"'
+        foreach ($style in 'AclGrid', 'FileGrid') {
+            $s = $xml.SelectSingleNode("//*[local-name()='Style'][@*[local-name()='Key']='$style']")
+            $s | Should -Not -BeNullOrEmpty
+            $s.OuterXml | Should -Match 'Property="IsSelected" Value="True"><Setter Property="Background" Value="\{DynamicResource SelBg\}" /><Setter Property="Foreground" Value="\{DynamicResource SelText\}" />'
+        }
+        (Get-MainWindowXaml) | Should -Not -Match 'IsKeyboardFocused" Value="True"><Setter TargetName="\w+" Property="BorderBrush" Value="\{DynamicResource Accent\}"'
+    }
+
+    It 'AC4c_TreeSelectionFromTheme' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $xml = [xml](Get-MainWindowXaml)
+        $tree = $xml.SelectSingleNode('//*[local-name()="TreeView"]')
+        @($tree.SelectNodes('.//*[@Color]')).Count | Should -Be 0 -Because 'tree selection colours come from the theme, not literals'
+        $script:Window = [System.Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xml))
+        $script:UI = @{ ThemeToggle = $script:Window.FindName('ThemeToggle'); FolderTree = $script:Window.FindName('FolderTree') }
+        try {
+            foreach ($name in 'Light', 'Dark') {
+                Set-AppTheme $name
+                $res = $script:UI.FolderTree.Resources
+                "$($res[[System.Windows.SystemColors]::HighlightBrushKey].Color)" | Should -Be ('#FF' + $script:Themes[$name].SelBg.TrimStart('#'))
+                "$($res[[System.Windows.SystemColors]::HighlightTextBrushKey].Color)" | Should -Be ('#FF' + $script:Themes[$name].SelText.TrimStart('#'))
+                "$($res[[System.Windows.SystemColors]::InactiveSelectionHighlightBrushKey].Color)" | Should -Be ('#FF' + $script:Themes[$name].SelBg.TrimStart('#'))
+            }
+        }
+        finally { $script:Window.Close() }
+    }
+
+    It 'AC4d_ThemeToggleText' {
+        Get-ThemeToggleText -Current Dark | Should -Match 'Switch to light$'
+        Get-ThemeToggleText -Current Light | Should -Match 'Switch to dark$'
+    }
+
+    It 'AC2b_TabOrderSplittersAndSize' {
+        $text = Get-MainWindowXaml
+        $xml = [xml]$text
+        # Tab order follows the markup: each path box comes before its button.
+        $text.IndexOf('x:Name="GoBox"') | Should -BeLessThan $text.IndexOf('x:Name="GoBtn"')
+        $text.IndexOf('x:Name="PathText"') | Should -BeLessThan $text.IndexOf('x:Name="RefreshBtn"')
+        $text.IndexOf('x:Name="ThemeToggle"') | Should -BeLessThan $text.IndexOf('x:Name="OpenLogFolderBtn"')
+        # Splitters are dragged with the mouse; they must not take a Tab stop.
+        $splitStyle = $xml.SelectSingleNode('//*[local-name()="Style"][@TargetType="GridSplitter"]')
+        $splitStyle.OuterXml | Should -Match 'Property="IsTabStop" Value="False"'
+        $xml.Window.MinHeight | Should -Be '560'
+    }
+
+    It 'AC20b_FilesGridCheckBoxes' {
+        $xml = [xml](Get-MainWindowXaml)
+        $grid = $xml.SelectSingleNode('//*[local-name()="DataGrid"][@*[local-name()="Name"]="FilesGrid"]')
+        $cols = @($grid.SelectNodes('./*[local-name()="DataGrid.Columns"]/*'))
+        $cols[0].LocalName | Should -Be 'DataGridCheckBoxColumn' -Because 'the files grid has a tick box per file, first'
+        $binding = $cols[0].GetAttribute('Binding')
+        $binding | Should -Match 'IsSelected'
+        $binding | Should -Match 'AncestorType=\{x:Type DataGridRow\}'
+        $binding | Should -Match 'Mode=TwoWay'
+        $binding | Should -Match 'UpdateSourceTrigger=PropertyChanged'
+        # The default element style is not clickable; this one is, so a tick adds to the selection.
+        $cols[0].OuterXml | Should -Match 'Property="IsHitTestVisible" Value="True"'
+        $hint = $xml.SelectSingleNode('//*[local-name()="TextBlock"][@*[local-name()="Name"]="FilesHint"]')
+        $hint.Text | Should -Be 'Tick files, or Ctrl-click / Shift-click to select several.'
+    }
 }
 
 Describe 'Theme setting' {
@@ -149,9 +279,35 @@ Describe 'Theme setting' {
         Set-Content -LiteralPath $bad -Value '{ this is not json'
         Get-SavedTheme -SettingsPath $bad | Should -Be 'Dark'
     }
+
+    It 'AC5b_ErrorLogCapped' {
+        # The tests' own error log is in $TestDrive (isolation), never the real %LOCALAPPDATA%.
+        $script:ErrorLogPath | Should -BeLike "$TestDrive*"
+        Write-AppError 'first entry'
+        (Get-Content -LiteralPath $script:ErrorLogPath -Raw) | Should -Match 'first entry'
+
+        $log = Join-Path $TestDrive 'big-errors.log'
+        $lines = foreach ($i in 1..2000) { '2026-10-19 10:00:00  error number {0:D5} with some detail text' -f $i }
+        Set-Content -LiteralPath $log -Value $lines -Encoding UTF8
+        (Get-Item -LiteralPath $log).Length | Should -BeGreaterThan 20000
+        Limit-AppErrorLog -Path $log -MaxBytes 20000
+        $after = Get-Item -LiteralPath $log
+        $after.Length | Should -BeLessOrEqual 20000
+        $kept = @(Get-Content -LiteralPath $log)
+        $kept[-1] | Should -Match 'error number 02000'
+        $kept[0] | Should -Match '^2026-10-19 10:00:00  error number \d{5} with some detail text$' -Because 'trimmed at a line boundary'
+
+        $small = Join-Path $TestDrive 'small-errors.log'
+        Set-Content -LiteralPath $small -Value 'one line' -Encoding UTF8
+        Limit-AppErrorLog -Path $small -MaxBytes 20000
+        (Get-Content -LiteralPath $small) | Should -Be 'one line'
+        { Limit-AppErrorLog -Path (Join-Path $TestDrive 'missing.log') -MaxBytes 100 } | Should -Not -Throw
+    }
 }
 
 Describe 'Script shape' {
+    AfterEach { Set-TestAppPaths }
+
     It 'AC6_NoNetworkListener' {
         $tokens = $null
         [void][System.Management.Automation.Language.Parser]::ParseFile($script:AppPath, [ref]$tokens, [ref]$null)
@@ -198,6 +354,62 @@ Describe 'Script shape' {
         $script:BgPool | Should -BeNullOrEmpty
         $script:InstanceMutex | Should -BeNullOrEmpty
     }
+
+    It 'AC8b_CloseNeverHangs' {
+        $order = [System.Collections.Generic.List[string]]::new()
+        $mutex = [PSCustomObject]@{}
+        $mutex | Add-Member ScriptMethod ReleaseMutex { $order.Add('mutex-release') }.GetNewClosure()
+        $mutex | Add-Member ScriptMethod Dispose { $order.Add('mutex-dispose') }.GetNewClosure()
+        $ps = [PSCustomObject]@{}
+        $ps | Add-Member ScriptMethod BeginStop { param($a, $b) $order.Add('task-stop') }.GetNewClosure()
+        $tasks = @([PSCustomObject]@{ PS = $ps })
+        # A pool whose runspace is stuck in I/O: BeginClose returns, but never completes.
+        $stuck = New-Object System.Threading.ManualResetEvent $false
+        $pool = [PSCustomObject]@{}
+        $pool | Add-Member ScriptMethod BeginClose { param($a, $b) $order.Add('pool-beginclose'); [PSCustomObject]@{ AsyncWaitHandle = $stuck } }.GetNewClosure()
+        $exits = @{ N = 0 }
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $r = Invoke-AppShutdown -Pool $pool -Mutex $mutex -Tasks $tasks -WaitMilliseconds 50 -ExitAction { $exits.N++ }.GetNewClosure()
+        $sw.Stop()
+        $sw.Elapsed.TotalSeconds | Should -BeLessThan 5 -Because 'closing must not wait on a stuck runspace'
+        $order[0] | Should -Be 'mutex-release' -Because 'the mutex is released first, so the tool can be opened again at once'
+        $order.IndexOf('pool-beginclose') | Should -BeGreaterThan $order.IndexOf('mutex-release')
+        $order | Should -Contain 'task-stop'
+        $r.PoolClosed | Should -BeFalse
+        $exits.N | Should -Be 1 -Because 'a stuck pool would keep the process alive, so it exits'
+
+        # A pool that closes in time: exit only when the process was started just for this window.
+        $done = New-Object System.Threading.ManualResetEvent $true
+        $okPool = [PSCustomObject]@{}
+        $okPool | Add-Member ScriptMethod BeginClose { param($a, $b) [PSCustomObject]@{ AsyncWaitHandle = $done } }.GetNewClosure()
+        $exits.N = 0
+        $r2 = Invoke-AppShutdown -Pool $okPool -Mutex $null -Tasks @() -WaitMilliseconds 50 -ExitAction { $exits.N++ }.GetNewClosure()
+        $r2.PoolClosed | Should -BeTrue
+        $exits.N | Should -Be 0 -Because "a tech's own console is not closed when nothing is stuck"
+        $null = Invoke-AppShutdown -Pool $okPool -Mutex $null -Tasks @() -WaitMilliseconds 50 -ExitWhenDone -ExitAction { $exits.N++ }.GetNewClosure()
+        $exits.N | Should -Be 1
+
+        # BeginClose itself failing still ends the process.
+        $badPool = [PSCustomObject]@{}
+        $badPool | Add-Member ScriptMethod BeginClose { param($a, $b) throw 'broken' }
+        $exits.N = 0
+        # The closure is made here: inside the Should script block $exits would not be in scope.
+        $countExit = { $exits.N++ }.GetNewClosure()
+        { Invoke-AppShutdown -Pool $badPool -Mutex $null -Tasks @() -WaitMilliseconds 50 -ExitAction $countExit } | Should -Not -Throw
+        $exits.N | Should -Be 1
+
+        # Started by the tool's own relaunch (-File <this script>), or from a tech's console.
+        Test-OwnProcess -CommandLineArgs @('powershell.exe', '-NoProfile', '-STA', '-File', '\\fs01\tools\FPM\FolderPermissionManager-GUI.ps1') -ScriptPath 'H:\FPM\FolderPermissionManager-GUI.ps1' | Should -BeTrue
+        Test-OwnProcess -CommandLineArgs @('powershell.exe') -ScriptPath 'C:\FPM\FolderPermissionManager-GUI.ps1' | Should -BeFalse
+
+        # The Closing handler asks Test-CanClose before it stops anything (SQ-018 wires changes in).
+        Test-CanClose | Should -BeTrue
+        $code = Get-Content -LiteralPath $script:AppPath -Raw
+        $closing = [regex]::Match($code, '(?s)\$win\.Add_Closing\(\{(.*?)\n\s*\}\)').Groups[1].Value
+        $closing | Should -Not -BeNullOrEmpty
+        $closing.IndexOf('Test-CanClose') | Should -BeGreaterOrEqual 0
+        $closing.IndexOf('Test-CanClose') | Should -BeLessThan $closing.IndexOf('BeginStop')
+    }
 }
 
 Describe 'Startup' {
@@ -222,6 +434,114 @@ Describe 'Startup' {
 
         $bare = @(Get-RelaunchArgumentList -ScriptPath $script)
         ($bare -join '|') | Should -Be ('-NoProfile|-ExecutionPolicy|Bypass|-STA|-File|"' + $script + '"')
+    }
+
+    It 'AC10b_RelativeLogFolderIsResolved' {
+        # The elevated copy starts in System32, so a relative -LogFolder must be made full first,
+        # against the PowerShell location the tech typed it in.
+        Push-Location -LiteralPath $TestDrive
+        try {
+            $expected = Join-Path (Get-Location).ProviderPath 'Tickets\1 2'
+            Resolve-LogFolderArgument -LogFolder 'Tickets\1 2' | Should -Be $expected
+            Resolve-LogFolderArgument -LogFolder '.\Tickets\1 2' | Should -Be $expected
+            $a = @(Get-RelaunchArgumentList -ScriptPath 'C:\Tools\FPM\FolderPermissionManager-GUI.ps1' -LogFolder 'Tickets\1 2')
+            $i = [array]::IndexOf($a, '-LogFolder')
+            $a[$i + 1] | Should -Be ('"' + $expected + '"')
+        }
+        finally { Pop-Location }
+        Resolve-LogFolderArgument -LogFolder 'D:\Tickets\1 2' | Should -Be 'D:\Tickets\1 2'
+        Resolve-LogFolderArgument -LogFolder '' | Should -BeNullOrEmpty
+        { Resolve-LogFolderArgument -LogFolder 'D:\Tickets\"x' } | Should -Throw '*cannot contain a double quote*'
+        { Get-RelaunchArgumentList -ScriptPath 'C:\a.ps1' -LogFolder 'D:\a"b' } | Should -Throw '*cannot contain a double quote*'
+    }
+
+    It 'AC10c_RelaunchFromMappedDrive' {
+        # The elevated copy cannot see H:, so the script and log folder go as UNC paths.
+        $map = @{ H = '\\fs01\home' }
+        $a = @(Get-RelaunchArgumentList -ScriptPath 'H:\Tools\FPM\FolderPermissionManager-GUI.ps1' -LogFolder 'H:\Tickets\1' -DriveMap $map)
+        $a[5] | Should -Be '"\\fs01\home\Tools\FPM\FolderPermissionManager-GUI.ps1"'
+        $a[[array]::IndexOf($a, '-LogFolder') + 1] | Should -Be '"\\fs01\home\Tickets\1"'
+    }
+
+    It 'AC11b_ElevationFailureShowsReason' {
+        Mock Show-AppMessage { }
+        # 1223 = ERROR_CANCELLED, the user chose No on the UAC prompt: no extra detail.
+        Mock Start-Process { throw [System.ComponentModel.Win32Exception]::new(1223) }
+        Request-Elevation -ScriptPath 'C:\a.ps1' | Should -BeFalse
+        Should -Invoke Show-AppMessage -Times 1 -Exactly -ParameterFilter { $Message -like 'Folder Permission Manager needs to run as administrator*' -and $Message -notmatch 'Windows said' }
+
+        Mock Start-Process { throw [System.InvalidOperationException]::new('outer', [System.ComponentModel.Win32Exception]::new(2, 'The system cannot find the file specified')) }
+        Request-Elevation -ScriptPath 'C:\a.ps1' | Should -BeFalse
+        Should -Invoke Show-AppMessage -Times 1 -Exactly -ParameterFilter { $Message -like 'Folder Permission Manager needs to run as administrator*' -and $Message -match 'Windows said: The system cannot find the file specified' }
+
+        Mock Start-Process { }
+        Request-Elevation -ScriptPath 'C:\a.ps1' -LogFolder 'C:\bad"quote' | Should -BeFalse
+        Should -Invoke Start-Process -Times 2 -Exactly -Because 'the first two cases called it; the bad -LogFolder never reaches it'
+        Should -Invoke Show-AppMessage -Times 1 -Exactly -ParameterFilter { $Message -like '*cannot contain a double quote*' }
+    }
+
+    It 'AC12b_MutexNameUsesFullPath' {
+        $a = Get-InstanceMutexName -LogFolder 'C:\Tools\FPM\Logs'
+        Get-InstanceMutexName -LogFolder 'C:\Tools\FPM\Logs\' | Should -Be $a
+        Get-InstanceMutexName -LogFolder 'C:\Tools\FPM\Other\..\Logs' | Should -Be $a
+        Get-InstanceMutexName -LogFolder 'C:/Tools/FPM/Logs' | Should -Be $a
+    }
+
+    It 'AC13b_DriveMapValidation' {
+        # A share name with a space survives every step.
+        $good = @{ H = '\\fs01\Home Drives'; S = '\\fs01.contoso.com\Data\Sub Folder' }
+        $back = ConvertFrom-DriveMapArgument -Argument (ConvertTo-DriveMapArgument -DriveMap $good)
+        $back['H'] | Should -Be '\\fs01\Home Drives'
+        $back['S'] | Should -Be '\\fs01.contoso.com\Data\Sub Folder'
+        Resolve-MappedDrive -Path 'H:\HR [old]' -DriveMap $good | Should -Be '\\fs01\Home Drives\HR [old]'
+        Test-UncSharePath -Path '\\fs01\Home Drives' | Should -BeTrue
+
+        # Anything that is not a real \\server\share is dropped, and the letter stays unresolved.
+        $badValues = '\\?\C:\Windows', '\\?\UNC\fs01\x', '\\.\pipe\x', '\\.\C:', '\\fs01', '\\fs01\', '\\\fs01\x',
+        '\\fs01\share\..\other', '\\fs01\.\x', '\\fs01\share\.', '\\..\x', 'C:\Data', '//fs01/x', '\\.hidden\x', ''
+        foreach ($v in $badValues) {
+            Test-UncSharePath -Path $v | Should -BeFalse -Because "'$v' is not a plain \\server\share path"
+            $m = @{ X = $v }
+            (ConvertFrom-DriveMapArgument -Argument (ConvertTo-DriveMapArgument -DriveMap $m)).Count | Should -Be 0 -Because "'$v' is dropped on the way out"
+            $json = ConvertTo-Json -InputObject ([PSCustomObject]@{ X = $v }) -Compress
+            $raw = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
+            (ConvertFrom-DriveMapArgument -Argument $raw).Count | Should -Be 0 -Because "'$v' is dropped on the way in"
+            Resolve-MappedDrive -Path 'X:\Data' -DriveMap $m | Should -Be 'X:\Data' -Because "'$v' is not used to resolve X:"
+            (Merge-DriveMap -Primary $m -Secondary @{}).Count | Should -Be 0
+        }
+    }
+
+    It 'AC13c_MappedDriveTableFromRegistry' {
+        # Fallback for drives CIM does not list: HKCU:\Network\<letter>, value RemotePath. Read only.
+        Mock Get-CimInstance { throw 'WMI is not available' }
+        Mock Get-ChildItem -ParameterFilter { $LiteralPath -eq 'HKCU:\Network' } {
+            @([PSCustomObject]@{ PSChildName = 'h' }, [PSCustomObject]@{ PSChildName = 'x' }, [PSCustomObject]@{ PSChildName = 'toolong' })
+        }
+        Mock Get-ItemProperty -ParameterFilter { $LiteralPath -like 'HKCU:\Network\*' } {
+            $letter = Split-Path -Leaf $LiteralPath
+            switch ($letter) {
+                'h' { [PSCustomObject]@{ RemotePath = '\\fs01\Home Drives' } }
+                'x' { [PSCustomObject]@{ RemotePath = '\\?\C:\Windows' } }
+                default { [PSCustomObject]@{ RemotePath = '\\fs01\x' } }
+            }
+        }
+        $t = Get-MappedDriveTable
+        $t['H'] | Should -Be '\\fs01\Home Drives'
+        $t.ContainsKey('X') | Should -BeFalse
+        $t.Count | Should -Be 1
+
+        # CIM wins for a letter it knows; bad CIM values are dropped too.
+        Mock Get-CimInstance {
+            @([PSCustomObject]@{ DeviceID = 'H:'; ProviderName = '\\fs02\home' }, [PSCustomObject]@{ DeviceID = 'Q:'; ProviderName = '\\.\pipe\x' })
+        }
+        $t2 = Get-MappedDriveTable
+        $t2['H'] | Should -Be '\\fs02\home'
+        $t2.ContainsKey('Q') | Should -BeFalse
+
+        # No 'net use' text parsing any more (it cut share names at the first space).
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:AppPath, [ref]$null, [ref]$null)
+        $netCalls = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -match '^net(\.exe)?$' }, $true))
+        $netCalls.Count | Should -Be 0
     }
 
     It 'AC11_ElevationDeclined' {
@@ -306,6 +626,62 @@ Describe 'Browsing' {
         $state.Result | Should -Not -BeNullOrEmpty -Because 'the completion callback must run within 10 s'
         $state.Result.Ok | Should -BeTrue
         @($state.Result.Children).Count | Should -Be 2
+    }
+
+    It 'AC15b_ReadTaskThatCannotStart' {
+        # The pool refusing a task must not leave the busy line or a pane on "Loading...".
+        Mock Start-BgTask { throw 'The runspace pool is closed.' }
+        $script:BusyEntries = [ordered]@{}
+        $state = @{ Result = $null; State = $null }
+        $t = Start-ReadTask -Action 'Opening folder' -Path 'C:\Data' -Work { 'unused' } -State 'pane-state' -OnDone { param($r, $s) $state.Result = $r; $state.State = $s }.GetNewClosure()
+        $t | Should -BeNullOrEmpty
+        $script:BusyEntries.Count | Should -Be 0
+        $state.Result.Ok | Should -BeFalse
+        $state.Result.Error | Should -Match 'The runspace pool is closed\.'
+        $state.State | Should -Be 'pane-state'
+    }
+
+    It 'AC15c_CallbackThatThrows' {
+        # A callback that throws: the status line shows the error, and the same callback gets a
+        # failed result so its pane shows its Failed state instead of staying on "Loading...".
+        $script:Captured = $null
+        Mock Start-BgTask { $script:Captured = @{ OnDone = $OnDone; State = $State }; [PSCustomObject]@{ Id = 1 } }
+        Mock Set-Status { }
+        $script:BusyEntries = [ordered]@{}
+        $calls = [System.Collections.Generic.List[object]]::new()
+        $null = Start-ReadTask -Action 'Loading the permissions of' -Path 'C:\Data' -Work { 'unused' } -State 'pane' -OnDone {
+            param($r, $s)
+            $calls.Add($r)
+            if ($r.Ok) { throw 'the grid could not be filled' }
+        }.GetNewClosure()
+        $script:BusyEntries.Count | Should -Be 1
+        & $script:Captured.OnDone ([PSCustomObject]@{ Ok = $true; Path = 'C:\Data' }) $script:Captured.State
+        $script:BusyEntries.Count | Should -Be 0
+        $calls.Count | Should -Be 2
+        $calls[1].Ok | Should -BeFalse
+        $calls[1].Error | Should -Match 'the grid could not be filled'
+        Should -Invoke Set-Status -Times 1 -Exactly -ParameterFilter { $Kind -eq 'Error' -and $Text -match 'the grid could not be filled' }
+    }
+
+    It 'AC15d_TaskResultIsTheOkObject' {
+        # Stray output from a work block must not be taken for its result.
+        $ok = [PSCustomObject]@{ Ok = $true; Children = @() }
+        (Select-TaskResult -Output @('noise', $ok, 'trailing text')) | Should -Be $ok
+        (Select-TaskResult -Output @('a', 'b')) | Should -Be 'b'
+        (Select-TaskResult -Output @()) | Should -BeNullOrEmpty
+        (Select-TaskResult -Output $null) | Should -BeNullOrEmpty
+    }
+
+    It 'AC15e_CoreLoadedOncePerPool' {
+        # The core's functions are part of the pool's session state; work blocks only fall back
+        # to dot-sourcing when a runspace does not have them.
+        $names = @(Get-CoreFunctionNames -CorePath $script:CorePath)
+        $names | Should -Contain 'Get-ItemOwner'
+        $names | Should -Contain 'ConvertTo-CsvSafeText'
+        foreach ($w in 'DrivesWork', 'ListChildrenWork', 'FolderAclWork', 'FilesWork', 'FileAclWork', 'ExportWork') {
+            $text = (Get-Variable -Name $w -Scope Script -ValueOnly).ToString()
+            $text | Should -Match 'Get-Command\s+-Name\s+Get-ItemOwner' -Because "$w loads the core only when it is missing"
+        }
     }
 
     It 'AC16_ListChildren' {
@@ -425,6 +801,12 @@ Describe 'Viewing' {
         Get-FileAclDiffWarning | Should -Be "Selected files have different permissions $($script:Dash) this operation applies uniformly to all"
     }
 
+    It 'AC21b_DiffWarningLine' {
+        $base = "Selected files have different permissions $($script:Dash) this operation applies uniformly to all"
+        Get-FileAclDiffWarningText -Checked 3 -Selected 3 | Should -Be "Warning: $base"
+        Get-FileAclDiffWarningText -Checked 20 -Selected 75 | Should -Be "Warning: $base (checked 20 of 75 selected files)"
+    }
+
     It 'AC22_PathHeader' {
         $map = @{ H = '\\fs01\home' }
         $m = Get-PathHeaderModel -Path 'H:\Data\HR' -DriveMap $map
@@ -460,6 +842,89 @@ Describe 'Export' {
         @($rows | Where-Object { $_.Path -eq $root -and $_.Owner -ne 'ERROR' }).Count | Should -BeGreaterThan 0
 
         Get-DefaultExportFileName -Path '\\fs01\Data\HR' | Should -Match '^Permissions-__fs01_Data_HR_\d{4}-\d{2}-\d{2}_\d{6}\.csv$'
+    }
+
+    Context 'Where the export is saved' {
+        BeforeAll {
+            $script:SavedOneDrive = @{ OneDrive = $env:OneDrive; OneDriveCommercial = $env:OneDriveCommercial; OneDriveConsumer = $env:OneDriveConsumer }
+        }
+        BeforeEach {
+            $env:OneDrive = $null; $env:OneDriveCommercial = $null; $env:OneDriveConsumer = $null
+            # DriveInfo stand-in: C: is a local fixed disk, every other letter is not.
+            Mock Test-LocalFixedPath { "$Path" -match '^[Cc]:' }
+        }
+        AfterAll {
+            $env:OneDrive = $script:SavedOneDrive.OneDrive
+            $env:OneDriveCommercial = $script:SavedOneDrive.OneDriveCommercial
+            $env:OneDriveConsumer = $script:SavedOneDrive.OneDriveConsumer
+        }
+
+        It 'AC23b_ExportLocationInfo' {
+            $local = Get-ExportLocationInfo -Path 'C:\Users\tech\Documents\Permissions.csv'
+            $local.IsLocal | Should -BeTrue
+            $local.Warning | Should -BeNullOrEmpty
+
+            $unc = Get-ExportLocationInfo -Path '\\fs01\Data\Permissions.csv'
+            $unc.IsLocal | Should -BeFalse
+            $unc.Warning | Should -Match ([regex]::Escape('\\fs01\Data\Permissions.csv'))
+            $unc.Warning | Should -Match 'network share'
+
+            $mapped = Get-ExportLocationInfo -Path 'H:\Permissions.csv' -DriveMap @{ H = '\\fs01\home' }
+            $mapped.IsLocal | Should -BeFalse
+            $mapped.Warning | Should -Match 'mapped'
+
+            $removable = Get-ExportLocationInfo -Path 'E:\Permissions.csv'
+            $removable.IsLocal | Should -BeFalse
+            $removable.Warning | Should -Match 'network, mapped or removable drive'
+
+            foreach ($var in 'OneDrive', 'OneDriveCommercial', 'OneDriveConsumer') {
+                Set-Item -Path "Env:$var" -Value 'C:\Users\tech\OneDrive - Contoso'
+                $od = Get-ExportLocationInfo -Path 'C:\Users\tech\OneDrive - Contoso\Documents\Permissions.csv'
+                $od.IsLocal | Should -BeFalse -Because "a folder under `$env:$var is synced to the cloud"
+                $od.Warning | Should -Match 'OneDrive'
+                # Only under it: a sibling folder with the same prefix is still local.
+                (Get-ExportLocationInfo -Path 'C:\Users\tech\OneDrive - Contoso2\x.csv').IsLocal | Should -BeTrue
+                Set-Item -Path "Env:$var" -Value ''
+            }
+        }
+
+        It 'AC23c_DefaultExportFolder' {
+            Get-DefaultExportFolder -DocumentsPath 'C:\Users\tech\Documents' -LocalAppDataPath 'C:\Users\tech\AppData\Local' |
+                Should -Be 'C:\Users\tech\Documents'
+            # Folder redirection to a share, or Documents on another disk that is not fixed.
+            Get-DefaultExportFolder -DocumentsPath '\\fs01\Redirected$\tech\Documents' -LocalAppDataPath 'C:\Users\tech\AppData\Local' |
+                Should -Be 'C:\Users\tech\AppData\Local\FolderPermissionManager\Exports'
+            # OneDrive Known Folder Move.
+            $env:OneDriveCommercial = 'C:\Users\tech\OneDrive - Contoso'
+            Get-DefaultExportFolder -DocumentsPath 'C:\Users\tech\OneDrive - Contoso\Documents' -LocalAppDataPath 'C:\Users\tech\AppData\Local' |
+                Should -Be 'C:\Users\tech\AppData\Local\FolderPermissionManager\Exports'
+        }
+
+        It 'AC23d_ExportConfirmWhenNotLocal' {
+            Mock Set-Status { }
+            Mock Show-AppQuestion { $false }
+            Confirm-ExportLocation -Path '\\fs01\Data\Permissions.csv' | Should -BeFalse
+            Should -Invoke Set-Status -Times 1 -Exactly -ParameterFilter { $Kind -eq 'Warning' -and $Text -match ([regex]::Escape('\\fs01\Data\Permissions.csv')) }
+            Should -Invoke Show-AppQuestion -Times 1 -Exactly -ParameterFilter { $Message -match ([regex]::Escape('\\fs01\Data\Permissions.csv')) }
+
+            Mock Show-AppQuestion { $true }
+            Confirm-ExportLocation -Path 'E:\Permissions.csv' | Should -BeTrue
+            Should -Invoke Show-AppQuestion -Times 2 -Exactly
+
+            Confirm-ExportLocation -Path 'C:\Users\tech\Documents\Permissions.csv' | Should -BeTrue
+            Should -Invoke Show-AppQuestion -Times 2 -Exactly -Because 'a local fixed disk needs no question'
+        }
+    }
+
+    It 'AC23e_ExportIncludesHiddenFolders' {
+        $root = Join-Path $TestDrive 'exp-hidden'
+        $hidden = Join-Path $root 'Secret'
+        New-Item -ItemType Directory -Path $hidden -Force | Out-Null
+        (Get-Item -LiteralPath $hidden -Force).Attributes = 'Directory, Hidden'
+        $out = Join-Path $TestDrive 'hidden.csv'
+        $r = & $script:ExportWork $root $out $null
+        $r.Ok | Should -BeTrue
+        @(Import-Csv -LiteralPath $out -Encoding UTF8 | Where-Object { $_.Path -eq $hidden }).Count | Should -BeGreaterThan 0 -Because 'hidden and system subfolders are part of the report'
     }
 }
 
@@ -505,5 +970,46 @@ Describe 'Banner and pane states' {
         $line | Should -Match ([regex]::Escape('C:\Data\HR'))
         $line | Should -Match '1m 05s'
         (Get-BusyLine -Action 'Loading' -Path 'C:\x' -Elapsed ([TimeSpan]::Zero)) | Should -Match '\b0s\b'
+    }
+
+    It 'AC25b_BusyLineReadsAsASentence' {
+        Get-BusyLine -Action 'Opening folder' -Path 'C:\Data\HR' -Elapsed ([TimeSpan]::FromSeconds(3)) | Should -Be 'Opening folder C:\Data\HR... (3s)'
+        Get-BusyLine -Action 'Loading the drive list' -Elapsed ([TimeSpan]::FromSeconds(65)) | Should -Be 'Loading the drive list... (1m 05s)'
+        # The actions the window passes are full sentence openings, not "<verb> on <path>".
+        $code = Get-Content -LiteralPath $script:AppPath -Raw
+        $actions = @([regex]::Matches($code, "Start-ReadTask -Action '([^']+)'") | ForEach-Object { $_.Groups[1].Value })
+        $actions.Count | Should -BeGreaterThan 3
+        $actions | Should -Contain 'Opening folder'
+        foreach ($a in $actions) { $a | Should -Not -Match '^(Opening|Loading permissions|Loading files)$' }
+    }
+
+    It 'AC25c_StatusLine' {
+        Get-StatusText -Text 'Done.' -Kind Success | Should -Be 'Done.'
+        Get-StatusText -Text 'Read it.' -Kind Info | Should -Be 'Read it.'
+        Get-StatusText -Text 'Check this.' -Kind Warning | Should -Be 'Warning: Check this.'
+        Get-StatusText -Text 'It broke.' -Kind Error | Should -Be 'Error: It broke.'
+        Get-StatusText -Text 'Warning: already said.' -Kind Warning | Should -Be 'Warning: already said.'
+
+        # The status box is a polite live region, so screen readers announce new messages.
+        # LiveSetting exists from .NET Framework 4.7.1; on older frameworks nothing is set.
+        Add-Type -AssemblyName PresentationCore, PresentationFramework, WindowsBase
+        $set = [System.Collections.Generic.List[object]]::new()
+        $fake = [PSCustomObject]@{}
+        $fake | Add-Member ScriptMethod SetValue { param($dp, $value) $set.Add(@($dp, $value)) }.GetNewClosure()
+        Enable-LiveRegion -Element $fake | Should -BeTrue
+        $set.Count | Should -Be 1
+        $set[0][0].Name | Should -Be 'LiveSetting'
+        "$($set[0][1])" | Should -Be 'Polite'
+    }
+
+    It 'AC24b_ReadmeDataHandling' {
+        $readme = Get-Content -LiteralPath (Join-Path $script:Root 'README.md') -Raw
+        $app = [regex]::Match($readme, '(?s)### FolderPermissionManager-GUI\.ps1 \(Windows app\)(.*?)\n### ').Groups[1].Value
+        $app | Should -Not -BeNullOrEmpty
+        foreach ($phrase in 'gui-errors.log', 'inherit', 'OneDrive', 'delete the local copy', 'clipboard history', 'RDP', 'probe file', 'hidden and system') {
+            $app | Should -Match ([regex]::Escape($phrase)) -Because "the app section covers '$phrase'"
+        }
+        $code = Get-Content -LiteralPath $script:AppPath -Raw
+        $code | Should -Not -Match 'is created with the first change'
     }
 }

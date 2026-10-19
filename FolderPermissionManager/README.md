@@ -54,7 +54,7 @@ PowerShell**, or run it from a PowerShell window:
   Add Permission to give yourself access."
 - **Folder permissions:** who owns the folder, whether it gets the permissions of the folder
   above it, and each entry: User or Group, Permission Level, Allow/Deny (Deny in red), Inherited.
-- **Files:** name, size and modified time. Select one or several files (click, Ctrl+click,
+- **Files:** name, size and modified time. Tick one or several files (or click, Ctrl+click,
   Shift+click, **Select all** or Ctrl+A) to see who owns each one and who has access to it on
   the right (the first 20 selected). When the selected files' permissions differ, it says
   "Selected files have different permissions — this operation applies uniformly to all".
@@ -63,12 +63,28 @@ PowerShell**, or run it from a PowerShell window:
 - **Export to CSV...** saves the permissions of the selected folder and all its subfolders to a
   CSV file you choose (`Path`, `Owner`, `Identity`, `Rights`, `AccessType`, `IsInherited`,
   `InheritanceFlags`; a folder that could not be read gets a row with `Owner` = `ERROR` and the
-  reason). It runs in the background and can be stopped. Text that Excel would run as a
-  formula gets a leading `'`, as in the change log.
-- **Dark or light:** the button at the top right switches; the choice is remembered in
-  `%LOCALAPPDATA%\FolderPermissionManager\settings.json`. Unexpected errors are written to
-  `gui-errors.log` in the same folder.
+  reason). Hidden and system subfolders are included. It runs in the background and can be
+  stopped. Text that Excel would run as a formula gets a leading `'`, as in the change log.
+  The Save dialog starts in your Documents folder when that is on this computer's own disk and
+  not in OneDrive; otherwise in `%LOCALAPPDATA%\FolderPermissionManager\Exports`. If you pick a
+  network share, a mapped, network or removable drive, or a OneDrive folder, the status line
+  warns and names the location, and the tool asks before it writes there.
+- **Dark or light:** the button at the top right ("Switch to light" / "Switch to dark")
+  switches; the choice is remembered in `%LOCALAPPDATA%\FolderPermissionManager\settings.json`.
+  Unexpected errors are written to `gui-errors.log` in the same folder.
 - **F5** or **Refresh** reads the current folder again.
+
+**Client data in what it saves.** The export CSV holds the folder paths, owners and account
+names of the client's whole folder tree. `gui-errors.log` holds the raw text of unexpected
+errors, which can name client folders and accounts; it is trimmed to its last 1 MB each time
+the app starts. A saved file inherits the permissions (ACL) of the folder it is saved in, so
+anyone who can read that folder can read it. Save the export locally (not in OneDrive or on a
+share), attach it to the ticket, then delete the local copy. The status line and the path
+boxes show raw paths and error text: they are not ticket-note-safe, and anything you copy from
+them goes into Windows clipboard history and, in a Remote Desktop (RDP) session, to the other
+computer's clipboard. Even in this view-only version and with `-WhatIf`, starting the app
+creates the `Logs` folder next to the script (when that is a local fixed disk) and writes and
+deletes a small probe file there, to check that backups could be saved.
 
 To copy files with their permissions, use [RobocopyMigration](../RobocopyMigration/): the
 Windows app has no Robocopy tab and no "Copy Files To...".
