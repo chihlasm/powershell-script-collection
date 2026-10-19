@@ -126,8 +126,7 @@ The copy-permissions tree backup is no longer needed (D-031). The old CLI
 ownership, `-Force` and a help block (D-010). Builds after SQ-008. Split per D-004.
 
 ## SQ-015 · FolderPermissionManager: fix recursive copy permissions
-- status: ready
-- revision: merge onto main failed 2 CLI tests at review 2026-10-19 (spec Revision notes, AC-R1..R3)
+- status: done
 - priority: P1
 - type: fix
 - branch: squad/SQ-015-fpm-recursive-copy (stacked on SQ-014; SQ-014's tip 33d09c5 merged in at 43ca5a3, owner 2026-10-19, D-041)
@@ -141,8 +140,7 @@ turns inherited rules into explicit ones, and handlers use `-Path`, which breaks
 subfolders untouched (D-031). Fix with a regression test for each. Builds after SQ-014 (D-011).
 
 ## SQ-017 · FolderPermissionManager as a WPF app: the window, browsing and viewing (read-only)
-- status: ready
-- revision: pool must copy core top-level variables (AC8d after the stack refresh; spec Revision notes 2026-10-19)
+- status: done
 - priority: P1
 - type: feature
 - branch: squad/SQ-017-fpm-wpf-window (stacked: create it from squad/SQ-015-fpm-recursive-copy as SQ-015 finishes this run, not from main; D-041)
