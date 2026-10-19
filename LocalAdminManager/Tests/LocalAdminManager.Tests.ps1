@@ -45,11 +45,24 @@ BeforeAll {
     $script:C = New-FakeMember 'CONTOSO\C' 'S-1-5-21-1-2-3-1003'
     $script:Columns = 'Time', 'Technician', 'Computer', 'Action', 'Target', 'ItemType', 'Detail',
                       'OldValue', 'NewValue', 'Result', 'Error', 'BackupFile'
+
+    # The fake target resolves the members above by SID, as the real one does on the target.
+    # Anything else (a typo, a deleted account) cannot be translated: ''.
+    function Resolve-FakeMemberSid {
+        param([string]$Member)
+        if ($Member -match '^S-1-\d+(-\d+)+$') { return $Member }
+        $known = @{ 'CONTOSO\A' = $script:A.Sid; 'CONTOSO\B' = $script:B.Sid; 'CONTOSO\C' = $script:C.Sid }
+        [string]$known[$Member]
+    }
 }
 
 Describe 'Set-LocalAdminMembership' {
 
     BeforeEach {
+        # Backstop: nothing may reach a real computer. Tests that need the transport mock it.
+        Mock Invoke-Command { throw 'unmocked Invoke-Command' }
+        Mock Invoke-OnTarget { throw 'unmocked Invoke-OnTarget' }
+        Mock Resolve-LocalAdminMemberSid { Resolve-FakeMemberSid -Member $Member }
         Mock Get-LocalAdminGroupName { 'Administratoren' }
         Mock Add-LocalAdminMember { }
         Mock Remove-LocalAdminMember { }
@@ -202,10 +215,22 @@ Describe 'Set-LocalAdminMembership' {
 Describe 'Main body' {
 
     BeforeEach {
+        # Backstop: nothing may reach a real computer. Tests that need the transport mock it.
+        Mock Invoke-Command { throw 'unmocked Invoke-Command' }
+        Mock Invoke-OnTarget { throw 'unmocked Invoke-OnTarget' }
         $script:logFolder = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
         Mock Test-Administrator { $true }
         Mock Get-LocalAdminGroupName { 'Administratoren' }
         Mock Get-LocalAdminMember { @($script:A, $script:B) }
+        # The one-round-trip read the main body previews with, built from the mocks above so a
+        # test that overrides Get-LocalAdminMember changes the preview too.
+        Mock Get-LocalAdminGroup {
+            [PSCustomObject]@{
+                Group     = Get-LocalAdminGroupName -ComputerName $ComputerName
+                Members   = @(Get-LocalAdminMember -ComputerName $ComputerName)
+                MemberSid = Resolve-FakeMemberSid -Member $Member
+            }
+        }
         Mock Add-LocalAdminMember { }
         Mock Remove-LocalAdminMember { }
         Mock Write-Status { }
@@ -318,6 +343,11 @@ Describe 'Resolve-BuiltinAdministratorsName' {
 
 Describe 'Transport' {
 
+    BeforeEach {
+        # Backstop: Invoke-OnTarget is under test here, so only the remoting cmdlet is stubbed.
+        Mock Invoke-Command { throw 'unmocked Invoke-Command' }
+    }
+
     It 'AC11_LocalNamesRunInProcessWithoutInvokeCommand' -ForEach @(
         @{ Name = $env:COMPUTERNAME }, @{ Name = 'localhost' }, @{ Name = '.' }, @{ Name = '' }
     ) {
@@ -330,13 +360,15 @@ Describe 'Transport' {
     }
 
     It 'AC11_ReadAndChangeWrappersGoThroughInvokeOnTargetWithTheComputerName' {
+        # A fake local name: this machine's own name must never be the target of a write wrapper.
+        Mock Test-IsLocalComputer { $true }
         Mock Invoke-OnTarget { }
 
-        Get-LocalAdminMember -ComputerName $env:COMPUTERNAME | Out-Null
-        Add-LocalAdminMember -ComputerName $env:COMPUTERNAME -Member 'CONTOSO\C'
-        Remove-LocalAdminMember -ComputerName $env:COMPUTERNAME -Member 'CONTOSO\C'
+        Get-LocalAdminMember -ComputerName 'FAKE-LOCAL' | Out-Null
+        Add-LocalAdminMember -ComputerName 'FAKE-LOCAL' -Member 'CONTOSO\C'
+        Remove-LocalAdminMember -ComputerName 'FAKE-LOCAL' -Member 'CONTOSO\C'
 
-        Should -Invoke Invoke-OnTarget -Times 3 -Exactly -ParameterFilter { $ComputerName -eq $env:COMPUTERNAME }
+        Should -Invoke Invoke-OnTarget -Times 3 -Exactly -ParameterFilter { $ComputerName -eq 'FAKE-LOCAL' }
     }
 
     It 'AC12_RemoteComputerUsesInvokeCommandWithComputerName' {
@@ -362,6 +394,10 @@ Describe 'Transport' {
 Describe 'Change log' {
 
     BeforeEach {
+        # Backstop: nothing may reach a real computer. Tests that need the transport mock it.
+        Mock Invoke-Command { throw 'unmocked Invoke-Command' }
+        Mock Invoke-OnTarget { throw 'unmocked Invoke-OnTarget' }
+        Mock Resolve-LocalAdminMemberSid { Resolve-FakeMemberSid -Member $Member }
         Mock Get-LocalAdminGroupName { 'Administratoren' }
         Mock Get-LocalAdminMember { @($script:A) }
         Mock Add-LocalAdminMember { }
@@ -418,5 +454,449 @@ Describe 'Format-MemberList' {
 
     It 'AC15_EmptyGroupGivesAnEmptyString' {
         Format-MemberList -Members @() | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Matching the member (review round 1)' {
+
+    BeforeEach {
+        Mock Invoke-Command { throw 'unmocked Invoke-Command' }
+        Mock Invoke-OnTarget { throw 'unmocked Invoke-OnTarget' }
+        Mock Resolve-LocalAdminMemberSid { Resolve-FakeMemberSid -Member $Member }
+        Mock Get-LocalAdminGroupName { 'Administratoren' }
+        Mock Add-LocalAdminMember { }
+        Mock Remove-LocalAdminMember { }
+    }
+
+    It 'AC3_MatchesByTheSidTheTargetResolvesEvenWhenTheGroupShowsAnotherName' {
+        # CONTOSO\JSmith was renamed CONTOSO\C: same SID, so it is already a member.
+        Mock Resolve-LocalAdminMemberSid { $script:C.Sid }
+        Mock Get-LocalAdminMember { @($script:A, $script:C) }
+
+        $e = Set-LocalAdminMembership -Action Add -Member 'CONTOSO\JSmith' -ComputerName 'PC01' -Confirm:$false
+
+        Should -Invoke Add-LocalAdminMember -Times 0 -Exactly
+        $e.Result | Should -Be 'No change (already a member)'
+    }
+
+    It 'AC3_ANameMatchCountsOnlyWhenTheAccountCannotBeTranslated' {
+        # CONTOSO\C was deleted and recreated: the group still holds the old SID under the old
+        # name, the new account has a new SID. That is not the same member.
+        $script:reads = 0
+        Mock Resolve-LocalAdminMemberSid { 'S-1-5-21-1-2-3-9999' }
+        Mock Get-LocalAdminMember {
+            $script:reads++
+            if ($script:reads -eq 1) { @($script:A, $script:C) }
+            else { @($script:A, $script:C, [PSCustomObject]@{ Name = 'CONTOSO\C'; Sid = 'S-1-5-21-1-2-3-9999' }) }
+        }
+
+        $e = Set-LocalAdminMembership -Action Add -Member 'CONTOSO\C' -ComputerName 'PC01' -Confirm:$false
+
+        Should -Invoke Add-LocalAdminMember -Times 1 -Exactly
+        $e.Result | Should -Be 'Done'
+    }
+
+    It 'AC4_RemoveOfAnAccountThatCannotBeFoundAndIsNotInTheGroupFails' {
+        Mock Get-LocalAdminMember { @($script:A, $script:B) }
+
+        $e = Set-LocalAdminMembership -Action Remove -Member 'CONTOSO\Ghost' -ComputerName 'PC01' -Confirm:$false
+
+        Should -Invoke Remove-LocalAdminMember -Times 0 -Exactly
+        $e.Result | Should -Be 'Failed'
+        $e.Error  | Should -BeLike '*CONTOSO\Ghost could not be found on PC01*'
+    }
+
+    It 'AC15_AnOrphanedSidCanBeRemovedByItsSid' {
+        $orphan = [PSCustomObject]@{ Name = ''; Sid = 'S-1-5-21-9-9-9-1105' }
+        $script:reads = 0
+        Mock Get-LocalAdminMember { $script:reads++; if ($script:reads -eq 1) { @($script:A, $orphan) } else { @($script:A) } }
+
+        $e = Set-LocalAdminMembership -Action Remove -Member 'S-1-5-21-9-9-9-1105' -ComputerName 'PC01' -Confirm:$false
+
+        Should -Invoke Remove-LocalAdminMember -Times 1 -Exactly -ParameterFilter { $Member -eq 'S-1-5-21-9-9-9-1105' }
+        $e.OldValue | Should -Be 'CONTOSO\A; S-1-5-21-9-9-9-1105'
+        $e.NewValue | Should -Be 'CONTOSO\A'
+        $e.Result   | Should -Be 'Done'
+    }
+
+    It 'AC3_AMemberWithoutADomainIsTheLocalAccountOnTheTarget' {
+        # 'LocalAdmin' cannot be translated here (fake), so it falls back to PC01\LocalAdmin.
+        Mock Get-LocalAdminMember { @($script:A, [PSCustomObject]@{ Name = 'PC01\LocalAdmin'; Sid = 'S-1-5-21-7-7-7-1001' }) }
+
+        $e = Set-LocalAdminMembership -Action Add -Member 'LocalAdmin' -ComputerName 'PC01' -Confirm:$false
+
+        Should -Invoke Add-LocalAdminMember -Times 0 -Exactly
+        $e.Result | Should -Be 'No change (already a member)'
+    }
+
+    It 'AC6_AUserPrincipalNameIsRejectedBeforeTheGroupIsRead' {
+        Mock Get-LocalAdminMember { @($script:A) }
+
+        $e = Set-LocalAdminMembership -Action Add -Member 'jsmith@contoso.com' -ComputerName 'PC01' -Confirm:$false
+
+        Should -Invoke Get-LocalAdminMember -Times 0 -Exactly
+        Should -Invoke Add-LocalAdminMember -Times 0 -Exactly
+        $e.Result | Should -Be 'Failed'
+        $e.Error  | Should -BeLike '*DOMAIN\Name*'
+    }
+}
+
+Describe 'Set-LocalAdminMembership edge cases (review round 1)' {
+
+    BeforeEach {
+        Mock Invoke-Command { throw 'unmocked Invoke-Command' }
+        Mock Invoke-OnTarget { throw 'unmocked Invoke-OnTarget' }
+        Mock Resolve-LocalAdminMemberSid { Resolve-FakeMemberSid -Member $Member }
+        Mock Get-LocalAdminGroupName { 'Administratoren' }
+        Mock Add-LocalAdminMember { }
+        Mock Remove-LocalAdminMember { }
+    }
+
+    It 'AC1_AnAddThatIsNotVisibleInTheReReadIsFailed' {
+        Mock Get-LocalAdminMember { @($script:A, $script:B) }
+
+        $e = Set-LocalAdminMembership -Action Add -Member 'CONTOSO\C' -ComputerName 'PC01' -Confirm:$false
+
+        $e.Result | Should -Be 'Failed'
+        $e.Error  | Should -BeLike '*not visible after re-read*'
+    }
+
+    It 'AC2_ARemoveThatIsNotVisibleInTheReReadIsFailed' {
+        Mock Get-LocalAdminMember { @($script:A, $script:C) }
+
+        $e = Set-LocalAdminMembership -Action Remove -Member 'CONTOSO\C' -ComputerName 'PC01' -Confirm:$false
+
+        $e.Result | Should -Be 'Failed'
+        $e.Error  | Should -BeLike '*not visible after re-read*'
+    }
+
+    It 'AC1_AddToAnEmptyGroup' {
+        $script:reads = 0
+        Mock Get-LocalAdminMember { $script:reads++; if ($script:reads -eq 1) { @() } else { @($script:C) } }
+
+        $e = Set-LocalAdminMembership -Action Add -Member 'CONTOSO\C' -ComputerName 'PC01' -Confirm:$false
+
+        Should -Invoke Add-LocalAdminMember -Times 1 -Exactly
+        $e.OldValue | Should -BeNullOrEmpty
+        $e.NewValue | Should -Be 'CONTOSO\C'
+        $e.Result   | Should -Be 'Done'
+    }
+
+    It 'AC4_RemoveFromAnEmptyGroupIsNoChange' {
+        Mock Get-LocalAdminMember { @() }
+
+        $e = Set-LocalAdminMembership -Action Remove -Member 'CONTOSO\C' -ComputerName 'PC01' -Confirm:$false
+
+        Should -Invoke Remove-LocalAdminMember -Times 0 -Exactly
+        $e.Result   | Should -Be 'No change (not a member)'
+        $e.OldValue | Should -BeNullOrEmpty
+    }
+
+    It 'AC7_WhatIfOnRemoveChangesNothing' {
+        Mock Get-LocalAdminMember { @($script:A, $script:C) }
+
+        $e = Set-LocalAdminMembership -Action Remove -Member 'CONTOSO\C' -ComputerName 'PC01' -WhatIf
+
+        Should -Invoke Remove-LocalAdminMember -Times 0 -Exactly
+        $e.Result   | Should -Be 'Skipped (WhatIf)'
+        $e.NewValue | Should -Be $e.OldValue
+    }
+
+    It 'AC1_UsesThePreviewInsteadOfReadingTheGroupAgain' {
+        Mock Get-LocalAdminMember { @($script:A, $script:B, $script:C) }
+        $preview = [PSCustomObject]@{ Group = 'Administratoren'; Members = @($script:A, $script:B); MemberSid = $script:C.Sid }
+
+        $e = Set-LocalAdminMembership -Action Add -Member 'CONTOSO\C' -ComputerName 'PC01' -Preview $preview -Confirm:$false
+
+        Should -Invoke Get-LocalAdminGroupName -Times 0 -Exactly
+        Should -Invoke Resolve-LocalAdminMemberSid -Times 0 -Exactly
+        Should -Invoke Get-LocalAdminMember -Times 1 -Exactly   # the re-read only
+        $e.Target   | Should -Be 'PC01\Administratoren'
+        $e.OldValue | Should -Be 'CONTOSO\A; CONTOSO\B'
+        $e.NewValue | Should -Be 'CONTOSO\A; CONTOSO\B; CONTOSO\C'
+        $e.Result   | Should -Be 'Done'
+    }
+
+    It 'AC9_ANonInteractiveSessionThatCannotConfirmIsFailedNotThrown' {
+        # A child pwsh -NonInteractive cannot show the prompt. Every wrapper is replaced by a
+        # fake before the call, and the transport throws, so nothing is reached.
+        $child = Join-Path $TestDrive 'noninteractive.ps1'
+        $lines = @(
+            ". '$($script:Script)' -LoadFunctionsOnly -Action Add -Member x"
+            "function Invoke-Command { throw 'unmocked Invoke-Command' }"
+            "function Invoke-OnTarget { throw 'unmocked Invoke-OnTarget' }"
+            "function Get-LocalAdminGroupName { 'Administratoren' }"
+            "function Get-LocalAdminMember { @() }"
+            "function Resolve-LocalAdminMemberSid { '' }"
+            "function Add-LocalAdminMember { throw 'must not run' }"
+            '$ConfirmPreference = ''High'''
+            "Set-LocalAdminMembership -Action Add -Member 'CONTOSO\C' -ComputerName 'PC01' | ConvertTo-Json -Compress"
+        )
+        Set-Content -LiteralPath $child -Value $lines -Encoding UTF8
+        $pwsh = (Get-Process -Id $PID).Path
+
+        $json = & $pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $child
+        $e = ($json | Out-String) | ConvertFrom-Json
+
+        $e.Result | Should -Be 'Failed'
+        $e.Error  | Should -BeLike '*non-interactive*-Force*'
+    }
+}
+
+Describe 'Main body (review round 1)' {
+
+    BeforeEach {
+        Mock Invoke-Command { throw 'unmocked Invoke-Command' }
+        Mock Invoke-OnTarget { throw 'unmocked Invoke-OnTarget' }
+        $script:logFolder = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        Mock Test-Administrator { $true }
+        Mock Get-LocalAdminGroupName { 'Administratoren' }
+        Mock Get-LocalAdminMember { @($script:A, $script:B) }
+        Mock Resolve-LocalAdminMemberSid { Resolve-FakeMemberSid -Member $Member }
+        Mock Get-LocalAdminGroup {
+            [PSCustomObject]@{
+                Group     = Get-LocalAdminGroupName -ComputerName $ComputerName
+                Members   = @(Get-LocalAdminMember -ComputerName $ComputerName)
+                MemberSid = Resolve-FakeMemberSid -Member $Member
+            }
+        }
+        Mock Add-LocalAdminMember { }
+        Mock Remove-LocalAdminMember { }
+        Mock Write-Status { }
+    }
+
+    It 'AC7_DryRunOfAnAddThatIsNotNeededWritesNoLog' {
+        Mock Get-LocalAdminMember { @($script:A, $script:B, $script:C) }
+        Mock Write-LocalAdminChangeLog { throw 'must not run' }
+
+        $code = Invoke-LocalAdminManagerMain -Action Add -Member 'CONTOSO\C' -ComputerName 'PC01' -LogFolder $script:logFolder -WhatIf
+
+        $code | Should -Be 0
+        Should -Invoke Write-LocalAdminChangeLog -Times 0 -Exactly
+        Should -Invoke Write-Status -Times 0 -ParameterFilter { $Message -like '*Logged to*' }
+        Should -Invoke Write-Status -Times 1 -ParameterFilter { $Level -eq 'INFO' -and $Message -like 'Dry run:*already a member*' }
+        Test-Path -LiteralPath $script:logFolder | Should -BeFalse
+    }
+
+    It 'AC7_DryRunAgainstAnUnreachableComputerWritesNoLogAndExits1' {
+        Mock Get-LocalAdminGroup { throw 'WinRM cannot complete the operation' }
+        Mock Get-LocalAdminMember { throw 'WinRM cannot complete the operation' }
+        Mock Write-LocalAdminChangeLog { throw 'must not run' }
+
+        $code = Invoke-LocalAdminManagerMain -Action Remove -Member 'CONTOSO\C' -ComputerName 'PC01' -LogFolder $script:logFolder -WhatIf
+
+        $code | Should -Be 1
+        Should -Invoke Write-LocalAdminChangeLog -Times 0 -Exactly
+        Should -Invoke Remove-LocalAdminMember -Times 0 -Exactly
+        Should -Invoke Write-Status -Times 0 -ParameterFilter { $Message -like '*Logged to*' }
+        Test-Path -LiteralPath $script:logFolder | Should -BeFalse
+    }
+
+    It 'AC14_DoneButLogWriteFailedSaysTheChangeWasMadeAndSavesAFallbackCopy' {
+        $fallback = Join-Path $TestDrive 'fallback-temp'
+        Mock Test-LogFolderWritable { $true }
+        Mock Get-FallbackLogFolder { $fallback }
+        Mock Write-LocalAdminChangeLog { $null } -ParameterFilter { $LogFolder -eq $script:logFolder }
+        Mock Set-LocalAdminMembership {
+            [PSCustomObject]([ordered]@{ Time = '2026-10-18 10:00:00'; Technician = 'CONTOSO\tech'; Computer = 'ADMIN01'
+                Action = 'Add administrator'; Target = 'PC01\Administratoren'; ItemType = 'Local group'
+                Detail = 'CONTOSO\C'; OldValue = 'CONTOSO\A'; NewValue = 'CONTOSO\A; CONTOSO\C'
+                Result = 'Done'; Error = ''; BackupFile = '' })
+        }
+
+        $code = Invoke-LocalAdminManagerMain -Action Add -Member 'CONTOSO\C' -ComputerName 'PC01' -LogFolder $script:logFolder -Force
+
+        $code | Should -Be 1
+        Should -Invoke Write-Status -Times 1 -Exactly -ParameterFilter { $Level -eq 'FAIL' -and $Message -like '*WAS made*' -and $Message -like "*$($script:logFolder)*" }
+        Should -Invoke Write-Status -Times 0 -ParameterFilter { $Level -eq 'PASS' }
+        foreach ($field in 'Target: PC01\Administratoren', 'Detail: CONTOSO\C', 'OldValue: CONTOSO\A', 'NewValue: CONTOSO\A; CONTOSO\C', 'Result: Done') {
+            Should -Invoke Write-Status -Times 1 -ParameterFilter { $Message -eq $field }
+        }
+        $saved = Join-Path $fallback ("LocalAdminManager_Changes_{0}.csv" -f (Get-Date -Format 'yyyy-MM-dd'))
+        Test-Path -LiteralPath $saved | Should -BeTrue
+        $row = @(Import-Csv -LiteralPath $saved)
+        $row.Count | Should -Be 1
+        $row[0].NewValue | Should -Be 'CONTOSO\A; CONTOSO\C'
+    }
+
+    It 'AC16_NotConfirmedExits1' {
+        Mock Test-LogFolderWritable { $true }
+        Mock Write-LocalAdminChangeLog { 'C:\fake\Logs\Changes_2026-10-18.csv' }
+        Mock Set-LocalAdminMembership { [PSCustomObject]@{ Result = 'Skipped (not confirmed)'; Error = '' } }
+
+        Invoke-LocalAdminManagerMain -Action Add -Member 'CONTOSO\C' -ComputerName 'PC01' -LogFolder $script:logFolder | Should -Be 1
+    }
+
+    It 'AC16_AUserPrincipalNameIsRefusedWithExitCode1' {
+        Mock Set-LocalAdminMembership { throw 'must not run' }
+
+        $code = Invoke-LocalAdminManagerMain -Action Add -Member 'jsmith@contoso.com' -ComputerName 'PC01' -LogFolder $script:logFolder -Force
+
+        $code | Should -Be 1
+        Should -Invoke Set-LocalAdminMembership -Times 0 -Exactly
+        Should -Invoke Write-Status -Times 1 -ParameterFilter { $Level -eq 'FAIL' -and $Message -like '*DOMAIN\Name*' }
+    }
+
+    It 'AC1_PassesThePreviewItShowedToTheChange' {
+        Mock Test-LogFolderWritable { $true }
+        Mock Write-LocalAdminChangeLog { 'C:\fake\Logs\Changes_2026-10-18.csv' }
+        Mock Set-LocalAdminMembership { [PSCustomObject]@{ Target = 'PC01\Administratoren'; Result = 'Done'; Error = '' } }
+
+        Invoke-LocalAdminManagerMain -Action Add -Member 'CONTOSO\C' -ComputerName 'PC01' -LogFolder $script:logFolder -Force | Should -Be 0
+
+        Should -Invoke Get-LocalAdminGroup -Times 1 -Exactly
+        Should -Invoke Set-LocalAdminMembership -Times 1 -Exactly -ParameterFilter { $Preview -and $Preview.Group -eq 'Administratoren' -and @($Preview.Members).Count -eq 2 }
+        Should -Invoke Write-Status -Times 1 -ParameterFilter { $Level -eq 'PASS' -and $Message -like 'Added CONTOSO\C to Administratoren on PC01.*' }
+    }
+
+    It 'AC11_ThisComputersOwnFqdnIsChangedAsTheLocalComputer' {
+        Mock Get-LocalComputerFqdn { "$env:COMPUTERNAME.contoso.test" }
+        Mock Test-LogFolderWritable { $true }
+        Mock Write-LocalAdminChangeLog { 'C:\fake\Logs\Changes_2026-10-18.csv' }
+        Mock Set-LocalAdminMembership { [PSCustomObject]@{ Result = 'Done'; Error = '' } }
+
+        Invoke-LocalAdminManagerMain -Action Add -Member 'CONTOSO\C' -ComputerName "$env:COMPUTERNAME.contoso.test" -LogFolder $script:logFolder -Force | Out-Null
+        Invoke-LocalAdminManagerMain -Action Add -Member 'CONTOSO\C' -ComputerName "$env:COMPUTERNAME.otherdomain.tld" -LogFolder $script:logFolder -Force | Out-Null
+
+        Should -Invoke Set-LocalAdminMembership -Times 1 -Exactly -ParameterFilter { $ComputerName -eq $env:COMPUTERNAME }
+        Should -Invoke Set-LocalAdminMembership -Times 1 -Exactly -ParameterFilter { $ComputerName -eq "$env:COMPUTERNAME.otherdomain.tld" }
+    }
+
+    It 'AC14_ScriptOnAShareLogsToLocalAppDataAndWarns' {
+        $oldLocal = $env:LOCALAPPDATA
+        try {
+            $env:LOCALAPPDATA = Join-Path $TestDrive 'localappdata'
+            $script:expected = Join-Path $env:LOCALAPPDATA 'LocalAdminManager\Logs'
+            Mock Test-LogFolderWritable { $true }
+            Mock Write-LocalAdminChangeLog { Join-Path $LogFolder 'Changes_2026-10-18.csv' }
+            Mock Set-LocalAdminMembership { [PSCustomObject]@{ Result = 'Done'; Error = '' } }
+
+            $code = Invoke-LocalAdminManagerMain -Action Add -Member 'CONTOSO\C' -ComputerName 'PC01' -DefaultLogFolder '\\fs01\tools\LocalAdminManager\Logs' -Force
+
+            $code | Should -Be 0
+            Should -Invoke Test-LogFolderWritable -Times 1 -Exactly -ParameterFilter { $LogFolder -eq $script:expected }
+            Should -Invoke Write-LocalAdminChangeLog -Times 1 -Exactly -ParameterFilter { $LogFolder -eq $script:expected }
+            Should -Invoke Write-Status -Times 1 -ParameterFilter { $Level -eq 'WARN' -and $Message -like '*network or removable location*' }
+        } finally {
+            $env:LOCALAPPDATA = $oldLocal
+        }
+    }
+}
+
+Describe 'Change log (review round 1)' {
+
+    It 'AC13_ValuesThatExcelWouldRunAsAFormulaGetALeadingQuote' {
+        $folder = Join-Path $TestDrive 'formula'
+        $entry = [PSCustomObject]([ordered]@{ Time = '2026-10-18 10:00:00'; Technician = 'CONTOSO\tech'; Computer = 'ADMIN01'
+            Action = 'Add administrator'; Target = 'PC01\Administratoren'; ItemType = 'Local group'
+            Detail = '=1+1'; OldValue = '@SUM(A1)'; NewValue = '+A1'; Result = 'Failed'; Error = '-cmd|calc'; BackupFile = '' })
+
+        $path = Write-LocalAdminChangeLog -Entries @($entry) -LogFolder $folder
+        $row = @(Import-Csv -LiteralPath $path)[0]
+
+        $row.Detail   | Should -Be "'=1+1"
+        $row.OldValue | Should -Be "'@SUM(A1)"
+        $row.NewValue | Should -Be "'+A1"
+        $row.Error    | Should -Be "'-cmd|calc"
+        $row.Target   | Should -Be 'PC01\Administratoren'
+    }
+
+    It 'AC14_TheProbeOpensTodaysLogSoALockedLogFailsClosed' {
+        $folder = Join-Path $TestDrive 'locked'
+        New-Item -ItemType Directory -Path $folder | Out-Null
+        $today = Join-Path $folder ("Changes_{0}.csv" -f (Get-Date -Format 'yyyy-MM-dd'))
+        $lock = [System.IO.File]::Open($today, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        try {
+            Test-LogFolderWritable -LogFolder $folder | Should -BeFalse
+        } finally {
+            $lock.Dispose()
+        }
+        Test-LogFolderWritable -LogFolder $folder | Should -BeTrue
+        @(Get-ChildItem -LiteralPath $folder -Filter '*.tmp' -Force).Count | Should -Be 0
+    }
+
+    It 'AC14_ADefaultFolderOnAShareFallsBackToLocalAppDataAndAnExplicitShareIsKeptWithAWarning' {
+        $oldLocal = $env:LOCALAPPDATA
+        try {
+            $env:LOCALAPPDATA = Join-Path $TestDrive 'localappdata'
+            $unc = '\\fs01\tools\LocalAdminManager\Logs'
+
+            $resolved = Resolve-ChangeLogFolder -DefaultFolder $unc
+            $resolved | Should -Be (Join-Path $env:LOCALAPPDATA 'LocalAdminManager\Logs')
+            @(Get-ChangeLogFolderNotice -ResolvedFolder $resolved -DefaultFolder $unc)[0] | Should -BeLike '*running from a network or removable location*'
+
+            Resolve-ChangeLogFolder -LogFolder $unc -DefaultFolder $unc | Should -Be $unc
+            @(Get-ChangeLogFolderNotice -LogFolder $unc -ResolvedFolder $unc -DefaultFolder $unc)[0] |
+                Should -BeLike "The log folder $([WildcardPattern]::Escape($unc)) is on a network drive or share*"
+
+            $local = Join-Path $TestDrive 'tool\Logs'
+            Resolve-ChangeLogFolder -DefaultFolder $local | Should -Be $local
+            @(Get-ChangeLogFolderNotice -ResolvedFolder $local -DefaultFolder $local).Count | Should -Be 0
+
+            Mock Get-LocalAppDataFolder { '' }
+            { Resolve-ChangeLogFolder -DefaultFolder $unc } | Should -Throw '*-LogFolder*'
+        } finally {
+            $env:LOCALAPPDATA = $oldLocal
+        }
+    }
+}
+
+Describe 'Target and ADsPath (review round 1)' {
+
+    BeforeEach {
+        Mock Invoke-Command { throw 'unmocked Invoke-Command' }
+    }
+
+    It 'AC11_OtherLocalFormsAreLocal' -ForEach @(
+        @{ Name = '127.0.0.1' }, @{ Name = '::1' }, @{ Name = "$env:COMPUTERNAME.contoso.test" }
+    ) {
+        Mock Get-LocalComputerFqdn { "$env:COMPUTERNAME.contoso.test" }
+        Test-IsLocalComputer -ComputerName $Name | Should -BeTrue
+    }
+
+    It 'AC12_ThisHostNameInAnotherDnsDomainIsRemote' {
+        Mock Get-LocalComputerFqdn { "$env:COMPUTERNAME.contoso.test" }
+        Test-IsLocalComputer -ComputerName "$env:COMPUTERNAME.otherdomain.tld" | Should -BeFalse
+
+        # Outside a domain the FQDN is just the host name, so no dotted name is local.
+        Mock Get-LocalComputerFqdn { $env:COMPUTERNAME }
+        Test-IsLocalComputer -ComputerName "$env:COMPUTERNAME.contoso.test" | Should -BeFalse
+    }
+
+    It 'AC12_ScriptRefusesAnEmptyComputerName' {
+        $tokens = $null; $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:Script, [ref]$tokens, [ref]$errors)
+        $param = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'ComputerName' }
+        @($param.Attributes | ForEach-Object { $_.TypeName.Name }) | Should -Contain 'ValidateNotNullOrEmpty'
+    }
+
+    It 'AC3_ADsPathFor_<Member>' -ForEach @(
+        @{ Member = 'CONTOSO\JSmith';      Expected = 'WinNT://CONTOSO/JSmith' }
+        @{ Member = 'LocalAdmin';          Expected = 'WinNT://PC01/LocalAdmin' }
+        @{ Member = 'S-1-5-21-9-9-9-1105'; Expected = 'WinNT://S-1-5-21-9-9-9-1105' }
+    ) {
+        ConvertTo-WinNTMemberPath -Member $Member -ComputerName 'PC01' | Should -Be $Expected
+
+        # Parity: the target runs this function's own text, passed in by the write wrappers.
+        $script:sent = $null
+        Mock Invoke-OnTarget { $script:sent = $ArgumentList }
+        Add-LocalAdminMember -ComputerName 'PC01' -Member $Member
+        $script:sent[0] | Should -Be 'Add'
+        (& ([scriptblock]::Create([string]$script:sent[3])) $Member 'PC01') | Should -Be $Expected
+        Remove-LocalAdminMember -ComputerName 'PC01' -Member $Member
+        $script:sent[0] | Should -Be 'Remove'
+        (& ([scriptblock]::Create([string]$script:sent[3])) $Member 'PC01') | Should -Be $Expected
+    }
+
+    It 'AC1_ThePreviewReadAsksTheTargetToResolveTheMember' {
+        $script:sent = $null
+        Mock Invoke-OnTarget { $script:sent = $ArgumentList; [PSCustomObject]@{ Group = 'Administratoren'; Members = @($script:A); MemberSid = $script:A.Sid } }
+
+        $info = Get-LocalAdminGroup -ComputerName 'PC01' -Member 'CONTOSO\A'
+
+        $script:sent[0] | Should -Be 'Get'
+        $script:sent[2] | Should -Be 'CONTOSO\A'
+        $info.MemberSid | Should -Be $script:A.Sid
+        @(Get-LocalAdminMember -ComputerName 'PC01').Count | Should -Be 1
     }
 }

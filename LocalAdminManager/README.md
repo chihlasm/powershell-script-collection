@@ -37,25 +37,36 @@ before and after.
 
 - **Action**: Required. `Add` or `Remove`.
 - **Member**: Required. The domain user or group as `DOMAIN\Username` or `DOMAIN\GroupName`.
-  A name without a domain means a local account on the target computer.
+  A name without a domain means a local account on the target computer. A SID
+  (`S-1-5-21-...`) also works: that is how you remove a deleted account that the group only
+  shows as its SID. A user principal name (`jsmith@contoso.com`) is refused; use
+  `DOMAIN\Name`.
 - **ComputerName**: Optional. The computer to change. Defaults to this computer.
 - **LogFolder**: Optional. Where the change log goes. Defaults to the `Logs` folder next to
-  the script.
+  the script. When the script runs from a share, a mapped network drive or a removable disk,
+  the default is `%LOCALAPPDATA%\LocalAdminManager\Logs` on this computer instead, with a
+  `[WARN]` line saying so. A `-LogFolder` on a network drive is used, with a `[WARN]`.
 - **Force**: Optional. Make the change without the confirmation prompt.
 - **WhatIf**: Optional. Show the current member count and what would change, and change
-  nothing. No log is written for a dry run.
+  nothing. A dry run writes no log; its last line is an `[INFO] Dry run: ...` line, never
+  "Logged to". It exits 1 if the computer could not be read.
 
 ### What you see
 
 ```
 [WARN] This will add CONTOSO\JSmith to the local administrators group (Administrators) on PC01 (currently 4 members).
 Confirm ... [Y] Yes  [N] No ...
-[PASS] Added CONTOSO\JSmith to PC01\Administrators on PC01. Logged to C:\Tools\LocalAdminManager\Logs\Changes_2026-10-17.csv
+[PASS] Added CONTOSO\JSmith to Administrators on PC01. Logged to C:\Tools\LocalAdminManager\Logs\Changes_2026-10-17.csv
 ```
 
-If the person is already a member (Add) or not a member (Remove), nothing changes and the
-result says "No change". If the change fails, the `[FAIL]` line gives the reason and the
-script exits with code 1.
+The member is matched by its SID, as the target computer resolves the name, so
+`contoso\jsmith` and `CONTOSO\JSmith` are the same member. If the person is already a member
+(Add) or not a member (Remove), nothing changes and the result says "No change". A Remove of
+a name the computer cannot find, and that is not in the group under that name, is `Failed`
+rather than "No change": check the spelling, or give the SID. If the change fails, the
+`[FAIL]` line gives the reason and the script exits with code 1. After the change the group
+is read again; if the change does not show there, the result is `Failed` ("change not
+visible after re-read").
 
 ### Examples
 
@@ -79,7 +90,9 @@ Dry run on a remote computer:
 
 ### Batch operations
 
-Batch files need `-Force`, because there is nobody to answer the prompt:
+Batch files need `-Force`, because there is nobody to answer the prompt. Without it, a
+`-NonInteractive` session cannot show the prompt: the result is `Failed` ("confirmation not
+possible in a non-interactive session; use -Force"), it is logged, and the exit code is 1.
 
 ```batch
 REM Add two users on PC01
@@ -94,7 +107,9 @@ if errorlevel 1 echo Removal failed - see the [FAIL] line above
 ## Change log
 
 Every attempt is one row in `Logs\Changes_<yyyy-MM-dd>.csv` next to the script (or in
-`-LogFolder`). Runs on the same day go into the same file. Columns:
+`-LogFolder`, or in `%LOCALAPPDATA%\LocalAdminManager\Logs` when the script runs from a
+network or removable location). Runs on the same day go into the same file. A dry run
+(`-WhatIf`) writes nothing. Columns:
 
 | Column | Meaning |
 |---|---|
@@ -112,14 +127,23 @@ Every attempt is one row in `Logs\Changes_<yyyy-MM-dd>.csv` next to the script (
 | BackupFile | Empty (kept so all change tools write the same columns) |
 
 A member whose account was deleted shows as its SID. To undo a change by hand, compare
-OldValue and NewValue and run the opposite action.
+OldValue and NewValue and run the opposite action. A value that starts with `=`, `+`, `-` or
+`@` is written with a leading `'`, so Excel shows it as text instead of running it as a
+formula.
 
 **The log holds client account names.** It is client data: attach it to the ticket if
 needed, and do not copy it into shared folders or source control (`LocalAdminManager/Logs/`
-is gitignored).
+is gitignored). Logs are never deleted automatically, and they inherit the permissions of
+the folder they are in: keep the tool in a folder only administrators can read.
 
-If the log folder cannot be created or written, the tool changes nothing, shows a `[FAIL]`
-line naming the folder, and exits 1. Pick another folder with `-LogFolder`.
+Before any change, the tool opens today's log file for writing. If that fails (folder
+read-only, disk full, file open in Excel), the tool changes nothing, shows a `[FAIL]` line
+naming the folder, and exits 1. Pick another folder with `-LogFolder`.
+
+If the log write fails only after the change was made, the `[FAIL]` line says the change
+**was** made but not logged, the Target, Detail, OldValue, NewValue and Result are shown on
+screen, the row is saved to `%TEMP%\LocalAdminManager_Changes_<yyyy-MM-dd>.csv`, and the
+script exits 1. Copy that row into the change log or the ticket.
 
 ## How it works
 
@@ -140,7 +164,8 @@ the script still printed "Operation completed."
   not enabled or is blocked by the firewall on the target. Enable PowerShell remoting there,
   or run the tool on the target itself.
 - **The specified account name is not valid / member not found**: check the spelling and the
-  `DOMAIN\Name` format, and that the account exists in Active Directory.
+  `DOMAIN\Name` format, and that the account exists in Active Directory. To remove a deleted
+  account, give its SID as it appears in the member list.
 - **Cannot write the change log**: the log folder is read-only or on a full disk. Use
   `-LogFolder` to point to a folder you can write to.
 

@@ -362,9 +362,9 @@ For a combined performance *and* event view across a fleet, use [Citrix-FSLogix-
 
 **Parameters**:
 - `-Action <string>` (Required): Action to perform ('Add' or 'Remove').
-- `-Member <string>` (Required): Domain user or group in 'DOMAIN\Username' format.
+- `-Member <string>` (Required): Domain user or group in 'DOMAIN\Username' format, or a SID (to remove a deleted account). User principal names are refused.
 - `-ComputerName <string>` (Optional): Target computer name (defaults to this computer). Remote computers need WinRM enabled.
-- `-LogFolder <string>` (Optional): Folder for the daily change log (defaults to `LocalAdminManager\Logs`).
+- `-LogFolder <string>` (Optional): Folder for the daily change log (defaults to `LocalAdminManager\Logs`, or `%LOCALAPPDATA%\LocalAdminManager\Logs` when the script runs from a share or removable disk).
 - `-Force` (Optional): Make the change without the confirmation prompt (batch files).
 - `-WhatIf` (Optional): Show what would change and change nothing.
 
@@ -376,7 +376,7 @@ For a combined performance *and* event view across a fleet, use [Citrix-FSLogix-
 **Notes**:
 - Run from an elevated prompt. Works on PowerShell 3.0 and later.
 - Finds the group by its SID, so it also works on non-English Windows ("Administratoren").
-- Every attempt is a row in `Logs\Changes_<yyyy-MM-dd>.csv`. The log holds client account names and is gitignored. If the log cannot be written, nothing is changed.
+- Every attempt is a row in `Logs\Changes_<yyyy-MM-dd>.csv`. The log holds client account names and is gitignored; it is never deleted automatically and inherits its folder's permissions, so keep the tool in an admin-only folder. If the log cannot be written, nothing is changed; if the write fails after the change, the `[FAIL]` line says the change was made and the row is saved to `%TEMP%`.
 - Exit code 1 when the change failed, so batch files can detect it.
 
 ## DriveMap-Diagnostics
