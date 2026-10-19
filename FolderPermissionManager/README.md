@@ -7,15 +7,11 @@ command-line script, and the older browser-based GUI.
 
 ### FolderPermissionManager-GUI.ps1 (Windows app)
 
-A normal Windows window (WPF) for looking at folder and file permissions on local drives,
-mapped drives and network shares. Nothing listens on the network, and slow work (opening a
-folder on a busy share, reading permissions, the export) runs in the background, so the
-window never freezes.
-
-**View only in this version.** The buttons that change permissions (Add Permission, Remove
-Permission, Take Ownership, Copy Permissions To...) are shown but switched off; the window
-says so. Until they are switched on, make changes with the browser version,
-`FolderPermissionManager-WebGUI.ps1` (below). Changes anything? **No.**
+A normal Windows window (WPF) for looking at and changing folder and file permissions on local
+drives, mapped drives and network shares. Nothing listens on the network, and slow work
+(opening a folder on a busy share, reading permissions, a change, the export) runs in the
+background, so the window never freezes. Changes anything? **Yes**: permissions and owners,
+always backed up and logged first (see "Changes are backed up and logged" below).
 
 **How to start it:** right-click `FolderPermissionManager-GUI.ps1` and choose **Run with
 PowerShell**, or run it from a PowerShell window:
@@ -74,6 +70,46 @@ PowerShell**, or run it from a PowerShell window:
   Unexpected errors are written to `gui-errors.log` in the same folder.
 - **F5** or **Refresh** reads the current folder again.
 
+**Making changes.** One change runs at a time: while it runs, the change buttons are off, the
+busy line shows what is being changed and for how long, and you can keep browsing. A second
+change is refused with "Another change is still running on `<path>`. Wait for it to finish."
+- **Folder:** Add Permission, Remove Permission, Take Ownership (this folder only), Take
+  Ownership of all subfolders and files, and Copy Permissions To... (adds only; see below).
+- **Selected files** (the bar under the file list): Add Permission, Remove Permission, Take
+  Ownership. Remove Permission lists everyone on the selected files; files whose permissions
+  are not read yet are read first.
+- **It asks first.** Remove Permission and every Take Ownership open a dialog that names the
+  path, the real location behind a mapped drive, and how many items, with the action on the
+  button ("Take ownership of 12,408 items") and **Cancel** as the default (Enter and Esc both
+  cancel). For the whole tree, the folders and files are counted in the background first. Add
+  Permission and Copy Permissions ask through their own dialog, as in the browser version.
+- **Remembered mappings.** When the folder is on a drive letter that only Windows' remembered
+  mappings explain, every change (Add and Copy included) asks first and warns that the real
+  location may be out of date. A `-LogFolder` on such a letter gets a warning in the bar under
+  the title, and the tool does not start again as administrator from such a letter unless the
+  script there is the same file (SHA-256).
+- **Refused, nothing changed:** taking ownership of a whole tree on the root of a drive
+  (`D:\`, `\\server\D$`), on a Windows folder (`%SystemRoot%`, `%ProgramFiles%`,
+  `%ProgramFiles(x86)%`, `%ProgramData%`) or on `ADMIN$`, `SYSVOL`, `NETLOGON`, `PRINT$` or
+  `IPC$` (D-036). This is checked on the real location: a mapped drive, a DFS path and this
+  computer's own name (`\\<this computer>\C$\Windows`) are resolved first. Any change on a path
+  with an alternate data stream (`file.txt:stream`), on a DFS path Windows cannot look up, or on
+  a DFS path with several targets (open the one you mean) is refused too.
+- **The result** shows in the status line, as in the browser version: what was done and where
+  it was backed up and logged, "Partly done: ..." when some items failed, "Done, with items to
+  check: ..." when the log could not be written or items cannot be restored from the backup,
+  and the "Escalate: `<n>` folder(s) could not be opened..." line after a whole-tree take
+  ownership. Then the folder (or the changed files' permissions) is read again.
+- **Closing** is refused while a change runs ("A permission change is still running on
+  `<path>`. Wait for it to finish: closing now could leave it half done."). Changes have no
+  cancel button: stopping takeown or a batch midway would leave it half done.
+- **Change log.** Before each change, a row with Result `Started` is written to the change log
+  for every item, so a change that is cut off (the computer restarted) still shows what was
+  being changed; the result row follows as each item completes. If the change log cannot be
+  written, nothing is changed.
+- **`-WhatIf`** (dry run): every change reports "WhatIf: nothing was changed (`<n>` items would
+  be)." Nothing is backed up or logged.
+
 **Client data in what it saves.** The export CSV holds the folder paths, owners and account
 names of the client's whole folder tree. `gui-errors.log` holds the raw text of unexpected
 errors, which can name client folders and accounts; it is trimmed to its last 1 MB each time
@@ -82,9 +118,9 @@ anyone who can read that folder can read it. Save the export locally (not in One
 share), attach it to the ticket, then delete the local copy. The status line and the path
 boxes show raw paths and error text: they are not ticket-note-safe, and anything you copy from
 them goes into Windows clipboard history and, in a Remote Desktop (RDP) session, to the other
-computer's clipboard. Even in this view-only version and with `-WhatIf`, starting the app
-creates the `Logs` folder next to the script (when that is a local fixed disk) and writes and
-deletes a small probe file there, to check that backups could be saved.
+computer's clipboard. Even with `-WhatIf`, starting the app creates the `Logs` folder next to
+the script (when that is a local fixed disk) and writes and deletes a small probe file there,
+to check that backups could be saved.
 
 **Mapped drives.** The real location behind a drive letter comes, in this order, from the
 drives the window itself sees, then the ones the first (non-elevated) window passed on, then
@@ -122,8 +158,8 @@ Requires Windows PowerShell 5.1 (or PowerShell 7 on Windows). Keep
 ### FolderPermissionManager-WebGUI.ps1 (browser version, kept until the Windows app is lab-tested)
 
 The browser version of the tool, until now `FolderPermissionManager-GUI.ps1`. It is kept only
-until the Windows app above has been lab-tested and can make changes, then it is removed. Use
-it to make changes in the meantime.
+until the Windows app above has been lab-tested, then it is removed. Use the Windows app
+instead; this version is there to compare against while the Windows app is lab-tested.
 
 A browser-based interface for managing folder permissions across local drives and network shares. Runs a local web server and opens an interactive dashboard.
 

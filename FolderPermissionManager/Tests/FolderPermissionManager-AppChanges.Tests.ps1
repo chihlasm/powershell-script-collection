@@ -981,6 +981,38 @@ Describe 'SQ-017 review notes: remembered mappings' {
         $main = (Get-Content -LiteralPath $script:AppPath -Raw)
         $main.Substring($main.IndexOf('#region Startup')) | Should -Match 'Get-LogFolderMappingNotice' -Because 'startup adds the notice to the banner'
     }
+
+    It 'SQ018N_RememberedScriptPathIsHashChecked' {
+        # A script started from a letter that only a remembered mapping explains is relaunched from
+        # that mapping's \\server\share path. The file there must be the one running (SHA-256 of
+        # both), or the administrator copy would run whatever a stale mapping now points at.
+        # Get-RelaunchFileHash is the seam: it hashes a file, $null when it cannot be read.
+        Mock Start-Process { }
+        Mock Get-RelaunchFileHash { if ("$Path" -like '\\*') { $script:UncHash } else { 'A1B2C3' } }
+        $map = @{ H = '\\fs01\tools' }
+        $running = 'H:\FPM\FolderPermissionManager-GUI.ps1'
+        $script:Unc = '\\fs01\tools\FPM\FolderPermissionManager-GUI.ps1'
+
+        # The same file: the relaunch goes ahead.
+        $script:UncHash = 'A1B2C3'
+        Request-Elevation -ScriptPath $running -DriveMap $map -DriveMapSource @{ H = 'Remembered' } | Should -BeTrue
+        Should -Invoke Start-Process -Times 1 -Exactly
+        Should -Invoke Get-RelaunchFileHash -Times 1 -Exactly -ParameterFilter { $Path -eq $script:Unc }
+
+        # A different file, or none there: refused with a plain message naming the path; nothing starts.
+        foreach ($h in 'FFFF00', $null) {
+            $script:Shown.Clear()
+            $script:UncHash = $h
+            Request-Elevation -ScriptPath $running -DriveMap $map -DriveMapSource @{ H = 'Remembered' } | Should -BeFalse -Because "the file at the remembered path differs ($h)"
+            Should -Invoke Start-Process -Times 1 -Exactly
+            @($script:Shown | Where-Object { $_ -match '(?i)remembered' -and $_.Contains($script:Unc) }).Count | Should -Be 1
+        }
+
+        # A live mapping is the drive the tech is using: no check.
+        Request-Elevation -ScriptPath $running -DriveMap $map -DriveMapSource @{ H = 'Live' } | Should -BeTrue
+        Should -Invoke Start-Process -Times 2 -Exactly
+        Should -Invoke Get-RelaunchFileHash -Times 3 -Exactly -ParameterFilter { $Path -eq $script:Unc }
+    }
 }
 
 Describe 'SQ-017 review notes: closing and fatal errors never stop a change' {

@@ -68,7 +68,7 @@ handed out, so it always matches this repository.
 
 | Folder | What it does |
 |---|---|
-| [FolderPermissionManager](FolderPermissionManager/) | Browser GUI for NTFS permissions |
+| [FolderPermissionManager](FolderPermissionManager/) | Windows app for NTFS permissions: view, change with backup and change log |
 | [RobocopyMigration](RobocopyMigration/) | GUI for server-to-server file migrations |
 | [CopyFileToServer](CopyFileToServer/) | GUI to copy files to many servers |
 | [DeleteOldFolders](DeleteOldFolders/) | Delete `.old` folders past an age |
