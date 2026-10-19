@@ -4444,7 +4444,9 @@ function Get-ChangeTarget {
           (Get-ResolvedRootRefusal). That last check reads the disk and needs the folder to
           exist.
     #>
-    param([Parameter(Mandatory)][string]$Path, [hashtable]$DriveMap, [hashtable]$DriveMapSource, [switch]$WholeTree)
+    # -RefuseProtected (SQ-018 AC50, D-044; stub, not built yet): for a Copy permissions target,
+    # refuse admin shares, SYSVOL, NETLOGON, D-036 folders and the high-impact roots.
+    param([Parameter(Mandatory)][string]$Path, [hashtable]$DriveMap, [hashtable]$DriveMapSource, [switch]$WholeTree, [switch]$RefuseProtected)
     if (-not $PSBoundParameters.ContainsKey('DriveMap')) { $DriveMap = $script:MappedDrives }
     if (-not $PSBoundParameters.ContainsKey('DriveMapSource')) { $DriveMapSource = $script:MappedDriveSources }
     $display = $Path.Trim()
@@ -4557,7 +4559,9 @@ function Resolve-ChangeTargetSet {
         [hashtable]$DriveMapSource,
         [switch]$WholeTree,
         [string]$FolderDisplayPath,
-        [string]$FolderRealPath
+        [string]$FolderRealPath,
+        # SQ-018 AC50 (stub, not built yet): passed on to Get-ChangeTarget.
+        [switch]$RefuseProtected
     )
     $paths = @($Path | Where-Object { "$_".Trim() })
     if ($paths.Count -eq 0) { return [PSCustomObject]@{ Ok = $false; Targets = @(); Refusal = 'No folder or file was chosen, so nothing was changed.' } }
@@ -4661,7 +4665,11 @@ function Get-ConfirmSpec {
         $Counts,
         [string]$Detail,
         # Copy permissions: the folder copied from.
-        $Source
+        $Source,
+        # SQ-018 AC47 (stub, not built yet): the type of the permission being added; Deny is destructive.
+        [ValidateSet('Allow', 'Deny')][string]$Type = 'Allow',
+        # SQ-018 AC48 (stub, not built yet): the source folder's explicit Deny entries, one text per entry.
+        [string[]]$DenyEntries = @()
     )
     $n = @($Targets).Count
     $where = Get-ConfirmTargetText -Targets $Targets
@@ -4746,6 +4754,27 @@ function Get-ConfirmSpec {
     if ($script:WhatIfMode) { $body += "`n`nDry run (WhatIf): nothing will be changed." }
     [PSCustomObject]@{ Title = $title; Body = $body; ActionLabel = $label; IsDestructive = $destructive }
 }
+function Get-TargetRootKind {
+    # SQ-018 AC49 (stub, not built yet): 'DriveRoot' (X:\), 'AdminShareRoot' (\\server\X$) or
+    # 'ShareRoot' (\\server\share) for a resolved path that is exactly one of those, else $null.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Path)
+    throw 'Not implemented: Get-TargetRootKind (SQ-018 AC49).'
+}
+
+function Set-PermissionSubmitStyle {
+    # SQ-018 AC47 (stub, not built yet): the add/remove dialog's submit button. Remove, and Add
+    # with type Deny: danger style and never the default button; Add with Allow: normal style,
+    # default button.
+    param(
+        [Parameter(Mandatory)][ValidateSet('Add', 'Remove')][string]$Mode,
+        [Parameter(Mandatory)][ValidateSet('Allow', 'Deny')][string]$Type,
+        [Parameter(Mandatory)]$Button,
+        $DangerStyle,
+        $NormalStyle
+    )
+    throw 'Not implemented: Set-PermissionSubmitStyle (SQ-018 AC47).'
+}
+
 function Set-ConfirmDialog {
     # Fills in the confirm dialog. The action button carries the verb, gets the danger style for
     # a destructive change, and is never the default button (Cancel is, in the XAML).
@@ -5643,7 +5672,9 @@ function Open-TakeOwnership {
 function Show-CopyPermissionsDialog {
     # The copy dialog, for -Source (looked up before it opened). Returns the typed text, or
     # $null when cancelled. Blank input is caught before the dialog closes.
-    param([Parameter(Mandatory)]$Source)
+    # -TypedText (SQ-018 AC53, stub, not built yet): the list the tech typed last time, put back
+    # in the box when the dialog opens again after a refused target.
+    param([Parameter(Mandatory)]$Source, [AllowNull()][AllowEmptyString()][string]$TypedText)
     $dlg = New-AppDialog -Xaml (Get-CopyPermissionsDialogXaml)
     $dlg.FindName('CopySourceText').Text = Get-CopyDialogSourceText -Source $Source
     try { [void](Enable-LiveRegion -Element $dlg.FindName('CopyError') -Setting Assertive) } catch { }

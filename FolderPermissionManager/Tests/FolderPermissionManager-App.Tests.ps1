@@ -326,18 +326,57 @@ Describe 'Theme setting' {
 Describe 'Script shape' {
     AfterEach { Set-TestAppPaths }
 
+    # AC54 (owner, review 2026-10-19, D-046): AC6 exempts exactly the two XAML namespace identifiers
+    # (xmlns names; nothing is fetched from them) and still fails on any other 'http://', 'localhost',
+    # HttpListener and so on. An identifier is exempt only as the whole string up to its closing quote,
+    # so 'http://schemas.microsoft.com/winfx/2006/xaml/evil' or any longer address is still a hit.
+    # https://learn.microsoft.com/dotnet/desktop/xaml-services/namespaces
+    BeforeAll {
+        function script:Get-NetworkReferenceHit {
+            param([string]$Code)
+            $ns = 'http://schemas\.microsoft\.com/winfx/2006/xaml(/presentation)?(?=["''])'
+            $stripped = [regex]::Replace($Code, $ns, '')
+            @('HttpListener', 'TcpListener', 'System.Net.Sockets', 'WebClient', 'Invoke-WebRequest', 'Invoke-RestMethod', 'localhost', 'http://' |
+                Where-Object { $stripped -match [regex]::Escape($_) })
+        }
+    }
+
     It 'AC6_NoNetworkListener' {
         $tokens = $null
         [void][System.Management.Automation.Language.Parser]::ParseFile($script:AppPath, [ref]$tokens, [ref]$null)
         $code = (@($tokens | Where-Object { $_.Kind -ne 'Comment' } | ForEach-Object { $_.Text }) -join "`n")
-        $hits = @('HttpListener', 'TcpListener', 'System.Net.Sockets', 'WebClient', 'Invoke-WebRequest', 'Invoke-RestMethod', 'localhost', 'http://' |
-            Where-Object { $code -match [regex]::Escape($_) })
+        $hits = @(Get-NetworkReferenceHit -Code $code)
         $hits | Should -BeNullOrEmpty -Because 'the app must not reference any network listener or client'
         $script:AppLoaded | Should -BeTrue -Because 'the app must be the WPF script with a param() block'
         $script:ParamNames | Should -Not -Contain 'Port'
         $script:ParamNames | Should -Not -Contain 'NoBrowserOpen'
     }
 
+    It 'AC54_ExemptionIsExactlyTheTwoXamlNamespaces' {
+        $presentation = '"http://schemas.microsoft.com/winfx/2006/xaml/presentation"'
+        $xaml = '"http://schemas.microsoft.com/winfx/2006/xaml"'
+        @(Get-NetworkReferenceHit -Code "xmlns=$presentation xmlns:x=$xaml").Count | Should -Be 0 -Because 'the two namespace identifiers are exempt'
+        @(Get-NetworkReferenceHit -Code "'http://schemas.microsoft.com/winfx/2006/xaml/presentation'").Count | Should -Be 0
+        # Anything else is still a hit.
+        foreach ($bad in "'http://example.com/'", "'http://schemas.microsoft.com/winfx/2006/xaml/evil'", "'http://schemas.microsoft.com/winfx/2006/xaml/presentation/extra'",
+            "'http://schemas.microsoft.com/winfx/2007/xaml/presentation'", "'https://x'; 'http://other'", "'localhost'", "'\\localhost\C$'", 'New-Object System.Net.HttpListener',
+            "'System.Net.Sockets.TcpListener'", 'Invoke-WebRequest -Uri $u', 'Invoke-RestMethod $u', 'New-Object System.Net.WebClient') {
+            @(Get-NetworkReferenceHit -Code $bad).Count | Should -BeGreaterThan 0 -Because "$bad must still fail the no-network test"
+        }
+        # An exempt namespace next to a real address: the address still fails.
+        @(Get-NetworkReferenceHit -Code "xmlns=$presentation; 'http://evil.example/'").Count | Should -BeGreaterThan 0
+    }
+
+    It 'AC54_AppUsesTheNormalNamespaceStrings' {
+        $text = [IO.File]::ReadAllText($script:AppPath)
+        $text | Should -Not -Match ([regex]::Escape('&#58;')) -Because 'the &#58; workaround is replaced by the normal namespace strings'
+        $script:XamlNamespaces | Should -Be 'xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"'
+        foreach ($xaml in (Get-PermissionDialogXaml), (Get-CopyPermissionsDialogXaml), (Get-ConfirmDialogXaml)) {
+            $xaml | Should -Match ([regex]::Escape('xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"'))
+            $xaml | Should -Match ([regex]::Escape('xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"'))
+            { [void][xml]$xaml } | Should -Not -Throw
+        }
+    }
     It 'AC7_ScriptHeader' {
         $lines = Get-Content -LiteralPath $script:AppPath -TotalCount 1
         $lines | Should -Be '#Requires -Version 5.1'

@@ -2260,4 +2260,473 @@ Describe 'Review round 2: minors' {
         }
     }
 }
+
+# ---------------------------------------------------------------------------------------------
+# Revision run (review 2026-10-19: D-043, D-044, D-045, D-046): AC47-AC53, plus the AC36 amendment.
+# AC54 (the AC6 amendment) is in FolderPermissionManager-App.Tests.ps1. Names and parameters
+# pinned here for the implementer (the spec leaves them open); the stubs in
+# FolderPermissionManager-GUI.ps1 already carry these signatures:
+#   Set-PermissionSubmitStyle -Mode Add|Remove -Type Allow|Deny -Button <obj .Style .IsDefault> -DangerStyle -NormalStyle
+#       Remove, and Add with Deny: danger style, IsDefault $false. Add with Allow: normal style, IsDefault $true.
+#       Show-PermissionDialog calls it on open and when the type combo changes.
+#   Get-ConfirmSpec ... -Type Allow|Deny          (AddPermission: Deny gives IsDestructive $true)
+#   Get-ConfirmSpec ... -DenyEntries <string[]>   (CopyPermissions: any entry gives IsDestructive $true and is listed in Body)
+#   Get-TargetRootKind -Path -> 'DriveRoot' (X:\) | 'ShareRoot' (\\server\share) | 'AdminShareRoot' (\\server\X$) | $null
+#       Get-ConfirmSpec makes an Add or Copy IsDestructive when a target's ResolvedPath has a root kind.
+#   Get-ChangeTarget / Resolve-ChangeTargetSet ... -RefuseProtected   (Copy targets: admin shares, IPC$, SYSVOL, NETLOGON,
+#       D-036 folders and the high-impact roots are not Ok; Invoke-CopyPermissions and the typed-folders lookup of
+#       Open-CopyPermissions pass it). Volume roots (D:\) are D-036, so a Copy to D:\ is refused (see the report).
+#   Invoke-CopyPermissions finds the source's explicit Deny entries in $script:ViewState.FolderPermissions.Rows
+#       (not IsInherited, Type Deny), the same rows the copy dialog's note uses.
+#   Show-CopyPermissionsDialog -Source [-TypedText <text>]; after a refused typed folder, Open-CopyPermissions opens it again
+#       with the typed text.
+#   AC52: Get-ChangeTarget -WholeTree reads each component of the share's server-side path over the admin share with
+#       Get-AppReparseInfo -Path '\\server\X$\...' (the existing seam).
+#   AC53: the core's late re-check in Invoke-TreeOwnershipChange calls Get-HighImpactRootRefusal (or a core copy of it).
+# ---------------------------------------------------------------------------------------------
+Describe 'Revision 2026-10-19: Deny, roots, protected Copy targets, server-side junctions (AC47-AC53)' {
+    BeforeAll {
+        function script:New-ViewRows {
+            param([object[]]$Row)
+            $script:ViewState.FolderPermissions = [PSCustomObject]@{ Ok = $true; Path = $script:Current.RealPath; Rows = @($Row) }
+        }
+        function script:New-ViewRow {
+            param([string]$Identity, [string]$Type = 'Allow', [bool]$Inherited = $false, [string]$Rights = 'Modify')
+            [PSCustomObject]@{ Identity = $Identity; Sid = 'S-1-5-21-1-2-3-1100'; Type = $Type; IsInherited = $Inherited; Rights = $Rights }
+        }
+    }
+    BeforeEach {
+        $script:Reads = [System.Collections.Generic.List[object]]::new()
+        Mock Start-ReadTask { $script:Reads.Add(@{ Action = $Action; Path = $Path; Work = $Work; ArgumentList = $ArgumentList; OnDone = $OnDone; State = $State }) }
+        $script:AtConfirm = [System.Collections.Generic.List[object]]::new()
+        # The confirm records whether a change task had already been started when it opened.
+        Mock Show-ConfirmDialog { $script:Confirms.Add($Spec); $script:AtConfirm.Add($script:Captured); $script:ConfirmAnswer }
+        New-ViewRows -Row @((New-ViewRow -Identity 'BUILTIN\Users'))
+    }
+
+    # ---- AC47 ----------------------------------------------------------------------------------
+    It 'AC47_AddDeny_DangerStyle' {
+        $danger = 'DANGER-STYLE'; $normal = 'NORMAL-STYLE'
+        $btn = [PSCustomObject]@{ Style = $null; IsDefault = $true }
+        Set-PermissionSubmitStyle -Mode Add -Type Deny -Button $btn -DangerStyle $danger -NormalStyle $normal
+        $btn.Style | Should -Be $danger -Because 'adding a Deny uses the danger button style'
+        # Choosing Allow again goes back to the normal style.
+        Set-PermissionSubmitStyle -Mode Add -Type Allow -Button $btn -DangerStyle $danger -NormalStyle $normal
+        $btn.Style | Should -Be $normal
+        # Remove is always danger.
+        Set-PermissionSubmitStyle -Mode Remove -Type Allow -Button $btn -DangerStyle $danger -NormalStyle $normal
+        $btn.Style | Should -Be $danger
+        # The dialog applies it (on open and when the type changes).
+        (Get-Command Show-PermissionDialog -CommandType Function).Definition | Should -Match 'Set-PermissionSubmitStyle'
+    }
+
+    It 'AC47_AddDeny_ButtonIsNotDefault' {
+        $btn = [PSCustomObject]@{ Style = $null; IsDefault = $true }
+        Set-PermissionSubmitStyle -Mode Add -Type Deny -Button $btn -DangerStyle 'D' -NormalStyle 'N'
+        $btn.IsDefault | Should -BeFalse -Because 'a Deny add is never the default (Enter) button'
+        Set-PermissionSubmitStyle -Mode Add -Type Allow -Button $btn -DangerStyle 'D' -NormalStyle 'N'
+        $btn.IsDefault | Should -BeTrue -Because 'a plain Allow add keeps Enter as submit'
+        Set-PermissionSubmitStyle -Mode Remove -Type Allow -Button $btn -DangerStyle 'D' -NormalStyle 'N'
+        $btn.IsDefault | Should -BeFalse
+    }
+
+    It 'AC47_AddDeny_ConfirmWithRealLocationBeforeAnyChange' {
+        $t = New-FakeTarget -Display 'H:\Data' -Resolved '\\fs02\real\Data'
+        Invoke-AddPermission -Scope Folder -Identity 'CONTOSO\Temps' -Rights 'Modify' -Type 'Deny' -Targets @($t)
+        $script:Confirms.Count | Should -Be 1 -Because 'a Deny add opens the confirm'
+        $script:AtConfirm[0] | Should -BeNullOrEmpty -Because 'no change task may have started when the confirm opens'
+        $spec = $script:Confirms[0]
+        $spec.IsDestructive | Should -BeTrue
+        $spec.ActionLabel | Should -Match '^Add'
+        $spec.ActionLabel | Should -Not -BeIn @('OK', 'Yes')
+        $spec.Body | Should -Match ([regex]::Escape('H:\Data'))
+        $spec.Body | Should -Match ([regex]::Escape('\\fs02\real\Data')) -Because 'the real location is shown'
+        $spec.Body | Should -Match 'Deny'
+        $spec.Body | Should -Match ([regex]::Escape('CONTOSO\Temps'))
+        $script:Captured | Should -Not -BeNullOrEmpty -Because 'the change starts once confirmed'
+        @($script:Captured.ArgumentList[0]) | Should -Be @('\\fs02\real\Data')
+
+        # Declined: nothing starts.
+        $script:Captured = $null; $script:Confirms.Clear(); $script:ConfirmAnswer = $false
+        Invoke-AddPermission -Scope Folder -Identity 'CONTOSO\Temps' -Rights 'Modify' -Type 'Deny' -Targets @($t)
+        $script:Confirms.Count | Should -Be 1
+        $script:Captured | Should -BeNullOrEmpty
+    }
+
+    It 'AC47_AddDeny_ConfirmSpec' {
+        $one = New-FakeTarget -Display 'D:\Data\HR'
+        $deny = Get-ConfirmSpec -Action AddPermission -Targets @($one) -Detail 'Deny Modify for CONTOSO\Temps' -Type Deny
+        $deny.IsDestructive | Should -BeTrue
+        $allow = Get-ConfirmSpec -Action AddPermission -Targets @($one) -Detail 'Allow Modify for CONTOSO\HR' -Type Allow
+        $allow.IsDestructive | Should -BeFalse
+    }
+
+    # Guard for the amended AC36 (D-044): passes before and after the revision.
+    It 'AC36_Amended_PlainAllowAddAndCopyStayOneStep' {
+        # One step only for a plain Allow add or copy on ordinary folders that resolve to themselves.
+        $folder = New-FakeTarget -Display 'D:\Data\HR'
+        Invoke-AddPermission -Scope Folder -Identity 'CONTOSO\HR' -Rights 'Modify' -Type 'Allow' -Targets @($folder)
+        $script:Confirms.Count | Should -Be 0
+        $script:Captured | Should -Not -BeNullOrEmpty
+
+        $script:Captured = $null
+        # The source has an explicit Allow and an inherited Deny only: no explicit Deny.
+        New-ViewRows -Row @((New-ViewRow -Identity 'BUILTIN\Users'), (New-ViewRow -Identity 'CONTOSO\Inh' -Type Deny -Inherited $true))
+        $source = New-FakeTarget -Display $script:Current.DisplayPath
+        $targets = @((New-FakeTarget -Display '\\fs01\Data\A'), (New-FakeTarget -Display 'D:\Data\B'))
+        Invoke-CopyPermissions -Source $source -Targets $targets
+        $script:Confirms.Count | Should -Be 0
+        $script:Captured | Should -Not -BeNullOrEmpty
+    }
+
+    # ---- AC48 ----------------------------------------------------------------------------------
+    It 'AC48_CopyWithExplicitDeny_DestructiveConfirm' {
+        New-ViewRows -Row @(
+            (New-ViewRow -Identity 'BUILTIN\Users'),
+            (New-ViewRow -Identity 'CONTOSO\Temps' -Type Deny -Rights 'Write'),
+            (New-ViewRow -Identity 'CONTOSO\InheritedDeny' -Type Deny -Inherited $true))
+        $source = New-FakeTarget -Display $script:Current.DisplayPath
+        $t1 = New-FakeTarget -Display '\\fs01\A' -Resolved '\\fs03\A'
+        $t2 = New-FakeTarget -Display 'D:\B'
+        Invoke-CopyPermissions -Source $source -Targets @($t1, $t2)
+        $script:Confirms.Count | Should -Be 1 -Because 'a copy of explicit Deny entries needs a confirm'
+        $script:AtConfirm[0] | Should -BeNullOrEmpty
+        $spec = $script:Confirms[0]
+        $spec.IsDestructive | Should -BeTrue
+        $spec.ActionLabel | Should -Match '^Copy'
+        $spec.Body | Should -Match ([regex]::Escape('CONTOSO\Temps')) -Because 'the Deny entries are listed'
+        $spec.Body | Should -Match 'Deny'
+        $spec.Body | Should -Not -Match ([regex]::Escape('CONTOSO\InheritedDeny')) -Because 'only the folder''s own (explicit) entries are copied'
+        $spec.Body | Should -Match ([regex]::Escape('\\fs01\A'))
+        $spec.Body | Should -Match ([regex]::Escape('\\fs03\A')) -Because 'every target''s real location is shown'
+        $spec.Body | Should -Match ([regex]::Escape('D:\B'))
+        $script:Captured | Should -Not -BeNullOrEmpty
+
+        $script:Captured = $null; $script:Confirms.Clear(); $script:AtConfirm.Clear(); $script:ConfirmAnswer = $false
+        Invoke-CopyPermissions -Source $source -Targets @($t1, $t2)
+        $script:Confirms.Count | Should -Be 1
+        $script:Captured | Should -BeNullOrEmpty -Because 'declined'
+    }
+
+    It 'AC48_ConfirmSpec_DenyEntries' {
+        $t = New-FakeTarget -Display 'D:\B'
+        $spec = Get-ConfirmSpec -Action CopyPermissions -Targets @($t) -Detail 'D:\Src' -DenyEntries @('CONTOSO\Temps (Deny, Write)')
+        $spec.IsDestructive | Should -BeTrue
+        $spec.Body | Should -Match ([regex]::Escape('CONTOSO\Temps'))
+        (Get-ConfirmSpec -Action CopyPermissions -Targets @($t) -Detail 'D:\Src').IsDestructive | Should -BeFalse
+    }
+
+    # ---- AC49 ----------------------------------------------------------------------------------
+    It 'AC49_RootKinds' {
+        Get-TargetRootKind -Path 'D:\' | Should -Be 'DriveRoot'
+        Get-TargetRootKind -Path 'd:\' | Should -Be 'DriveRoot'
+        Get-TargetRootKind -Path '\\fs01\Data' | Should -Be 'ShareRoot'
+        Get-TargetRootKind -Path '\\fs01\Data\' | Should -Be 'ShareRoot'
+        Get-TargetRootKind -Path '\\fs01\D$' | Should -Be 'AdminShareRoot'
+        foreach ($p in 'D:\Data', '\\fs01\Data\HR', '\\fs01\D$\Data', 'C:\Users\bob') { Get-TargetRootKind -Path $p | Should -BeNullOrEmpty -Because "$p is not a root" }
+    }
+
+    It 'AC49_AddOnARoot_DestructiveConfirmWithRealLocation' {
+        $cases = @(
+            @{ Display = 'D:\'; Resolved = 'D:\' }
+            @{ Display = '\\fs01\Data'; Resolved = '\\fs01\Data' }
+            @{ Display = '\\fs01\D$'; Resolved = '\\fs01\D$' }
+            @{ Display = 'H:\'; Resolved = '\\fs01\home' }                          # a mapped drive: the root of its share
+            @{ Display = '\\contoso.com\dfs\hr'; Resolved = '\\fs02\HR' }           # DFS: resolves to a share root
+        )
+        foreach ($c in $cases) {
+            $script:Captured = $null; $script:Confirms.Clear(); $script:AtConfirm.Clear(); $script:ConfirmAnswer = $true
+            $t = New-FakeTarget -Display $c.Display -Resolved $c.Resolved
+            Invoke-AddPermission -Scope Folder -Identity 'CONTOSO\HR' -Rights 'Modify' -Type 'Allow' -Targets @($t)
+            $script:Confirms.Count | Should -Be 1 -Because "an Allow add on $($c.Display) (really $($c.Resolved)) is a root"
+            $script:AtConfirm[0] | Should -BeNullOrEmpty
+            $script:Confirms[0].IsDestructive | Should -BeTrue
+            $script:Confirms[0].Body | Should -Match ([regex]::Escape($c.Resolved))
+            $script:Captured | Should -Not -BeNullOrEmpty
+
+            $script:Captured = $null; $script:Confirms.Clear(); $script:AtConfirm.Clear(); $script:ConfirmAnswer = $false
+            Invoke-AddPermission -Scope Folder -Identity 'CONTOSO\HR' -Rights 'Modify' -Type 'Allow' -Targets @($t)
+            $script:Captured | Should -BeNullOrEmpty -Because 'declined'
+        }
+        # Not a root: one step.
+        $script:Captured = $null; $script:Confirms.Clear(); $script:ConfirmAnswer = $true
+        foreach ($p in 'D:\Data', '\\fs01\Data\HR', '\\fs01\D$\Data') {
+            $script:Captured = $null
+            Invoke-AddPermission -Scope Folder -Identity 'CONTOSO\HR' -Rights 'Modify' -Type 'Allow' -Targets @((New-FakeTarget -Display $p))
+            $script:Captured | Should -Not -BeNullOrEmpty -Because "$p is an ordinary folder"
+        }
+        $script:Confirms.Count | Should -Be 0
+    }
+
+    It 'AC49_CopyOntoARoot_DestructiveConfirmWithRealLocation' {
+        $source = New-FakeTarget -Display $script:Current.DisplayPath
+        $cases = @(
+            @{ Display = '\\fs01\Data'; Resolved = '\\fs01\Data' }
+            @{ Display = 'H:\'; Resolved = '\\fs01\home' }
+            @{ Display = '\\contoso.com\dfs\hr'; Resolved = '\\fs02\HR' }
+        )
+        foreach ($c in $cases) {
+            $script:Captured = $null; $script:Confirms.Clear(); $script:AtConfirm.Clear(); $script:ConfirmAnswer = $true
+            $t = New-FakeTarget -Display $c.Display -Resolved $c.Resolved
+            $ok = New-FakeTarget -Display 'D:\Data\Other'
+            Invoke-CopyPermissions -Source $source -Targets @($ok, $t)
+            $script:Confirms.Count | Should -Be 1 -Because "a copy onto $($c.Display) (really $($c.Resolved)) is a root"
+            $script:AtConfirm[0] | Should -BeNullOrEmpty
+            $script:Confirms[0].IsDestructive | Should -BeTrue
+            $script:Confirms[0].Body | Should -Match ([regex]::Escape($c.Resolved))
+            $script:Captured | Should -Not -BeNullOrEmpty
+
+            $script:Captured = $null; $script:Confirms.Clear(); $script:AtConfirm.Clear(); $script:ConfirmAnswer = $false
+            Invoke-CopyPermissions -Source $source -Targets @($ok, $t)
+            $script:Captured | Should -BeNullOrEmpty -Because 'declined'
+        }
+    }
+
+    # ---- AC50 ----------------------------------------------------------------------------------
+    It 'AC50_CopyTargetsThatAreProtectedAreRefused' {
+        $sysRoot = "$env:SystemRoot"
+        $sysUnc = '\\testpc\' + $sysRoot.Substring(0, 1) + '$' + $sysRoot.Substring(2)
+        $refused = @(
+            '\\fs01\D$', '\\fs01\ADMIN$', '\\fs01\IPC$', '\\fs01\print$', '\\fs01\SYSVOL', '\\fs01\NETLOGON',   # admin shares and the DC shares
+            "$sysRoot\System32",                                                                                  # D-036: a Windows folder
+            $sysUnc,                                                                                              # D-036 through this computer's own admin share
+            'C:\Users', 'D:\System Volume Information'                                                            # high-impact roots
+        )
+        foreach ($p in $refused) {
+            $script:Captured = $null; $script:Shown.Clear(); $script:Status.Clear(); $script:Confirms.Clear(); $script:ConfirmAnswer = $true
+            Invoke-CopyPermissions -TargetText $p
+            $script:Captured | Should -BeNullOrEmpty -Because "no task starts for the protected target $p"
+            $script:Confirms.Count | Should -Be 0 -Because 'it is refused, not confirmed'
+            @($script:Shown).Count | Should -BeGreaterThan 0 -Because "$p is refused with a message the tech sees"
+            $script:Shown[0] | Should -Not -Match 'Exception'
+            (Get-LastStatus).Kind | Should -Be 'Error'
+        }
+        # One protected folder in a list refuses the whole copy.
+        $script:Captured = $null; $script:Shown.Clear()
+        Invoke-CopyPermissions -TargetText "D:\Data\A`n\\fs01\ADMIN$"
+        $script:Captured | Should -BeNullOrEmpty
+
+        # An ordinary share folder is not refused.
+        $script:Captured = $null; $script:Shown.Clear(); $script:Status.Clear()
+        Invoke-CopyPermissions -TargetText '\\fs01\Data\HR'
+        $script:Captured | Should -Not -BeNullOrEmpty
+    }
+
+    It 'AC50_GetChangeTarget_RefuseProtected' {
+        foreach ($p in '\\fs01\ADMIN$', '\\fs01\IPC$', '\\fs01\D$', '\\fs01\SYSVOL') {
+            (Get-ChangeTarget -Path $p -RefuseProtected).Ok | Should -BeFalse -Because $p
+            (Get-ChangeTarget -Path $p).Ok | Should -BeTrue -Because "$p is only refused for a Copy target"
+        }
+        (Get-ChangeTarget -Path '\\fs01\Data\HR' -RefuseProtected).Ok | Should -BeTrue
+        (Get-ChangeTarget -Path '\\fs01\Data' -RefuseProtected).Ok | Should -BeTrue -Because 'a share root is confirmed (AC49), not refused'
+        $set = Resolve-ChangeTargetSet -Path @('D:\Data', '\\fs01\ADMIN$') -DriveMap @{} -DriveMapSource @{} -RefuseProtected
+        $set.Ok | Should -BeFalse
+    }
+
+    It 'AC50_CopyDialogFlow_TypedFoldersAreCheckedInTheBackground' {
+        $script:MappedDrives = @{ H = '\\fs01\home' }; $script:MappedDriveSources = @{ H = 'Live' }
+        $script:Current = [PSCustomObject]@{ DisplayPath = 'H:\Data'; RealPath = '\\fs01\home\Data' }
+        New-ViewRows -Row @((New-ViewRow -Identity 'BUILTIN\Users'))
+        $script:CopyDialogs = [System.Collections.Generic.List[object]]::new()
+        $script:CopyAnswers = [System.Collections.Generic.Queue[object]]::new()
+        $script:CopyAnswers.Enqueue("\\fs01\ADMIN`$`n\\fs01\Data\HR")
+        $script:CopyAnswers.Enqueue($null)
+        Mock Show-CopyPermissionsDialog { $script:CopyDialogs.Add(@{ Source = $Source; TypedText = $TypedText }); $script:CopyAnswers.Dequeue() }
+        Open-CopyPermissions
+        & $script:Reads[0].OnDone ([PSCustomObject]@{ Ok = $true; Targets = @(New-FakeTarget -Display 'H:\Data' -Resolved '\\fs01\home\Data'); Refusal = $null }) $script:Reads[0].State
+        $script:Reads.Count | Should -BeGreaterThan 1 -Because 'the typed folders are looked up after the dialog'
+        $argList = @($script:Reads[1].ArgumentList)
+        $r = & $script:Reads[1].Work @argList
+        $r.Ok | Should -BeFalse -Because 'the background lookup of the typed folders refuses \\fs01\ADMIN$'
+        & $script:Reads[1].OnDone $r $script:Reads[1].State
+        $script:Captured | Should -BeNullOrEmpty
+        @($script:Shown | Where-Object { $_ -match [regex]::Escape('ADMIN$') }).Count | Should -BeGreaterThan 0
+    }
+
+    # ---- AC51 ----------------------------------------------------------------------------------
+    It 'AC51_CopyTargetResolvedElsewhere_ConfirmListsTypedAndRealLocation' {
+        $source = New-FakeTarget -Display $script:Current.DisplayPath
+        $cases = @(
+            @{ What = 'mapped drive'; Display = 'H:\Share\Sub'; Resolved = '\\fs01\home\Share\Sub' }
+            @{ What = 'DFS'; Display = '\\contoso.com\dfs\hr\Sub'; Resolved = '\\fs02\HR\Sub' }
+            @{ What = 'loopback admin share'; Display = '\\testpc\C$\Temp'; Resolved = 'C:\Temp' }
+            @{ What = 'local share'; Display = '\\testpc\Data\Sub'; Resolved = 'D:\Shares\Data\Sub' }
+        )
+        foreach ($c in $cases) {
+            $script:Captured = $null; $script:Confirms.Clear(); $script:AtConfirm.Clear(); $script:ConfirmAnswer = $true
+            $same = New-FakeTarget -Display 'D:\Data\Same'
+            $t = New-FakeTarget -Display $c.Display -Resolved $c.Resolved
+            Invoke-CopyPermissions -Source $source -Targets @($same, $t)
+            $script:Confirms.Count | Should -Be 1 -Because "$($c.What): $($c.Display) is really $($c.Resolved)"
+            $script:AtConfirm[0] | Should -BeNullOrEmpty -Because 'the confirm comes before the change'
+            $script:Confirms[0].Body | Should -Match ([regex]::Escape($c.Display)) -Because 'what was typed'
+            $script:Confirms[0].Body | Should -Match ([regex]::Escape($c.Resolved)) -Because 'where it really is'
+            $script:Captured | Should -Not -BeNullOrEmpty
+            @($script:Captured.ArgumentList[1]) | Should -Contain $c.Resolved
+
+            $script:Captured = $null; $script:Confirms.Clear(); $script:AtConfirm.Clear(); $script:ConfirmAnswer = $false
+            Invoke-CopyPermissions -Source $source -Targets @($same, $t)
+            $script:Confirms.Count | Should -Be 1
+            $script:Captured | Should -BeNullOrEmpty -Because 'declined'
+        }
+    }
+
+    # Guard (passes before and after): with nothing to flag, Copy stays one step.
+    It 'AC51_CopyStaysOneStepWhenEveryTargetResolvesToItself' {
+        $source = New-FakeTarget -Display $script:Current.DisplayPath
+        Invoke-CopyPermissions -Source $source -Targets @((New-FakeTarget -Display 'D:\Data\A'), (New-FakeTarget -Display '\\fs01\Data\B'))
+        $script:Confirms.Count | Should -Be 0
+        $script:Captured | Should -Not -BeNullOrEmpty
+    }
+
+    # ---- AC52 ----------------------------------------------------------------------------------
+    # FILE_ATTRIBUTE_REPARSE_POINT is 1024 (0x400): "A file or directory that has an associated reparse
+    # point, or a file that is a symbolic link". Get-AppReparseInfo (FindFirstFileW dwFileAttributes) is the
+    # seam; its reads are mocked here. NetShareGetInfo level 2 (SHARE_INFO_2.shi2_path) is the existing
+    # Get-RemoteShareLocalPath seam, also mocked. 2684354563 = 0xA0000003, IO_REPARSE_TAG_MOUNT_POINT.
+    # https://learn.microsoft.com/windows/win32/fileio/file-attribute-constants
+    # https://learn.microsoft.com/windows/win32/api/lmshare/nf-lmshare-netsharegetinfo
+    It 'AC52_ServerSidePathComponentsAreChecked_NoJunction' {
+        $script:Asked = [System.Collections.Generic.List[string]]::new()
+        Mock Get-RemoteShareLocalPath { 'D:\Shares\Data' }
+        Mock Get-AppReparseInfo { $script:Asked.Add($Path); [PSCustomObject]@{ Exists = $true; IsReparsePoint = $false; Tag = $null } }
+        $t = Get-ChangeTarget -Path '\\fs01\Data\HR' -WholeTree
+        $t.Ok | Should -BeTrue -Because "$($t.Refusal)"
+        @($script:Asked) | Should -Contain '\\fs01\D$\Shares' -Because 'each component of the server-side path is read over the admin share'
+        @($script:Asked) | Should -Contain '\\fs01\D$\Shares\Data'
+    }
+
+    It 'AC52_AReparsePointInTheServerSidePathRefuses' {
+        Mock Get-RemoteShareLocalPath { 'D:\Shares\Data' }
+        foreach ($bad in '\\fs01\D$\Shares', '\\fs01\D$\Shares\Data') {
+            $script:Bad = $bad
+            Mock Get-AppReparseInfo { [PSCustomObject]@{ Exists = $true; IsReparsePoint = ($Path -eq $script:Bad); Tag = $(if ($Path -eq $script:Bad) { [uint32]2684354563 } else { $null }) } }
+            $t = Get-ChangeTarget -Path '\\fs01\Data\HR' -WholeTree
+            $t.Ok | Should -BeFalse -Because "$bad is a junction on the server"
+            $t.Refusal | Should -Match ([regex]::Escape($bad)) -Because 'the refusal names the component'
+            $t.Refusal | Should -Match '(?i)junction|symbolic link|link|reparse'
+        }
+    }
+
+    It 'AC52_AComponentThatCannotBeCheckedRefuses' {
+        Mock Get-RemoteShareLocalPath { 'D:\Shares\Data' }
+        Mock Get-AppReparseInfo { if ($Path -eq '\\fs01\D$\Shares') { throw 'Access is denied' }; [PSCustomObject]@{ Exists = $true; IsReparsePoint = $false; Tag = $null } }
+        $t = Get-ChangeTarget -Path '\\fs01\Data\HR' -WholeTree
+        $t.Ok | Should -BeFalse -Because 'a guard that cannot read the component fails closed'
+        $t.Refusal | Should -Match ([regex]::Escape('\\fs01\D$\Shares'))
+    }
+
+    It 'AC52_OnlyWholeTreeChangesAreGuardedThisWay' {
+        $script:Asked = [System.Collections.Generic.List[string]]::new()
+        Mock Get-RemoteShareLocalPath { 'D:\Shares\Data' }
+        Mock Get-AppReparseInfo { $script:Asked.Add($Path); [PSCustomObject]@{ Exists = $true; IsReparsePoint = $true; Tag = [uint32]2684354563 } }
+        (Get-ChangeTarget -Path '\\fs01\Data\HR').Ok | Should -BeTrue -Because 'a one-item change is not guarded this way'
+        @($script:Asked | Where-Object { $_ -like '\\fs01\*' }).Count | Should -Be 0
+    }
+
+    It 'AC52_RefusedBeforeTheCountAndTheConfirm' {
+        Mock Get-RemoteShareLocalPath { 'D:\Shares\Data' }
+        Mock Get-AppReparseInfo { [PSCustomObject]@{ Exists = $true; IsReparsePoint = ($Path -eq '\\fs01\D$\Shares'); Tag = $(if ($Path -eq '\\fs01\D$\Shares') { [uint32]2684354563 } else { $null }) } }
+        $script:Current = [PSCustomObject]@{ DisplayPath = '\\fs01\Data\HR'; RealPath = '\\fs01\Data\HR' }
+        Open-TakeOwnership -Scope Tree
+        $script:Reads.Count | Should -Be 1 -Because 'only the lookup of where the folder is has started'
+        $argList = @($script:Reads[0].ArgumentList)
+        $r = & $script:Reads[0].Work @argList
+        $r.Ok | Should -BeFalse
+        & $script:Reads[0].OnDone $r $script:Reads[0].State
+        $script:Reads.Count | Should -Be 1 -Because 'no count starts'
+        $script:Confirms.Count | Should -Be 0
+        $script:Captured | Should -BeNullOrEmpty
+        @($script:Shown | Where-Object { $_ -match [regex]::Escape('\\fs01\D$\Shares') }).Count | Should -BeGreaterThan 0
+    }
+
+    # ---- AC53 (a): the late re-check before takeown also runs the high-impact-root check --------
+    It 'AC53a_LateRecheckAlsoChecksHighImpactRoots' {
+        $dir = New-Folder 'Late53'
+        $log = Join-Path $TestDrive ('late-log-' + [guid]::NewGuid().ToString('N'))
+        $script:SnapshotTaken = $false
+        $script:ToolCalls = [System.Collections.Generic.List[string]]::new()
+        # The snapshot is faked (no owners are read); the flag marks "after the snapshot", the late check.
+        Mock Save-OwnerSnapshot {
+            $script:SnapshotTaken = $true
+            [PSCustomObject]@{ File = (Join-Path $TestDrive 'snap.csv'); Count = 1; Items = @(); Unreadable = 0; Unlisted = 0; UnlistedFolders = @(); Links = 0; LinkPaths = @() }
+        }
+        Mock Get-TreeOwnershipTargetRefusal { $null }
+        Mock Get-TreeLinkRefusal { $null }
+        Mock Get-OwnerReadBack { [PSCustomObject]@{ Mine = 1; NotMine = 0; Changed = 1; Unchecked = 0; AdministratorsOnly = $false; WatchedChanged = @(); WatchedUnchecked = @() } }
+        Mock Invoke-AclTool { $script:ToolCalls.Add("$Tool"); [PSCustomObject]@{ ExitCode = 0; Output = @() } }
+        # The folder is fine on the first check and is the profiles folder at the late one (swapped in meanwhile).
+        Mock Get-HighImpactRootRefusal { if ($script:SnapshotTaken) { "$Path is the folder that holds every user profile on this computer (C:\Users). Taking ownership of everything in it changes the owner of every user profile." } else { $null } }
+        $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -LogFolder $log -Recurse -Confirm:$false)
+        $row = $rows | Where-Object { $_ } | Select-Object -Last 1
+        $row.Result | Should -Be 'Failed' -Because 'the late re-check must refuse a high-impact root'
+        $row.ErrorText | Should -Match 'user profile'
+        $row.ErrorText | Should -Match 'Nothing was changed'
+        $script:ToolCalls.Count | Should -Be 0 -Because 'takeown and icacls must not run'
+    }
+
+    # ---- AC53 (b): orphan wording and the icacls hint ------------------------------------------
+    It 'AC53b_OrphanWordingAndIcaclsHint' {
+        $sid = 'S-1-5-21-1-2-3-1009'
+        Mock ConvertTo-SidAccountName { $null }
+        Mock ConvertTo-IdentitySid { $null }
+        foreach ($case in @(@{ Identity = $sid; Type = 'Allow'; Switch = '/remove:g' }, @{ Identity = 'CONTOSO\Gone'; Type = 'Deny'; Switch = '/remove:d' })) {
+            $r = Get-RemoveIdentityProblem -Identity $case.Identity -Sid $sid -Path @('D:\Data') -Type $case.Type
+            $r.Problem | Should -Match ([regex]::Escape("Windows can't look up this account from here (it may be deleted, or local to the server)"))
+            $r.Problem | Should -Not -Match 'no longer exists' -Because 'an untranslatable live SID is not necessarily deleted'
+            $save = $r.Problem.IndexOf('icacls "D:\Data" /save ')
+            $save | Should -BeGreaterThan -1 -Because 'the hint starts with a backup of the permissions'
+            $remove = $r.Problem.IndexOf("$($case.Switch) *$sid")
+            $remove | Should -BeGreaterThan $save -Because '/save comes before /remove'
+            $r.Problem | Should -Match 'Nothing was changed'
+        }
+    }
+
+    # ---- AC53 (c): the final-path refusal's next step ------------------------------------------
+    It 'AC53c_FinalPathRefusalNextStep' {
+        Mock Get-Win32PathName { $null }
+        $text = Get-ResolvedRootRefusal -Path 'D:\Data'
+        $text | Should -Match ([regex]::Escape('run the tool on the server itself, or ask a senior admin'))
+        $text | Should -Not -Match 'Press Refresh'
+        $dir = New-Folder 'Final53'
+        $t = Get-ChangeTarget -Path $dir -WholeTree
+        $t.Ok | Should -BeFalse
+        $t.Refusal | Should -Match ([regex]::Escape('run the tool on the server itself, or ask a senior admin'))
+    }
+
+    # ---- AC53 (d): the Copy dialog keeps the typed list when a target is refused ---------------
+    It 'AC53d_CopyDialogKeepsTheTypedListAfterARefusal' {
+        $script:MappedDrives = @{ H = '\\fs01\home' }; $script:MappedDriveSources = @{ H = 'Live' }
+        $script:Current = [PSCustomObject]@{ DisplayPath = 'H:\Data'; RealPath = '\\fs01\home\Data' }
+        New-ViewRows -Row @((New-ViewRow -Identity 'BUILTIN\Users'))
+        $typed = "\\fs01\ADMIN`$`n\\fs01\Data\HR"
+        $script:CopyDialogs = [System.Collections.Generic.List[object]]::new()
+        $script:CopyAnswers = [System.Collections.Generic.Queue[object]]::new()
+        $script:CopyAnswers.Enqueue($typed)
+        $script:CopyAnswers.Enqueue($null)
+        Mock Show-CopyPermissionsDialog { $script:CopyDialogs.Add(@{ Source = $Source; TypedText = $TypedText }); $script:CopyAnswers.Dequeue() }
+        Open-CopyPermissions
+        & $script:Reads[0].OnDone ([PSCustomObject]@{ Ok = $true; Targets = @(New-FakeTarget -Display 'H:\Data' -Resolved '\\fs01\home\Data'); Refusal = $null }) $script:Reads[0].State
+        $script:CopyDialogs[0].TypedText | Should -BeNullOrEmpty -Because 'the first time the box is empty'
+
+        # One typed folder is refused: the refusal is shown and the dialog opens again with what was typed.
+        & $script:Reads[1].OnDone ([PSCustomObject]@{ Ok = $false; Targets = @(); Refusal = '\\fs01\ADMIN$ is an administrative share, so nothing was changed.' }) $script:Reads[1].State
+        $script:Shown | Should -Contain '\\fs01\ADMIN$ is an administrative share, so nothing was changed.'
+        $script:CopyDialogs.Count | Should -Be 2 -Because 'the dialog opens again after the refusal'
+        $script:CopyDialogs[1].TypedText | Should -Be $typed -Because 'the typed list is kept'
+        $script:CopyDialogs[1].Source.ResolvedPath | Should -Be '\\fs01\home\Data'
+        # Cancelling the second dialog ends it cleanly.
+        $script:Captured | Should -BeNullOrEmpty
+        $script:ChangePending | Should -BeNullOrEmpty
+    }
+
+    It 'AC53d_CopyDialogPutsTheTypedTextBackInTheBox' {
+        $fn = @($script:Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Show-CopyPermissionsDialog' }, $true))[0]
+        @($fn.Body.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath }) | Should -Contain 'TypedText'
+        $afterParams = $fn.Body.ParamBlock.Extent.EndOffset
+        $uses = @($fn.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.VariableExpressionAst] -and $n.VariablePath.UserPath -eq 'TypedText' -and $n.Extent.StartOffset -gt $afterParams }, $true))
+        $uses.Count | Should -BeGreaterThan 0 -Because 'the body must use -TypedText to fill CopyTargetsBox'
+        $fn.Extent.Text | Should -Match 'CopyTargetsBox'
+    }
+}
 }
