@@ -490,7 +490,8 @@ Describe 'FolderPermissionManager: change a permission in place (SQ-025)' {
     Describe 'The change itself (core)' {
         BeforeEach {
             $script:Dir = New-Folder 'cp'
-            $script:Log = Join-Path $TestDrive 'cp-logs'
+            # A log folder per test: TestDrive keeps files across the It blocks of this Describe.
+            $script:Log = Join-Path $TestDrive ('cp-logs-' + [guid]::NewGuid().ToString('N'))
             $script:AllowSetAcl = $true
         }
 
@@ -623,7 +624,7 @@ Describe 'FolderPermissionManager: change a permission in place (SQ-025)' {
             $script:Sddls[$script:Dir] = $script:SddlAC1
             $script:LogDirForSetAcl = $script:Log
             $e = Get-EntryArgs -Sddl $script:SddlAC1 -Sid $script:BU -Type Allow -NewRights Modify -NewType Deny
-            $result = & $script:ChangePermissionWork @(Get-WorkArgs -Path $script:Dir -Entry $e -LogFolder $script:Log)
+            $workArgs = @(Get-WorkArgs -Path $script:Dir -Entry $e -LogFolder $script:Log); $result = & $script:ChangePermissionWork @workArgs
             $result.Ok | Should -BeTrue -Because "$($result.Error)"
             $script:SetAclCalls.Count | Should -Be 1
             $before = $script:SetAclCalls[0].LogAndBackups
@@ -834,7 +835,7 @@ Describe 'FolderPermissionManager: change a permission in place (SQ-025)' {
             # The change is there when read back: success, with the backup and log paths.
             $script:Sddls[$dir] = $script:SddlAC1
             $log = Join-Path $TestDrive 'cp23-ok'
-            $r = & $script:ChangePermissionWork @(Get-WorkArgs -Path $dir -Entry $e -LogFolder $log)
+            $workArgs = @(Get-WorkArgs -Path $dir -Entry $e -LogFolder $log); $r = & $script:ChangePermissionWork @workArgs
             $r.Ok | Should -BeTrue -Because "$($r.Error)"
             $r.Message | Should -BeLike "Changed BUILTIN\Users from Allow Modify to Deny Modify on $([WildcardPattern]::Escape($dir))*"
             $r.Message | Should -Match 'Backed up to .*Backups.* and logged to '
@@ -845,7 +846,7 @@ Describe 'FolderPermissionManager: change a permission in place (SQ-025)' {
             $script:Applied.Clear(); $script:SetAclCalls.Clear()
             Mock Set-Acl { $script:SetAclCalls.Add([PSCustomObject]@{ Path = "$LiteralPath"; Acl = $AclObject; LogAndBackups = '' }) }
             $log2 = Join-Path $TestDrive 'cp23-stale'
-            $r2 = & $script:ChangePermissionWork @(Get-WorkArgs -Path $dir -Entry $e -LogFolder $log2)
+            $workArgs = @(Get-WorkArgs -Path $dir -Entry $e -LogFolder $log2); $r2 = & $script:ChangePermissionWork @workArgs
             $s2 = Get-ChangeStatus -Entries $r2.Entries -LogPath $r2.LogPath -Message $r2.Message
             $s2.Kind | Should -Be 'Warning'
             $s2.Text | Should -BeLike 'Done, with items to check: *'
@@ -855,8 +856,9 @@ Describe 'FolderPermissionManager: change a permission in place (SQ-025)' {
             $script:Applied.Clear(); $script:SetAclCalls.Clear()
             Mock Set-Acl { $script:SetAclCalls.Add([PSCustomObject]@{ Path = "$LiteralPath"; Acl = $AclObject; LogAndBackups = '' }); $script:SetAclDone = $true }
             $script:GetAclFailsAfterSetAcl = $true
+            $script:SetAclDone = $false
             $log3 = Join-Path $TestDrive 'cp23-noread'
-            $r3 = & $script:ChangePermissionWork @(Get-WorkArgs -Path $dir -Entry $e -LogFolder $log3)
+            $workArgs = @(Get-WorkArgs -Path $dir -Entry $e -LogFolder $log3); $r3 = & $script:ChangePermissionWork @workArgs
             $s3 = Get-ChangeStatus -Entries $r3.Entries -LogPath $r3.LogPath -Message $r3.Message
             $s3.Text | Should -BeLike 'Done, with items to check: *'
             $s3.Text | Should -Match 'could not read the permissions back'
@@ -875,7 +877,7 @@ Describe 'FolderPermissionManager: change a permission in place (SQ-025)' {
                 @{ Path = $file; Entry = (Get-EntryArgs -Sddl $fileSddl -Sid $script:BU -Type Allow -NewRights Modify -NewType Deny -File); Applies = 'This file only' }
             )
             foreach ($c in $cases) {
-                $r = & $script:ChangePermissionWork @(Get-WorkArgs -Path $c.Path -Entry $c.Entry -LogFolder $log -WhatIf $true)
+                $workArgs = @(Get-WorkArgs -Path $c.Path -Entry $c.Entry -LogFolder $log -WhatIf $true); $r = & $script:ChangePermissionWork @workArgs
                 $r.Ok | Should -BeTrue -Because "$($r.Error)"
                 @($r.Entries | ForEach-Object { $_.Result }) | Should -Be @('Skipped (WhatIf)')
                 $script:SetAclCalls.Count | Should -Be 0
