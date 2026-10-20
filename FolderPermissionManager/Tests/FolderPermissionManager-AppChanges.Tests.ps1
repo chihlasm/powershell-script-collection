@@ -2954,6 +2954,39 @@ Describe 'Revision 2026-10-19: Deny, roots, protected Copy targets, server-side 
         $script:Shown.Count | Should -Be 1
         $script:Shown[0] | Should -Match 'and 2 more'
     }
+
+    # SQ-022 AC10 (D-052): the core refuses a source with Deny entries unless -AllowDeny is passed,
+    # so the app passes it only after the Deny confirm was accepted. The captured work block is run
+    # in this session (as Complete-Captured does) with Copy-FolderPermission mocked.
+    It 'AC10_AppPassesAllowDenyOnlyAfterTheDenyConfirm_<Case>' -ForEach @(
+        @{ Case = 'ExplicitDeny'; Expect = $true }
+        @{ Case = 'DenyUnchecked'; Expect = $true }
+        @{ Case = 'PlainCopy'; Expect = $false }
+    ) {
+        switch ($Case) {
+            'ExplicitDeny' { New-ViewRows -Row @((New-ViewRow -Identity 'BUILTIN\Users'), (New-ViewRow -Identity 'CONTOSO\Temps' -Type Deny -Rights 'Write')) }
+            'DenyUnchecked' { $script:ViewState.FolderPermissions = $null }
+            'PlainCopy' { New-ViewRows -Row @((New-ViewRow -Identity 'BUILTIN\Users')) }
+        }
+        $dest = New-Folder ('Ac10Dest-' + $Case)
+        $source = New-FakeTarget -Display $script:Current.DisplayPath -Resolved $script:Current.RealPath
+        $script:CopyCalls10 = [System.Collections.Generic.List[object]]::new()
+        Mock Copy-FolderPermission {
+            $script:CopyCalls10.Add(@{ Keys = @($PSBoundParameters.Keys); AllowDeny = $PSBoundParameters['AllowDeny'] })
+            foreach ($t in $TargetPath) { New-Row -Action 'Copy permissions' -Target $t -Detail "Copied from $($SourcePath): Allow Modify for BUILTIN\Users" }
+        }
+        Mock Get-Acl { New-FakeAcl }
+
+        Invoke-CopyPermissions -Source $source -Targets @((New-FakeTarget -Display $dest))
+
+        $script:Confirms.Count | Should -Be $(if ($Expect) { 1 } else { 0 }) -Because 'only the Deny cases show the destructive confirm'
+        $script:Captured | Should -Not -BeNullOrEmpty
+        $null = Complete-Captured
+        $script:CopyCalls10.Count | Should -Be 1
+        $passed = ($script:CopyCalls10[0].Keys -contains 'AllowDeny') -and [bool]$script:CopyCalls10[0].AllowDeny
+        $passed | Should -Be $Expect -Because "-AllowDeny follows the accepted Deny confirm ($Case)"
+        Should -Invoke Set-Acl -Times 0 -Exactly -Scope It
+    }
 }
 
 Describe 'Revision 3 (owner lab test, 2026-10-19): .\name, account lookup in the dialog, dry-run result (AC55-AC57)' {

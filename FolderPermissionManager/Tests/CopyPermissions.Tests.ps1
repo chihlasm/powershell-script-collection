@@ -127,6 +127,8 @@ Describe 'Copy-FolderPermission (SQ-015, add-only)' {
             $real
         }
         Mock Invoke-AclTool { [PSCustomObject]@{ ExitCode = 0; Output = '' } }
+        # SQ-022: the core's Copy refusal reads the profiles folder; the real API never runs here.
+        Mock Get-AppProfilesDirectory { 'C:\Users' }
     }
 
     It 'AC1_CopyAddsEachSourceRuleWithIdenticalRightsTypeAndFlags' {
@@ -138,7 +140,7 @@ Describe 'Copy-FolderPermission (SQ-015, add-only)' {
         $expected = @((Get-Acl -LiteralPath $src).Access)
         $expected.Count | Should -Be 4
 
-        $null = Copy-FolderPermission -SourcePath $src -TargetPath $dst -LogFolder $log
+        $null = Copy-FolderPermission -SourcePath $src -TargetPath $dst -LogFolder $log -AllowDeny
 
         Should -Invoke Set-Acl -Times 1 -Exactly -Scope It
         $script:Applied.ContainsKey($dst) | Should -BeTrue
@@ -156,7 +158,7 @@ Describe 'Copy-FolderPermission (SQ-015, add-only)' {
         $script:Seed[$src] = Get-FourRuleSddl
         $script:Seed[$dst] = (New-FakeAcl).Sddl
 
-        $rows = @(Copy-FolderPermission -SourcePath $src -TargetPath $dst -LogFolder $log)
+        $rows = @(Copy-FolderPermission -SourcePath $src -TargetPath $dst -LogFolder $log -AllowDeny)
 
         $rows[0].Result | Should -Be 'Done' -Because 'the copy must really have run, or "no icacls call" proves nothing'
         Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It

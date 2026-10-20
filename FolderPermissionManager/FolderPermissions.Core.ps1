@@ -2175,6 +2175,17 @@ function Get-CopySourceText {
     ''
 }
 
+# SQ-022 STUBS: the D-044 Copy refusals move here from FolderPermissionManager-GUI.ps1.
+function Get-CopyTargetRefusal {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Path)
+    throw 'Get-CopyTargetRefusal is not implemented in the core yet (SQ-022).'
+}
+
+function Get-CopyTargetResolvedRefusal {
+    param([Parameter(Mandatory)][string]$Path)
+    throw 'Get-CopyTargetResolvedRefusal is not implemented in the core yet (SQ-022).'
+}
+
 function Copy-FolderPermission {
     <#
     .SYNOPSIS
@@ -2213,7 +2224,8 @@ function Copy-FolderPermission {
     param(
         [Parameter(Mandatory)][AllowEmptyString()][string]$SourcePath,
         [Parameter(Mandatory)][AllowEmptyString()][AllowEmptyCollection()][string[]]$TargetPath,
-        [Parameter(Mandatory)][string]$LogFolder
+        [Parameter(Mandatory)][string]$LogFolder,
+        [switch]$AllowDeny
     )
 
     $action = 'Copy permissions'
