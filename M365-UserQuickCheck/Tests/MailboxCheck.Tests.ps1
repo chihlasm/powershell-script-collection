@@ -1169,3 +1169,59 @@ Describe 'minimum Exchange roles (D-026)' -Tag 'Integration' {
         ($r.Cnc -join "`n") | Should -Not -Match 'role|permission|denied|not recognized|parameter'
     }
 }
+
+Describe 'AC-R1 / AC-R2 dot-sources the SQ-011 read-only guard accepts' {
+    BeforeAll {
+        function script:Get-DotSources([string]$Path) {
+            $tokens = $null; $errs = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errs)
+            $cmds = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and
+                    $n.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Dot }, $true)
+            , @($ast, $cmds)
+        }
+    }
+
+    It 'AC_R2_NoProductionScriptDotSourcesAParenthesisedExpression' {
+        $bad = @()
+        foreach ($f in Get-ChildItem -LiteralPath $script:Root -Filter '*.ps1' -File) {
+            $r = Get-DotSources $f.FullName
+            foreach ($c in @($r[1])) {
+                $first = $c.CommandElements[0]
+                if ($first -is [System.Management.Automation.Language.ParenExpressionAst]) {
+                    $bad += "$($f.Name):$($c.Extent.StartLineNumber)"
+                }
+            }
+        }
+        $bad | Should -BeNullOrEmpty -Because "use `$corePath = Join-Path ...; . `$corePath (SQ-011 AC3 rejects '. (...)'): $($bad -join ', ')"
+    }
+
+    It 'AC_R1_EntryDotSourcesBothCoresThroughVariablesAssignedFromJoinPath' {
+        $r = Get-DotSources $script:Entry
+        $ast = $r[0]
+        $cmds = @($r[1])
+        $cmds.Count | Should -BeGreaterOrEqual 2
+        foreach ($core in 'MailboxCheck.Core.ps1', 'M365UserCheck.Core.ps1') {
+            $found = $false
+            foreach ($c in $cmds) {
+                $v = $c.CommandElements[0]
+                if ($v -isnot [System.Management.Automation.Language.VariableExpressionAst]) { continue }
+                $name = $v.VariablePath.UserPath
+                $assigns = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                        $n.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                        $n.Left.VariablePath.UserPath -eq $name }, $true)
+                foreach ($a in $assigns) {
+                    $t = $a.Right.Extent.Text
+                    if ($t -match 'Join-Path' -and $t -match [regex]::Escape($core)) { $found = $true }
+                }
+            }
+            $found | Should -BeTrue -Because "$core must be dot-sourced as '. `$var' with `$var = Join-Path ... '$core'"
+        }
+    }
+
+    It 'AC_R1_LoadFunctionsOnlyStillDefinesTheMailboxFunctions' {
+        . $script:Entry -LoadFunctionsOnly
+        foreach ($f in 'Get-MailboxDelegates', 'Test-ExternalAddress', 'Get-InboxRuleSigns', 'Get-ForwardingSigns', 'Get-MailboxCheckAssessment', 'ConvertTo-MailboxCheckHtml', 'Get-MailboxCheckNote', 'ConvertTo-M365CsvValue') {
+            Get-Command -Name $f -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty -Because "$f must be defined"
+        }
+    }
+}
