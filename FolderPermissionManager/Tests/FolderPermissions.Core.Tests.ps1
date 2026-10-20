@@ -122,6 +122,8 @@ Describe 'FolderPermissions.Core' {
             $real
         }
         Mock Invoke-AclTool { [PSCustomObject]@{ ExitCode = 0; Output = '' } }
+        # SQ-022: the core's Copy refusal reads the profiles folder; the real API never runs here.
+        Mock Get-AppProfilesDirectory { 'C:\Users' }
     }
 
     Context 'Single-item changes' {

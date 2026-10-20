@@ -326,10 +326,18 @@ to each folder you list. Nothing already on a target folder is removed.
 - If the current folder has a Deny permission of its own, the dialog says so before you copy:
   a Deny is copied too and blocks access even where another permission allows it. The GUI
   then asks again in a red confirm that lists the Deny permissions and every target's real
-  location.
+  location. The copy itself refuses Deny permissions you were not warned about: if a Deny was
+  added to the folder after the window loaded its permissions, every target is `Failed`, the
+  row names the Deny permissions, and nothing is copied.
 - In the GUI, a target that is an administrative share, `SYSVOL`, `NETLOGON`, the root of a
   drive, a Windows folder, a `Users` folder, `System Volume Information` or `$Recycle.Bin` is
   refused, and nothing is copied to any of the folders listed.
+- The copy itself (`Copy-FolderPermission` in `FolderPermissions.Core.ps1`) refuses the same
+  folders, whatever calls it, also when a folder really leads into one through a junction, a
+  symbolic link or a short name, or when Windows cannot tell where it really is. It checks
+  where each target really is again just before it writes, so a folder swapped for a junction
+  after the first check is refused too. A refused target is `Failed` with the reason and
+  "Nothing was changed."; the other targets are still copied.
 - Each target folder is changed once. **Subfolders and files under it that inherit permissions
   get the new ones automatically**, as they would in Explorer.
 - A target that is a file is refused: "<path> is a file. Copy permissions copies to folders only."

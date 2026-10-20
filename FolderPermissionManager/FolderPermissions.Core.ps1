@@ -95,6 +95,10 @@
       https://learn.microsoft.com/windows/win32/secauthz/generic-access-rights
       https://learn.microsoft.com/windows/win32/fileio/file-security-and-access-rights
       https://learn.microsoft.com/windows/win32/fileio/file-access-rights-constants
+      A Deny is placed before the Allow entries of its group, so it blocks access even where
+      another permission on the same folder allows it; a source with Deny entries is copied
+      only with -AllowDeny (D-052, Get-CopyDenyRefusal):
+      https://learn.microsoft.com/windows/win32/secauthz/order-of-aces-in-a-dacl
     - -LiteralPath on Test-Path, Get-Item, Get-ChildItem, Get-Acl and Set-Acl: with -Path, [ ]
       is a wildcard character range, so "HR [old]" matches "HR o" and not itself:
       https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_wildcards
@@ -2175,6 +2179,104 @@ function Get-CopySourceText {
     ''
 }
 
+function Get-TargetRootKind {
+    # Whether a path is the very top of a drive or a share (D-044, AC49): 'DriveRoot' (X:\, or a
+    # volume GUID path's root), 'AdminShareRoot' (\\server\X$) or 'ShareRoot' (\\server\share),
+    # else $null. A permission set there reaches everything on the drive or share that inherits.
+    # Text only, in the spelling ConvertTo-ComparablePath gives (\\?\ dropped, trailing \ too).
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Path)
+    $p = ConvertTo-ComparablePath -Path $Path
+    if (-not $p) { return $null }
+    if ($p -match '^[A-Za-z]:\\$' -or $p -match '^Volume\{[^\\]*\}$') { return 'DriveRoot' }
+    if ($p -match '^\\\\[^\\]+\\([^\\]+)$') {
+        if ($Matches[1] -match '^[A-Za-z]\$$') { return 'AdminShareRoot' }
+        return 'ShareRoot'
+    }
+    $null
+}
+
+function Get-CopyTargetRefusal {
+    # D-044 (AC50): why a folder cannot be a Copy permissions target, or $null. -Path is where the
+    # copy really lands (ResolvedPath). Refused: the administrative shares (\\server\X$ itself,
+    # ADMIN$, IPC$, PRINT$), SYSVOL and NETLOGON, the D-036 folders (the root of a drive, the
+    # Windows folders, here and through \\server\X$; Get-TreeOwnershipRefusal) and the high-impact
+    # roots (a Users folder or this computer's profiles folder, System Volume Information,
+    # $Recycle.Bin; Get-HighImpactRootRefusal). A folder inside \\server\X$ and the root of an
+    # ordinary share are allowed (the GUI gives the root the destructive confirm, AC49). Text
+    # only, apart from reading this computer's profiles folder. Copy-FolderPermission runs it on
+    # every target (SQ-022), so no caller can copy to such a folder; the text already ends with
+    # "Nothing was changed.".
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Path)
+    $p = ConvertTo-ComparablePath -Path $Path
+    if (-not $p) { return $null }
+    $what = $null
+    if ($p -match '^\\\\([^\\]+)\\([^\\]+)(?:\\(.*))?$') {
+        $server = $Matches[1]; $share = $Matches[2]; $rest = "$($Matches[3])"
+        if ($share -ieq 'IPC$') {
+            # IPC$ is not a folder at all, so "could let people into it" does not fit.
+            return "Permissions can't be copied to ${Path}: it is the IPC`$ share of $server, which Windows uses for remote administration, and it is not a folder. Choose the folder that needs these permissions instead. Nothing was changed."
+        }
+        if ($share -ieq 'ADMIN$') { $what = "on the ADMIN`$ administrative share of $server, which is used to administer Windows remotely" }
+        elseif ($share -ieq 'PRINT$') { $what = "on the PRINT`$ share of $server, which holds the printer drivers it hands out" }
+        elseif ($share -ieq 'SYSVOL' -or $share -ieq 'NETLOGON') { $what = "on the $($share.ToUpperInvariant()) share of $server, which domain controllers use for Group Policy and logon scripts" }
+        elseif ($share -match '^[A-Za-z]\$$' -and -not $rest) { $what = "the $($share.ToUpperInvariant()) administrative share of $server, the root of a whole drive" }
+    }
+    if (-not $what) {
+        if ((Get-TargetRootKind -Path $p) -eq 'DriveRoot') { $what = 'the root of a whole drive' }
+        elseif (Get-TreeOwnershipRefusal -Path $p) { $what = 'in a Windows system folder' }
+        elseif (Get-HighImpactRootRefusal -Path $p) {
+            $what = if ($p -match '(?i)(^|\\)(System Volume Information|\$Recycle\.Bin)(\\|$)') { 'in System Volume Information or $Recycle.Bin, which Windows keeps for itself' }
+            else { 'a folder that holds every user profile' }
+        }
+    }
+    if (-not $what) { return $null }
+    "Permissions can't be copied to ${Path}: it is $what, and adding permissions there could let people into it who should not have access. Choose the folder that needs these permissions instead. Nothing was changed."
+}
+
+function Get-CopyTargetResolvedRefusal {
+    # Get-CopyTargetRefusal on where Windows really reaches a Copy permissions target (D-044,
+    # AC50): the final path (Get-Win32PathName -Kind Final follows every junction and symbolic
+    # link on the way) and the long-name form (-Kind Long expands 8.3 short names such as
+    # PROGRA~1). A local junction to C:\Users or C:\PROGRA~1 resolves to itself as text, so only
+    # these show it. A final path that cannot be told, or whose read fails, is refused: "a guard
+    # that cannot resolve the path fails closed" (destructive-operations profile). Reads the
+    # disk: the GUI runs it in the background lookup (Get-ChangeTarget -RefuseProtected), and
+    # Copy-FolderPermission runs it at the plan step and again just before each write (SQ-022).
+    # $null when it is allowed; the text already ends with "Nothing was changed.".
+    param([Parameter(Mandatory)][string]$Path)
+    $final = $null
+    try { $final = Get-Win32PathName -Path $Path -Kind Final } catch { $final = $null }
+    if (-not $final) {
+        return "Windows could not tell where $Path really is (it may not exist, or this account cannot open it), so it cannot be checked against the root of a drive, the Windows system folders and the user profiles folder. Check that the folder exists and try again, or ask a senior admin. Nothing was changed."
+    }
+    # Get-Win32PathName gives $null when it cannot tell; a failed long-name read is the same.
+    $long = $null
+    try { $long = Get-Win32PathName -Path $Path -Kind Long } catch { $long = $null }
+    $given = ConvertTo-ComparablePath -Path $Path
+    foreach ($form in @($final, $long)) {
+        if (-not $form) { continue }
+        $c = ConvertTo-ComparablePath -Path $form
+        if (-not $c -or $c -ieq $given) { continue }
+        $refusal = Get-CopyTargetRefusal -Path $c
+        if ($refusal) { return "$Path leads to $c (through a junction, a symbolic link or a short name). $refusal" }
+    }
+    $null
+}
+
+function Get-CopyDenyRefusal {
+    # Why Copy-FolderPermission will not copy -Rule (the source's own rules, from the one Get-Acl
+    # read whose rules are copied) without -AllowDeny, or $null when none is a Deny (D-052). A
+    # Deny blocks access even where another permission allows it, so it goes out only when the
+    # caller has warned the technician and they accepted (the GUI's red Deny confirm).
+    # https://learn.microsoft.com/windows/win32/secauthz/order-of-aces-in-a-dacl
+    param([Parameter(Mandatory)][string]$SourcePath, [AllowNull()][AllowEmptyCollection()][object[]]$Rule)
+    $denies = @($Rule | Where-Object { $_ -and $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Deny })
+    if ($denies.Count -eq 0) { return $null }
+    $list = @($denies | ForEach-Object { Format-PermissionRule $_ }) -join '; '
+    $count = if ($denies.Count -eq 1) { 'a Deny permission' } else { "$($denies.Count) Deny permissions" }
+    "Permissions were not copied from ${SourcePath}: it has $count of its own that you were not warned about ($list). A Deny is copied too and blocks access even where another permission allows it. Reload the folder's permissions and copy again, so the warning lists them. Nothing was changed."
+}
+
 function Copy-FolderPermission {
     <#
     .SYNOPSIS
@@ -2208,12 +2310,28 @@ function Copy-FolderPermission {
           NOT VERIFIED: Learn does not say which Win32 call Set-Acl uses to write a folder's
           permissions; Add permission has always relied on the same propagation.
         - A target that is a file is refused: the copied rules are for folders.
+        - Protected targets are refused (D-044, SQ-022), here and not only in a window, so no
+          caller can copy to them: an administrative share, SYSVOL, NETLOGON, PRINT$, IPC$, the
+          root of a drive, a Windows folder, a Users folder or this computer's profiles folder,
+          System Volume Information and $Recycle.Bin (Get-CopyTargetRefusal on the path as
+          given), also when the folder really leads into one through a junction, a symbolic link
+          or a short name, or when where it really is cannot be told
+          (Get-CopyTargetResolvedRefusal). Both run before ShouldProcess, so -WhatIf shows the
+          refusal too, and a refused target is Failed with "Nothing was changed.", never backed
+          up or written. Where the folder really is is read again just before its Set-Acl, so a
+          junction swapped in after the first check is refused at the write.
+        - A source with explicit Deny entries is refused for every target unless -AllowDeny is
+          given (D-052). The decision uses the same Get-Acl read whose rules are copied.
+    .PARAMETER AllowDeny
+        Copy the source's own Deny entries too. Pass it only after the technician was warned
+        that the source has Deny entries (or that they could not be checked) and accepted it.
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param(
         [Parameter(Mandatory)][AllowEmptyString()][string]$SourcePath,
         [Parameter(Mandatory)][AllowEmptyString()][AllowEmptyCollection()][string[]]$TargetPath,
-        [Parameter(Mandatory)][string]$LogFolder
+        [Parameter(Mandatory)][string]$LogFolder,
+        [switch]$AllowDeny
     )
 
     $action = 'Copy permissions'
@@ -2252,6 +2370,21 @@ function Copy-FolderPermission {
         return
     }
 
+    # D-052: Deny entries go out only when the caller says the technician accepted them. Decided
+    # on $sourceRules, the read that is copied, so a Deny added since a window loaded the source
+    # cannot slip through. No target is read or written.
+    if (-not $AllowDeny) {
+        $denyRefusal = Get-CopyDenyRefusal -SourcePath $SourcePath -Rule $sourceRules
+        if ($denyRefusal) {
+            foreach ($t in $TargetPath) {
+                $itemType = Get-AclItemType -Path $t
+                if (-not $itemType) { $itemType = 'Unknown' }
+                New-PermissionChangeEntry -Action $action -Target "$t" -ItemType $itemType -Detail $detail -Result 'Failed' -ErrorText $denyRefusal
+            }
+            return
+        }
+    }
+
     # A target that is the source or under it already inherits the source's inheritable rules;
     # those count as present, or they would be frozen onto it as its own (Get-PermissionCopyPlan).
     $already = 'Already has these permissions; nothing changed.'
@@ -2261,6 +2394,11 @@ function Copy-FolderPermission {
         if ($itemType -eq 'File') {
             return [PSCustomObject]@{ Result = 'Failed'; ErrorText = "$p is a file. Copy permissions copies to folders only." }
         }
+        # D-044: protected folders, as typed and where the folder really is (both texts end with
+        # "Nothing was changed."). Before ShouldProcess, so -WhatIf shows the refusal too.
+        $refusal = Get-CopyTargetRefusal -Path $p
+        if (-not $refusal) { $refusal = Get-CopyTargetResolvedRefusal -Path $p }
+        if ($refusal) { return [PSCustomObject]@{ Result = 'Failed'; ErrorText = $refusal } }
         # A target that cannot be read is left to the normal flow, which refuses it.
         try { $acl = Get-Acl -LiteralPath $p -ErrorAction Stop } catch { return $null }
         $copy = Get-PermissionCopyPlan -Acl $acl -Rule $sourceRules -CountInherited:(Test-PathWithin -Path $p -Root $SourcePath)
@@ -2277,6 +2415,11 @@ function Copy-FolderPermission {
         if ($copy.Added.Count -eq 0) {
             return [PSCustomObject]@{ Result = 'Skipped (nothing to copy)'; Detail = $already }
         }
+        # Where the folder really is, read again just before the write: a junction swapped in
+        # since the plan step is refused here. Nothing is written yet, so the row is Failed with
+        # the refusal and no "partly changed" note (Invoke-SingleItemAclChange).
+        $lateRefusal = Get-CopyTargetResolvedRefusal -Path $p
+        if ($lateRefusal) { throw $lateRefusal }
         Set-Acl -LiteralPath $p -AclObject $copy.Acl -ErrorAction Stop
         [PSCustomObject]@{ Detail = Get-CopyDetail -SourcePath $SourcePath -Added $copy.Added }
     }
