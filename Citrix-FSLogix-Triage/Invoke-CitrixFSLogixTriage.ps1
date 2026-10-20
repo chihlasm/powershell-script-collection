@@ -25,6 +25,12 @@
       5. Recent errors and warnings in the FSLogix and Remote Desktop session logs
       6. Free space on the server's local disks
       7. The profile share can be reached from the server (and from your PC, for comparison)
+      8. On an Azure Virtual Desktop (AVD) host only - one with the Remote Desktop Agent
+         Loader service (RDAgentBootLoader) or the HKLM\SOFTWARE\Microsoft\RDInfraAgent key:
+         the agent service is running, the host is registered to its host pool
+         (IsRegistered = 1), no known agent errors in the Application log (events 3277, 3703,
+         3019, 3389), and the rdp-sxs listener is in the Listen state (qwinsta). Every AVD
+         finding links to Microsoft's fix. Citrix and RDS hosts get no AVD items.
 
     WHAT THIS DOES NOT CHECK: the user's own container file (size, locks, corruption), the
     FSLogix text logs, or Citrix broker state. See Parse-FSLogixLogs, FSLogix-ProfileDiskRepair
@@ -96,7 +102,8 @@
     still runs, without a note.
 
     Remote checks need, on the target: ping (ICMP), WinRM for CIM and Invoke-Command, the
-    Remote Registry service, and Event Log access (RPC). Run as an account that is a local
+    Remote Registry service, and Event Log access (RPC); on AVD hosts also qwinsta's Remote
+    Desktop Services RPC access for the rdp-sxs check. Run as an account that is a local
     administrator on the session host.
 
     Formerly the citrix.fslogix.triage check of the retired MSP-TroubleshootingWorkbench
@@ -129,9 +136,28 @@
       Clipboard history / cloud clipboard opt-out formats (CanIncludeInClipboardHistory,
       CanUploadToCloudClipboard; set by the kit's WinForms path, not by Set-Clipboard)
         https://learn.microsoft.com/windows/win32/dataxchg/clipboard-formats
+      AVD agent: RDAgentBootLoader ("Remote Desktop Agent Loader") stopped = agent not running;
+      HKLM\SOFTWARE\Microsoft\RDInfraAgent IsRegistered = 1 once registered; agent events in the
+      Application log from WVD-Agent, WVD-Agent-Updater, RDAgentBootLoader, MsiInstaller;
+      event 3277 with INVALID_REGISTRATION_TOKEN / EXPIRED_MACHINE_TOKEN (invalid registration
+      key), INVALID_FORM (broker blocked: firewall, DNS, ciphers), ENDPOINT_NOT_FOUND (no usable
+      session host), InstallMsiException (installer running or msiexec.exe blocked),
+      DownloadMsiException (disk space), InstallationHealthCheckFailedException (stack
+      listener); 3703 (RD Gateway URLs blocked); 3019 (web socket transport URLs blocked); 3389
+      MissingMethodException (update reverted, .NET older than 4.7.2); qwinsta rdp-sxs STATE
+      must be Listen, not listed or not Listen = stack issue
+        https://learn.microsoft.com/troubleshoot/azure/virtual-desktop/troubleshoot-agent
+      SxS Stack Listener health check failing is fatal; Upgrade Failed does not affect sessions
+        https://learn.microsoft.com/azure/virtual-desktop/troubleshoot-statuses-checks
+      qwinsta /server:<servername>; output columns SESSIONNAME USERNAME ID STATE TYPE DEVICE
+        https://learn.microsoft.com/windows-server/administration/windows-commands/qwinsta
+      RegistryView.Registry64 for the agent key (OpenBaseKey / OpenRemoteBaseKey overloads)
+        https://learn.microsoft.com/dotnet/api/microsoft.win32.registrykey.openremotebasekey
 
     NOT VERIFIED ON LEARN: the free-disk-space thresholds (see Get-DiskSpaceStatus) are this
-    tool's own rule of thumb, not a Microsoft figure.
+    tool's own rule of thumb, not a Microsoft figure. The short state words qwinsta prints
+    (Active, Conn, Disc, Listen, Down, ...) are not listed on Learn; any word outside that list
+    (for example on a non-English Windows) is reported as "could not check", never as healthy.
 #>
 [CmdletBinding()]
 param(
@@ -166,6 +192,62 @@ param(
 # https://learn.microsoft.com/fslogix/reference-configuration-settings
 $script:ProfileKeyPath = 'SOFTWARE\FSLogix\Profiles'
 $script:PolicyProfileKeyPath = 'SOFTWARE\Policies\FSLogix\Profiles'
+
+# Azure Virtual Desktop agent facts, all from
+# https://learn.microsoft.com/troubleshoot/azure/virtual-desktop/troubleshoot-agent
+#   - the agent registers under HKLM\SOFTWARE\Microsoft\RDInfraAgent, IsRegistered = 1 once registered
+#   - agent events are in Windows Logs > Application from these sources
+#   - each rule's ID, description text, meaning and fix is the page's section of that name
+$script:AvdAgentLearnUrl = 'https://learn.microsoft.com/troubleshoot/azure/virtual-desktop/troubleshoot-agent'
+$script:AvdAgentKeyPath = 'SOFTWARE\Microsoft\RDInfraAgent'
+$script:AvdAgentEventSources = @('WVD-Agent', 'WVD-Agent-Updater', 'RDAgentBootLoader', 'MsiInstaller')
+$script:AvdAgentEventIds = @(3277, 3703, 3019, 3389)
+$script:AvdAgentEventRules = @(
+    # Event 3277 "with the description INVALID_REGISTRATION_TOKEN or EXPIRED_MACHINE_TOKEN": the
+    # registration key that has been used isn't recognized as valid.
+    @{ Id = 3277; Pattern = 'INVALID_REGISTRATION_TOKEN'; Label = 'INVALID_REGISTRATION_TOKEN'; Status = 'Fail'
+        Meaning = 'the registration key the agent used is not recognized as valid'
+        Fix = 'Escalate to an Azure Virtual Desktop admin: generate a new registration key for the host pool, give it to the agent and restart RDAgentBootLoader, then confirm IsRegistered is 1.' }
+    @{ Id = 3277; Pattern = 'EXPIRED_MACHINE_TOKEN'; Label = 'EXPIRED_MACHINE_TOKEN'; Status = 'Fail'
+        Meaning = 'the registration key the agent used is not recognized as valid'
+        Fix = 'Escalate to an Azure Virtual Desktop admin: generate a new registration key for the host pool, give it to the agent and restart RDAgentBootLoader, then confirm IsRegistered is 1.' }
+    # 3277 with INVALID_FORM: the agent can't connect to the broker; firewall or DNS settings,
+    # or a cipher policy blocking TLS 1.2 to the broker.
+    @{ Id = 3277; Pattern = 'INVALID_FORM'; Label = 'INVALID_FORM'; Status = 'Fail'
+        Meaning = 'the agent cannot connect to the AVD broker'
+        Fix = 'Escalate to the network team: firewall, proxy or DNS settings are blocking the broker (the BrokerResourceIdURI and BrokerResourceIdURIGlobal addresses in the RDInfraAgent key, each with /api/health added, should load), or a Group Policy cipher setting blocks the TLS 1.2 connection.' }
+    # 3277 with ENDPOINT_NOT_FOUND: the broker couldn't find a session host to connect to.
+    @{ Id = 3277; Pattern = 'ENDPOINT_NOT_FOUND'; Label = 'ENDPOINT_NOT_FOUND'; Status = 'Fail'
+        Meaning = 'the broker could not find a session host to connect the user to'
+        Fix = 'Check the host is powered on and still in its host pool, has not reached the session limit, the agent service is running and the stack listener works, and its registration key is valid and not expired.' }
+    # 3277 with InstallMsiException: another installer is running, or Group Policy blocks msiexec.exe.
+    @{ Id = 3277; Pattern = 'InstallMsiException'; Label = 'InstallMsiException'; Status = 'Fail'
+        Meaning = 'the agent could not install an update'
+        Fix = 'Another installer was running, or Group Policy blocks msiexec.exe: run rsop.msc and check Computer Configuration > Administrative Templates > Windows Components > Windows Installer > Turn off Windows Installer. If it is Enabled, ask the AD team to allow msiexec.exe.' }
+    # 3277 with DownloadMsiException: not enough disk space for the agent.
+    @{ Id = 3277; Pattern = 'DownloadMsiException'; Label = 'DownloadMsiException'; Status = 'Fail'
+        Meaning = 'there is not enough disk space for the agent'
+        Fix = 'Free up space on the system disk (see the Disk items) or ask an engineer to enlarge it.' }
+    # 3277 with InstallationHealthCheckFailedException: the stack listener isn't working.
+    @{ Id = 3277; Pattern = 'InstallationHealthCheckFailedException'; Label = 'InstallationHealthCheckFailedException'; Status = 'Fail'
+        Meaning = 'the side-by-side stack listener is not working'
+        Fix = 'See the AVD stack listener item; if it is not listening, escalate to reinstall the Remote Desktop Services SxS Network Stack.' }
+    # 3703 "with RD Gateway Url: is not accessible": the agent can't reach the gateway URLs.
+    @{ Id = 3703; Pattern = 'RD Gateway Url'; Label = 'RD Gateway URL not accessible'; Status = 'Fail'
+        Meaning = 'the agent cannot reach the RD Gateway URLs, so users cannot connect to this host'
+        Fix = 'Escalate to the network team: allow the Azure Virtual Desktop Required URL list through the firewall and proxy, and confirm with the Required URL Check tool.' }
+    # 3019: the agent can't reach the web socket transport URLs.
+    @{ Id = 3019; Pattern = ''; Label = 'web socket transport blocked'; Status = 'Fail'
+        Meaning = 'the agent cannot reach the web socket transport URLs, so users cannot connect to this host'
+        Fix = 'Escalate to the network team: allow the Azure Virtual Desktop Required URL list through the firewall, proxy and DNS; a network trace shows where it is blocked.' }
+    # 3389 "with MissingMethodException: Method not found": the agent update failed and reverted
+    # to an earlier version, likely because .NET Framework is older than 4.7.2. The host keeps
+    # working on the old agent ("Upgrade Failed" does not affect sessions,
+    # https://learn.microsoft.com/azure/virtual-desktop/troubleshoot-statuses-checks), so Warn.
+    @{ Id = 3389; Pattern = 'MissingMethodException'; Label = 'MissingMethodException'; Status = 'Warn'
+        Meaning = 'the agent update failed and the agent reverted to an earlier version'
+        Fix = 'Upgrade .NET Framework on the host to 4.7.2 or later so the agent can update.' }
+)
 
 function New-EvidenceItem {
     [CmdletBinding()]
@@ -814,23 +896,394 @@ function Get-FSLogixStorageSettingEvidence {
     return @($evidence)
 }
 
-# SQ-012 STUBS (replace with the real AVD host checks): test seams for the AVD agent checks.
+# =============================================================================
+# Azure Virtual Desktop (AVD) agent checks
+# =============================================================================
+# Every fact below is from "Troubleshoot common Azure Virtual Desktop Agent issues"
+# (https://learn.microsoft.com/troubleshoot/azure/virtual-desktop/troubleshoot-agent) unless
+# another page is cited. They run only on a host that has the AVD agent: the RDAgentBootLoader
+# service ("Remote Desktop Agent Loader") or the HKLM\SOFTWARE\Microsoft\RDInfraAgent key.
+
 function Get-AvdAgentRegistry {
+    <#
+    .SYNOPSIS
+        Reads IsRegistered from HKLM\SOFTWARE\Microsoft\RDInfraAgent on a host.
+    .DESCRIPTION
+        Returns Found / Error / Values like the FSLogix registry reader; Values holds only
+        IsRegistered, as text ('1' once the host is registered to its host pool). The key also
+        holds RegistrationToken, a secret, so no other value is read.
+        Throws when the registry cannot be opened at all (Remote Registry stopped, no access).
+
+        The 64-bit view is asked for explicitly, so a 32-bit PowerShell does not look under
+        WOW6432Node and report a real AVD host as "no agent key". On a 32-bit OS the request
+        falls back to the 32-bit view.
+        https://learn.microsoft.com/dotnet/api/microsoft.win32.registrykey.openbasekey
+        https://learn.microsoft.com/dotnet/api/microsoft.win32.registrykey.openremotebasekey
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$ComputerName,
         [bool]$IsLocal = $false
     )
-    throw 'Get-AvdAgentRegistry is not implemented yet (SQ-012).'
+
+    $baseKey = $null
+    $key = $null
+    try {
+        if ($IsLocal) {
+            $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+        }
+        else {
+            $baseKey = [Microsoft.Win32.RegistryKey]::OpenRemoteBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $ComputerName, [Microsoft.Win32.RegistryView]::Registry64)
+        }
+
+        $path = 'HKLM:\{0}' -f $script:AvdAgentKeyPath
+        try {
+            $key = $baseKey.OpenSubKey($script:AvdAgentKeyPath)
+        }
+        catch {
+            return [PSCustomObject]@{ Path = $path; Found = $false; Error = $_.Exception.Message }
+        }
+
+        if ($null -eq $key) {
+            return [PSCustomObject]@{ Path = $path; Found = $false; Error = '' }
+        }
+
+        $values = [ordered]@{}
+        $isRegistered = $key.GetValue('IsRegistered')
+        if ($null -ne $isRegistered) {
+            $values['IsRegistered'] = [string]$isRegistered
+        }
+
+        return [PSCustomObject]@{ Path = $path; Found = $true; Error = ''; Values = [PSCustomObject]$values }
+    }
+    finally {
+        if ($null -ne $key) { $key.Close() }
+        if ($null -ne $baseKey) { $baseKey.Close() }
+    }
 }
 
 function Get-AvdStackListenerOutput {
+    <#
+    .SYNOPSIS
+        Returns the lines of "qwinsta" (local) or "qwinsta /server:<name>" (remote).
+    .DESCRIPTION
+        Microsoft's check for the AVD side-by-side stack is to run qwinsta.exe and look at the
+        rdp-sxs row. Throws when qwinsta cannot run or prints nothing; anything it does print is
+        returned for ConvertFrom-AvdStackListenerOutput to judge.
+        https://learn.microsoft.com/windows-server/administration/windows-commands/qwinsta
+
+        qwinsta.exe is 64-bit only on a 64-bit OS; a 32-bit PowerShell reaches System32 through
+        the Sysnative alias.
+        https://learn.microsoft.com/windows/win32/winprog64/file-system-redirector
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$ComputerName,
         [bool]$IsLocal = $false
     )
-    throw 'Get-AvdStackListenerOutput is not implemented yet (SQ-012).'
+
+    $systemFolder = if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) { 'Sysnative' } else { 'System32' }
+    $qwinsta = Join-Path $env:windir ('{0}\qwinsta.exe' -f $systemFolder)
+    $arguments = @()
+    if (-not $IsLocal) { $arguments += ('/server:{0}' -f $ComputerName) }
+
+    $lines = @(& $qwinsta @arguments 2>&1 | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($lines.Count -eq 0) {
+        throw ('qwinsta returned nothing (exit code {0}).' -f $LASTEXITCODE)
+    }
+
+    return $lines
+}
+
+function ConvertFrom-AvdStackListenerOutput {
+    <#
+    .SYNOPSIS
+        Judges qwinsta output: the rdp-sxs listener must be in the Listen state.
+    .DESCRIPTION
+        "If the STATE column for rdp-tcp and rdp-sxs entries isn't Listen, or if rdp-tcp and
+        rdp-sxs entries aren't listed, it means that there's a stack issue." The SxS Stack
+        Listener health check is fatal: users cannot connect to the session host.
+        https://learn.microsoft.com/troubleshoot/azure/virtual-desktop/troubleshoot-agent
+        https://learn.microsoft.com/azure/virtual-desktop/troubleshoot-statuses-checks
+
+        qwinsta prints localized headers and state words, so the output is judged only when the
+        English header (SESSIONNAME ... STATE) is present and the rdp-sxs state is a word this
+        tool knows. Anything else is "could not check" (Warn, NotChecked), never a pass.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()]
+        [string[]]$Lines = @()
+    )
+
+    $name = 'AVD stack listener'
+    $fixAction = 'Users cannot connect while the AVD listener is down. Restart the session host; if rdp-sxs is still not listening, escalate to reinstall the Remote Desktop Services SxS Network Stack (Windows Pro does not support it). Steps: {0}' -f $script:AvdAgentLearnUrl
+    $couldNotAction = 'On the session host, run qwinsta.exe and check that the rdp-sxs row says Listen. Steps: {0}' -f $script:AvdAgentLearnUrl
+
+    $header = @($Lines | Where-Object { $_ -match '\bSESSIONNAME\b' -and $_ -match '\bSTATE\b' })
+    if ($header.Count -eq 0) {
+        return New-EvidenceItem -Name $name -Status 'Warn' -NotChecked `
+            -Detail 'Could not check the rdp-sxs listener: qwinsta output was not in a form this tool can read (for example a non-English Windows).' `
+            -Action $couldNotAction
+    }
+
+    # Row: [>]SESSIONNAME [USERNAME] ID STATE [TYPE] [DEVICE]. Only the listener row counts: a
+    # user's session on the stack is named rdp-sxs...#<n> and says nothing about the listener.
+    $states = @()
+    foreach ($line in @($Lines)) {
+        if ($line -match '^\s*>?(?<session>rdp-sxs[^\s#]*)\s+(?:\S+\s+)?(?<id>\d+)\s+(?<state>\S+)') {
+            $states += [PSCustomObject]@{ Session = $Matches['session']; State = $Matches['state'] }
+        }
+    }
+
+    if ($states.Count -eq 0) {
+        return New-EvidenceItem -Name $name -Status 'Fail' `
+            -Detail 'No rdp-sxs listener is listed by qwinsta, so the AVD side-by-side stack is not working and users cannot connect.' `
+            -Action $fixAction
+    }
+
+    $listening = @($states | Where-Object { $_.State -eq 'Listen' })
+    if ($listening.Count -gt 0) {
+        return New-EvidenceItem -Name $name -Status 'Pass' -Detail ('{0} is in the Listen state.' -f $listening[0].Session)
+    }
+
+    # The English state words qwinsta prints (see the qwinsta page example and the session
+    # states in WTS_CONNECTSTATE_CLASS); anything else is likely a localized word.
+    # https://learn.microsoft.com/windows/win32/api/wtsapi32/ne-wtsapi32-wts_connectstate_class
+    $knownStates = @('Active', 'Conn', 'ConnQ', 'Shadow', 'Disc', 'Idle', 'Reset', 'Down', 'Init')
+    $known = @($states | Where-Object { $knownStates -contains $_.State })
+    if ($known.Count -lt $states.Count) {
+        return New-EvidenceItem -Name $name -Status 'Warn' -NotChecked `
+            -Detail ("Could not check the rdp-sxs listener: qwinsta shows its state as '{0}', a word this tool does not recognize." -f (@($states | ForEach-Object { $_.State }) -join "', '")) `
+            -Action $couldNotAction
+    }
+
+    return New-EvidenceItem -Name $name -Status 'Fail' `
+        -Detail ('{0} is in the {1} state, not Listen, so the AVD side-by-side stack is not accepting connections.' -f $known[0].Session, $known[0].State) `
+        -Action $fixAction
+}
+
+function Get-AvdAgentEventEvidence {
+    <#
+    .SYNOPSIS
+        Maps AVD agent events from the Application log to documented findings, one item each.
+    .DESCRIPTION
+        Events from the documented agent sources (WVD-Agent, WVD-Agent-Updater,
+        RDAgentBootLoader, MsiInstaller) whose ID and description match a rule in
+        $script:AvdAgentEventRules become one evidence item per rule, with the count and the
+        newest time. An event with a watched ID that matches no rule is a warning to look it up.
+        No events is a pass.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()]
+        [object[]]$Events = @(),
+
+        [int]$EventLookbackHours = 24
+    )
+
+    $agentEvents = @($Events | Where-Object { $script:AvdAgentEventSources -contains [string]$_.ProviderName })
+    $findings = [ordered]@{}
+    foreach ($winEvent in $agentEvents) {
+        $message = [string]$winEvent.Message
+        $rule = $null
+        foreach ($candidate in $script:AvdAgentEventRules) {
+            if ([int]$winEvent.Id -ne $candidate.Id) { continue }
+            if ($candidate.Pattern -and $message -notmatch $candidate.Pattern) { continue }
+            $rule = $candidate
+            break
+        }
+
+        $key = if ($null -ne $rule) { '{0}|{1}' -f $rule.Id, $rule.Label } else { '{0}|unknown' -f $winEvent.Id }
+        if (-not $findings.Contains($key)) {
+            $findings[$key] = [PSCustomObject]@{ Id = [int]$winEvent.Id; Rule = $rule; Seen = 0; Newest = $null }
+        }
+        $finding = $findings[$key]
+        $finding.Seen++
+        if ($null -ne $winEvent.TimeCreated -and ($null -eq $finding.Newest -or $winEvent.TimeCreated -gt $finding.Newest)) {
+            $finding.Newest = $winEvent.TimeCreated
+        }
+    }
+
+    if ($findings.Count -eq 0) {
+        return @(New-EvidenceItem -Name 'AVD agent events' -Status 'Pass' `
+                -Detail ('No AVD agent errors (events {0}) in the Application log in the last {1} hour(s).' -f ($script:AvdAgentEventIds -join ', '), $EventLookbackHours))
+    }
+
+    $evidence = @()
+    foreach ($finding in @($findings.Values)) {
+        $when = if ($null -ne $finding.Newest) { ', newest {0}' -f ([datetime]$finding.Newest).ToString('yyyy-MM-dd HH:mm:ss') } else { '' }
+        $seen = 'Application event {0} ({1} time(s){2})' -f $finding.Id, $finding.Seen, $when
+        if ($null -ne $finding.Rule) {
+            $evidence += New-EvidenceItem -Name 'AVD agent event' -Status $finding.Rule.Status `
+                -Detail ('{0}: {1} - {2}.' -f $seen, $finding.Rule.Label, $finding.Rule.Meaning) `
+                -Action ('{0} Steps: {1}' -f $finding.Rule.Fix, $script:AvdAgentLearnUrl)
+        }
+        else {
+            $evidence += New-EvidenceItem -Name 'AVD agent event' -Status 'Warn' `
+                -Detail ('{0}: the AVD agent reported an error this tool does not recognize.' -f $seen) `
+                -Action ('Open Event Viewer > Windows Logs > Application on the server, read the newest event {0} and look up its description in {1}' -f $finding.Id, $script:AvdAgentLearnUrl)
+        }
+    }
+
+    return @($evidence)
+}
+
+function Get-AvdHostEvidence {
+    <#
+    .SYNOPSIS
+        Runs the AVD agent checks on a host that has the agent; returns nothing for any other host.
+    .DESCRIPTION
+        Detection: the RDAgentBootLoader service is installed, or the RDInfraAgent key exists.
+        When neither can be confirmed (both absent, or a read failed) no AVD item is added, so a
+        Citrix or RDS host gets nothing; the FSLogix checks already warn about failed reads.
+        Returns Evidence, Errors and Raw.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ComputerName,
+        [bool]$IsLocal = $false,
+        [Parameter(Mandatory)][datetime]$EventStartTime,
+        [int]$EventLookbackHours = 24
+    )
+
+    $evidence = @()
+    $errors = @()
+    $readAction = 'Run as an administrator of the server, and check WinRM, Remote Registry and remote event log access are allowed on it.'
+
+    # --- Agent service (Win32_Service: Get-Service has no -ComputerName in PowerShell 6+) ---
+    $agentService = $null
+    $serviceError = ''
+    try {
+        $serviceSplat = @{ ClassName = 'Win32_Service'; Filter = "Name='RDAgentBootLoader'"; ErrorAction = 'Stop' }
+        if (-not $IsLocal) { $serviceSplat.ComputerName = $ComputerName }
+        $agentService = @(Get-CimInstance @serviceSplat | Where-Object { [string]$_.Name -eq 'RDAgentBootLoader' })[0]
+    }
+    catch {
+        $serviceError = $_.Exception.Message
+    }
+
+    # --- Agent registry ---
+    $agentKey = $null
+    $registryError = ''
+    try {
+        $agentKey = Get-AvdAgentRegistry -ComputerName $ComputerName -IsLocal $IsLocal
+        if ($null -ne $agentKey -and -not [string]::IsNullOrWhiteSpace([string]$agentKey.Error)) {
+            $registryError = [string]$agentKey.Error
+        }
+    }
+    catch {
+        $registryError = $_.Exception.Message
+    }
+
+    $keyFound = (-not $registryError) -and $null -ne $agentKey -and [bool]$agentKey.Found
+    if ($null -eq $agentService -and -not $keyFound) {
+        return [PSCustomObject]@{ Evidence = @(); Errors = @(); Raw = $null }
+    }
+
+    $raw = [ordered]@{ AgentService = ''; IsRegistered = ''; Events = @(); Listener = @() }
+
+    # "RDAgentBootLoader is either stopped or not running" / "There's no status for Remote
+    # Desktop Agent Loader" = the agent is not running on the session host.
+    $serviceAction = 'The host cannot take AVD connections without the agent. Start "Remote Desktop Agent Loader" (RDAgentBootLoader) in Services; if it stops again, the host is probably not registered (see the other AVD items) - escalate. Steps: {0}' -f $script:AvdAgentLearnUrl
+    if ($serviceError) {
+        $errors += "AVD agent service: $serviceError"
+        $raw.AgentService = "Error: $serviceError"
+        $evidence += New-EvidenceItem -Name 'AVD agent service' -Status 'Warn' -NotChecked `
+            -Detail "Could not read the AVD agent service (RDAgentBootLoader): $serviceError" -Action $readAction
+    }
+    elseif ($null -eq $agentService) {
+        $raw.AgentService = 'Not installed'
+        $evidence += New-EvidenceItem -Name 'AVD agent service' -Status 'Fail' `
+            -Detail "The AVD agent key exists but the Remote Desktop Agent Loader service (RDAgentBootLoader) is not installed on $ComputerName." `
+            -Action ('Escalate: the AVD agent and boot loader need reinstalling and the host re-registering. Steps: {0}' -f $script:AvdAgentLearnUrl)
+    }
+    elseif ([string]$agentService.State -eq 'Running') {
+        $raw.AgentService = 'Running'
+        $evidence += New-EvidenceItem -Name 'AVD agent service' -Status 'Pass' -Detail 'Remote Desktop Agent Loader (RDAgentBootLoader) is running.'
+    }
+    else {
+        $raw.AgentService = [string]$agentService.State
+        $evidence += New-EvidenceItem -Name 'AVD agent service' -Status 'Fail' `
+            -Detail ('Remote Desktop Agent Loader (RDAgentBootLoader) is {0} (start type {1}).' -f $agentService.State, $agentService.StartMode) `
+            -Action $serviceAction
+    }
+
+    # "verify that IsRegistered is set to 1" after registration.
+    $registrationAction = 'Escalate to an Azure Virtual Desktop admin: generate a new registration key for the host pool and re-register this host, then confirm IsRegistered is 1. Steps: {0}' -f $script:AvdAgentLearnUrl
+    if ($registryError) {
+        $errors += "AVD agent registry: $registryError"
+        $raw.IsRegistered = "Error: $registryError"
+        $evidence += New-EvidenceItem -Name 'AVD host pool registration' -Status 'Warn' -NotChecked `
+            -Detail "Could not read HKLM\$script:AvdAgentKeyPath on ${ComputerName}: $registryError" `
+            -Action 'The Remote Registry service may be stopped on the server, or you are not an administrator there.'
+    }
+    else {
+        $isRegistered = ''
+        if ($keyFound -and $agentKey.PSObject.Properties.Name -contains 'Values' -and $null -ne $agentKey.Values -and
+            $agentKey.Values.PSObject.Properties.Name -contains 'IsRegistered') {
+            $isRegistered = [string]$agentKey.Values.IsRegistered
+        }
+
+        if (-not $keyFound) {
+            $raw.IsRegistered = 'Key missing'
+            $evidence += New-EvidenceItem -Name 'AVD host pool registration' -Status 'Fail' `
+                -Detail "The host is not registered to its host pool: HKLM\$script:AvdAgentKeyPath is missing although the agent service is installed." `
+                -Action $registrationAction
+        }
+        elseif ($isRegistered -eq '1') {
+            $raw.IsRegistered = '1'
+            $evidence += New-EvidenceItem -Name 'AVD host pool registration' -Status 'Pass' -Detail 'The host is registered to its host pool (IsRegistered = 1).'
+        }
+        else {
+            $shown = if ([string]::IsNullOrWhiteSpace($isRegistered)) { 'IsRegistered is not set' } elseif ($isRegistered -match '^-?\d{1,10}$') { 'IsRegistered = {0}' -f $isRegistered } else { 'IsRegistered is not 1' }
+            $raw.IsRegistered = $shown
+            $evidence += New-EvidenceItem -Name 'AVD host pool registration' -Status 'Fail' `
+                -Detail ("The host is not registered to its host pool ({0} under HKLM\{1})." -f $shown, $script:AvdAgentKeyPath) `
+                -Action $registrationAction
+        }
+    }
+
+    # --- Agent events (Application log) ---
+    try {
+        $eventSplat = @{ FilterHashtable = @{ LogName = 'Application'; Id = $script:AvdAgentEventIds; StartTime = $EventStartTime }; MaxEvents = 200; ErrorAction = 'Stop' }
+        if (-not $IsLocal) { $eventSplat.ComputerName = $ComputerName }
+        $events = @(Get-WinEvent @eventSplat)
+        $raw.Events = @($events | Select-Object -First 10 | ForEach-Object {
+            $message = [string]$_.Message
+            if ($message.Length -gt 180) { $message = $message.Substring(0, 180) }
+            [PSCustomObject]@{ Id = [int]$_.Id; ProviderName = [string]$_.ProviderName; Message = $message }
+        })
+        $evidence += @(Get-AvdAgentEventEvidence -Events $events -EventLookbackHours $EventLookbackHours)
+    }
+    catch {
+        $eventErrorMessage = $_.Exception.Message
+        if (Test-WinEventNoEventsFoundError -Message $eventErrorMessage) {
+            $evidence += @(Get-AvdAgentEventEvidence -Events @() -EventLookbackHours $EventLookbackHours)
+        }
+        else {
+            $errors += "AVD agent events: $eventErrorMessage"
+            $evidence += New-EvidenceItem -Name 'AVD agent events' -Status 'Warn' -NotChecked `
+                -Detail "Could not read the Application log on ${ComputerName} for AVD agent errors: $eventErrorMessage" `
+                -Action 'Run as an administrator of the server; remote event log access may be blocked by its firewall.'
+        }
+    }
+
+    # --- Side-by-side stack listener (qwinsta) ---
+    try {
+        $listenerLines = @(Get-AvdStackListenerOutput -ComputerName $ComputerName -IsLocal $IsLocal)
+        $raw.Listener = $listenerLines
+        $evidence += ConvertFrom-AvdStackListenerOutput -Lines $listenerLines
+    }
+    catch {
+        $errors += "AVD stack listener: $($_.Exception.Message)"
+        $raw.Listener = @("Error: $($_.Exception.Message)")
+        $evidence += New-EvidenceItem -Name 'AVD stack listener' -Status 'Warn' -NotChecked `
+            -Detail "Could not run qwinsta against ${ComputerName}: $($_.Exception.Message)" `
+            -Action 'Run as an administrator of the server, or sign in to it and run qwinsta.exe to check the rdp-sxs row says Listen.'
+    }
+
+    return [PSCustomObject]@{ Evidence = @($evidence); Errors = @($errors); Raw = [PSCustomObject]$raw }
 }
 
 function New-CitrixFSLogixResult {
@@ -921,6 +1374,7 @@ function Invoke-CitrixFSLogixTriage {
         Events             = @()
         Disks              = @()
         ProfilePaths       = @()
+        Avd                = $null
     }
 
     # --- 1. Ping -------------------------------------------------------------------------
@@ -1303,6 +1757,12 @@ function Invoke-CitrixFSLogixTriage {
         }
     }
 
+    # --- 8. Azure Virtual Desktop agent (AVD hosts only) ---------------------------------
+    $avd = Get-AvdHostEvidence -ComputerName $ComputerName -IsLocal $isLocalTarget -EventStartTime $eventStartTime -EventLookbackHours $EventLookbackHours
+    $evidence += @($avd.Evidence)
+    $errors += @($avd.Errors)
+    $rawOutput.Avd = $avd.Raw
+
     $verdict = Get-TriageVerdict -Evidence $evidence -ComputerName $ComputerName
 
     $nextSteps = @()
@@ -1500,8 +1960,10 @@ function ConvertTo-CitrixFSLogixTriageTicketNote {
     $isLocal = (-not [string]::IsNullOrEmpty($target)) -and (Test-IsLocalComputerTarget -ComputerName $target)
     $from = if ($isLocal) { 'on the server itself' } else { 'from {0} over the network' -f $env:COMPUTERNAME }
     $who = if ($Result.RawOutput.AffectedUser) { ' for user {0}' -f $Result.RawOutput.AffectedUser } else { '' }
-    $scopeLine = 'FSLogix on {0}{1}, checked {2}: services, profile settings, event logs (last {3} hours), disk space and the profile share.' -f `
-        $target, $who, $from, $Result.RawOutput.EventLookbackHours
+    $avdChecked = ($Result.RawOutput.PSObject.Properties.Name -contains 'Avd') -and ($null -ne $Result.RawOutput.Avd)
+    $avdPart = if ($avdChecked) { ', the profile share and the Azure Virtual Desktop agent' } else { ' and the profile share' }
+    $scopeLine = 'FSLogix on {0}{1}, checked {2}: services, profile settings, event logs (last {3} hours), disk space{4}.' -f `
+        $target, $who, $from, $Result.RawOutput.EventLookbackHours, $avdPart
 
     $scope = if ($isLocal) { $env:COMPUTERNAME } else { $target }
     $stampArgs = @{ ScopeLabel = 'Computer'; Scope = $scope }
