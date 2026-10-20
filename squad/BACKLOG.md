@@ -67,11 +67,11 @@ Split from SQ-002 per D-004.
 
 
 ## SQ-019 · M365 user check: blocked synced user advice must escalate, not "change it" (D-017)
-- status: new
+- status: ready
 - priority: P1
 - type: fix
 - branch:
-- spec:
+- spec: squad/specs/SQ-019.md
 
 Found in the SQ-011 destructive-operations review (2026-10-18), pre-existing from SQ-002.
 `M365UserCheck.Core.ps1` SignInBlocked next step for a synced user when no AD comparison ran
@@ -237,7 +237,7 @@ password problem, encryption type blocked") with the next step, in the report an
 (D-022, D-023, D-024). Per-DC gate says "can't tell" where a DC can't log the events. Read-only.
 
 ## SQ-007 · Mailbox check: the facts, with "do NOT reset yet" on takeover signs
-- status: new
+- status: ready
 - revision: merge to main failed one test at review 2026-10-18 (see spec Revision notes)
 - priority: P2
 - type: feature
@@ -282,7 +282,7 @@ Invoke-Command (D-005), and log every change in the shared format (D-030). Fail 
 can't be written (D-029).
 
 ## SQ-012 · AVD host checks in Citrix-FSLogix-Triage
-- status: new
+- status: ready
 - priority: P2
 - type: feature
 - branch:
@@ -294,7 +294,7 @@ documented event 3277 errors, events 3703/3019/3389 and the rdp-sxs listener, ea
 Learn fix. No new folder. Split from SQ-003 per D-004; P2 per D-016.
 
 ## SQ-005 · End-of-support section in AD-Audit
-- status: new
+- status: ready
 - priority: P3
 - type: feature
 - branch:
@@ -307,11 +307,12 @@ hedged for ESU. The existing Unsupported OS list draws its server entries from t
 (D-020). Dated CSV; no automatic comparison in v1 (D-021).
 
 ## SQ-021 · FolderPermissionManager: admin-share route skips the server-side junction check
-- status: new
+- status: dropped
 - priority: P2
 - type: follow-up
 - found-in: SQ-018
 - branch:
+- merged-into: SQ-023 (2026-10-19 plan; the ACs in squad/specs/SQ-021.md are built there)
 
 When NetShareGetInfo fails, Get-ShareTreeRefusal tells the tech to open the folder by its
 administrative share path (\\server\D$\...). The D-045 server-side junction check
@@ -322,10 +323,13 @@ for whole-tree changes on \\server\X$\... paths too, or change the advice to "ru
 the server itself, or ask a senior admin". (Advisory review of SQ-018 rev2, major.)
 
 ## SQ-022 · FolderPermissionManager: D-044 copy refusals and confirms only exist in the WPF app
-- status: new
+- status: ready
 - priority: P2
 - type: follow-up
 - found-in: SQ-018
+- branch:
+- spec: squad/specs/SQ-022.md
+- depends-on: SQ-018
 
 The D-044 protections (protected Copy targets refused, Deny/root confirms) live only in
 FolderPermissionManager-GUI.ps1. The core work function Copy-FolderPermission accepts any
@@ -334,24 +338,14 @@ SYSVOL, C:\Windows or C:\Users. Move Get-CopyTargetRefusal (with path resolution
 and enforce it inside Copy-FolderPermission. Moot for the browser GUI once it is removed after
 the SQ-018 lab test, but the CLI still needs it. (Destructive-operations review of SQ-018 rev2, major.)
 
-## SQ-023 · FolderPermissionManager: CLI and browser whole-tree paths lack the D-045 and resolved high-impact checks
-- status: new
-- priority: P2
-- type: follow-up
-- found-in: SQ-018
-
-The D-045 server-side junction check and the resolved-path high-impact check run only in the
-WPF app's lookup. Through the CLI or the browser GUI, a whole-tree take ownership on
-\\server\share whose server-side folder is reached through a junction lands on an unchecked
-server folder. Move Get-ShareTreeRefusal, Get-ServerSideLinkRefusal, Get-RemoteShareLocalPath
-and Get-AppReparseInfo into the core and call them from Get-TreeOwnershipTargetRefusal.
-(Destructive-operations review of SQ-018 rev2, major.)
-
 ## SQ-024 · FolderPermissionManager: a typed `..` in a share path makes the checks look at a different folder
-- status: new
+- status: ready
 - priority: P2
 - type: follow-up
 - found-in: SQ-018
+- branch:
+- spec: squad/specs/SQ-024.md
+- depends-on: SQ-018
 
 Get-ShareTreeRefusal builds the server-side path from the typed rest of a UNC path, and
 ConvertTo-ComparablePath resolves `..` against the server's folder, so it can climb above the
@@ -365,12 +359,29 @@ segments in Get-ChangeTarget, or normalise the client UNC first (stopping `..` a
 says `.`/`..` segments do not skip the check, and add a regression test.
 (Destructive-operations re-review of SQ-018 fix round 1, major.)
 
+## SQ-023 · FolderPermissionManager: CLI and browser whole-tree paths lack the D-045 and resolved high-impact checks
+- status: ready
+- priority: P2
+- type: follow-up
+- found-in: SQ-018
+- branch:
+- spec: squad/specs/SQ-023.md (includes SQ-021)
+- depends-on: SQ-018, SQ-024
+
+The D-045 server-side junction check and the resolved-path high-impact check run only in the
+WPF app's lookup. Through the CLI or the browser GUI, a whole-tree take ownership on
+\\server\share whose server-side folder is reached through a junction lands on an unchecked
+server folder. Move Get-ShareTreeRefusal, Get-ServerSideLinkRefusal, Get-RemoteShareLocalPath
+and Get-AppReparseInfo into the core and call them from Get-TreeOwnershipTargetRefusal.
+(Destructive-operations review of SQ-018 rev2, major.)
+
 ## SQ-025 · FolderPermissionManager WPF app: change an existing permission in place
-- status: new
+- status: ready
 - priority: P1
 - type: feature
-- depends-on: SQ-018
 - branch:
+- spec: squad/specs/SQ-025.md
+- depends-on: SQ-018
 
 Owner request during the SQ-018 lab test (2026-10-19): turning an Allow entry for `chihlas`
 into a Deny meant adding a second entry and retyping the whole account name. Add **Change
@@ -381,3 +392,18 @@ The old entry is replaced by the new one in a single ACL write after the usual b
 so a failure never leaves the account with no entry; read back and report like Add/Remove,
 -WhatIf end to end. Inherited entries cannot be changed here: the dialog says which folder above
 they come from. Destructive-operations checklist applies.
+
+## SQ-026 · FolderPermissionManager: Copy targets on a remote share get the file-server checks
+- status: new
+- priority: P2
+- type: follow-up
+- found-in: SQ-022 (D-053)
+- depends-on: SQ-023
+- branch:
+
+A Copy Permissions target on a remote share is checked only on the client side: `\\fs01\Win`
+pointing at C:\Windows on the server is not refused. After SQ-023 moves the share helpers
+(Get-ShareTreeRefusal, Get-ServerSideLinkRefusal, Get-RemoteShareLocalPath) into the core, run
+them for every remote Copy target: the share's real server folder against D-036 and the
+high-impact roots, and the D-045 junction walk, failing closed. Same as whole-tree takeown
+(D-045), extended to Copy (D-053).
