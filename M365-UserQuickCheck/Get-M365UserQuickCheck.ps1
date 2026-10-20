@@ -725,8 +725,8 @@ function ConvertTo-M365UserCheckTicketNote {
         Blocker -> PROBLEM, Probable and Warning -> WARNING, Info -> INFO. Every source that could
         not be read -> Could not check, with its reason; Cleared checks go to Ruled out only with
         CouldLook (the assessment never clears anything from an unreadable source). Next steps
-        are the Blocker and Probable actions, plus the admin-center step when sign-in history
-        could not be read. The stamp names the tenant and the signed-in account.
+        are the Blocker and Probable actions, then the RiskyUser action (SQ-027), plus the
+        admin-center step when sign-in history could not be read. The stamp names the tenant and the signed-in account.
     #>
     param([Parameter(Mandatory = $true)][object]$Result, [string[]]$EvidencePaths = @())
     $items = New-Object System.Collections.Generic.List[object]
@@ -753,6 +753,9 @@ function ConvertTo-M365UserCheckTicketNote {
         foreach ($c in @($a.Cleared)) { $items.Add((New-TicketNoteItem -Kind Clear -Text $c.Message -CouldLook ([bool]$c.CouldLook))) }
 
         foreach ($r in @($a.Reasons | Where-Object { $_.Level -eq 'Blocker' -or $_.Level -eq 'Probable' })) { $next.Add($r.Action) }
+        # SQ-027 (Q2): a user ID Protection flags always carries the security-lead step into the
+        # note, even when they can sign in (the verdict stays YES).
+        foreach ($r in @($a.Reasons | Where-Object { $_.Code -eq 'RiskyUser' })) { $next.Add($r.Action) }
         if ($Result.User -and $f.SignInGate.State -ne 'Available') { $next.Add($script:M365NoSignInHistoryStep) }
         if (Test-M365AddressCheckFailed -Assessment $a) { $next.Add($script:M365AddressCheckStep) }
         if ($next.Count -eq 0 -and $a.Verdict -eq 'YES') {
