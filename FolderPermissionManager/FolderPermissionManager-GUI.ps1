@@ -51,6 +51,9 @@
     Used by the tool itself when it opens again as administrator: the mapped drives of the
     first, non-elevated window. Leave it out.
 
+.PARAMETER SmokeTest
+    Not implemented yet (SQ-029).
+
 .PARAMETER LoadFunctionsOnly
     Define the script's functions and return without opening the window. Used by the Pester
     tests.
@@ -300,6 +303,9 @@ param(
     [string]$DriveMap,
 
     [Parameter()]
+    [switch]$SmokeTest,
+
+    [Parameter()]
     [switch]$LoadFunctionsOnly
 )
 
@@ -409,7 +415,8 @@ function Get-StartupAction {
     # WPF needs STA first; elevation is asked for once the window can show a message.
     param(
         [Parameter(Mandatory)][bool]$IsSta,
-        [Parameter(Mandatory)][bool]$IsAdmin
+        [Parameter(Mandatory)][bool]$IsAdmin,
+        [switch]$SmokeTest
     )
     if (-not $IsSta) { return 'RelaunchSta' }
     if (-not $IsAdmin) { return 'RelaunchElevated' }
@@ -6262,6 +6269,27 @@ function Open-CopyTargets {
             Open-CopyTargets -Source $s2.Source -TypedText $s2.Text
         })
 }
+#endregion
+
+#region Smoke test (SQ-029 stubs: not implemented)
+
+function Get-SmokeVerdict {
+    param([bool]$Rendered, [bool]$ProbeOk, [bool]$TimedOut, [AllowEmptyCollection()][string[]]$Failures, [int]$RenderMs, [int]$ProbeMs)
+    throw 'Get-SmokeVerdict is not implemented.'
+}
+function Get-SmokeTickAction {
+    param([bool]$Rendered, [bool]$ProbeDone, [TimeSpan]$Elapsed, [TimeSpan]$Deadline)
+    throw 'Get-SmokeTickAction is not implemented.'
+}
+function Set-SmokeWindowMode {
+    param([Parameter(Mandatory)]$Window)
+    throw 'Set-SmokeWindowMode is not implemented.'
+}
+function Add-SmokeFailure {
+    param([Parameter(Mandatory)][string]$Text)
+    throw 'Add-SmokeFailure is not implemented.'
+}
+
 #endregion
 
 if ($LoadFunctionsOnly) { return }
