@@ -5277,6 +5277,35 @@ function Get-PermissionInputError {
     $null
 }
 
+function Resolve-AddIdentity {
+    # NOT IMPLEMENTED (SQ-018 revision 3, AC55). The user or group typed in the Add dialog, ready
+    # to use: a leading dot-backslash name becomes <this computer>\name when every target is on this
+    # computer (IsLocal), and is refused ("Type the server's name instead, for example FS01\name.")
+    # when any target is on a network share or mapped drive. Returns Ok, Identity, Problem.
+    param([AllowNull()][AllowEmptyString()][string]$Identity, [object[]]$Targets)
+    throw 'Resolve-AddIdentity is not implemented yet (SQ-018 AC55).'
+}
+
+function Find-PermissionAccount {
+    # NOT IMPLEMENTED (SQ-018 revision 3, AC56). Looks the account up without freezing the window
+    # (background lookup or a short timeout). -Lookup: { param($identity) } returns the SID text
+    # or $null; the default is the app's own lookup. Returns Found, Sid, TimedOut, Problem.
+    param(
+        [AllowNull()][AllowEmptyString()][string]$Identity,
+        [scriptblock]$Lookup,
+        [int]$TimeoutMilliseconds = 4000
+    )
+    throw 'Find-PermissionAccount is not implemented yet (SQ-018 AC56).'
+}
+
+function Get-DryRunSummary {
+    # NOT IMPLEMENTED (SQ-018 revision 3, AC57). The dry-run result shown after a -WhatIf change:
+    # Title and Text naming what would have been changed and where, and saying nothing was
+    # changed.
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Entries)
+    throw 'Get-DryRunSummary is not implemented yet (SQ-018 AC57).'
+}
+
 function Get-ChangeScopeTargets {
     # The chosen folder, or the selected files, as change targets; $null after saying why not.
     param([Parameter(Mandatory)][ValidateSet('Folder', 'Files')][string]$Scope)

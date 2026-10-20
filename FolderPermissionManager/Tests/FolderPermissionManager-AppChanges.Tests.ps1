@@ -2955,4 +2955,205 @@ Describe 'Revision 2026-10-19: Deny, roots, protected Copy targets, server-side 
         $script:Shown[0] | Should -Match 'and 2 more'
     }
 }
+
+Describe 'Revision 3 (owner lab test, 2026-10-19): .\name, account lookup in the dialog, dry-run result (AC55-AC57)' {
+    # Pinned for the implementer (the spec leaves the names open; stubs carry these signatures):
+    #   Resolve-AddIdentity -Identity <typed text> -Targets <Get-ChangeTarget results>
+    #       -> Ok, Identity, Problem.  ".\name" -> "<COMPUTERNAME>\name" when every target IsLocal;
+    #       refused (Ok = $false) for any target that is not local (UNC path, mapped drive);
+    #       any other text is returned unchanged.
+    #   Find-PermissionAccount -Identity <text> [-Lookup { param($identity) -> SID text or $null }] [-TimeoutMilliseconds]
+    #       -> Found, Sid, TimedOut, Problem.  -Lookup is the test seam; the default is the app's own
+    #       lookup (ConvertTo-IdentitySid), which must not freeze the window.
+    #   Show-PermissionDialog gains -Targets; its Add click calls Resolve-AddIdentity and then
+    #       Find-PermissionAccount before it sets Tag.Answer and DialogResult.
+    #   Get-DryRunSummary -Entries <core rows, all 'Skipped (WhatIf)'> -> Title, Text.
+    #   Complete-ChangeTask shows that text with Show-AppMessage when every row was a dry run.
+    # The WPF dialog is never opened: its wiring is checked on the syntax tree.
+
+    BeforeEach {
+        $script:Me = $env:COMPUTERNAME
+    }
+
+    It 'AC55_DotBackslashOnLocalTargetsUsesTheComputerName' {
+        $local = New-FakeTarget -Display 'D:\Data\HR' -Local $true
+        $r = Resolve-AddIdentity -Identity '.\micha' -Targets @($local)
+        $r.Ok | Should -BeTrue
+        $r.Identity | Should -BeExactly "$($script:Me)\micha"
+        $r.Problem | Should -BeNullOrEmpty
+
+        $files = @((New-FakeTarget -Display 'D:\Data\a.txt' -Local $true), (New-FakeTarget -Display 'D:\Data\b.txt' -Local $true))
+        (Resolve-AddIdentity -Identity '  .\micha  ' -Targets $files).Identity | Should -BeExactly "$($script:Me)\micha" -Because 'surrounding spaces are trimmed'
+    }
+
+    It 'AC55_DotBackslashOnNetworkTargetsIsRefusedInPlace' {
+        $text = "Type the server's name instead, for example FS01\name."
+        $unc = New-FakeTarget -Display '\\fs01\share\HR' -Local $false
+        $mapped = New-FakeTarget -Display 'H:\HR' -Resolved '\\fs01\home\HR' -Local $false
+        $mixed = @((New-FakeTarget -Display 'D:\Data\a.txt' -Local $true), $unc)
+        foreach ($case in @(@{ N = 'UNC path'; T = @($unc) }, @{ N = 'mapped drive'; T = @($mapped) }, @{ N = 'one network target among local ones'; T = $mixed })) {
+            $r = Resolve-AddIdentity -Identity '.\micha' -Targets $case.T
+            $r.Ok | Should -BeFalse -Because $case.N
+            $r.Problem | Should -BeExactly $text -Because $case.N
+        }
+    }
+
+    It 'AC55_OtherNamesAreUnchanged' {
+        $local = New-FakeTarget -Display 'D:\Data\HR' -Local $true
+        $unc = New-FakeTarget -Display '\\fs01\share\HR' -Local $false
+        foreach ($t in @($local, $unc)) {
+            foreach ($name in 'micha', 'CONTOSO\HR-Staff', 'BUILTIN\Users', 'micha@contoso.com', "$($script:Me)\micha") {
+                $r = Resolve-AddIdentity -Identity $name -Targets @($t)
+                $r.Ok | Should -BeTrue -Because "$name on $($t.DisplayPath)"
+                $r.Identity | Should -BeExactly $name -Because "$name on $($t.DisplayPath)"
+            }
+        }
+    }
+
+    It 'AC55_AddUsesTheComputerNameOnALocalFolder' {
+        $dir = New-Folder 'DotLocal'
+        Invoke-AddPermission -Scope Folder -Identity '.\micha' -Rights 'Modify' -Type 'Allow' -Targets @((New-FakeTarget -Display $dir -Local $true))
+        $script:Captured | Should -Not -BeNullOrEmpty -Because 'the change starts'
+        $script:Captured.ArgumentList[1] | Should -BeExactly "$($script:Me)\micha" -Because 'the account is added under the computer name'
+    }
+
+    It 'AC55_AddRefusesDotBackslashOnANetworkFolder' {
+        Invoke-AddPermission -Scope Folder -Identity '.\micha' -Rights 'Modify' -Type 'Allow' -Targets @((New-FakeTarget -Display '\\fs01\share\HR' -Local $false))
+        Should -Invoke Start-ChangeTask -Times 0 -Exactly
+        (Get-LastStatus).Text | Should -Match ([regex]::Escape("Type the server's name instead, for example FS01\name."))
+    }
+
+    It 'AC55_AddDialogChecksTheNameBeforeItCloses' {
+        $fn = $script:Ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Show-PermissionDialog' }, $true)
+        $names = @($fn.Body.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+        $names | Should -Contain 'Targets' -Because 'the dialog needs the targets to know if they are local'
+        $resolve = @($fn.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Resolve-AddIdentity' }, $true))
+        $resolve.Count | Should -BeGreaterThan 0 -Because 'the dialog resolves .\name'
+        $close = @($fn.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left -is [System.Management.Automation.Language.MemberExpressionAst] -and "$($n.Left.Member.Value)" -eq 'DialogResult' }, $true))
+        $close.Count | Should -BeGreaterThan 0
+        foreach ($c in $resolve) { $c.Extent.StartOffset | Should -BeLessThan $close[0].Extent.StartOffset }
+
+        $open = $script:Ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Open-AddPermission' }, $true)
+        $call = @($open.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Show-PermissionDialog' }, $true))
+        $call.Count | Should -Be 1
+        @($call[0].CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -eq 'Targets' }).Count | Should -Be 1 -Because 'Open-AddPermission hands the dialog its targets'
+    }
+
+    It 'AC56_UnknownAccountKeepsTheDialogOpenWithTheMessage' {
+        $r = Find-PermissionAccount -Identity 'CONTOSO\nobody' -Lookup { param($identity) $null }
+        $r.Found | Should -BeFalse
+        $r.Problem | Should -BeExactly 'Windows could not find the account CONTOSO\nobody. Check the name, or ask a senior admin.'
+    }
+
+    It 'AC56_KnownAccountIsFoundAndTheNameIsPassedToTheLookup' {
+        $r = Find-PermissionAccount -Identity 'CONTOSO\HR-Staff' -Lookup { param($identity) "S-FAKE-$identity" }
+        $r.Found | Should -BeTrue
+        $r.Sid | Should -BeExactly 'S-FAKE-CONTOSO\HR-Staff'
+        $r.Problem | Should -BeNullOrEmpty
+    }
+
+    It 'AC56_ALookupThatThrowsCountsAsNotFound' {
+        $r = Find-PermissionAccount -Identity 'CONTOSO\broken' -Lookup { param($identity) throw 'The trust relationship failed' }
+        $r.Found | Should -BeFalse
+        $r.Problem | Should -Match ([regex]::Escape('Windows could not find the account CONTOSO\broken.'))
+    }
+
+    It 'AC56_AnUnreachableDomainDoesNotFreezeTheWindow' {
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $r = Find-PermissionAccount -Identity 'GHOSTDOMAIN\someone' -TimeoutMilliseconds 300 -Lookup { param($identity) Start-Sleep -Seconds 10; 'S-FAKE-LATE' }
+        $sw.Stop()
+        $sw.Elapsed.TotalSeconds | Should -BeLessThan 5 -Because 'the lookup is cut off, not waited for'
+        $r.Found | Should -BeFalse
+        $r.TimedOut | Should -BeTrue
+        $r.Problem | Should -Not -BeNullOrEmpty
+    }
+
+    It 'AC56_TheDefaultTimeoutIsShortAndTheDialogChecksBeforeItCloses' {
+        $find = $script:Ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Find-PermissionAccount' }, $true)
+        $timeout = @($find.Body.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'TimeoutMilliseconds' })
+        $timeout.Count | Should -Be 1
+        [int]"$($timeout[0].DefaultValue.Extent.Text)" | Should -BeLessOrEqual 5000
+
+        $fn = $script:Ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Show-PermissionDialog' }, $true)
+        $lookups = @($fn.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Find-PermissionAccount' }, $true))
+        $lookups.Count | Should -BeGreaterThan 0 -Because 'Add looks the account up before the dialog closes'
+        $close = @($fn.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left -is [System.Management.Automation.Language.MemberExpressionAst] -and "$($n.Left.Member.Value)" -eq 'DialogResult' }, $true))
+        $close.Count | Should -BeGreaterThan 0
+        foreach ($c in $lookups) { $c.Extent.StartOffset | Should -BeLessThan $close[0].Extent.StartOffset }
+        $answer = @($fn.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and "$($n.Left.Extent.Text)" -match 'Tag\.Answer' }, $true))
+        $answer.Count | Should -BeGreaterThan 0
+        foreach ($c in $lookups) { $c.Extent.StartOffset | Should -BeLessThan $answer[0].Extent.StartOffset -Because 'nothing is answered before the account is found' }
+    }
+
+    It 'AC57_DryRunCountsUseTheRightPlural' {
+        function script:Get-DryMessage { param([string]$Type, [int]$Count) Get-ChangeResultMessage -Entries @(1..$Count | ForEach-Object { New-Row -Result 'Skipped (WhatIf)' -ItemType $Type -Target "C:\x$_" }) -LogPath $null -LogFolder 'C:\logs' }
+        Get-DryMessage -Type Folder -Count 1 | Should -BeExactly 'WhatIf: nothing was changed (1 folder would be).'
+        Get-DryMessage -Type Folder -Count 2 | Should -BeExactly 'WhatIf: nothing was changed (2 folders would be).'
+        Get-DryMessage -Type File -Count 1 | Should -BeExactly 'WhatIf: nothing was changed (1 file would be).'
+        Get-DryMessage -Type File -Count 3 | Should -BeExactly 'WhatIf: nothing was changed (3 files would be).'
+        Get-DryMessage -Type Unknown -Count 1 | Should -BeExactly 'WhatIf: nothing was changed (1 item would be).'
+        Get-DryMessage -Type Unknown -Count 2 | Should -BeExactly 'WhatIf: nothing was changed (2 items would be).'
+    }
+
+    It 'AC57_DryRunSummaryNamesWhatWouldChangeAndWhere' {
+        $cases = @(
+            @{ N = 'add'; Rows = @(New-Row -Action 'Add permission' -Target 'D:\Data\HR' -Detail 'Allow Modify for CONTOSO\HR-Staff' -Result 'Skipped (WhatIf)'); Has = @('CONTOSO\HR-Staff', 'Modify', 'Allow', 'D:\Data\HR', 'add') }
+            @{ N = 'add deny'; Rows = @(New-Row -Action 'Add permission' -Target 'D:\Data\HR' -Detail 'Deny Write for CONTOSO\Temps' -Result 'Skipped (WhatIf)'); Has = @('CONTOSO\Temps', 'Write', 'Deny', 'D:\Data\HR') }
+            @{ N = 'remove'; Rows = @(New-Row -Action 'Remove permission' -Target 'D:\Data\HR' -Detail 'Allow Modify for CONTOSO\HR-Staff' -Result 'Skipped (WhatIf)'); Has = @('CONTOSO\HR-Staff', 'Allow', 'D:\Data\HR', 'remove') }
+            @{ N = 'take ownership'; Rows = @(New-Row -Action 'Take ownership' -Target 'D:\Data\HR' -Detail 'Owner set to me' -Result 'Skipped (WhatIf)'); Has = @('D:\Data\HR', 'ownership') }
+            @{ N = 'copy to two folders'; Rows = @((New-Row -Action 'Copy permissions' -Target 'E:\One' -Detail 'Added Modify for CONTOSO\HR' -Result 'Skipped (WhatIf)'), (New-Row -Action 'Copy permissions' -Target 'E:\Two' -Detail 'Added Modify for CONTOSO\HR' -Result 'Skipped (WhatIf)')); Has = @('E:\One', 'E:\Two', 'copy') }
+        )
+        foreach ($c in $cases) {
+            $s = Get-DryRunSummary -Entries $c.Rows
+            $s.Title | Should -Match '(?i)dry run' -Because $c.N
+            $s.Text | Should -Match '(?i)nothing was changed' -Because $c.N
+            foreach ($piece in $c.Has) { $s.Text | Should -Match "(?i)$([regex]::Escape($piece))" -Because "$($c.N): the result names '$piece'" }
+            $s.Text | Should -Not -Match '\b1 (folders|files|items)\b' -Because $c.N
+        }
+    }
+
+    It 'AC57_AFinishedDryRunShowsTheResultNotOnlyTheStatusLine' {
+        $row = New-Row -Action 'Add permission' -Target 'D:\Data\HR' -Detail 'Allow Modify for CONTOSO\HR-Staff' -Result 'Skipped (WhatIf)'
+        $result = [PSCustomObject]@{ Ok = $true; Entries = @($row); LogPath = $null; UnloggedPath = $null; Message = 'WhatIf: nothing was changed (1 folder would be).'; Error = $null }
+        Complete-ChangeTask -Result $result -State $null
+        $script:Shown.Count | Should -Be 1 -Because 'one dry-run result is shown'
+        $script:Shown[0] | Should -Match ([regex]::Escape('CONTOSO\HR-Staff'))
+        $script:Shown[0] | Should -Match ([regex]::Escape('D:\Data\HR'))
+        $script:Shown[0] | Should -Match '(?i)nothing was changed'
+        (Get-LastStatus).Kind | Should -Be 'Info'
+        (Get-LastStatus).Text | Should -Match 'WhatIf: nothing was changed \(1 folder would be\)\.'
+    }
+
+    It 'AC57_ARealChangeShowsNoDryRunResult' {
+        $row = New-Row -Action 'Add permission' -Target 'D:\Data\HR' -Detail 'Allow Modify for CONTOSO\HR-Staff' -Result 'Done'
+        $result = [PSCustomObject]@{ Ok = $true; Entries = @($row); LogPath = 'C:\logs\change.csv'; UnloggedPath = $null; Message = 'Added Allow Modify for CONTOSO\HR-Staff on D:\Data\HR.'; Error = $null }
+        Complete-ChangeTask -Result $result -State $null
+        $script:Shown.Count | Should -Be 0
+        (Get-LastStatus).Kind | Should -Be 'Success'
+    }
+
+    It 'AC57_DryRunEndToEndAddAndTakeOwnership' {
+        $script:WhatIfMode = $true
+        $dir = New-Folder 'DryRunE2E'
+        $script:Current = [PSCustomObject]@{ DisplayPath = $dir; RealPath = $dir }
+        Mock Get-Acl { New-FakeAcl }
+        $actions = [ordered]@{
+            'add'            = { Invoke-AddPermission -Scope Folder -Identity 'BUILTIN\Users' -Rights 'Modify' -Type 'Allow' }
+            'take ownership' = { Invoke-TakeOwnership -Scope Folder }
+        }
+        foreach ($name in $actions.Keys) {
+            $script:Captured = $null; $script:Shown.Clear()
+            & $actions[$name]
+            $null = Complete-Captured
+            $script:Shown.Count | Should -Be 1 -Because "$name shows a dry-run result"
+            $script:Shown[0] | Should -Match ([regex]::Escape($dir)) -Because $name
+            $script:Shown[0] | Should -Match '(?i)nothing was changed' -Because $name
+        }
+        $script:Shown.Clear(); $script:Captured = $null
+        & $actions['add']
+        $null = Complete-Captured
+        foreach ($piece in 'BUILTIN\Users', 'Modify', 'Allow') { $script:Shown[0] | Should -Match ([regex]::Escape($piece)) }
+        @($script:BackstopHit).Count | Should -Be 0
+    }
+}
 }
