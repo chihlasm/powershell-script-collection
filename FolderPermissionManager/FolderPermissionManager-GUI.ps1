@@ -5046,7 +5046,10 @@ function Get-ConfirmSpec {
             elseif ($LowersAccess) { $body += "`n`nThe new level gives $($Change.Identity) less access than before." }
             if ($SelfDenyWarning) { $body += "`n`n$SelfDenyWarning" }
             if ($rootNote) { $body += "`n`n$rootNote" }
-            $body += "`n`nOnly this entry changes; any other entries for $($Change.Identity) stay. $backup"
+            # AddAccessRule may merge the new rule into an existing entry of the same account, type
+            # and flags (Set-FolderPermissionEntry), so "stay" is qualified.
+            # https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.filesystemsecurity.addaccessrule
+            $body += "`n`nOnly this entry changes; any other entries for $($Change.Identity) stay (Windows may combine the new entry with one of them that is the same Allow or Deny and applies to the same items). $backup"
             $label = if ($Type -eq 'Deny') { 'Change to Deny' } else { 'Change Permission' }
             $destructive = ($Type -eq 'Deny') -or [bool]$LowersAccess -or [bool]$rootNote
         }
@@ -6831,10 +6834,17 @@ function Get-CurrentIdentitySids {
     # real token is read; the tests replace it.
     # https://learn.microsoft.com/dotnet/api/system.security.principal.windowsidentity.user
     # https://learn.microsoft.com/dotnet/api/system.security.principal.windowsidentity.groups
+    # WindowsIdentity holds the token handle until it is disposed.
+    # https://learn.microsoft.com/dotnet/api/system.security.principal.windowsidentity.dispose
     $me = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-    [PSCustomObject]@{
-        UserSid  = "$($me.User.Value)"
-        GroupSid = @($me.Groups | ForEach-Object { "$($_.Value)" })
+    try {
+        [PSCustomObject]@{
+            UserSid  = "$($me.User.Value)"
+            GroupSid = @($me.Groups | ForEach-Object { "$($_.Value)" })
+        }
+    }
+    finally {
+        $me.Dispose()
     }
 }
 

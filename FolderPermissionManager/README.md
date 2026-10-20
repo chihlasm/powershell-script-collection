@@ -125,6 +125,8 @@ change is refused with "Another change is still running on `<path>`. Wait for it
   (for example `DeleteSubdirectoriesAndFiles, Modify`) starts on **Keep current (...)**, so you
   can flip Allow and Deny without losing the exact rights. Only the selected entry changes: when
   the account has other entries set on the folder, the dialog says how many and that they stay.
+  (If one of them is the same Allow or Deny and applies to the same items as the changed entry,
+  Windows may combine the two into one entry.)
   - **Files:** select exactly one file and press **Change Permission** in the files bar; the
     dialog has a picker of that file's own entries. A file with only inherited entries can't be
     changed here.

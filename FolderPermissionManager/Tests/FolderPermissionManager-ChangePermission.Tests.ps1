@@ -1012,3 +1012,63 @@ Describe 'FolderPermissionManager: change a permission in place (SQ-025)' {
         }
     }
 }
+
+# Outside the Describe above: its Pester mocks must not be what Initialize-BackgroundPool copies into
+# the pool. Here the pool gets the app's and core's real definitions, plus -FunctionOverride stand-ins
+# for every write (Set-Acl, Invoke-AclTool, takeown, icacls) and for the ACL reads, so no real ACL is
+# read or written.
+Describe 'FolderPermissionManager: change a permission in the background pool (SQ-025)' {
+    It 'AC26_PoolRunReachesNoRealWrite' {
+        $marker = Join-Path $TestDrive 'change-pool-reached.txt'
+        $stub = { param($n) "param([Parameter(ValueFromRemainingArguments)]`$a) Add-Content -LiteralPath '$marker' -Value '$n'; [PSCustomObject]@{ ExitCode = 0; Output = '' }" }
+        $override = @{}
+        foreach ($n in 'Invoke-AclTool', 'takeown', 'icacls') { $override[$n] = & $stub $n }
+        # Set-Acl records that it was reached and keeps the ACL it was given, so the read-back in the
+        # same pool runspace sees the change; Get-Acl hands out that ACL, or the fixture's.
+        $sddl = 'O:BAG:SYD:(A;OICI;0x1301bf;;;BU)'
+        $override['Set-Acl'] = "[CmdletBinding()] param([string]`$LiteralPath, `$AclObject) Add-Content -LiteralPath '$marker' -Value 'Set-Acl'; if (-not `$global:PoolTestApplied) { `$global:PoolTestApplied = @{} }; `$global:PoolTestApplied[`$LiteralPath] = `$AclObject"
+        $override['Get-Acl'] = "[CmdletBinding()] param([string]`$LiteralPath) if (`$global:PoolTestApplied -and `$global:PoolTestApplied.ContainsKey(`$LiteralPath)) { return `$global:PoolTestApplied[`$LiteralPath] }; `$acl = New-Object System.Security.AccessControl.DirectorySecurity; `$acl.SetSecurityDescriptorSddlForm('$sddl'); `$acl"
+        # PowerShell 7 pool runspaces do not load Get-Acl's type extensions (.Sddl); see SQ018N_PoolRunBlocksNeverReachRealWrites.
+        $override['Get-ItemSddl'] = 'param([string]$Path) try { (Get-Acl -LiteralPath $Path -ErrorAction Stop).GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::All) } catch { ''Could not read'' }'
+        $script:PoolLog = Join-Path $TestDrive 'change-pool-log'
+        try {
+            Initialize-BackgroundPool -FunctionOverride $override
+            $run = {
+                param([string]$Dir, [bool]$WhatIf)
+                New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+                # The work block's arguments, in its parameter order: Users' Allow Modify (this folder,
+                # subfolders and files) becomes Allow Read.
+                $workArgs = @([string[]]@($Dir), 'S-1-5-32-545', 'Allow', [int]0x1301bf, 'ContainerInherit, ObjectInherit', 'None',
+                    'Read', 'Allow', $script:PoolLog, $WhatIf, $null)
+                $t = Start-BgTask -Work $script:ChangePermissionWork -ArgumentList $workArgs -OnDone { } -State $null -Kind Change
+                $t.Handle.AsyncWaitHandle.WaitOne(120000) | Should -BeTrue
+                $out = @($t.PS.EndInvoke($t.Handle))
+                $errs = @($t.PS.Streams.Error)
+                $t.PS.Dispose()
+                [PSCustomObject]@{ Out = $out; Errors = $errs }
+            }
+            # Positive control: with -WhatIf off, the pool run does reach the (stubbed) Set-Acl, so the
+            # stubs are what the pool calls and the -WhatIf assertion below is not vacuous.
+            $live = & $run (Join-Path $TestDrive 'ChangePoolLive') $false
+            $live.Errors.Count | Should -Be 0 -Because "$($live.Errors | Out-String)"
+            $liveResult = Select-TaskResult -Output $live.Out
+            $liveResult.Ok | Should -BeTrue -Because "$($liveResult.Error)"
+            @($liveResult.Entries | ForEach-Object { $_.Result }) | Should -Be @('Done') -Because "$($liveResult.Message)"
+            @(Get-Content -LiteralPath $marker) | Should -Be @('Set-Acl') -Because 'the control run writes once, through the stubbed Set-Acl only'
+            Remove-Item -LiteralPath $marker -Force
+
+            # With -WhatIf on, the pool run (WhatIfPreference starts false there) reaches no write and
+            # says nothing was changed.
+            $dry = & $run (Join-Path $TestDrive 'ChangePoolDry') $true
+            $dry.Errors.Count | Should -Be 0 -Because "$($dry.Errors | Out-String)"
+            (Test-Path -LiteralPath $marker) | Should -BeFalse -Because 'a -WhatIf pool run reached Set-Acl, Invoke-AclTool, takeown or icacls'
+            $dryResult = Select-TaskResult -Output $dry.Out
+            $dryResult.Ok | Should -BeTrue -Because "$($dryResult.Error)"
+            @($dryResult.Entries | ForEach-Object { $_.Result }) | Should -Be @('Skipped (WhatIf)')
+            $dryResult.Message | Should -BeLike 'WhatIf: nothing was changed*'
+        }
+        finally {
+            if ($script:BgPool) { try { $script:BgPool.Close() } catch { } }
+        }
+    }
+}
