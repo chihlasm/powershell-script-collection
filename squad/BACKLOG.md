@@ -67,10 +67,10 @@ Split from SQ-002 per D-004.
 
 
 ## SQ-019 · M365 user check: blocked synced user advice must escalate, not "change it" (D-017)
-- status: ready
+- status: review
 - priority: P1
 - type: fix
-- branch:
+- branch: squad/SQ-019-m365-blocked-escalate
 - spec: squad/specs/SQ-019.md
 
 Found in the SQ-011 destructive-operations review (2026-10-18), pre-existing from SQ-002.
@@ -157,7 +157,7 @@ until the owner's lab test. Robocopy tab and Copy Files To are dropped (D-037). 
 SQ-014 and SQ-015 (same core and GUI file). Split per D-039.
 
 ## SQ-018 · FolderPermissionManager WPF app: every change, confirmations and results
-- status: ready
+- status: review
 - revision: owner lab test 2026-10-19, AC55-AC57 (spec SQ-017.md "Revision notes, SQ-018 (owner lab test ...)"); earlier D-043/D-044/D-045 AC47-AC54
 - priority: P1
 - type: feature
@@ -237,7 +237,7 @@ password problem, encryption type blocked") with the next step, in the report an
 (D-022, D-023, D-024). Per-DC gate says "can't tell" where a DC can't log the events. Read-only.
 
 ## SQ-007 · Mailbox check: the facts, with "do NOT reset yet" on takeover signs
-- status: ready
+- status: review
 - revision: merge to main failed one test at review 2026-10-18 (see spec Revision notes)
 - priority: P2
 - type: feature
@@ -282,10 +282,10 @@ Invoke-Command (D-005), and log every change in the shared format (D-030). Fail 
 can't be written (D-029).
 
 ## SQ-012 · AVD host checks in Citrix-FSLogix-Triage
-- status: ready
+- status: review
 - priority: P2
 - type: feature
-- branch:
+- branch: squad/SQ-012-avd-host-checks
 - spec: squad/specs/SQ-003.md (section "Proposed split: SQ-012 · AVD host checks")
 - idea: squad/ideas/sessions/2026-10-16/cards/I-08-vdi-temp-profile-verdict.md
 
@@ -294,10 +294,10 @@ documented event 3277 errors, events 3703/3019/3389 and the rdp-sxs listener, ea
 Learn fix. No new folder. Split from SQ-003 per D-004; P2 per D-016.
 
 ## SQ-005 · End-of-support section in AD-Audit
-- status: ready
+- status: review
 - priority: P3
 - type: feature
-- branch:
+- branch: squad/SQ-005-end-of-support
 - spec: squad/specs/SQ-005.md
 - idea: squad/ideas/sessions/2026-10-16/cards/I-11-end-of-support-in-ad-audit.md
 
@@ -407,3 +407,47 @@ pointing at C:\Windows on the server is not refused. After SQ-023 moves the shar
 them for every remote Copy target: the share's real server folder against D-036 and the
 high-impact roots, and the D-045 junction walk, failing closed. Same as whole-tree takeown
 (D-045), extended to Copy (D-053).
+
+## SQ-027 · M365 user check: a blocked risky user must escalate to the security lead, not the manager path
+- status: new
+- priority: P2
+- type: follow-up
+- found-in: SQ-019
+- branch:
+
+D-050 limits the "check with their manager, note who approved it, then unblock/enable" step to a
+plain blocked account (no block marker, not a risky user). `M365UserCheck.Core.ps1` picks the
+SignInBlocked step (cloud-only, :831) and both 50057 steps (:738/:739) without looking at the
+ID Protection result. A user flagged atRisk/confirmedCompromised whom an admin blocked during an
+incident gets "involve the security lead before unblocking" (RiskyUser, a Warning) next to
+"check with their manager ... then unblock sign-in" (SignInBlocked, a Blocker), and only the
+Blocker's step reaches the ticket note. Tier 1 could unblock a compromised account. When
+RiskGate is Available and the user is risky, those steps should escalate to the security lead.
+Add a blocked + risky scenario test. Same pass: the synced 50057 step should not say "enable it
+in AD" when AD was read and the account carries the block marker (conflicts with the :678
+escalation on the same ticket).
+
+## SQ-028 · FolderPermissionManager: a bare account name on a network folder must not resolve to this workstation's local account
+- status: new
+- priority: P2
+- type: follow-up
+- found-in: SQ-018
+- branch:
+
+Add Permission resolves a bare name such as `micha` on the workstation (NTAccount.Translate /
+LookupAccountName), which checks the local machine's accounts before the domain
+(https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-lookupaccountnamew). If the
+workstation has a local `micha` and the domain also has one, a grant on `\fs01\share` goes to
+the workstation's local SID: an orphan entry the server cannot use, reported as Done. SQ-018's
+AC56 lookup now even shows it as "found". On a target that is not on this computer, refuse or
+warn when the resolved SID is in this computer's account domain (machine SID prefix), and show
+which account (DOMAIN\name) will be used before the change starts. Related: lab-test whether
+the AC55 advice "Type the server's name instead, for example FS01\name" resolves from a
+workstation at all; if not, reword it (domain group, or run the tool on the server).
+Destructive-operations checklist applies.
+Same pass (found in the SQ-018 fix-round re-review): `Test-AddTargetOnThisComputer` decides
+"this computer" for `.\name` from the drive type only, so `D:\Link` where `D:\Link` is a
+directory symbolic link to `\FS01\Data` (Fixed drive) still rewrites `.\micha` to
+`PC01\micha` and writes a workstation-local SID onto FS01's folder (reported Done). Refuse when
+any folder from the target up to its root is a reparse point not known to be local, or cannot be
+read (Get-AppReparseInfo throws, so fail closed); test with a mocked symlink tag 0xA000000C.
