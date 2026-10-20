@@ -1098,3 +1098,61 @@ Describe 'SQ-011 on-premises AD stage' {
         (Get-Section $lines 'Ruled out:') -join "`n" | Should -Not -Match '(?i)address conflict'
     }
 }
+
+Describe 'SQ-027 a risky user escalates in the ticket note' {
+    BeforeEach {
+        New-Scenario
+        $script:Events = New-Object System.Collections.Generic.List[string]
+        Mock Import-Module { }
+        Mock Connect-MgGraph { $script:Events.Add('CONNECT') }
+        Mock Get-MgContext { [PSCustomObject]@{ Account = $script:Scn.Me; TenantId = $script:TenantId; Scopes = @('Directory.Read.All'); AuthType = 'Delegated'; ContextScope = 'Process' } }
+        Mock Disconnect-MgGraph { $script:Events.Add('DISCONNECT') }
+        Mock Set-Clipboard { }
+        Mock Invoke-WinFormsClipboard { }
+        Mock Write-Host { $script:Events.Add('HOST:' + ($Object -join ' ')) }
+        Mock Invoke-MgGraphRequest -MockWith $script:FakeGraph
+    }
+
+    BeforeAll {
+        # The security-lead step, read from the core (loaded in a child scope: functions stay out of the test).
+        function Get-RiskyUserStep { & { . (Join-Path $script:Root 'M365UserCheck.Core.ps1') -LoadFunctionsOnly; $script:M365RiskyUserStep } }
+        function Get-NextStepText([string]$Out, [string]$Ticket) {
+            $noteFile = @(Get-ChildItem -LiteralPath (Join-Path $Out "Ticket_$Ticket") -Filter 'Note_*.txt' -ErrorAction SilentlyContinue)
+            $noteFile.Count | Should -Be 1
+            $lines = [System.IO.File]::ReadAllLines($noteFile[0].FullName)
+            $section = @(Get-Section $lines 'Next step:')
+            return [PSCustomObject]@{ Lines = $section; Text = (($section -join ' ') -replace '\s+', ' ') }
+        }
+    }
+
+    It 'SQ027_AC9_TicketNoteBlockedRiskyEscalates: cloud-only, blocked, high/atRisk -> the note''s Next step holds the security-lead step once, no manager step, no "unblock sign-in for the user"' {
+        $step = Get-RiskyUserStep
+        $step | Should -Not -BeNullOrEmpty -Because 'the core must define $script:M365RiskyUserStep'
+        New-Scenario @{ UpnMatches = @((New-User @{ accountEnabled = $false })); RiskyUser = @{ riskLevel = 'high'; riskState = 'atRisk' }; RiskyStatus = 'Found' }
+        $out = New-OutDir
+        $r = Invoke-Entry @{ TicketNumber = 'T2701'; OutputPath = $out }
+        $script:LastError | Should -BeNullOrEmpty
+        $r.Assessment.Verdict | Should -Be 'NO'
+        $next = Get-NextStepText $out 'T2701'
+        $next.Text.Contains(($step -replace '\s+', ' ')) | Should -BeTrue -Because 'the Next step section must carry the security-lead step'
+        @($next.Lines | Where-Object { ($_ -replace '\s+', ' ').Contains(($step -replace '\s+', ' ')) }).Count | Should -Be 1 -Because 'identical steps are shown once'
+        $next.Text | Should -Not -Match '(?i)manager'
+        $next.Text | Should -Not -Match '(?i)\bunblock sign-in for the user\b'
+    }
+
+    It 'SQ027_AC10_TicketNoteRiskyNotBlocked: risky user, account enabled, last sign-in succeeded -> still YES (exit 0); Next step holds the RiskyUser action, not "No Microsoft 365 account problem found"' {
+        New-Scenario @{ RiskyUser = @{ riskLevel = 'medium'; riskState = 'atRisk' }; RiskyStatus = 'Found' }
+        $out = New-OutDir
+        $r = Invoke-Entry @{ TicketNumber = 'T2702'; OutputPath = $out }
+        $script:LastError | Should -BeNullOrEmpty
+        $r.Assessment.Verdict | Should -Be 'YES'
+        $r.ExitCode | Should -Be 0
+        (Get-HostText) | Should -Match 'Can Jane Doe sign in to Microsoft 365\?\s+YES'
+        $riskyAction = ($r.Assessment.Reasons | Where-Object { $_.Code -eq 'RiskyUser' } | Select-Object -First 1).Action
+        $riskyAction | Should -Not -BeNullOrEmpty
+        $next = Get-NextStepText $out 'T2702'
+        $next.Text.Contains(($riskyAction -replace '\s+', ' ')) | Should -BeTrue -Because 'Next step carries the RiskyUser action'
+        $next.Text | Should -Match '(?i)security lead'
+        $next.Text | Should -Not -Match 'No Microsoft 365 account problem found'
+    }
+}

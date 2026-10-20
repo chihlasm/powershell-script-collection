@@ -1221,9 +1221,338 @@ Describe 'SQ-019 next steps never undo a block without a check' {
 
         $disabled = @($rows | Where-Object { $_.See -eq 'AD has the account disabled, Microsoft 365 still allows sign-in (warning)' })
         $disabled.Count | Should -Be 1 -Because 'a new row carries the AC3 advice'
-        $disabled[0].Todo | Should -Match '^Check with their manager'
+        # SQ-027 AC11 puts one "if ID Protection flags the user, escalate" sentence in front.
+        $disabled[0].Todo | Should -Match '^(If ID Protection flags [^.]*\. )?Check with their manager'
         $disabled[0].Todo | Should -Match 'note on the ticket who approved'
         $disabled[0].Todo | Should -Match 'Entra Connect'
+    }
+}
+
+Describe 'SQ-027 a risky user always escalates to the security lead' {
+    BeforeAll {
+        $script:Sid = 'S-1-5-21-1111111111-2222222222-3333333333-1105'
+        # Own copies of the fixtures (a Describe's BeforeAll is not visible to its siblings).
+        function New-AdUser {
+            param([hashtable]$Set = @{})
+            $a = @{
+                Enabled = $true; UserPrincipalName = 'jdoe@contoso.com'; mail = 'jdoe@contoso.com'
+                proxyAddresses = @('SMTP:jdoe@contoso.com'); SamAccountName = 'jdoe'
+                DistinguishedName = 'CN=Jane Doe,OU=Staff,DC=contoso,DC=com'; pwdLastSet = 133700000000000000
+                'msDS-cloudExtensionAttribute10' = $null
+            }
+            foreach ($k in $Set.Keys) { $a[$k] = $Set[$k] }
+            return $a
+        }
+        function New-AdGate { param([string]$State = 'Available', [string]$Reason) New-M365Gate -Source 'On-premises AD' -State $State -Reason $Reason }
+        function New-HybridFacts {
+            param([hashtable]$Override = @{}, [hashtable]$UserSet = @{})
+            $s = @{ onPremisesSyncEnabled = $true; onPremisesSecurityIdentifier = $script:Sid; onPremisesProvisioningErrors = @() }
+            foreach ($k in $UserSet.Keys) { $s[$k] = $UserSet[$k] }
+            $o = @{
+                User = (New-User $s); OnPremisesGate = (New-AdGate); AdUser = (New-AdUser); AdMatchedBy = 'SID'
+                AddressConflicts = @(); TenantLastSync = ($script:Now - (New-TimeSpan -Minutes 20)).ToString('yyyy-MM-ddTHH:mm:ssZ')
+            }
+            foreach ($k in $Override.Keys) { $o[$k] = $Override[$k] }
+            return (New-Facts $o)
+        }
+        function New-NoCloudUserFacts {
+            param([object]$AdUser)
+            $nc = 'no Microsoft 365 user'
+            return (New-Facts @{
+                    User = $null; OnPremisesGate = (New-AdGate); AdUser = $AdUser; AdMatchedBy = 'UserPrincipalName'
+                    SignInGate = (New-M365Gate -Source 'Sign-in history' -State NotChecked -Reason $nc)
+                    ConditionalAccessGate = (New-M365Gate -Source 'Conditional Access detail' -State NotChecked -Reason $nc)
+                    MfaGate = (New-M365Gate -Source 'MFA methods' -State NotChecked -Reason $nc)
+                    RiskGate = (New-M365Gate -Source 'Risky user' -State NotChecked -Reason $nc)
+                    SignIns = @(); MfaMethods = @()
+                })
+        }
+        function Merge-Hash([hashtable]$Base, [hashtable]$Extra) {
+            $m = @{}
+            foreach ($k in $Base.Keys) { $m[$k] = $Base[$k] }
+            foreach ($k in $Extra.Keys) { $m[$k] = $Extra[$k] }
+            return $m
+        }
+
+        $script:Marker = @{ 'msDS-cloudExtensionAttribute10' = 'BlockCloudSignIn' }
+
+        # Today's texts (the Action a user who is NOT risky sees), copied from the core so a
+        # change to a non-risky text is caught (AC5).
+        $script:TodayCloudBlocked = 'Check with their manager that the account should be back in use, note on the ticket who approved it, then unblock sign-in for the user in the Microsoft 365 admin center.'
+        $script:TodayAdDisabledBlocked = 'Check with their manager that the account should be back in use, note on the ticket who approved it, then enable it in on-premises AD (AD-UserQuickCheck shows its state) and wait for the next sync: the AD account is disabled, and sync carries that to Microsoft 365.'
+        $script:TodayMarkerBlocked = 'Check with the senior engineer who blocked it whether to remove the marker with M365-SyncedUserFixes: it was blocked on purpose (block marker on the AD account). If they agree, wait for the next sync after it is removed.'
+        $script:TodayAdEnabledBlocked = 'On-premises AD has the account enabled and it was not blocked on purpose with M365-SyncedUserFixes, so the block has not come from AD this sync: see "AD and Microsoft 365 disagree".'
+        $script:TodayNoAd = 'Check with the senior engineer before undoing this block. The account syncs from on-premises AD, so the block comes from there: either the AD account is disabled, or it was blocked on purpose with M365-SyncedUserFixes (block marker msDS-cloudExtensionAttribute10 = BlockCloudSignIn). This check could not compare it with the AD account: run it again where it can read AD (on a client server, or with -Server and -Credential) to see which.'
+        $script:TodayAdDisabledCloudEnabled = 'Check with their manager whether they should still be able to sign in. If not (a leaver), Microsoft 365 blocks sign-in at the next sync: The tenant last received changes from on-premises AD at 2026-10-17 13:40 UTC. If it stays allowed after that, check the Entra Connect server. If they should, note on the ticket who approved it, then enable the AD account (AD-UserQuickCheck shows its state).'
+        $script:TodayRiskyUserAction = 'Treat it as a possible compromised account: involve the security lead before unblocking anything. A risk policy may block them or force a password change.'
+
+        $script:RiskHighAtRisk = @{ riskLevel = 'high'; riskState = 'atRisk' }
+        $script:RiskStateOnly = @{ riskLevel = 'low'; riskState = 'confirmedCompromised' }
+
+        function New-NoAdCases {
+            param([hashtable]$Extra = @{})
+            [ordered]@{
+                'no OnPremisesGate (SQ-002 shape)' = (New-Facts (Merge-Hash @{ User = (New-User @{ accountEnabled = $false; onPremisesSyncEnabled = $true }) } $Extra))
+                'gate NotChecked (-SkipOnPremises)' = (New-HybridFacts (Merge-Hash @{ OnPremisesGate = (New-AdGate -State NotChecked -Reason 'skipped with -SkipOnPremises'); AdUser = $null } $Extra) @{ accountEnabled = $false })
+                'gate Failed' = (New-HybridFacts (Merge-Hash @{ OnPremisesGate = (New-AdGate -State Failed -Reason 'no domain controller answered'); AdUser = $null } $Extra) @{ accountEnabled = $false })
+                'gate Available, AdUser null' = (New-HybridFacts (Merge-Hash @{ AdUser = $null } $Extra) @{ accountEnabled = $false })
+            }
+        }
+
+        # The scenarios of AC1-AC6. Kind: Blocked (SignInBlocked), AdCloud (AdDisabledCloudEnabled),
+        # SignIn (the latest sign-in failed). Group: manager (today's step goes to the manager),
+        # escalating (already escalates), adenabled (the :684 text), code50057, password.
+        function Get-Scenarios {
+            param($Risk, [string]$GateState = 'Available')
+            $common = @{ RiskyUser = $Risk; RiskGate = (New-M365Gate -Source 'Risky user' -State $GateState -Reason 'synthetic') }
+            $list = New-Object System.Collections.Generic.List[object]
+            function Add-S($Name, $Facts, $Kind, $Code, $Today, $Group) {
+                $list.Add([PSCustomObject]@{ Name = $Name; Facts = $Facts; Kind = $Kind; Code = $Code; Today = $Today; Group = $Group })
+            }
+            Add-S 'cloud-only blocked' (New-Facts (Merge-Hash @{ User = (New-User @{ accountEnabled = $false }) } $common)) 'Blocked' 'SignInBlocked' $script:TodayCloudBlocked 'manager'
+            Add-S 'synced, AD disabled, no marker' (New-HybridFacts (Merge-Hash @{ AdUser = (New-AdUser @{ Enabled = $false }) } $common) @{ accountEnabled = $false }) 'Blocked' 'SignInBlocked' $script:TodayAdDisabledBlocked 'manager'
+            Add-S 'synced, block marker' (New-HybridFacts (Merge-Hash @{ AdUser = (New-AdUser $script:Marker) } $common) @{ accountEnabled = $false }) 'Blocked' 'SignInBlocked' $script:TodayMarkerBlocked 'escalating'
+            Add-S 'synced, AD enabled, no marker' (New-HybridFacts (Merge-Hash @{} $common) @{ accountEnabled = $false }) 'Blocked' 'SignInBlocked' $script:TodayAdEnabledBlocked 'adenabled'
+            $noAd = New-NoAdCases $common
+            foreach ($k in $noAd.Keys) { Add-S "synced, no AD: $k" $noAd[$k] 'Blocked' 'SignInBlocked' $script:TodayNoAd 'escalating' }
+            Add-S 'synced, AD disabled, M365 allows sign-in' (New-HybridFacts (Merge-Hash @{ AdUser = (New-AdUser @{ Enabled = $false }) } $common)) 'AdCloud' 'AdDisabledCloudEnabled' $script:TodayAdDisabledCloudEnabled 'manager'
+            foreach ($code in 50057, 50055, 50126) {
+                foreach ($sync in $null, $true) {
+                    $facts = New-Facts (Merge-Hash @{ User = (New-User @{ onPremisesSyncEnabled = $sync }); SignIns = @((New-SignInRow -Code $code)) } $common)
+                    $reasonCode = if ($code -eq 50126) { 'LatestSignInFailed' } else { 'BlockingSignInFailure' }
+                    $group = if ($code -eq 50057) { 'code50057' } else { 'password' }
+                    Add-S "sign-in $code, onPremisesSyncEnabled=$sync" $facts 'SignIn' $reasonCode (Get-M365SignInNextStep -Code $code -Synced ($sync -eq $true)) $group
+                }
+            }
+            return $list.ToArray()
+        }
+        function Get-ScenarioAction($S) { (Get-Reason (Get-M365UserAssessment -Facts $S.Facts) $S.Code).Action }
+
+        # The D017_NoRemovalStepForTier1 scenario list (AC8), each one with RiskyUser set.
+        function Get-D017Scenarios {
+            param($Risk)
+            $err = @{ category = 'PropertyConflict'; propertyCausingError = 'ProxyAddresses'; value = 'smtp:jdoe@contoso.com'; occurredDateTime = '2026-10-16T09:00:00Z' }
+            $holder = [PSCustomObject]@{ Type = 'group'; DisplayName = 'Sales Team'; Address = 'jdoe@contoso.com'; Id = 'eeeeeeee-0000-0000-0000-000000000001' }
+            $sc = New-Object System.Collections.Generic.List[object]
+            $sc.Add((New-Facts @{ User = (New-User @{ accountEnabled = $false }) }))
+            $sc.Add((New-Facts @{ User = (New-User @{ accountEnabled = $false; onPremisesSyncEnabled = $true }) }))
+            $sc.Add((New-Facts @{ User = (New-User @{ assignedLicenses = @(); licenseAssignmentStates = @() }) }))
+            $sc.Add((New-Facts @{ User = (New-User @{ licenseAssignmentStates = @(@{ skuId = 'bbbbbbbb-0000-0000-0000-000000000001'; state = 'Error'; error = 'CountViolation' }) }) }))
+            $sc.Add((New-Facts @{ User = (New-User @{ userType = 'Guest' }) }))
+            $sc.Add((New-Facts @{ MfaMethods = @(@{ '@odata.type' = '#microsoft.graph.passwordAuthenticationMethod'; id = '28c10230-6103-485e-b985-444c60001490' }) }))
+            $sc.Add((New-Facts @{ RiskyUser = @{ riskLevel = 'high'; riskState = 'atRisk' } }))
+            $sc.Add((New-Facts @{ SignIns = @() }))
+            $sc.Add((New-Facts @{ SignIns = @((New-SignInRow -Ago (New-TimeSpan -Hours 1) -Code 99999), (New-SignInRow -Ago (New-TimeSpan -Hours 2)), (New-SignInRow -Ago (New-TimeSpan -Hours 3) -Code 50126)) }))
+            foreach ($code in 50053, 50055, 50057, 50126, 53003, 530035) {
+                foreach ($sync in $null, $true) {
+                    $sc.Add((New-Facts @{ User = (New-User @{ onPremisesSyncEnabled = $sync }); SignIns = @((New-SignInRow -Code $code)) }))
+                }
+            }
+            $sc.Add((New-NoCloudUserFacts -AdUser (New-AdUser)))
+            $sc.Add((New-NoCloudUserFacts -AdUser (New-AdUser $script:Marker)))
+            $sc.Add((New-HybridFacts -UserSet @{ onPremisesProvisioningErrors = @($err) }))
+            $sc.Add((New-HybridFacts @{ TenantLastSync = ($script:Now - (New-TimeSpan -Hours 4)).ToString('yyyy-MM-ddTHH:mm:ssZ') }))
+            $sc.Add((New-Facts @{ OnPremisesGate = (New-AdGate); AdUser = (New-AdUser); AddressConflicts = @() }))
+            $sc.Add((New-HybridFacts @{ AdUser = $null }))
+            $sc.Add((New-HybridFacts @{ AdUser = (New-AdUser $script:Marker) } @{ accountEnabled = $false }))
+            $sc.Add((New-HybridFacts @{ AdUser = (New-AdUser @{ Enabled = $false }) } @{ accountEnabled = $false }))
+            $sc.Add((New-HybridFacts @{} @{ accountEnabled = $false }))
+            $sc.Add((New-HybridFacts @{ AdUser = (New-AdUser @{ Enabled = $false }) }))
+            $sc.Add((New-HybridFacts @{ AdUser = (New-AdUser @{ UserPrincipalName = 'jane.doe@contoso.com' }) }))
+            $sc.Add((New-HybridFacts @{ AdMatchedBy = 'UserPrincipalName' }))
+            $sc.Add((New-HybridFacts @{ AddressConflicts = @($holder) }))
+            $sc.Add((New-Facts @{ User = (New-User @{ accountEnabled = $false; onPremisesSyncEnabled = $true }) }))
+            $sc.Add((New-HybridFacts @{ OnPremisesGate = (New-AdGate -State NotChecked -Reason 'skipped with -SkipOnPremises'); AdUser = $null } @{ accountEnabled = $false }))
+            $sc.Add((New-HybridFacts @{ OnPremisesGate = (New-AdGate -State Failed -Reason 'no domain controller answered'); AdUser = $null } @{ accountEnabled = $false }))
+            $sc.Add((New-HybridFacts @{ AdUser = $null } @{ accountEnabled = $false }))
+            foreach ($f in $sc) { $f.RiskyUser = $Risk }
+            return $sc.ToArray()
+        }
+
+        # AC1/AC2 step wording (the proposed constant text is the implementer's; the rules are the spec's).
+        function Assert-RiskyStepWording {
+            $step = $script:M365RiskyUserStep
+            $step | Should -Not -BeNullOrEmpty -Because 'the core must define $script:M365RiskyUserStep'
+            $step | Should -Match '^Escalate to the security lead'
+            $step | Should -Match '(?i)do not unblock sign-in'
+            $step | Should -Match '(?i)enable the account'
+            $step | Should -Match '(?i)reset the password'
+            $step | Should -Match '(?i)until the security lead agrees'
+            $step | Should -Not -Match '(?i)manager'
+        }
+    }
+
+    It 'SQ027_AC1_RiskyBlockedCloudOnly: cloud-only, blocked, high/atRisk -> NO, SignInBlocked Action is the security-lead step, RiskyUser Warning unchanged' {
+        Assert-RiskyStepWording
+        $s = @(Get-Scenarios $script:RiskHighAtRisk | Where-Object { $_.Name -eq 'cloud-only blocked' })[0]
+        $a = Get-M365UserAssessment -Facts $s.Facts
+        $a.Verdict | Should -Be 'NO'
+        (Get-Reason $a 'SignInBlocked').Action | Should -BeExactly $script:M365RiskyUserStep
+        $w = Get-Reason $a 'RiskyUser'
+        $w | Should -Not -BeNullOrEmpty
+        $w.Level | Should -Be 'Warning'
+        $w.Message | Should -BeExactly 'Microsoft Entra ID Protection flags this user: risk level high, risk state atRisk.'
+        $w.Action | Should -BeExactly $script:TodayRiskyUserAction
+        foreach ($r in @($a.Reasons)) { [string]$r.Action | Should -Not -Match '(?i)check with their manager' -Because "the manager step is not shown anywhere ($($r.Code))" }
+    }
+
+    It 'SQ027_AC2_RiskyBlockedSyncedEveryBranch: synced, blocked, risky by state alone -> SignInBlocked Action is the security-lead step in all three AD cases and the four no-AD routes' {
+        Assert-RiskyStepWording
+        $cases = @(Get-Scenarios $script:RiskStateOnly | Where-Object { $_.Kind -eq 'Blocked' -and $_.Name -like 'synced*' })
+        $cases.Count | Should -Be 8
+        foreach ($s in $cases) {
+            $a = Get-M365UserAssessment -Facts $s.Facts
+            (Get-Reason $a 'RiskyUser') | Should -Not -BeNullOrEmpty -Because $s.Name
+            (Get-Reason $a 'SignInBlocked').Action | Should -BeExactly $script:M365RiskyUserStep -Because $s.Name
+        }
+    }
+
+    It 'SQ027_AC3_RiskySignInStepsEscalate: risky, latest sign-in failed 50057/50055/50126, synced or not -> Action is the security-lead step; Level, Code and Message unchanged' {
+        Assert-RiskyStepWording
+        $risky = @(Get-Scenarios $script:RiskHighAtRisk | Where-Object { $_.Kind -eq 'SignIn' })
+        $plain = @(Get-Scenarios $null | Where-Object { $_.Kind -eq 'SignIn' })
+        $risky.Count | Should -Be 6
+        for ($i = 0; $i -lt $risky.Count; $i++) {
+            $r = Get-Reason (Get-M365UserAssessment -Facts $risky[$i].Facts) $risky[$i].Code
+            $b = Get-Reason (Get-M365UserAssessment -Facts $plain[$i].Facts) $plain[$i].Code
+            $r | Should -Not -BeNullOrEmpty -Because $risky[$i].Name
+            $r.Action | Should -BeExactly $script:M365RiskyUserStep -Because $risky[$i].Name
+            $r.Level | Should -Be $b.Level -Because $risky[$i].Name
+            $r.Code | Should -Be $b.Code -Because $risky[$i].Name
+            $r.Message | Should -BeExactly $b.Message -Because $risky[$i].Name
+            $r.Message | Should -Match 'meaning per Microsoft' -Because $risky[$i].Name
+        }
+    }
+
+    It 'SQ027_AC4_RiskyAdDisabledCloudEnabledEscalates: risky synced user allowed in Microsoft 365, AD disabled -> Action is the security-lead step; Warning and Message unchanged' {
+        Assert-RiskyStepWording
+        $s = @(Get-Scenarios $script:RiskHighAtRisk | Where-Object { $_.Kind -eq 'AdCloud' })[0]
+        $r = Get-Reason (Get-M365UserAssessment -Facts $s.Facts) 'AdDisabledCloudEnabled'
+        $r | Should -Not -BeNullOrEmpty
+        $r.Action | Should -BeExactly $script:M365RiskyUserStep
+        $r.Level | Should -Be 'Warning'
+        $r.Message | Should -BeExactly 'On-premises AD has this account disabled, but Microsoft 365 still allows sign-in: AD and Microsoft 365 disagree, and sync normally carries the AD state across.'
+    }
+
+    It 'SQ027_AC5_NotRiskyUnchanged: no record, low/remediated and none/dismissed give exactly today''s Action in every AC1-AC4 scenario (password steps equal Get-M365SignInNextStep); risk gate NotLicensed/Failed keeps today''s text as the start' {
+        $script:M365RiskyUserStep | Should -Not -BeNullOrEmpty -Because 'the core must define $script:M365RiskyUserStep (non-vacuous: a not-risky user must never get it)'
+        foreach ($risk in $null, @{ riskLevel = 'low'; riskState = 'remediated' }, @{ riskLevel = 'none'; riskState = 'dismissed' }) {
+            foreach ($s in @(Get-Scenarios $risk)) {
+                $act = Get-ScenarioAction $s
+                $act | Should -BeExactly $s.Today -Because "$($s.Name), risk $($risk | ConvertTo-Json -Compress)"
+                $act | Should -Not -BeExactly $script:M365RiskyUserStep
+            }
+        }
+        foreach ($state in 'NotLicensed', 'Failed') {
+            foreach ($s in @(Get-Scenarios $null $state)) {
+                $act = Get-ScenarioAction $s
+                if ($s.Group -eq 'adenabled') { continue }
+                if ($s.Group -in 'manager', 'code50057') { $act.StartsWith($s.Today, [StringComparison]::Ordinal) | Should -BeTrue -Because "$state $($s.Name): today's text, then the AC6 sentence" }
+                else { $act | Should -BeExactly $s.Today -Because "$state $($s.Name): already escalates / password step, no sentence" }
+            }
+        }
+    }
+
+    It 'SQ027_AC6_RiskNotCheckedCaveat: risk gate NotLicensed or Failed -> manager-path steps and the cloud/synced 50057 step end with the "ID Protection could not be checked" sentence; the escalating steps and the four password steps do not get it' {
+        $sentence = $script:M365RiskNotCheckedSentence
+        $sentence | Should -Not -BeNullOrEmpty -Because 'the core must define $script:M365RiskNotCheckedSentence'
+        $sentence | Should -Match 'escalate to the security lead'
+        foreach ($state in 'NotLicensed', 'Failed') {
+            foreach ($s in @(Get-Scenarios $null $state)) {
+                $act = Get-ScenarioAction $s
+                switch ($s.Group) {
+                    { $_ -in 'manager', 'code50057' } {
+                        $act.EndsWith($sentence, [StringComparison]::Ordinal) | Should -BeTrue -Because "$state $($s.Name)"
+                        $act.StartsWith($s.Today, [StringComparison]::Ordinal) | Should -BeTrue -Because "$state $($s.Name)"
+                    }
+                    'escalating' { $act | Should -BeExactly $s.Today -Because "$state $($s.Name)" }
+                    'password' { $act | Should -BeExactly $s.Today -Because "$state $($s.Name)" }
+                }
+            }
+        }
+        # The same facts with the gate Available and nothing risky never carry the sentence.
+        foreach ($s in @(Get-Scenarios $null)) { (Get-ScenarioAction $s) | Should -Not -Match 'ID Protection could not be checked' -Because $s.Name }
+    }
+
+    It 'SQ027_AC7_MarkerBlocked50057Consistent: blocked synced user with the marker and a failed 50057 -> the 50057 Action equals the SignInBlocked Action and nothing says "enable it in AD"; the same for cloud-only, AD-disabled, AD-enabled and no-AD cases' {
+        $row = @((New-SignInRow -Code 50057))
+        $cases = [ordered]@{
+            'marker (spec case)' = (New-HybridFacts @{ AdUser = (New-AdUser $script:Marker); SignIns = $row } @{ accountEnabled = $false })
+            'cloud-only' = (New-Facts @{ User = (New-User @{ accountEnabled = $false }); SignIns = $row })
+            'AD disabled, no marker' = (New-HybridFacts @{ AdUser = (New-AdUser @{ Enabled = $false }); SignIns = $row } @{ accountEnabled = $false })
+            'AD enabled, no marker' = (New-HybridFacts @{ SignIns = $row } @{ accountEnabled = $false })
+        }
+        $noAd = New-NoAdCases @{ SignIns = $row }
+        foreach ($k in $noAd.Keys) { $cases["no AD: $k"] = $noAd[$k] }
+        foreach ($name in $cases.Keys) {
+            $a = Get-M365UserAssessment -Facts $cases[$name]
+            $blocked = Get-Reason $a 'SignInBlocked'
+            $failed = Get-Reason $a 'BlockingSignInFailure'
+            $blocked | Should -Not -BeNullOrEmpty -Because $name
+            $failed | Should -Not -BeNullOrEmpty -Because $name
+            $failed.Action | Should -BeExactly $blocked.Action -Because $name
+            foreach ($r in @($a.Reasons)) { [string]$r.Action | Should -Not -Match 'enable it in AD' -Because "$name ($($r.Code))" }
+        }
+        # Marker case, exactly: the senior-engineer text.
+        $m = Get-M365UserAssessment -Facts $cases['marker (spec case)']
+        (Get-Reason $m 'BlockingSignInFailure').Action | Should -Match '^Check with the senior engineer who blocked it'
+        # When SignInBlocked did not fire (account enabled) the mapped 50057 step stays.
+        $enabled = Get-M365UserAssessment -Facts (New-Facts @{ User = (New-User @{ onPremisesSyncEnabled = $true }); SignIns = $row })
+        (Get-Reason $enabled 'SignInBlocked') | Should -BeNullOrEmpty
+        (Get-Reason $enabled 'BlockingSignInFailure').Action | Should -BeExactly (Get-M365SignInNextStep -Code 50057 -Synced $true)
+    }
+
+    It 'SQ027_AC8_NoConflictingStepsForRiskyUser: every D017 scenario with a risky user -> no manager step anywhere, every unblock/enable/reset step has "security lead" before it, and Test-M365StepNeedsApproval passes for every Action' {
+        $script:M365RiskyUserStep | Should -Not -BeNullOrEmpty -Because 'the core must define $script:M365RiskyUserStep'
+        $scenarios = @(Get-D017Scenarios $script:RiskHighAtRisk)
+        $scenarios.Count | Should -BeGreaterThan 40
+        $security = 0
+        foreach ($f in $scenarios) {
+            foreach ($r in @((Get-M365UserAssessment -Facts $f).Reasons)) {
+                $act = [string]$r.Action
+                if (-not $act) { continue }
+                if ($act -ceq $script:M365RiskyUserStep) { $security++ }
+                $act | Should -Not -Match '(?i)check with their manager' -Because "$($r.Code): $act"
+                # The unblock / enable / re-enable / reset class (the removal wording has its own D-017 test).
+                $hits = @([regex]::Matches($act, $script:ReversalPattern, 'IgnoreCase'))
+                if ($hits.Count -gt 0) {
+                    $first = ($hits | Sort-Object Index)[0]
+                    if ($first.Value -match '^(unblock\w*|re-?enable\w*|enable|reset|change it)$') {
+                        $lead = $act.IndexOf('security lead', [StringComparison]::OrdinalIgnoreCase)
+                        $lead | Should -BeGreaterOrEqual 0 -Because "$($r.Code): $act"
+                        $lead | Should -BeLessThan $first.Index -Because "$($r.Code): security lead comes before '$($first.Value)' in: $act"
+                    }
+                }
+                Test-M365StepNeedsApproval $act | Should -BeNullOrEmpty -Because "$($r.Code): $act"
+            }
+        }
+        $security | Should -BeGreaterThan 8 -Because 'the blocked, AD-disabled and sign-in scenarios must now carry the security-lead step'
+    }
+
+    It 'SQ027_AC11_ReadmeRiskyRows: the blocked row and the AD-disabled row start with "if ID Protection flags the user, escalate to the security lead instead"; the ID Protection row says it replaces every unblock, enable and password-reset step' {
+        $lines = Get-Content -LiteralPath (Join-Path $script:Root 'README.md')
+        $rows = New-Object System.Collections.Generic.List[object]
+        $inSection = $false
+        foreach ($line in $lines) {
+            if ($line -match '^## ') { $inSection = @('What each reason means', 'Is it a sync problem?' | Where-Object { $line -match [regex]::Escape($_) }).Count -gt 0; continue }
+            if (-not $inSection -or $line -notmatch '^\|') { continue }
+            $cells = @($line.Trim().Trim('|').Split('|') | ForEach-Object { $_.Trim() })
+            if ($cells.Count -ne 3 -or $cells[0] -eq 'You see' -or $cells[0] -match '^-+$') { continue }
+            $rows.Add([PSCustomObject]@{ See = $cells[0]; Means = $cells[1]; Todo = $cells[2] })
+        }
+        foreach ($row in $rows) { Test-M365StepNeedsApproval $row.Todo | Should -BeNullOrEmpty -Because "README row '$($row.See)'" }
+
+        $lead = '(?i)^If ID Protection flags [^.]*,\s*escalate to the security lead instead'
+        $blocked = @($rows | Where-Object { $_.See -eq 'Sign-in is blocked' })
+        $blocked.Count | Should -Be 1
+        $blocked[0].Todo | Should -Match $lead
+        $disabled = @($rows | Where-Object { $_.See -eq 'AD has the account disabled, Microsoft 365 still allows sign-in (warning)' })
+        $disabled.Count | Should -Be 1
+        $disabled[0].Todo | Should -Match $lead
+        $risky = @($rows | Where-Object { $_.See -eq 'ID Protection flags this user (warning)' })
+        $risky.Count | Should -Be 1
+        $risky[0].Todo | Should -Match '(?i)security lead'
+        $risky[0].Todo | Should -Match '(?i)replaces?\b.*\bunblock\b.*\benable\b.*\bpassword'
     }
 }
 
