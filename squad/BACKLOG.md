@@ -70,7 +70,7 @@ Split from SQ-002 per D-004.
 
 
 ## SQ-019 · M365 user check: blocked synced user advice must escalate, not "change it" (D-017)
-- status: review
+- status: done
 - priority: P1
 - feature: M365 user check
 - type: fix
@@ -166,7 +166,7 @@ until the owner's lab test. Robocopy tab and Copy Files To are dropped (D-037). 
 SQ-014 and SQ-015 (same core and GUI file). Split per D-039.
 
 ## SQ-018 · FolderPermissionManager WPF app: every change, confirmations and results
-- status: review
+- status: done
 - revision: owner lab test 2026-10-19, AC55-AC57 (spec SQ-017.md "Revision notes, SQ-018 (owner lab test ...)"); earlier D-043/D-044/D-045 AC47-AC54
 - priority: P1
 - feature: FolderPermissionManager rewrite
@@ -252,7 +252,7 @@ password problem, encryption type blocked") with the next step, in the report an
 (D-022, D-023, D-024). Per-DC gate says "can't tell" where a DC can't log the events. Read-only.
 
 ## SQ-007 · Mailbox check: the facts, with "do NOT reset yet" on takeover signs
-- status: review
+- status: done
 - revision: merge to main failed one test at review 2026-10-18 (see spec Revision notes)
 - priority: P2
 - feature: Mailbox takeover check
@@ -268,7 +268,7 @@ with "Check CIPP's BEC report" as the next step. Subjects stay out of the ticket
 Second entry script in the SQ-002 folder; builds after SQ-002.
 
 ## SQ-016 · Mailbox check: when were rules, forwarding and delegates added?
-- status: review
+- status: done
 - waiting: SQ-007 (stacked on it; SQ-007 went back to ready at review 2026-10-18). Owner approved
   the merge; merge right after SQ-007 lands.
 - priority: P2
@@ -300,7 +300,7 @@ Invoke-Command (D-005), and log every change in the shared format (D-030). Fail 
 can't be written (D-029).
 
 ## SQ-012 · AVD host checks in Citrix-FSLogix-Triage
-- status: review
+- status: done
 - priority: P2
 - feature: VDI temp-profile triage
 - type: feature
@@ -313,7 +313,7 @@ documented event 3277 errors, events 3703/3019/3389 and the rdp-sxs listener, ea
 Learn fix. No new folder. Split from SQ-003 per D-004; P2 per D-016.
 
 ## SQ-005 · End-of-support section in AD-Audit
-- status: review
+- status: done
 - priority: P3
 - feature: AD-Audit
 - type: feature
