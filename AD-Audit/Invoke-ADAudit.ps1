@@ -1421,18 +1421,10 @@ function Export-CSVReports {
     $exported = 0
     foreach ($kv in $csvMap.GetEnumerator()) {
         $data = @($kv.Value)
-        $filePath = Join-Path $BasePath "$ReportName-$($kv.Key).csv"
         if ($data.Count -gt 0) {
+            $filePath = Join-Path $BasePath "$ReportName-$($kv.Key).csv"
             $data | Export-Csv -Path $filePath -NoTypeInformation -Encoding UTF8
             $exported++
-        }
-        elseif (Test-Path -LiteralPath $filePath) {
-            # $ReportName is fixed for the session, so re-exporting results (pipeline use
-            # after -LoadFunctionsOnly) into the same folder must not leave an older CSV of
-            # THIS report next to results that now have no rows. Only this report's own
-            # file name is ever removed.
-            try { Remove-Item -LiteralPath $filePath -Force -ErrorAction Stop }
-            catch { Write-AuditLog "Could not remove outdated $filePath : $($_.Exception.Message)" -Level Warning }
         }
     }
 
