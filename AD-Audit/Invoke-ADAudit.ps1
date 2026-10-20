@@ -11,6 +11,8 @@
     - User account analysis (stale, locked, password issues)
     - Group analysis (empty, large, nested, privileged)
     - Computer account analysis (stale, OS distribution, unsupported OS)
+    - End of support: every enabled Windows Server with Microsoft's mainstream, extended
+      and ESU end dates from a cited lifecycle table, days left, and last logon
     - Password policy review (default and fine-grained, NIST 800-63B)
     - Privileged access review (AdminSDHolder, delegation, Kerberoastable, AS-REP Roastable, RBCD)
     - Security findings (reversible encryption, DES, Legacy/Windows LAPS, DNS)
@@ -39,7 +41,7 @@
 
 .PARAMETER IncludeSection
     Array of section names to include. Default: All. Valid values:
-    DomainOverview, DomainControllers, Users, Groups, Computers,
+    DomainOverview, DomainControllers, Users, Groups, Computers, EndOfSupport,
     PasswordPolicy, PrivilegedAccess, Security, Infrastructure, OUStructure
 
 .PARAMETER LogCallback
@@ -71,7 +73,7 @@
 
 .NOTES
     Author: PowerShell Script Collection
-    Version: 2.1
+    Version: 2.2
     Requires: Windows PowerShell 5.1 (uses ::new()), ActiveDirectory module (RSAT).
     The ActiveDirectory module is imported at run time (not via #Requires -Modules) so
     servers that have RSAT cmdlets available but not formally registered still work.
@@ -93,6 +95,20 @@
       https://learn.microsoft.com/openspecs/windows_protocols/ms-pac/55fc19f2-55ba-4251-8a6a-103dd7c66280
     - netdom trust /quarantine (Yes = accept only SIDs from the directly trusted domain):
       https://learn.microsoft.com/windows-server/administration/windows-commands/netdom-trust
+    - Windows Server lifecycle dates (End of Support section; table last checked 2026-10-20):
+      https://learn.microsoft.com/lifecycle/products/windows-server-2003-
+      https://learn.microsoft.com/lifecycle/products/windows-server-2008
+      https://learn.microsoft.com/lifecycle/products/windows-server-2008-r2
+      https://learn.microsoft.com/lifecycle/products/windows-server-2012
+      https://learn.microsoft.com/lifecycle/products/windows-server-2012-r2
+      https://learn.microsoft.com/lifecycle/products/windows-server-2016
+      https://learn.microsoft.com/lifecycle/products/windows-server-2019
+      https://learn.microsoft.com/lifecycle/products/windows-server-2022
+      https://learn.microsoft.com/lifecycle/products/windows-server-2025
+    - lastLogonTimestamp (source of LastLogonDate) replicates only when older than
+      msDS-LogonTimeSyncInterval, so last logon can lag by about 14 days:
+      https://learn.microsoft.com/windows/win32/adschema/a-lastlogontimestamp
+      https://learn.microsoft.com/windows/win32/adschema/a-msds-logontimesyncinterval
 #>
 
 [CmdletBinding()]
@@ -118,7 +134,7 @@ param(
 
     [Parameter()]
     [ValidateSet('All','DomainOverview','DomainControllers','Users','Groups','Computers',
-        'PasswordPolicy','PrivilegedAccess','Security','Infrastructure','OUStructure')]
+        'EndOfSupport','PasswordPolicy','PrivilegedAccess','Security','Infrastructure','OUStructure')]
     [string[]]$IncludeSection = @('All'),
 
     [Parameter()]
@@ -132,11 +148,11 @@ param(
 $ErrorActionPreference = 'Continue'
 $WarningPreference = 'Continue'
 
-$ScriptVersion = "2.0"
+$ScriptVersion = "2.2"
 
 # Section selection helper
 $AllSections = @('DomainOverview','DomainControllers','Users','Groups','Computers',
-    'PasswordPolicy','PrivilegedAccess','Security','Infrastructure','OUStructure')
+    'EndOfSupport','PasswordPolicy','PrivilegedAccess','Security','Infrastructure','OUStructure')
 if ($IncludeSection -contains 'All') { $IncludeSection = $AllSections }
 function Test-SectionIncluded { param([string]$Name) $IncludeSection -contains $Name }
 $AuditDate = Get-Date
@@ -181,6 +197,13 @@ function Escape-Html {
     param([string]$Value)
     if ([string]::IsNullOrEmpty($Value)) { return '' }
     return [System.Security.SecurityElement]::Escape($Value)
+}
+
+function ConvertTo-CsvSafeText {
+    # A CSV cell starting with = + - @ tab or CR is read as a formula by Excel; prefix a quote.
+    param([string]$Text)
+    if (-not [string]::IsNullOrEmpty($Text) -and $Text -match '^[=+\-@\t\r]') { return ("'" + $Text) }
+    return $Text
 }
 
 function Test-Prerequisites {
@@ -270,12 +293,186 @@ function Get-SchemaVersionOS {
     return "Unknown (version $Version)"
 }
 
-# SQ-005 STUBS (test-first): replaced by the real implementation in the build step.
-function Get-ServerLifecycleTable { throw 'Get-ServerLifecycleTable: not implemented (SQ-005)' }
-function Resolve-ServerLifecycle { param([string]$OperatingSystem, $Table) throw 'Resolve-ServerLifecycle: not implemented (SQ-005)' }
-function Get-EndOfSupportStatus { param($Lifecycle, [datetime]$AsOf) throw 'Get-EndOfSupportStatus: not implemented (SQ-005)' }
-function Test-LifecycleTableAge { param([string]$CheckedOn, [datetime]$AsOf) throw 'Test-LifecycleTableAge: not implemented (SQ-005)' }
-function Get-EndOfSupportAudit { throw 'Get-EndOfSupportAudit: not implemented (SQ-005)' }
+function Get-ServerLifecycleTable {
+    <#
+    Static Windows Server lifecycle table (no run-time fetch: output stays local).
+    Every date was read from the Microsoft Learn lifecycle page cited above its row on the
+    CheckedOn date. Learn shows each end as "<next day> 6:59:59 AM" (the start of the
+    following day); the value stored here is the LAST COVERED calendar day, so
+    "Extended End Date 1/13/2027 6:59:59 AM" is stored as 2027-01-12.
+    EsuEnd is the latest end of ANY Extended Security Update offering (on-premises or
+    Azure-only), so the report never rules out coverage that might exist. $null = Learn
+    lists no ESU for the product.
+    Rows are ordered newest first and every R2 row comes before its base release; the
+    base-release patterns also refuse a following "R2", so 2012 R2 never resolves to 2012.
+    Update: re-read each page, adjust the dates, and set CheckedOn to the day you checked.
+    #>
+    # Learn writes the trademark sign as (R) in some OS strings and AD can hold the real
+    # character; (?:\(R\)|\W)* accepts either, plus any spacing, between "Server" and the year.
+    $prefix = '^Windows Server(?:\(R\)|\W)*'
+
+    return @{
+        CheckedOn = '2026-10-20'
+        Rows      = @(
+            # https://learn.microsoft.com/lifecycle/products/windows-server-2025
+            [PSCustomObject]@{ Product = 'Windows Server 2025'; Pattern = "${prefix}2025\b"
+                MainstreamEnd = '2029-11-13'; ExtendedEnd = '2034-11-14'; EsuEnd = $null
+                Source = 'https://learn.microsoft.com/lifecycle/products/windows-server-2025' }
+            # https://learn.microsoft.com/lifecycle/products/windows-server-2022
+            [PSCustomObject]@{ Product = 'Windows Server 2022'; Pattern = "${prefix}2022\b"
+                MainstreamEnd = '2026-10-13'; ExtendedEnd = '2031-10-14'; EsuEnd = $null
+                Source = 'https://learn.microsoft.com/lifecycle/products/windows-server-2022' }
+            # https://learn.microsoft.com/lifecycle/products/windows-server-2019
+            [PSCustomObject]@{ Product = 'Windows Server 2019'; Pattern = "${prefix}2019\b"
+                MainstreamEnd = '2024-01-09'; ExtendedEnd = '2029-01-09'; EsuEnd = $null
+                Source = 'https://learn.microsoft.com/lifecycle/products/windows-server-2019' }
+            # https://learn.microsoft.com/lifecycle/products/windows-server-2016
+            [PSCustomObject]@{ Product = 'Windows Server 2016'; Pattern = "${prefix}2016\b"
+                MainstreamEnd = '2022-01-11'; ExtendedEnd = '2027-01-12'; EsuEnd = $null
+                Source = 'https://learn.microsoft.com/lifecycle/products/windows-server-2016' }
+            # https://learn.microsoft.com/lifecycle/products/windows-server-2012-r2
+            # ESU Year 3 ends 10/14/2026 6:59:59 AM -> last covered day 2026-10-13.
+            [PSCustomObject]@{ Product = 'Windows Server 2012 R2'; Pattern = "${prefix}2012\s*R2\b"
+                MainstreamEnd = '2018-10-09'; ExtendedEnd = '2023-10-10'; EsuEnd = '2026-10-13'
+                Source = 'https://learn.microsoft.com/lifecycle/products/windows-server-2012-r2' }
+            # https://learn.microsoft.com/lifecycle/products/windows-server-2012
+            # ESU Year 3 ends 10/14/2026 6:59:59 AM -> last covered day 2026-10-13.
+            [PSCustomObject]@{ Product = 'Windows Server 2012'; Pattern = "${prefix}2012\b(?!\W*R2)"
+                MainstreamEnd = '2018-10-09'; ExtendedEnd = '2023-10-10'; EsuEnd = '2026-10-13'
+                Source = 'https://learn.microsoft.com/lifecycle/products/windows-server-2012' }
+            # https://learn.microsoft.com/lifecycle/products/windows-server-2008-r2
+            # ESU Year 4 (Azure only) ends 1/10/2024 6:59:59 AM -> last covered day 2024-01-09.
+            [PSCustomObject]@{ Product = 'Windows Server 2008 R2'; Pattern = "${prefix}2008\s*R2\b"
+                MainstreamEnd = '2015-01-13'; ExtendedEnd = '2020-01-14'; EsuEnd = '2024-01-09'
+                Source = 'https://learn.microsoft.com/lifecycle/products/windows-server-2008-r2' }
+            # https://learn.microsoft.com/lifecycle/products/windows-server-2008
+            # ESU Year 4 (Azure only) ends 1/10/2024 6:59:59 AM -> last covered day 2024-01-09.
+            [PSCustomObject]@{ Product = 'Windows Server 2008'; Pattern = "${prefix}2008\b(?!\W*R2)"
+                MainstreamEnd = '2015-01-13'; ExtendedEnd = '2020-01-14'; EsuEnd = '2024-01-09'
+                Source = 'https://learn.microsoft.com/lifecycle/products/windows-server-2008' }
+            # https://learn.microsoft.com/lifecycle/products/windows-server-2003-
+            # (the trailing hyphen is part of Microsoft's URL). AD records Server 2003 R2 as
+            # "Windows Server 2003" too; the 2003 R2 page has the same mainstream/extended dates.
+            [PSCustomObject]@{ Product = 'Windows Server 2003'; Pattern = "${prefix}2003\b"
+                MainstreamEnd = '2010-07-13'; ExtendedEnd = '2015-07-14'; EsuEnd = $null
+                Source = 'https://learn.microsoft.com/lifecycle/products/windows-server-2003-' }
+        )
+    }
+}
+
+function Resolve-ServerLifecycle {
+    <#
+    Returns the lifecycle row whose Pattern matches the AD OperatingSystem string, or $null
+    when the OS is not in the table (Semi-Annual Channel, Storage Server, unknown years...).
+    $null must never be read as "supported" - Get-EndOfSupportStatus turns it into Unknown.
+    #>
+    param(
+        [string]$OperatingSystem,
+        $Table = (Get-ServerLifecycleTable)
+    )
+    if ([string]::IsNullOrWhiteSpace($OperatingSystem)) { return $null }
+    foreach ($row in @($Table.Rows)) {
+        if ($OperatingSystem -match $row.Pattern) { return $row }
+    }
+    return $null
+}
+
+function ConvertFrom-LifecycleDate {
+    # Lifecycle dates are stored as yyyy-MM-dd and parsed culture-independently.
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+    return [datetime]::ParseExact($Value, 'yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Get-EndOfSupportStatus {
+    <#
+    Plain-words support status for one lifecycle row on a given day.
+    Dates are the last covered calendar day and comparisons are date-only (time of day on
+    AsOf is ignored). DaysUntilExtendedEnd is signed: negative = days since extended
+    support ended. Severity: No support = High, Extended support ended = Warning, Security
+    updates only = Warning with 365 days or fewer left (Info otherwise), Mainstream = Low,
+    Unknown (OS not in the table) = Warning.
+    #>
+    param(
+        $Lifecycle,
+        [datetime]$AsOf = (Get-Date)
+    )
+
+    if ($null -eq $Lifecycle) {
+        return [PSCustomObject]@{
+            Status               = 'Unknown'
+            Severity             = 'Warning'
+            Note                 = 'Not in the lifecycle table - check https://learn.microsoft.com/lifecycle manually.'
+            DaysUntilExtendedEnd = $null
+        }
+    }
+
+    $warningDays = 365
+    $today       = $AsOf.Date
+    $mainstream  = ConvertFrom-LifecycleDate $Lifecycle.MainstreamEnd
+    $extended    = ConvertFrom-LifecycleDate $Lifecycle.ExtendedEnd
+    $esu         = ConvertFrom-LifecycleDate $Lifecycle.EsuEnd
+    $daysLeft    = [int]($extended - $today).TotalDays
+
+    if ($today -le $mainstream) {
+        $status   = 'Mainstream support'
+        $severity = 'Low'
+        $note     = "In mainstream support until $($Lifecycle.MainstreamEnd)."
+    }
+    elseif ($today -le $extended) {
+        $status   = 'Security updates only'
+        $severity = if ($daysLeft -le $warningDays) { 'Warning' } else { 'Info' }
+        $dayWord  = if ($daysLeft -eq 1) { 'day' } else { 'days' }
+        $note     = "Mainstream support ended. Security updates until $($Lifecycle.ExtendedEnd); $daysLeft $dayWord left."
+    }
+    elseif ($esu -and $today -le $esu) {
+        # AD cannot tell whether the client bought ESU, so the wording hedges.
+        $status   = 'Extended support ended'
+        $severity = 'Warning'
+        $note     = "Extended support ended on $($Lifecycle.ExtendedEnd); covered only if the client bought ESU (ESU available until $($Lifecycle.EsuEnd))."
+    }
+    else {
+        $status   = 'No support'
+        $severity = 'High'
+        $note     = if ($esu) { "All support ended on $($Lifecycle.EsuEnd), including paid ESU." }
+                    else      { "All support ended on $($Lifecycle.ExtendedEnd); no ESU was offered." }
+    }
+
+    return [PSCustomObject]@{
+        Status               = $status
+        Severity             = $severity
+        Note                 = $note
+        DaysUntilExtendedEnd = $daysLeft
+    }
+}
+
+function Test-LifecycleTableAge {
+    <#
+    Returns a warning message when the lifecycle table was last checked more than 180 days
+    before AsOf (Microsoft does change dates, e.g. new ESU offers), otherwise $null.
+    #>
+    param(
+        [string]$CheckedOn,
+        [datetime]$AsOf = (Get-Date)
+    )
+    $maxAgeDays = 180
+    $checked = ConvertFrom-LifecycleDate $CheckedOn
+    if ($null -eq $checked) {
+        return 'Lifecycle table has no checked date - verify the dates at https://learn.microsoft.com/lifecycle before relying on this section.'
+    }
+    $age = [int]($AsOf.Date - $checked).TotalDays
+    if ($age -le $maxAgeDays) { return $null }
+    return "Lifecycle table last checked $CheckedOn ($age days ago) - verify the dates at https://learn.microsoft.com/lifecycle before relying on this section."
+}
+
+function Get-AuditRunStamp {
+    # Who ran the audit and where. Only the account NAME of -Credential is recorded, never
+    # the credential object (personal-data rules).
+    $cred = if ($Credential) { $Credential } elseif ($ADParams -and $ADParams['Credential']) { $ADParams['Credential'] } else { $null }
+    $runBy = "$env:USERDOMAIN\$env:USERNAME"
+    if ($cred -and $cred.UserName) { $runBy += " (as $($cred.UserName))" }
+    return [PSCustomObject]@{ RunBy = $runBy; RunOn = $env:COMPUTERNAME }
+}
 function Get-TrustSidFilteringState {
     <#
     Interprets a trust's SID filtering from the trustAttributes bits.
@@ -570,15 +767,22 @@ function Get-ComputerAccountAudit {
             Select-Object @{N='OperatingSystem';E={$_.Name}}, Count |
             Sort-Object Count -Descending)
 
-        # Unsupported OS detection
-        $unsupportedPatterns = @(
-            '*Windows Server 2003*', '*Windows Server 2008*', '*Windows Server 2012*',
-            '*Windows 7*', '*Windows 8*', '*Windows XP*', '*Windows Vista*'
-        )
+        # Unsupported OS detection. Server entries come from the cited lifecycle table
+        # (D-020): a server is listed once its extended support has ended on the audit
+        # date (ESU window or no support at all). Servers whose OS is not in the table are
+        # not guessed at here; the End of Support section shows them as Unknown.
+        $clientUnsupportedPatterns = @('*Windows 7*', '*Windows 8*', '*Windows XP*', '*Windows Vista*')
+        $lifecycleTable = Get-ServerLifecycleTable
         $unsupportedComputers = @($enabledComputers | Where-Object {
             $os = $_.OperatingSystem
             if (-not $os) { return $false }
-            foreach ($p in $unsupportedPatterns) {
+            if ($os -like '*Windows Server*') {
+                $lifecycle = Resolve-ServerLifecycle -OperatingSystem $os -Table $lifecycleTable
+                if ($null -eq $lifecycle) { return $false }
+                $status = (Get-EndOfSupportStatus -Lifecycle $lifecycle -AsOf $AuditDate).Status
+                return ($status -eq 'Extended support ended' -or $status -eq 'No support')
+            }
+            foreach ($p in $clientUnsupportedPatterns) {
                 if ($os -like $p) { return $true }
             }
             return $false
@@ -599,6 +803,88 @@ function Get-ComputerAccountAudit {
         return @{ TotalComputers = 0; EnabledCount = 0; DisabledCount = 0;
                   StaleComputers = @(); OSDistribution = @(); UnsupportedComputers = @() }
     }
+}
+
+function Get-EndOfSupportAudit {
+    <#
+    One row per ENABLED Windows Server computer account with Microsoft's support end
+    dates (Get-ServerLifecycleTable), days left, last logon and a stale flag. Each row is
+    stamped with the audit date, audited domain, who ran it and from where, so two
+    quarters' CSVs can be compared. Reads $AuditDate, $StaleDate, $ADParams, $Credential
+    and $Domain from the script scope like the other audit functions.
+    LastLogonDate comes from the replicated lastLogonTimestamp, which is only updated when
+    it is older than msDS-LogonTimeSyncInterval (14 days by default), so it can lag:
+    https://learn.microsoft.com/windows/win32/adschema/a-lastlogontimestamp
+    https://learn.microsoft.com/windows/win32/adschema/a-msds-logontimesyncinterval
+    #>
+    Write-AuditLog "Checking Windows Server end of support..." -Level Info
+
+    $table = Get-ServerLifecycleTable
+    $stamp = Get-AuditRunStamp
+    $staleTableWarning = Test-LifecycleTableAge -CheckedOn $table.CheckedOn -AsOf $AuditDate
+    if ($staleTableWarning) { Write-AuditLog $staleTableWarning -Level Warning }
+
+    $result = @{
+        Servers           = @()
+        PastEndCount      = 0
+        StaleTableWarning = $staleTableWarning
+        Error             = $null
+        TableCheckedOn    = $table.CheckedOn
+        RunBy             = $stamp.RunBy
+        RunOn             = $stamp.RunOn
+    }
+
+    try {
+        $computers = @(Get-ADComputer -Filter "OperatingSystem -like '*Windows Server*'" `
+            -Properties OperatingSystem, OperatingSystemVersion, LastLogonDate, Enabled @ADParams -ErrorAction Stop)
+    }
+    catch {
+        $result.Error = $_.Exception.Message
+        Write-AuditLog "Failed end of support audit - could not read servers from AD: $($result.Error)" -Level Error
+        return $result
+    }
+
+    $auditedDomain = $null
+    try { $auditedDomain = (Get-ADDomain @ADParams -ErrorAction Stop).DNSRoot } catch { $auditedDomain = $null }
+    if (-not $auditedDomain) { $auditedDomain = if ($Domain) { $Domain } else { $env:USERDNSDOMAIN } }
+
+    $auditDateText = $AuditDate.ToString('yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)
+    $rows = foreach ($c in @($computers | Where-Object { $_.Enabled -eq $true })) {
+        $lifecycle = Resolve-ServerLifecycle -OperatingSystem $c.OperatingSystem -Table $table
+        $status    = Get-EndOfSupportStatus -Lifecycle $lifecycle -AsOf $AuditDate
+        $lastLogon = if ($c.LastLogonDate) { ([datetime]$c.LastLogonDate).ToString('yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture) } else { 'Never' }
+        $stale     = (-not $c.LastLogonDate) -or ([datetime]$c.LastLogonDate -lt $StaleDate)
+
+        # Property order is the CSV column order (AC12).
+        [PSCustomObject]@{
+            Name                   = $c.Name
+            OperatingSystem        = $c.OperatingSystem
+            OperatingSystemVersion = $c.OperatingSystemVersion
+            Product                = if ($lifecycle) { $lifecycle.Product } else { '' }
+            Status                 = $status.Status
+            Severity               = $status.Severity
+            DaysUntilExtendedEnd   = $status.DaysUntilExtendedEnd
+            MainstreamEnd          = if ($lifecycle) { $lifecycle.MainstreamEnd } else { '' }
+            ExtendedEnd            = if ($lifecycle) { $lifecycle.ExtendedEnd } else { '' }
+            EsuEnd                 = if ($lifecycle -and $lifecycle.EsuEnd) { $lifecycle.EsuEnd } else { '' }
+            Note                   = $status.Note
+            LastLogonDate          = $lastLogon
+            Stale                  = $stale
+            Source                 = if ($lifecycle) { $lifecycle.Source } else { 'https://learn.microsoft.com/lifecycle' }
+            TableCheckedOn         = $table.CheckedOn
+            AuditDate              = $auditDateText
+            AuditedDomain          = $auditedDomain
+            RunBy                  = $stamp.RunBy
+            RunOn                  = $stamp.RunOn
+        }
+    }
+
+    # Most urgent first: furthest past extended end at the top, OS not in the table last.
+    $result.Servers = @($rows | Sort-Object @{ Expression = { if ($null -eq $_.DaysUntilExtendedEnd) { [int]::MaxValue } else { $_.DaysUntilExtendedEnd } } }, Name)
+    $result.PastEndCount = @($result.Servers | Where-Object { $_.Status -eq 'Extended support ended' -or $_.Status -eq 'No support' }).Count
+
+    Write-AuditLog "End of support audit complete: $(@($result.Servers).Count) servers, $($result.PastEndCount) past end of support" -Level Success
+    return $result
 }
 
 function Get-PasswordPolicyAudit {
@@ -1113,6 +1399,12 @@ function Export-CSVReports {
         'Computers-Stale'      = $AuditResults.Computers.StaleComputers
         'Computers-OS'         = $AuditResults.Computers.OSDistribution
         'Computers-Unsupported' = $AuditResults.Computers.UnsupportedComputers
+        'EndOfSupport'         = @($AuditResults.EndOfSupport.Servers | Where-Object { $_ } | ForEach-Object {
+            # AD-sourced cells are neutralised so a crafted name cannot run as a formula.
+            $row = $_.PSObject.Copy()
+            foreach ($p in 'Name', 'OperatingSystem', 'OperatingSystemVersion') { $row.$p = ConvertTo-CsvSafeText $row.$p }
+            $row
+        })
         'PasswordPolicy-NIST'  = $AuditResults.PasswordPolicy.NISTFindings
         'PasswordPolicy-FGPP'  = $AuditResults.PasswordPolicy.FineGrained
         'Privileged-AdminSDHolder' = $AuditResults.Privileged.AdminSDHolder
@@ -1152,6 +1444,10 @@ function Export-HTMLReport {
     $pwPolicy = $AuditResults.PasswordPolicy
     $priv = $AuditResults.Privileged
     $security = $AuditResults.Security
+    $eos = $AuditResults.EndOfSupport
+    if (-not $eos) { $eos = @{ Servers = @(); PastEndCount = 0; StaleTableWarning = $null; Error = $null; Skipped = $true } }
+    $eosServers = @($eos.Servers | Where-Object { $_ })
+    $eosPastEnd = @($eosServers | Where-Object { $_.Status -eq 'Extended support ended' -or $_.Status -eq 'No support' }).Count
 
     # Count total findings for summary
     $totalFindings = @($security.Findings).Count + @($priv.KerberoastableAdmins).Count +
@@ -1240,6 +1536,10 @@ function Export-HTMLReport {
                 <div class="metric-label">Stale Computers</div>
             </div>
             <div class="metric">
+                <div class="metric-value$(if($eosPastEnd -gt 0){' danger'})">$eosPastEnd</div>
+                <div class="metric-label">Servers past end of support</div>
+            </div>
+            <div class="metric">
                 <div class="metric-value$(if($totalFindings -gt 0){' danger'})">$totalFindings</div>
                 <div class="metric-label">Security Findings</div>
             </div>
@@ -1254,6 +1554,7 @@ function Export-HTMLReport {
                 <li><a href="#users">User Accounts</a></li>
                 <li><a href="#groups">Group Analysis</a></li>
                 <li><a href="#computers">Computer Accounts</a></li>
+                <li><a href="#endofsupport">End of Support</a></li>
                 <li><a href="#passwordpolicy">Password Policy</a></li>
                 <li><a href="#privileged">Privileged Access</a></li>
                 <li><a href="#security">Security Findings</a></li>
@@ -1607,6 +1908,72 @@ function Export-HTMLReport {
         </div>
 "@
 
+    #--- End of Support Section ---
+    $firstEos = if ($eosServers.Count -gt 0) { $eosServers[0] } else { $null }
+    $eosCheckedOn = if ($eos.TableCheckedOn) { $eos.TableCheckedOn } elseif ($firstEos) { $firstEos.TableCheckedOn } else { (Get-ServerLifecycleTable).CheckedOn }
+    $eosStamp = if ($eos.RunBy) { [PSCustomObject]@{ RunBy = $eos.RunBy; RunOn = $eos.RunOn } }
+                elseif ($firstEos) { [PSCustomObject]@{ RunBy = $firstEos.RunBy; RunOn = $firstEos.RunOn } }
+                else { Get-AuditRunStamp }
+    $html += @"
+
+        <div class="section" id="endofsupport">
+            <h2>End of Support</h2>
+            <p>Enabled Windows Server computer accounts and Microsoft's support end dates. Lifecycle dates last checked against Microsoft Learn on <strong>$(Escape-Html $eosCheckedOn)</strong>. Audit run by $(Escape-Html $eosStamp.RunBy) on $(Escape-Html $eosStamp.RunOn).</p>
+            <p>A server past extended support is covered only if the client bought ESU (Extended Security Updates); AD cannot tell whether they did. Last logon comes from lastLogonTimestamp, which can be up to about 14 days behind.</p>
+"@
+
+    if ($eos.StaleTableWarning) {
+        $html += @"
+            <p class="severity-warning">$(Escape-Html $eos.StaleTableWarning)</p>
+"@
+    }
+
+    if ($eos.Skipped) {
+        $html += @"
+            <p>This section was not selected for this run.</p>
+"@
+    }
+    elseif ($eos.Error) {
+        $html += @"
+            <p class="severity-high">Could not read servers from AD: $(Escape-Html $eos.Error)</p>
+"@
+    }
+    elseif ($eosServers.Count -eq 0) {
+        $html += @"
+            <p>No enabled Windows Server computer accounts found.</p>
+"@
+    }
+    else {
+        $html += @"
+            <div class="metric">
+                <div class="metric-value">$($eosServers.Count)</div>
+                <div class="metric-label">Servers</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value$(if($eosPastEnd -gt 0){' danger'})">$eosPastEnd</div>
+                <div class="metric-label">Past extended support</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value$(if(@($eosServers | Where-Object { $_.Status -eq 'Unknown' }).Count -gt 0){' warning'})">$(@($eosServers | Where-Object { $_.Status -eq 'Unknown' }).Count)</div>
+                <div class="metric-label">Not in the lifecycle table</div>
+            </div>
+            <table>
+                <tr><th>Server</th><th>Operating System (as AD records it)</th><th>Product</th><th>Support Status</th><th>What it means</th><th>Mainstream End</th><th>Extended End</th><th>ESU End</th><th>Days Until Extended End</th><th>Last Logon</th><th>Not Seen in $DaysInactive Days</th></tr>
+                $($eosServers | ForEach-Object {
+                    $sevClass = "severity-$(([string]$_.Severity).ToLower())"
+                    $productCell = if ($_.Product) { "<a href=`"$(Escape-Html $_.Source)`">$(Escape-Html $_.Product)</a>" } else { "<a href=`"$(Escape-Html $_.Source)`">Check manually</a>" }
+                    "<tr><td>$(Escape-Html $_.Name)</td><td>$(Escape-Html $_.OperatingSystem)</td><td>$productCell</td><td class='$sevClass'>$(Escape-Html $_.Status)</td><td>$(Escape-Html $_.Note)</td><td>$(Escape-Html $_.MainstreamEnd)</td><td>$(Escape-Html $_.ExtendedEnd)</td><td>$(Escape-Html $_.EsuEnd)</td><td>$(Escape-Html ([string]$_.DaysUntilExtendedEnd))</td><td>$(Escape-Html $_.LastLogonDate)</td><td>$(if ($_.Stale -eq $true) { 'Yes' } else { 'No' })</td></tr>"
+                })
+            </table>
+            <p>Days Until Extended End: a negative number means extended support ended that many days ago. Each product links to the Microsoft Learn lifecycle page its dates came from.</p>
+"@
+    }
+
+    $html += @"
+            <div class="back-to-top"><a href="#top">Back to top</a></div>
+        </div>
+"@
+
     #--- Password Policy Section ---
     $html += @"
 
@@ -1875,6 +2242,7 @@ $auditResults = @{
     Users             = if (Test-SectionIncluded 'Users')             { Get-UserAccountAudit }         else { @{ TotalUsers = 0; EnabledCount = 0; DisabledCount = 0; StaleUsers = @(); PasswordNeverExpires = @(); PasswordNotRequired = @(); NeverLoggedOn = @(); LockedOut = @(); SIDHistory = @() } }
     Groups            = if (Test-SectionIncluded 'Groups')            { Get-GroupAudit }               else { @{ TotalGroups = 0; EmptyGroups = @(); LargeGroups = @(); PrivilegedMembers = @(); NestedWarnings = @() } }
     Computers         = if (Test-SectionIncluded 'Computers')         { Get-ComputerAccountAudit }     else { @{ TotalComputers = 0; EnabledCount = 0; DisabledCount = 0; StaleComputers = @(); OSDistribution = @(); UnsupportedComputers = @() } }
+    EndOfSupport      = if (Test-SectionIncluded 'EndOfSupport')      { Get-EndOfSupportAudit }        else { @{ Servers = @(); PastEndCount = 0; StaleTableWarning = $null; Error = $null; Skipped = $true } }
     PasswordPolicy    = if (Test-SectionIncluded 'PasswordPolicy')    { Get-PasswordPolicyAudit }      else { @{ DefaultPolicy = $null; NISTFindings = @(); FineGrained = @() } }
     Privileged        = if (Test-SectionIncluded 'PrivilegedAccess')   { Get-PrivilegedAccessAudit }    else { @{ AdminSDHolder = @(); Delegation = @(); KerberoastableAdmins = @(); ASREPRoastable = @() } }
     Security          = if (Test-SectionIncluded 'Security')          { Get-SecurityAudit }            else { @{ Findings = @() } }

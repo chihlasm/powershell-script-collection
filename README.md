@@ -25,7 +25,7 @@ handed out, so it always matches this repository.
 | [AD-LockoutDiagnostics](AD-LockoutDiagnostics/) | Why does this account keep locking out, and from which device? Includes source-device evidence, cause ranking and a live watcher |
 | [AD-GroupMembership-Export](AD-GroupMembership-Export/) | Who has access to what: every group and member, with nesting and overlap |
 | [Find-PrivilegedAccessPaths](Find-PrivilegedAccessPaths/) | Why is this user an admin? Plus a domain-wide privileged access report |
-| [AD-Audit](AD-Audit/) | Whole-domain posture audit: accounts, password policy, DCs, trusts, infrastructure |
+| [AD-Audit](AD-Audit/) | Whole-domain posture audit: accounts, password policy, DCs, trusts, infrastructure, Windows Server end of support |
 | [AD-GroupPolicy-Audit](AD-GroupPolicy-Audit/) | Audits every GPO for duplicates, conflicts, security issues and FSLogix settings |
 | [DriveMap-Diagnostics](DriveMap-Diagnostics/) | Why is a mapped drive missing? Also audits every GPO drive map and searches SYSVOL logon scripts |
 | [ADReplicationDiagnostics](ADReplicationDiagnostics/) | AD replication and DFSR/DFS Namespace health |
