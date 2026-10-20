@@ -602,6 +602,33 @@ Describe 'FolderPermissionManager.ps1 (command line): DFS targets, unresolvable 
         }
     }
 
+    # SQ-020 (D-042): IO_REPARSE_TAG_APPEXECLINK 0x8000001B and IO_REPARSE_TAG_STORAGE_SYNC
+    # 0x8000001E are plain files (MS-FSCC 2.1.2.1 Reparse Tags), so even with the destination
+    # faked as \\dc01\NETLOGON the command line does not refuse the folder because of them.
+    # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+    Context 'SQ-020: WindowsApps aliases and Azure File Sync tiered files' {
+        BeforeEach {
+            $script:LinkPath = Join-Path $script:Dir 'alias'
+            New-Item -ItemType Directory -Path $script:LinkPath | Out-Null
+            Mock Get-ChildItem { New-FakeReparseChild -Path $script:LinkPath } -ParameterFilter { $LiteralPath -eq $script:Dir }
+            Mock Get-Win32PathName { '\\dc01\NETLOGON' } -ParameterFilter { $Path -eq $script:LinkPath }
+        }
+
+        It '<Ac>_Cli<Name>TreeIsNotRefused' -ForEach @(
+            @{ Ac = 'AC3'; Name = 'AppExecLink'; Tag = [uint32]'0x8000001B' }
+            @{ Ac = 'AC4'; Name = 'StorageSync'; Tag = [uint32]'0x8000001E' }
+        ) {
+            $script:AliasTag = $Tag
+            Mock Get-ReparsePointTag { $script:AliasTag } -ParameterFilter { $Path -eq $script:LinkPath }
+
+            $null = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log -Force
+
+            @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' -and $_ -match 'NETLOGON' }).Count | Should -Be 0
+            @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' -and $_ -match [regex]::Escape($script:LinkPath) }).Count | Should -Be 0
+            Should -Invoke Invoke-AclTool -Times 1 -Exactly -Scope It -ParameterFilter { $Tool -eq 'takeown' }
+        }
+    }
+
     Context 'A DFS link inside a folder on a network path' {
         BeforeEach {
             $script:Top = '\\fs01\share\Dept'

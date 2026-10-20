@@ -136,7 +136,9 @@
       dwReserved0 holds the tag when the item is a reparse point. Only the tags in
       $RedirectFreeReparseTags count as plain files (D-040): IO_REPARSE_TAG_DEDUP 0x80000013,
       WOF 0x80000017, HSM 0xC0000004, HSM2 0x80000006, SIS 0x80000007, ONEDRIVE 0x80000021,
-      CLOUD 0x9000001A and CLOUD_1..CLOUD_F 0x9000101A..0x9000F01A (MS-FSCC 2.1.2.1). Every
+      CLOUD 0x9000001A, CLOUD_1..CLOUD_F 0x9000101A..0x9000F01A, and (D-042) APPEXECLINK
+      0x8000001B (app execution aliases in AppData\Local\Microsoft\WindowsApps) and
+      STORAGE_SYNC 0x8000001E (Azure File Sync tiered files) (MS-FSCC 2.1.2.1). Every
       other reparse point, IO_REPARSE_TAG_DFS 0x8000000A and unknown tags included, is a link,
       which the owner snapshot lists but does not go into:
       https://learn.microsoft.com/powershell/module/microsoft.powershell.management/get-childitem
@@ -1219,7 +1221,8 @@ function Resolve-NetworkDrivePath {
 # The only reparse tags that count as plain files in a whole-tree take ownership (owner
 # decision D-040): storage filters that keep the item's data somewhere else but do not send
 # the path anywhere (Data Deduplication, Windows Overlay, legacy HSM, single-instance storage,
-# Cloud Files / OneDrive placeholders). Every other tag, IO_REPARSE_TAG_DFS (0x8000000A) and
+# Cloud Files / OneDrive placeholders), plus app execution aliases and Azure File Sync tiered
+# files (owner decision D-042). Every other tag, IO_REPARSE_TAG_DFS (0x8000000A) and
 # tags not known here included, is treated as a link (Test-LinkReparsePoint). Add a tag only
 # with the owner's approval; a test pins this list. Values from MS-FSCC 2.1.2.1 Reparse Tags.
 # The values are cast from strings: a 0x8... literal is a negative [int] in Windows PowerShell.
@@ -1258,6 +1261,12 @@ $script:RedirectFreeReparseTags = [ordered]@{
     IO_REPARSE_TAG_CLOUD_D  = [uint32]'0x9000D01A'  # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
     IO_REPARSE_TAG_CLOUD_E  = [uint32]'0x9000E01A'  # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
     IO_REPARSE_TAG_CLOUD_F  = [uint32]'0x9000F01A'  # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+    # App execution aliases (AppData\Local\Microsoft\WindowsApps), "Used by Universal Windows
+    # Platform (UWP) packages ... to be launched by CreateProcess" (D-042):
+    IO_REPARSE_TAG_APPEXECLINK  = [uint32]'0x8000001B'  # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+    # Azure File Sync tiered files, "Used by the Azure File Sync (AFS) filter" (D-042):
+    # https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+    IO_REPARSE_TAG_STORAGE_SYNC = [uint32]'0x8000001E'
 }
 
 function Test-LinkReparsePoint {
@@ -1267,7 +1276,8 @@ function Test-LinkReparsePoint {
         takeown and icacls somewhere else: a junction, a symbolic link, a DFS link, or any
         reparse point whose tag is not in $script:RedirectFreeReparseTags. False for an
         ordinary item and for the allowlisted tags (Data Deduplication, Windows Overlay, HSM,
-        single-instance storage, Cloud Files / OneDrive placeholders). A reparse point whose
+        single-instance storage, Cloud Files / OneDrive placeholders, app execution aliases,
+        Azure File Sync tiered files). A reparse point whose
         tag cannot be read counts as a link.
     .DESCRIPTION
         An allowlist, not the name surrogate bit (owner decision D-040): IO_REPARSE_TAG_DFS

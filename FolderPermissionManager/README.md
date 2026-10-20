@@ -313,7 +313,9 @@ as `\\fs02\Apps$`), does not stop the change, but a folder containing any link i
 reported as a plain success: the result says how many there are and names them. Check them, and
 what they point to, after the change. A short list of storage features count as plain items and
 are changed like any other: deduplicated files, compressed (WOF) files, OneDrive and other cloud
-placeholders, and legacy HSM and single-instance storage files. Every other kind of reparse
+placeholders, legacy HSM and single-instance storage files, WindowsApps aliases (the app
+execution aliases in each profile's `AppData\Local\Microsoft\WindowsApps`) and Azure File Sync
+tiered files. Every other kind of reparse
 point, DFS links and anything the tool does not recognise included, is treated as a link and
 checked as above.
 
