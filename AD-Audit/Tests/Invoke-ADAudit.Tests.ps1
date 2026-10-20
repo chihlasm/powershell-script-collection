@@ -394,7 +394,19 @@ Describe 'SQ-005 End of support' {
             $s = Get-EndOfSupportStatus -Lifecycle $row -AsOf (D '2026-10-14')
             $s.Status | Should -Be 'No support'
             $s.Note   | Should -Match 'ESU'
+            $s.Note   | Should -Match 'including paid ESU'
             $s.Note   | Should -Not -Match 'covered only if the client bought ESU'
+        }
+
+        It 'Severity: <Expect> is <Severity>' -ForEach @(
+            @{ AsOf = '2031-01-01'; Esu = $null;        Expect = 'No support';             Severity = 'High' }
+            @{ AsOf = '2031-01-01'; Esu = '2033-01-01'; Expect = 'Extended support ended'; Severity = 'Warning' }
+            @{ AsOf = '2019-06-01'; Esu = $null;        Expect = 'Mainstream support';     Severity = 'Low' }
+        ) {
+            $row = New-LcRow -Mainstream '2020-01-01' -Extended '2030-01-01' -Esu $Esu
+            $s = Get-EndOfSupportStatus -Lifecycle $row -AsOf (D $AsOf)
+            $s.Status   | Should -Be $Expect
+            $s.Severity | Should -Be $Severity
         }
 
         It 'AC6_MainstreamToExtendedTransition: AsOf <AsOf>' -ForEach @(
@@ -478,6 +490,65 @@ Describe 'SQ-005 End of support' {
                 $p.Value | Should -Not -BeOfType [System.Security.SecureString]
                 [string]$p.Value | Should -Not -Match '(?i)password'
                 $p.Name | Should -Not -Match '(?i)password'
+            }
+        }
+
+        It 'AC10_SecretValueAppearsNowhere_SuccessPath' {
+            $Credential = New-Object System.Management.Automation.PSCredential('CONTOSO\svc-audit', (ConvertTo-SecureString 'Placeholder-1' -AsPlainText -Force))
+            $ADParams = @{ Server = 'dc01.contoso.com'; Credential = $Credential }
+            Mock Get-ADComputer { @((New-FakeServer -Name 'SRV01'), (New-FakeServer -Name 'SRV02' -Os 'Windows Server 2012 R2 Standard')) }
+            $r = Get-EndOfSupportAudit
+            @($r.Servers).Count | Should -Be 2
+            foreach ($row in @($r.Servers)) {
+                foreach ($p in $row.PSObject.Properties) { [string]$p.Value | Should -Not -Match 'Placeholder-1' }
+            }
+            ($r | ConvertTo-Json -Depth 5) | Should -Not -Match 'Placeholder-1'
+
+            $res = New-EmptyAuditResults
+            $res.EndOfSupport = $r
+            $dir = Join-Path $TestDrive 'secret-ok'
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            Export-CSVReports -AuditResults $res -BasePath $dir
+            $csv = Join-Path $dir 'AD-Audit-test-EndOfSupport.csv'
+            $csv | Should -Exist
+            (Get-Content -LiteralPath $csv -Raw) | Should -Not -Match 'Placeholder-1'
+            $out = Join-Path $TestDrive 'secret-ok.html'
+            Export-HTMLReport -AuditResults $res -OutputFile $out
+            $html = Get-Content -LiteralPath $out -Raw
+            $html | Should -Match 'CONTOSO\\svc-audit'
+            $html | Should -Not -Match 'Placeholder-1'
+        }
+
+        It 'AC10_SecretValueAppearsNowhere_FailurePath' {
+            $Credential = New-Object System.Management.Automation.PSCredential('CONTOSO\svc-audit', (ConvertTo-SecureString 'Placeholder-1' -AsPlainText -Force))
+            $ADParams = @{ Server = 'dc01.contoso.com'; Credential = $Credential }
+            Mock Get-ADComputer { throw 'The server has rejected the client credentials.' }
+            $r = Get-EndOfSupportAudit
+            $r.Error | Should -Not -BeNullOrEmpty
+            foreach ($k in @($r.Keys)) {
+                $r[$k] | Should -Not -BeOfType [System.Management.Automation.PSCredential]
+                $r[$k] | Should -Not -BeOfType [System.Security.SecureString]
+                [string]$r[$k] | Should -Not -Match 'Placeholder-1'
+            }
+            ($r | ConvertTo-Json -Depth 5) | Should -Not -Match 'Placeholder-1'
+
+            $res = New-EmptyAuditResults
+            $res.EndOfSupport = $r
+            $out = Join-Path $TestDrive 'secret-err.html'
+            Export-HTMLReport -AuditResults $res -OutputFile $out
+            $html = Get-Content -LiteralPath $out -Raw
+            $html | Should -Match 'Could not read servers from AD'
+            $html | Should -Not -Match 'Placeholder-1'
+        }
+
+        It 'AuditedDomain fallback is logged as a warning when Get-ADDomain fails' {
+            $Domain = 'contoso.com'
+            Mock Get-ADDomain { throw 'Unable to contact the server.' }
+            Mock Get-ADComputer { @(New-FakeServer -Name 'SRV01') }
+            $r = Get-EndOfSupportAudit
+            @($r.Servers)[0].AuditedDomain | Should -Be 'contoso.com'
+            Should -Invoke Write-AuditLog -Times 1 -Exactly -ParameterFilter {
+                $Level -eq 'Warning' -and $Message -match '-Domain parameter' -and $Message -match 'Unable to contact the server'
             }
         }
 
@@ -585,6 +656,100 @@ Describe 'SQ-005 End of support' {
             $html | Should -Match '(?s)>\s*2\s*</div>\s*<div class="metric-label">Servers past end of support'
             $html | Should -Match ([regex]::Escape('&lt;script&gt;x&lt;/script&gt;'))
             $html | Should -Not -Match ([regex]::Escape('<script>x</script>'))
+        }
+
+        It 'CSV neutralises formula-leading AD values without changing the results in memory' {
+            $res = New-EmptyAuditResults
+            $r1 = New-EosRow -Name '=SUM(1+1)'
+            $r1.OperatingSystem = '+cmd|calc'
+            $r1.OperatingSystemVersion = '-10.0'
+            $r2 = New-EosRow -Name '@SRV02'
+            $r2.OperatingSystem = "`tWindows Server 2022"
+            $r2.OperatingSystemVersion = '=1'
+            $res.EndOfSupport = @{ Servers = @($r1, $r2); PastEndCount = 0; StaleTableWarning = $null; Error = $null }
+            $before = @($res.EndOfSupport.Servers | ForEach-Object { '{0}|{1}|{2}' -f $_.Name, $_.OperatingSystem, $_.OperatingSystemVersion })
+
+            $dir = Join-Path $TestDrive 'csv-formula'
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            Export-CSVReports -AuditResults $res -BasePath $dir
+            $rows = @(Import-Csv -LiteralPath (Join-Path $dir 'AD-Audit-test-EndOfSupport.csv'))
+            $rows.Count | Should -Be 2
+            $rows[0].Name                   | Should -BeExactly "'=SUM(1+1)"
+            $rows[0].OperatingSystem        | Should -BeExactly "'+cmd|calc"
+            $rows[0].OperatingSystemVersion | Should -BeExactly "'-10.0"
+            $rows[1].Name                   | Should -BeExactly "'@SRV02"
+            $rows[1].OperatingSystem        | Should -BeExactly "'`tWindows Server 2022"
+            $rows[1].OperatingSystemVersion | Should -BeExactly "'=1"
+
+            $after = @($res.EndOfSupport.Servers | ForEach-Object { '{0}|{1}|{2}' -f $_.Name, $_.OperatingSystem, $_.OperatingSystemVersion })
+            $after | Should -Be $before
+            $res.EndOfSupport.Servers[0].Name | Should -BeExactly '=SUM(1+1)'
+            $res.EndOfSupport.Servers[1].OperatingSystem | Should -BeExactly "`tWindows Server 2022"
+        }
+
+        It 'Summary tile says Not run when the section was skipped' {
+            $res = New-EmptyAuditResults
+            $res.EndOfSupport = @{ Servers = @(); PastEndCount = 0; StaleTableWarning = $null; Error = $null; Skipped = $true }
+            $out = Join-Path $TestDrive 'skipped-tile.html'
+            Export-HTMLReport -AuditResults $res -OutputFile $out
+            $html = Get-Content -LiteralPath $out -Raw
+            $html | Should -Match '(?s)<div class="metric-value warning">Not run</div>\s*<div class="metric-label">Servers past end of support'
+            $html | Should -Not -Match '(?s)>\s*0\s*</div>\s*<div class="metric-label">Servers past end of support'
+        }
+
+        It 'Summary tile says Error when the AD read failed' {
+            Mock Get-ADComputer { throw 'RPC server is unavailable' }
+            $res = New-EmptyAuditResults
+            $res.EndOfSupport = Get-EndOfSupportAudit
+            $out = Join-Path $TestDrive 'error-tile.html'
+            Export-HTMLReport -AuditResults $res -OutputFile $out
+            $html = Get-Content -LiteralPath $out -Raw
+            $html | Should -Match '(?s)<div class="metric-value warning">Error</div>\s*<div class="metric-label">Servers past end of support'
+            $html | Should -Not -Match '(?s)>\s*0\s*</div>\s*<div class="metric-label">Servers past end of support'
+        }
+
+        It 'Skipped section shows only the heading and the not-selected sentence' {
+            $res = New-EmptyAuditResults
+            $res.EndOfSupport = @{ Servers = @(); PastEndCount = 0; StaleTableWarning = 'Lifecycle table last checked 2026-01-01'; Error = $null; Skipped = $true }
+            $out = Join-Path $TestDrive 'skipped.html'
+            Export-HTMLReport -AuditResults $res -OutputFile $out
+            $html = Get-Content -LiteralPath $out -Raw
+            $html | Should -Match '(?s)<div class="section" id="endofsupport">\s*<h2>End of Support</h2>\s*<p>This section was not selected for this run\.</p>\s*<div class="back-to-top">'
+            $section = [regex]::Match($html, '(?s)id="endofsupport".*?back-to-top').Value
+            $section | Should -Not -Match 'Audit run by'
+            $section | Should -Not -Match 'last checked'
+            $section | Should -Not -Match 'ESU'
+        }
+
+        It 'Section metrics use plain-English labels' {
+            $res = New-EmptyAuditResults
+            $unknown = New-EosRow -Name 'SRV-UNK' -Status 'Unknown' -Severity 'Warning' -Note 'Not in the lifecycle table - check https://learn.microsoft.com/lifecycle manually.'
+            $res.EndOfSupport = @{ Servers = @((New-EosRow -Name 'SRV01'), $unknown); PastEndCount = 0; StaleTableWarning = $null; Error = $null }
+            $out = Join-Path $TestDrive 'labels.html'
+            Export-HTMLReport -AuditResults $res -OutputFile $out
+            $section = [regex]::Match((Get-Content -LiteralPath $out -Raw), '(?s)id="endofsupport".*?back-to-top').Value
+            $section | Should -Match '<div class="metric-label">Servers past end of support</div>'
+            $section | Should -Match '(?s)>1</div>\s*<div class="metric-label">Not recognised \(check manually\)</div>'
+            $section | Should -Not -Match 'metric-label">Past extended support'
+            $section | Should -Not -Match 'metric-label">Not in the lifecycle table'
+        }
+
+        It 'Table has no blank date cells: None offered for no ESU, dashes for an unknown OS' {
+            $res = New-EmptyAuditResults
+            $known = New-EosRow -Name 'SRV-KNOWN'
+            $unknown = New-EosRow -Name 'SRV-UNK' -Status 'Unknown' -Severity 'Warning' -Note 'Not in the lifecycle table - check https://learn.microsoft.com/lifecycle manually.'
+            $unknown.Product = ''; $unknown.MainstreamEnd = ''; $unknown.ExtendedEnd = ''; $unknown.EsuEnd = ''; $unknown.DaysUntilExtendedEnd = $null
+            $unknown.Source = 'https://learn.microsoft.com/lifecycle'
+            $res.EndOfSupport = @{ Servers = @($known, $unknown); PastEndCount = 0; StaleTableWarning = $null; Error = $null }
+            $out = Join-Path $TestDrive 'cells.html'
+            Export-HTMLReport -AuditResults $res -OutputFile $out
+            $html = Get-Content -LiteralPath $out -Raw
+            $knownRow   = [regex]::Match($html, '<tr><td>SRV-KNOWN</td>.*?</tr>').Value
+            $unknownRow = [regex]::Match($html, '<tr><td>SRV-UNK</td>.*?</tr>').Value
+            $knownRow   | Should -Match '<td>2026-10-13</td><td>2031-10-14</td><td>None offered</td><td>100</td>'
+            $unknownRow | Should -Match '<td>-</td><td>-</td><td>-</td><td>-</td>'
+            $knownRow   | Should -Not -Match '<td></td>'
+            $unknownRow | Should -Not -Match '<td></td>'
         }
 
         It 'AC14_StaleTableWarns_HtmlShowsWarning' {

@@ -473,6 +473,7 @@ function Get-AuditRunStamp {
     if ($cred -and $cred.UserName) { $runBy += " (as $($cred.UserName))" }
     return [PSCustomObject]@{ RunBy = $runBy; RunOn = $env:COMPUTERNAME }
 }
+
 function Get-TrustSidFilteringState {
     <#
     Interprets a trust's SID filtering from the trustAttributes bits.
@@ -845,8 +846,14 @@ function Get-EndOfSupportAudit {
     }
 
     $auditedDomain = $null
-    try { $auditedDomain = (Get-ADDomain @ADParams -ErrorAction Stop).DNSRoot } catch { $auditedDomain = $null }
-    if (-not $auditedDomain) { $auditedDomain = if ($Domain) { $Domain } else { $env:USERDNSDOMAIN } }
+    $domainReadError = $null
+    try { $auditedDomain = (Get-ADDomain @ADParams -ErrorAction Stop).DNSRoot } catch { $domainReadError = $_.Exception.Message }
+    if (-not $auditedDomain) {
+        if ($Domain) { $auditedDomain = $Domain; $fallback = '-Domain parameter' }
+        else         { $auditedDomain = $env:USERDNSDOMAIN; $fallback = 'USERDNSDOMAIN of this session' }
+        $reason = if ($domainReadError) { "Get-ADDomain failed: $domainReadError" } else { 'Get-ADDomain returned no DNS root' }
+        Write-AuditLog "End of support: could not read the audited domain name ($reason); AuditedDomain uses the $fallback ('$auditedDomain') instead." -Level Warning
+    }
 
     $auditDateText = $AuditDate.ToString('yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)
     $rows = foreach ($c in @($computers | Where-Object { $_.Enabled -eq $true })) {
@@ -1448,6 +1455,9 @@ function Export-HTMLReport {
     if (-not $eos) { $eos = @{ Servers = @(); PastEndCount = 0; StaleTableWarning = $null; Error = $null; Skipped = $true } }
     $eosServers = @($eos.Servers | Where-Object { $_ })
     $eosPastEnd = @($eosServers | Where-Object { $_.Status -eq 'Extended support ended' -or $_.Status -eq 'No support' }).Count
+    # A skipped section or a failed AD read must not look like "0 servers past end of support".
+    $eosSummaryValue = if ($eos.Skipped) { 'Not run' } elseif ($eos.Error) { 'Error' } else { [string]$eosPastEnd }
+    $eosSummaryClass = if ($eos.Skipped -or $eos.Error) { ' warning' } elseif ($eosPastEnd -gt 0) { ' danger' } else { '' }
 
     # Count total findings for summary
     $totalFindings = @($security.Findings).Count + @($priv.KerberoastableAdmins).Count +
@@ -1536,7 +1546,7 @@ function Export-HTMLReport {
                 <div class="metric-label">Stale Computers</div>
             </div>
             <div class="metric">
-                <div class="metric-value$(if($eosPastEnd -gt 0){' danger'})">$eosPastEnd</div>
+                <div class="metric-value$eosSummaryClass">$eosSummaryValue</div>
                 <div class="metric-label">Servers past end of support</div>
             </div>
             <div class="metric">
@@ -1909,64 +1919,81 @@ function Export-HTMLReport {
 "@
 
     #--- End of Support Section ---
-    $firstEos = if ($eosServers.Count -gt 0) { $eosServers[0] } else { $null }
-    $eosCheckedOn = if ($eos.TableCheckedOn) { $eos.TableCheckedOn } elseif ($firstEos) { $firstEos.TableCheckedOn } else { (Get-ServerLifecycleTable).CheckedOn }
-    $eosStamp = if ($eos.RunBy) { [PSCustomObject]@{ RunBy = $eos.RunBy; RunOn = $eos.RunOn } }
-                elseif ($firstEos) { [PSCustomObject]@{ RunBy = $firstEos.RunBy; RunOn = $firstEos.RunOn } }
-                else { Get-AuditRunStamp }
     $html += @"
 
         <div class="section" id="endofsupport">
             <h2>End of Support</h2>
-            <p>Enabled Windows Server computer accounts and Microsoft's support end dates. Lifecycle dates last checked against Microsoft Learn on <strong>$(Escape-Html $eosCheckedOn)</strong>. Audit run by $(Escape-Html $eosStamp.RunBy) on $(Escape-Html $eosStamp.RunOn).</p>
-            <p>A server past extended support is covered only if the client bought ESU (Extended Security Updates); AD cannot tell whether they did. Last logon comes from lastLogonTimestamp, which can be up to about 14 days behind.</p>
 "@
-
-    if ($eos.StaleTableWarning) {
-        $html += @"
-            <p class="severity-warning">$(Escape-Html $eos.StaleTableWarning)</p>
-"@
-    }
 
     if ($eos.Skipped) {
         $html += @"
             <p>This section was not selected for this run.</p>
 "@
     }
-    elseif ($eos.Error) {
+    else {
+        $firstEos = if ($eosServers.Count -gt 0) { $eosServers[0] } else { $null }
+        $eosCheckedOn = if ($eos.TableCheckedOn) { $eos.TableCheckedOn } elseif ($firstEos) { $firstEos.TableCheckedOn } else { (Get-ServerLifecycleTable).CheckedOn }
+        $eosStamp = if ($eos.RunBy) { [PSCustomObject]@{ RunBy = $eos.RunBy; RunOn = $eos.RunOn } }
+                    elseif ($firstEos) { [PSCustomObject]@{ RunBy = $firstEos.RunBy; RunOn = $firstEos.RunOn } }
+                    else { Get-AuditRunStamp }
         $html += @"
+            <p>Enabled Windows Server computer accounts and Microsoft's support end dates. Lifecycle dates last checked against Microsoft Learn on <strong>$(Escape-Html $eosCheckedOn)</strong>. Audit run by $(Escape-Html $eosStamp.RunBy) on $(Escape-Html $eosStamp.RunOn).</p>
+            <p>A server past extended support is covered only if the client bought ESU (Extended Security Updates); AD cannot tell whether they did. Last logon comes from lastLogonTimestamp, which can be up to about 14 days behind.</p>
+"@
+
+        if ($eos.StaleTableWarning) {
+            $html += @"
+            <p class="severity-warning">$(Escape-Html $eos.StaleTableWarning)</p>
+"@
+        }
+
+        if ($eos.Error) {
+            $html += @"
             <p class="severity-high">Could not read servers from AD: $(Escape-Html $eos.Error)</p>
 "@
-    }
-    elseif ($eosServers.Count -eq 0) {
-        $html += @"
+        }
+        elseif ($eosServers.Count -eq 0) {
+            $html += @"
             <p>No enabled Windows Server computer accounts found.</p>
 "@
-    }
-    else {
-        $html += @"
+        }
+        else {
+            $eosUnknown = @($eosServers | Where-Object { $_.Status -eq 'Unknown' }).Count
+            $html += @"
             <div class="metric">
                 <div class="metric-value">$($eosServers.Count)</div>
                 <div class="metric-label">Servers</div>
             </div>
             <div class="metric">
                 <div class="metric-value$(if($eosPastEnd -gt 0){' danger'})">$eosPastEnd</div>
-                <div class="metric-label">Past extended support</div>
+                <div class="metric-label">Servers past end of support</div>
             </div>
             <div class="metric">
-                <div class="metric-value$(if(@($eosServers | Where-Object { $_.Status -eq 'Unknown' }).Count -gt 0){' warning'})">$(@($eosServers | Where-Object { $_.Status -eq 'Unknown' }).Count)</div>
-                <div class="metric-label">Not in the lifecycle table</div>
+                <div class="metric-value$(if($eosUnknown -gt 0){' warning'})">$eosUnknown</div>
+                <div class="metric-label">Not recognised (check manually)</div>
             </div>
             <table>
                 <tr><th>Server</th><th>Operating System (as AD records it)</th><th>Product</th><th>Support Status</th><th>What it means</th><th>Mainstream End</th><th>Extended End</th><th>ESU End</th><th>Days Until Extended End</th><th>Last Logon</th><th>Not Seen in $DaysInactive Days</th></tr>
                 $($eosServers | ForEach-Object {
                     $sevClass = "severity-$(([string]$_.Severity).ToLower())"
                     $productCell = if ($_.Product) { "<a href=`"$(Escape-Html $_.Source)`">$(Escape-Html $_.Product)</a>" } else { "<a href=`"$(Escape-Html $_.Source)`">Check manually</a>" }
-                    "<tr><td>$(Escape-Html $_.Name)</td><td>$(Escape-Html $_.OperatingSystem)</td><td>$productCell</td><td class='$sevClass'>$(Escape-Html $_.Status)</td><td>$(Escape-Html $_.Note)</td><td>$(Escape-Html $_.MainstreamEnd)</td><td>$(Escape-Html $_.ExtendedEnd)</td><td>$(Escape-Html $_.EsuEnd)</td><td>$(Escape-Html ([string]$_.DaysUntilExtendedEnd))</td><td>$(Escape-Html $_.LastLogonDate)</td><td>$(if ($_.Stale -eq $true) { 'Yes' } else { 'No' })</td></tr>"
+                    # No blank cells: an OS not in the table has no dates (dash); a known product
+                    # with no ESU end had no ESU offered.
+                    if ($_.Status -eq 'Unknown') {
+                        $mainCell = '-'; $extCell = '-'; $esuCell = '-'; $daysCell = '-'
+                    }
+                    else {
+                        $mainCell = Escape-Html $_.MainstreamEnd
+                        $extCell  = Escape-Html $_.ExtendedEnd
+                        $esuCell  = if ($_.EsuEnd) { Escape-Html $_.EsuEnd } else { 'None offered' }
+                        $daysCell = Escape-Html ([string]$_.DaysUntilExtendedEnd)
+                    }
+                    "<tr><td>$(Escape-Html $_.Name)</td><td>$(Escape-Html $_.OperatingSystem)</td><td>$productCell</td><td class='$sevClass'>$(Escape-Html $_.Status)</td><td>$(Escape-Html $_.Note)</td><td>$mainCell</td><td>$extCell</td><td>$esuCell</td><td>$daysCell</td><td>$(Escape-Html $_.LastLogonDate)</td><td>$(if ($_.Stale -eq $true) { 'Yes' } else { 'No' })</td></tr>"
                 })
             </table>
             <p>Days Until Extended End: a negative number means extended support ended that many days ago. Each product links to the Microsoft Learn lifecycle page its dates came from.</p>
 "@
+        }
     }
 
     $html += @"
