@@ -270,6 +270,12 @@ function Get-SchemaVersionOS {
     return "Unknown (version $Version)"
 }
 
+# SQ-005 STUBS (test-first): replaced by the real implementation in the build step.
+function Get-ServerLifecycleTable { throw 'Get-ServerLifecycleTable: not implemented (SQ-005)' }
+function Resolve-ServerLifecycle { param([string]$OperatingSystem, $Table) throw 'Resolve-ServerLifecycle: not implemented (SQ-005)' }
+function Get-EndOfSupportStatus { param($Lifecycle, [datetime]$AsOf) throw 'Get-EndOfSupportStatus: not implemented (SQ-005)' }
+function Test-LifecycleTableAge { param([string]$CheckedOn, [datetime]$AsOf) throw 'Test-LifecycleTableAge: not implemented (SQ-005)' }
+function Get-EndOfSupportAudit { throw 'Get-EndOfSupportAudit: not implemented (SQ-005)' }
 function Get-TrustSidFilteringState {
     <#
     Interprets a trust's SID filtering from the trustAttributes bits.
