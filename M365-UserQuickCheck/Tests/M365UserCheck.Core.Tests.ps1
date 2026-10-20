@@ -1434,7 +1434,7 @@ Describe 'SQ-027 a risky user always escalates to the security lead' {
         $r.Message | Should -BeExactly 'On-premises AD has this account disabled, but Microsoft 365 still allows sign-in: AD and Microsoft 365 disagree, and sync normally carries the AD state across.'
     }
 
-    It 'SQ027_AC5_NotRiskyUnchanged: no record, low/remediated and none/dismissed give exactly today''s Action in every AC1-AC4 scenario (password steps equal Get-M365SignInNextStep); risk gate NotLicensed/Failed keeps today''s text as the start' {
+    It 'SQ027_AC5_NotRiskyUnchanged: no record, low/remediated and none/dismissed give exactly today''s Action in every AC1-AC4 scenario (password steps equal Get-M365SignInNextStep); risk gate NotLicensed/NotAllowed/Failed keeps today''s text as the start' {
         $script:M365RiskyUserStep | Should -Not -BeNullOrEmpty -Because 'the core must define $script:M365RiskyUserStep (non-vacuous: a not-risky user must never get it)'
         foreach ($risk in $null, @{ riskLevel = 'low'; riskState = 'remediated' }, @{ riskLevel = 'none'; riskState = 'dismissed' }) {
             foreach ($s in @(Get-Scenarios $risk)) {
@@ -1443,21 +1443,21 @@ Describe 'SQ-027 a risky user always escalates to the security lead' {
                 $act | Should -Not -BeExactly $script:M365RiskyUserStep
             }
         }
-        foreach ($state in 'NotLicensed', 'Failed') {
+        foreach ($state in 'NotLicensed', 'NotAllowed', 'Failed') {
             foreach ($s in @(Get-Scenarios $null $state)) {
                 $act = Get-ScenarioAction $s
-                if ($s.Group -eq 'adenabled') { continue }
-                if ($s.Group -in 'manager', 'code50057') { $act.StartsWith($s.Today, [StringComparison]::Ordinal) | Should -BeTrue -Because "$state $($s.Name): today's text, then the AC6 sentence" }
+                if ($s.Group -eq 'adenabled') { $act | Should -BeExactly $s.Today -Because "$state $($s.Name): AD-enabled synced block keeps today's step, no sentence" }
+                elseif ($s.Group -in 'manager', 'code50057') { $act.StartsWith($s.Today, [StringComparison]::Ordinal) | Should -BeTrue -Because "$state $($s.Name): today's text, then the AC6 sentence" }
                 else { $act | Should -BeExactly $s.Today -Because "$state $($s.Name): already escalates / password step, no sentence" }
             }
         }
     }
 
-    It 'SQ027_AC6_RiskNotCheckedCaveat: risk gate NotLicensed or Failed -> manager-path steps and the cloud/synced 50057 step end with the "ID Protection could not be checked" sentence; the escalating steps and the four password steps do not get it' {
+    It 'SQ027_AC6_RiskNotCheckedCaveat: risk gate NotLicensed, NotAllowed or Failed -> manager-path steps and the cloud/synced 50057 step end with the "ID Protection could not be checked" sentence; the escalating steps and the four password steps do not get it' {
         $sentence = $script:M365RiskNotCheckedSentence
         $sentence | Should -Not -BeNullOrEmpty -Because 'the core must define $script:M365RiskNotCheckedSentence'
         $sentence | Should -Match 'escalate to the security lead'
-        foreach ($state in 'NotLicensed', 'Failed') {
+        foreach ($state in 'NotLicensed', 'NotAllowed', 'Failed') {
             foreach ($s in @(Get-Scenarios $null $state)) {
                 $act = Get-ScenarioAction $s
                 switch ($s.Group) {

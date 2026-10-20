@@ -212,9 +212,12 @@ $script:M365NoSignInHistoryStep = 'Look at their recent sign-ins in the Microsof
 $script:M365RiskyUserStep = 'Escalate to the security lead: Microsoft Entra ID Protection flags this user as a possible compromised account. Do not unblock sign-in, enable the account or reset the password until the security lead agrees.'
 
 # SQ-027 (D-059): appended to the manager-path steps when the risky-user check could not run
-# (no Entra ID P2, or the read failed), so a block made during an incident is not undone blind.
+# (no Entra ID P2, a role that cannot read risky users, or the read failed), so a block made
+# during an incident is not undone blind. NotAllowed is included because a 403 on riskyUsers
+# does not say whether P2 or the role is missing (Get-M365GateFromError). NotChecked is not:
+# it means there was no cloud user to check.
 $script:M365RiskNotCheckedSentence = 'ID Protection could not be checked: if this account was blocked during a security incident, escalate to the security lead instead.'
-$script:M365RiskNotCheckedStates = @('NotLicensed', 'Failed')
+$script:M365RiskNotCheckedStates = @('NotLicensed', 'NotAllowed', 'Failed')
 
 # --- On-premises AD stage (SQ-011) ---------------------------------------------------------
 

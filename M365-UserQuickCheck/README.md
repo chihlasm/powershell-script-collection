@@ -102,7 +102,7 @@ Under the answer: **Why not** (each with a "What to do" line), **Worth knowing**
 | Earlier failed sign-ins (info) | Older failures by code and count. Only the latest sign-in decides the answer. | Look one up if it keeps coming back. |
 | No sign-in attempts reached Microsoft 365 (info) | Sign-in history was readable but empty for the window. | The problem is before Microsoft 365: the sign-in name, the device, the app or the network. |
 | No MFA method registered (warning) | Only a password. | If the tenant requires MFA, help them set up Microsoft Authenticator. |
-| ID Protection flags this user (warning) | Risk level and state from Entra ID P2. | Treat as possibly compromised; involve the security lead. For this user, "Escalate to the security lead" replaces every unblock, enable and password-reset step the tool would otherwise give, and it goes in the ticket note's next steps even when the answer is YES. When ID Protection could not be checked (no Entra ID P2, or the read failed), the manager steps end with a reminder to escalate instead if the account was blocked during a security incident. |
+| ID Protection flags this user (warning) | Risk level and state from Entra ID P2. | Treat as possibly compromised; involve the security lead. For this user, "Escalate to the security lead" replaces every unblock, enable and password-reset step the tool would otherwise give, and it goes in the ticket note's next steps even when the answer is YES. When ID Protection could not be checked (no Entra ID P2, the signed-in account's role cannot read it, or the read failed), the manager steps end with a reminder to escalate instead if the account was blocked during a security incident. |
 
 ## Is it a sync problem?
 
