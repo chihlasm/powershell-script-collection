@@ -75,17 +75,20 @@ BeforeAll {
         }
     }
 
-    # Pretend session host. -Service: Running | Stopped | Absent | Throw.
+    # Pretend session host. -Service: Running | Stopped | Absent | Throw. -StartMode: the agent
+    # service's start type (Auto, Manual, Disabled).
     # -Registry: Registered | NotRegistered | NoValue | KeyMissing | Throw.
     # -Events: array of events, or 'Throw'. -Qwinsta: lines, or 'Throw'.
     function Set-AvdHost {
         param(
             [string]$Service = 'Running',
+            [string]$StartMode = 'Auto',
             [string]$Registry = 'Registered',
             $Events = @(),
             $Qwinsta = $script:QwinstaListen
         )
         $script:AvdService = $Service
+        $script:AvdStartMode = $StartMode
         $script:AvdRegistry = $Registry
         $script:AvdEvents = $Events
         $script:AvdQwinsta = $Qwinsta
@@ -100,7 +103,7 @@ BeforeAll {
             if ($Filter -like '*RDAgentBootLoader*') {
                 if ($script:AvdService -eq 'Throw') { throw 'The WinRM client cannot process the request.' }
                 if ($script:AvdService -ne 'Absent') {
-                    $out += [PSCustomObject]@{ Name = 'RDAgentBootLoader'; DisplayName = 'Remote Desktop Agent Loader'; State = $script:AvdService; StartMode = 'Auto' }
+                    $out += [PSCustomObject]@{ Name = 'RDAgentBootLoader'; DisplayName = 'Remote Desktop Agent Loader'; State = $script:AvdService; StartMode = $script:AvdStartMode }
                 }
             }
             $out
@@ -433,9 +436,289 @@ Describe 'AVD host checks: still PowerShell 3.0 compatible and pure ASCII' {
         @($bytes | Where-Object { $_ -gt 127 }).Count | Should -Be 0
     }
 
-    It 'AVD_AC8_NoReadsOnThisMachine: the AVD seams are defined as functions so tests can mock them' {
+    It 'AVD_AC8_SeamsAreMockableFunctions: the AVD seams are defined as functions so tests can mock them' {
         foreach ($name in 'Get-AvdAgentRegistry', 'Get-AvdStackListenerOutput') {
             Get-Command -Name $name -CommandType Function -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
         }
+    }
+}
+
+# ---- Review round 1 (SQ-012) -------------------------------------------------------------
+
+Describe 'AVD host checks: qwinsta user names stay out of every output (personal data)' {
+    BeforeAll {
+        # Columns as qwinsta prints them: USERNAME starts where its header does, ID is right-aligned.
+        function New-QwinstaRow([string]$Session, [string]$User, [string]$Id, [string]$State, [switch]$Current) {
+            $lead = if ($Current) { '>' } else { ' ' }
+            $lead + $Session.PadRight(18) + $User.PadRight(20) + $Id.PadLeft(5) + '  ' + $State
+        }
+        function Get-QwinstaWithUsers([string]$ListenerState) {
+            @(
+                (' ' + 'SESSIONNAME'.PadRight(18) + 'USERNAME'.PadRight(20) + 'ID'.PadLeft(5) + '  STATE   TYPE        DEVICE'),
+                (New-QwinstaRow 'services' '' '0' 'Disc'),
+                (New-QwinstaRow 'console' '' '1' 'Conn'),
+                (New-QwinstaRow 'rdp-sxs2312010#5' 'jdoe.smith' '2' 'Active' -Current),
+                (New-QwinstaRow '' 'mary.major' '3' 'Disc'),
+                (New-QwinstaRow 'rdp-tcp' '' '65536' 'Listen'),
+                (New-QwinstaRow 'rdp-sxs2312010' '' '65537' $ListenerState)
+            )
+        }
+        $script:UserNames = 'jdoe\.smith|mary\.major'
+    }
+
+    It 'AVD_PD_NoUserNamesAnywhere: listener <State> - no signed-in user name in RawOutput, Evidence, Errors, the report or the ticket note' -ForEach @(
+        @{ State = 'Listen' }
+        @{ State = 'Down' }
+    ) {
+        Set-AvdHost -Qwinsta (Get-QwinstaWithUsers $State)
+        $r = Invoke-CitrixFSLogixTriage -ComputerName AVD01 -UserName jdoe
+
+        ($r.RawOutput | ConvertTo-Json -Depth 12 -Compress) | Should -Not -Match $script:UserNames
+        foreach ($e in @($r.Evidence)) {
+            "$($e.Name) $($e.Detail) $($e.Action)" | Should -Not -Match $script:UserNames
+        }
+        ([string]$r.Error) | Should -Not -Match $script:UserNames
+        ((ConvertTo-TriageText -Result $r) -join "`n") | Should -Not -Match $script:UserNames
+        $note = ConvertTo-CitrixFSLogixTriageTicketNote -Result $r
+        ((ConvertTo-TicketNoteText -Note $note) -join "`n") | Should -Not -Match $script:UserNames
+    }
+
+    It 'AVD_PD_ListenerFactsOnly: RawOutput keeps the rdp-sxs row state and a count of signed-in sessions, not the qwinsta text' {
+        Set-AvdHost -Qwinsta (Get-QwinstaWithUsers 'Down')
+        $r = Invoke-CitrixFSLogixTriage -ComputerName AVD01 -UserName jdoe
+        $facts = $r.RawOutput.Avd.Listener
+        $facts.HeaderFound | Should -BeTrue
+        $facts.SignedInSessions | Should -Be 2
+        @($facts.Listeners).Count | Should -Be 1
+        $facts.Listeners[0].Session | Should -Be 'rdp-sxs2312010'
+        $facts.Listeners[0].State | Should -Be 'Down'
+        ($facts | ConvertTo-Json -Depth 5 -Compress) | Should -Not -Match 'SESSIONNAME|rdp-tcp|console'
+    }
+
+    It 'AVD_PD_DownListenerEscalatesWithUserCount: the fix is an escalation that says how many users must sign out' {
+        Set-AvdHost -Qwinsta (Get-QwinstaWithUsers 'Down')
+        $r = Invoke-CitrixFSLogixTriage -ComputerName AVD01 -UserName jdoe
+        $e = @(Get-Evidence $r 'AVD stack listener')
+        $e[0].Status | Should -Be 'Fail'
+        $e[0].Action | Should -Match '^Users cannot connect while the AVD listener is down\. Escalate: put the host in drain mode, ask the 2 signed-in users to save their work and sign out, then restart it'
+    }
+}
+
+Describe 'AVD host checks: review round 1 wording' {
+    It 'AVD_R1_DisabledAgentEscalates: a Stopped agent with start type Disabled says Escalate and that it was disabled on purpose' {
+        Set-AvdHost -Service Stopped -StartMode Disabled
+        $r = Invoke-CitrixFSLogixTriage -ComputerName AVD01 -UserName jdoe
+        $e = @(Get-Evidence $r 'AVD agent service')
+        $e[0].Status | Should -Be 'Fail'
+        $e[0].Action | Should -Match '^Escalate: someone disabled the AVD agent on purpose'
+        $e[0].Action | Should -Match ([regex]::Escape($script:LearnAgentUrl))
+    }
+
+    It 'AVD_R1_StoppedAgentEscalates: a Stopped agent (start type Auto) is left to an engineer to start' {
+        Set-AvdHost -Service Stopped -StartMode Auto
+        $r = Invoke-CitrixFSLogixTriage -ComputerName AVD01 -UserName jdoe
+        $e = @(Get-Evidence $r 'AVD agent service')
+        $e[0].Action | Should -Match 'Escalate to an engineer to start'
+        $e[0].Action | Should -Not -Match 'disabled'
+    }
+
+    It 'AVD_R1_LeftoverKeyWording: agent key present but no service asks whether the server is meant to be an AVD host' {
+        Set-AvdHost -Service Absent -Registry Registered
+        $r = Invoke-CitrixFSLogixTriage -ComputerName AVD01 -UserName jdoe
+        $e = @(Get-Evidence $r 'AVD agent service')
+        $e[0].Action | Should -Match '^If this server is meant to be an AVD session host, escalate'
+    }
+
+    It 'AVD_R1_QwinstaErrorShown: an "Error [n]" from qwinsta is shown with a rights/RPC action, not blamed on the language' {
+        Set-AvdHost -Qwinsta @('Error [5]:Access is denied.')
+        $r = Invoke-CitrixFSLogixTriage -ComputerName AVD01 -UserName jdoe
+        $e = @(Get-Evidence $r 'AVD stack listener')
+        $e[0].Status | Should -Be 'Warn'
+        $e[0].NotChecked | Should -BeTrue
+        $e[0].Detail | Should -Match 'Error \[5\]:Access is denied'
+        $e[0].Detail | Should -Not -Match 'non-English'
+        $e[0].Action | Should -Match 'administrator'
+        $e[0].Action | Should -Match 'RPC'
+    }
+
+    It 'AVD_R1_DownloadMsiPointsAtTheDiskTools: DownloadMsiException reuses the disk advice (named tools or escalate)' {
+        Set-AvdHost -Events @(New-AvdEvent -Id 3277 -Message 'DownloadMsiException (synthetic test event)')
+        $r = Invoke-CitrixFSLogixTriage -ComputerName AVD01 -UserName jdoe
+        $e = @(Get-Evidence $r 'AVD agent event' | Where-Object { $_.Detail -match 'DownloadMsiException' })
+        $e.Count | Should -Be 1
+        $e[0].Action | Should -Match 'Run Drive-Storage-Report or Cleanup-CitrixVDAStorage on the server, or escalate'
+        $e[0].Action | Should -Match 'ask an engineer to enlarge'
+        $e[0].Action | Should -Not -Match '(?i)free up'
+    }
+
+    It 'AVD_R1_DotNetUpgradeEscalates: event 3389 asks an engineer to schedule the .NET upgrade and keeps the Learn link' {
+        Set-AvdHost -Events @(New-AvdEvent -Id 3389 -Message 'MissingMethodException: Method not found (synthetic test event)')
+        $r = Invoke-CitrixFSLogixTriage -ComputerName AVD01 -UserName jdoe
+        $e = @(Get-Evidence $r 'AVD agent event' | Where-Object { $_.Detail -match '3389' })
+        $e.Count | Should -Be 1
+        $e[0].Action | Should -Match '^Escalate to an engineer to schedule a \.NET Framework upgrade \(4\.7\.2 or later\) in a maintenance window; it needs a restart\. The host keeps working on the old agent meanwhile\.'
+        $e[0].Action | Should -Match ([regex]::Escape($script:LearnAgentUrl))
+    }
+}
+
+Describe 'AVD host checks: every disruptive fix says Escalate (D-017)' {
+    It 'AVD_R1_DisruptiveVerbsEscalate: rule fixes and the service, registration and listener actions put Escalate before any restart/reinstall/upgrade/free-up/delete/clean-up' {
+        $texts = New-Object System.Collections.Generic.List[object]
+        foreach ($rule in @($script:AvdAgentEventRules)) { $texts.Add([PSCustomObject]@{ Case = "rule $($rule.Label)"; Text = $rule.Fix }) }
+
+        $down = @($script:QwinstaListen | Select-Object -First 4) + ' rdp-sxs2312010                          65537  Down'
+        $scenarios = @(
+            @{ Case = 'service stopped'; Splat = @{ Service = 'Stopped' } }
+            @{ Case = 'service disabled'; Splat = @{ Service = 'Stopped'; StartMode = 'Disabled' } }
+            @{ Case = 'service missing, key present'; Splat = @{ Service = 'Absent'; Registry = 'Registered' } }
+            @{ Case = 'not registered'; Splat = @{ Registry = 'NotRegistered' } }
+            @{ Case = 'key missing'; Splat = @{ Registry = 'KeyMissing' } }
+            @{ Case = 'listener down'; Splat = @{ Qwinsta = $down } }
+            @{ Case = 'listener not listed'; Splat = @{ Qwinsta = @($script:QwinstaListen | Select-Object -First 4) } }
+            @{ Case = 'reads fail'; Splat = @{ Service = 'Throw'; Events = 'Throw'; Qwinsta = 'Throw' } }
+        )
+        foreach ($scenario in $scenarios) {
+            $splat = $scenario.Splat
+            Set-AvdHost @splat
+            $r = Invoke-CitrixFSLogixTriage -ComputerName AVD01 -UserName jdoe
+            foreach ($e in @(Get-AvdEvidence $r | Where-Object { $_.Action })) {
+                $texts.Add([PSCustomObject]@{ Case = "$($scenario.Case): $($e.Name)"; Text = [string]$e.Action })
+            }
+        }
+        $texts.Count | Should -BeGreaterThan 15
+
+        $verb = '(?i)\b(restart\w*|reboot\w*|reinstall\w*|install|installs|upgrade\w*|free up|delete\w*|clean up)\b'
+        $offenders = @(foreach ($t in $texts) {
+                $m = [regex]::Match($t.Text, $verb)
+                if (-not $m.Success) { continue }
+                $before = $t.Text.Substring(0, $m.Index)
+                $namedDiskTool = ($m.Value -match '(?i)^(free up|clean up)$') -and ($t.Text -match 'Drive-Storage-Report|Cleanup-CitrixVDAStorage')
+                if ($before -notmatch '(?i)\bescalate' -and -not $namedDiskTool) { '{0}: "{1}" before Escalate in: {2}' -f $t.Case, $m.Value, $t.Text }
+            })
+        $offenders | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'AVD host checks: Application log query' {
+    It 'AVD_R1_QueryFiltersByAgentSource: the first query asks for the agent sources, not just the IDs' {
+        Set-AvdHost
+        $null = Invoke-CitrixFSLogixTriage -ComputerName AVD01 -UserName jdoe
+        Should -Invoke Get-WinEvent -Times 1 -Exactly -ParameterFilter {
+            $FilterHashtable.LogName -eq 'Application' -and @($FilterHashtable.ProviderName) -contains 'WVD-Agent' -and
+            @($FilterHashtable.ProviderName) -contains 'MsiInstaller' -and @($FilterHashtable.Id) -contains 3277
+        }
+    }
+
+    It 'AVD_R1_FallbackKeepsOnlyAgentEvents: when the source filter is refused, the ID-only retry keeps agent events only and stores no message text' {
+        Set-AvdHost
+        Mock Get-WinEvent -ParameterFilter { $FilterHashtable.LogName -eq 'Application' } {
+            if ($FilterHashtable.ContainsKey('ProviderName')) { throw 'There is not an event provider on the AVD01 computer that matches "WVD-Agent-Updater".' }
+            @(
+                [PSCustomObject]@{ Id = 3019; ProviderName = 'SomeOtherApp'; LevelDisplayName = 'Error'; Message = 'OTHERAPPMARKER private text'; TimeCreated = (Get-Date) }
+                [PSCustomObject]@{ Id = 3703; ProviderName = 'WVD-Agent'; LevelDisplayName = 'Error'; Message = 'RD Gateway Url: https://gw.example.invalid is not accessible AGENTMARKER'; TimeCreated = (Get-Date) }
+            )
+        }
+        $r = Invoke-CitrixFSLogixTriage -ComputerName AVD01 -UserName jdoe
+        Should -Invoke Get-WinEvent -Times 2 -Exactly -ParameterFilter { $FilterHashtable.LogName -eq 'Application' }
+        $found = @(Get-Evidence $r 'AVD agent event' | Where-Object { $_.Status -ne 'Pass' })
+        $found.Count | Should -Be 1
+        $found[0].Detail | Should -Match '3703'
+        @(Get-Evidence $r 'AVD agent event*' | Where-Object { $_.Detail -match '3019' }).Count | Should -Be 0
+
+        $raw = @($r.RawOutput.Avd.Events)
+        $raw.Count | Should -Be 1
+        $raw[0].Id | Should -Be 3703
+        $raw[0].ProviderName | Should -Be 'WVD-Agent'
+        $raw[0].Rule | Should -Be 'RD Gateway URL not accessible'
+        $raw[0].PSObject.Properties.Name | Should -Not -Contain 'Message'
+        ($r.RawOutput | ConvertTo-Json -Depth 12 -Compress) | Should -Not -Match 'OTHERAPPMARKER|AGENTMARKER'
+    }
+}
+
+Describe 'AVD host checks: ticket note wording for checks that could not run' {
+    BeforeAll {
+        function Get-NoteText($Result) { (ConvertTo-TicketNoteText -Note (ConvertTo-CitrixFSLogixTriageTicketNote -Result $Result)) -join "`n" }
+    }
+
+    It 'AVD_R1_NoteUsesFixedWording: failed AVD reads appear in the note in fixed words, without the exception text; the report keeps it' {
+        Set-AvdHost -Service Throw -Registry Registered -Events 'Throw' -Qwinsta 'Throw'
+        $r = Invoke-CitrixFSLogixTriage -ComputerName AVD01 -UserName jdoe
+        $note = Get-NoteText $r
+        $note | Should -Match ([regex]::Escape('- Could not read the AVD agent service.'))
+        $note | Should -Match ([regex]::Escape('- Could not read the Application log for AVD agent errors.'))
+        $note | Should -Match ([regex]::Escape('- Could not check the AVD rdp-sxs listener.'))
+        $note | Should -Not -Match 'WinRM client|RPC server is unavailable|Access is denied'
+        $note | Should -Match 'the Azure Virtual Desktop agent\.' -Because 'the registration was read, so AVD was partly checked'
+
+        $report = (ConvertTo-TriageText -Result $r) -join "`n"
+        $report | Should -Match 'The WinRM client cannot process the request'
+        ([string]$r.Error) | Should -Match 'Access is denied'
+    }
+
+    It 'AVD_R1_ScopeLineSaysCouldNotCheck: when every AVD item could not be checked, the scope line says so' {
+        Set-AvdHost -Service Throw -Registry Registered -Events 'Throw' -Qwinsta 'Throw'
+        $r = Invoke-CitrixFSLogixTriage -ComputerName AVD01 -UserName jdoe
+        # Today a registration read that fails also hides the host from detection, so make every
+        # AVD item NotChecked by hand to pin the wording.
+        $evidence = @($r.Evidence | ForEach-Object {
+                if ($_.Name -like 'AVD *' -and -not $_.NotChecked) { New-EvidenceItem -Name $_.Name -Status 'Warn' -NotChecked -Detail 'x' -Action 'y' } else { $_ }
+            })
+        $blind = [PSCustomObject]@{}
+        foreach ($p in $r.PSObject.Properties) { $blind | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value }
+        $blind.Evidence = $evidence
+        $note = Get-NoteText $blind
+        $note | Should -Match 'the Azure Virtual Desktop agent \(could not check\)\.'
+        $note | Should -Match ([regex]::Escape('- Could not read the AVD host pool registration.'))
+    }
+}
+
+Describe 'AVD host checks: static guards' {
+    BeforeAll {
+        $script:GuardAst = [System.Management.Automation.Language.Parser]::ParseFile($script:ScriptPath, [ref]$null, [ref]$null)
+        function Get-FunctionAst([string]$Name) {
+            @($script:GuardAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $Name }, $true))[0]
+        }
+    }
+
+    It 'AVD_R1_RegistryReadsOnlyIsRegistered: Get-AvdAgentRegistry only calls GetValue(IsRegistered), opens the key read-only and never lists values or names RegistrationToken' {
+        $fn = Get-FunctionAst 'Get-AvdAgentRegistry'
+        $fn | Should -Not -BeNullOrEmpty
+        $calls = @($fn.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))
+        $members = @($calls | ForEach-Object { $_.Member.Extent.Text } | Sort-Object -Unique)
+        foreach ($m in $members) { $m | Should -BeIn @('OpenBaseKey', 'OpenRemoteBaseKey', 'OpenSubKey', 'GetValue', 'Close') }
+        $getValue = @($calls | Where-Object { $_.Member.Extent.Text -eq 'GetValue' })
+        $getValue.Count | Should -BeGreaterThan 0
+        foreach ($c in $getValue) {
+            @($c.Arguments).Count | Should -Be 1
+            $c.Arguments[0].Value | Should -Be 'IsRegistered'
+        }
+        foreach ($c in @($calls | Where-Object { $_.Member.Extent.Text -eq 'OpenSubKey' })) { @($c.Arguments).Count | Should -Be 1 -Because 'one argument = read-only' }
+        $strings = @($fn.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true) | ForEach-Object { $_.Value })
+        $strings | Should -Not -Contain 'RegistrationToken'
+        $strings | Should -Not -Contain 'GetValueNames'
+    }
+
+    It 'AVD_R1_OnlyNativeCallIsQwinsta: the only & invocation is qwinsta.exe with nothing but /server:<name>' {
+        $amp = @($script:GuardAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Ampersand }, $true))
+        $amp.Count | Should -Be 1
+        $call = $amp[0]
+        $call.CommandElements[0].Extent.Text | Should -Be '$qwinsta'
+        @($call.CommandElements).Count | Should -Be 2
+        $call.CommandElements[1].Extent.Text | Should -Be '@arguments'
+
+        $fn = Get-FunctionAst 'Get-AvdStackListenerOutput'
+        $call.Extent.StartOffset | Should -BeGreaterThan $fn.Extent.StartOffset
+        $call.Extent.EndOffset | Should -BeLessThan $fn.Extent.EndOffset
+        $assigns = @($fn.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true))
+        $qwinstaSet = @($assigns | Where-Object { $_.Left.Extent.Text -eq '$qwinsta' })
+        $qwinstaSet.Count | Should -Be 1
+        $qwinstaSet[0].Right.Extent.Text | Should -Match "'\{0\}\\qwinsta\.exe'"
+        $argumentSet = @($assigns | Where-Object { $_.Left.Extent.Text -eq '$arguments' } | ForEach-Object { $_.Right.Extent.Text })
+        $argumentSet.Count | Should -Be 2
+        $argumentSet | Should -Contain '@()'
+        $argumentSet | Should -Contain "('/server:{0}' -f `$ComputerName)"
+
+        $commands = @($script:GuardAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() })
+        foreach ($banned in 'Start-Process', 'Invoke-Expression', 'iex', 'cmd', 'cmd.exe') { $commands | Should -Not -Contain $banned }
     }
 }
