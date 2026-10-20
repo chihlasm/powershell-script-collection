@@ -1399,7 +1399,7 @@ Describe 'SQ-027 a risky user always escalates to the security lead' {
     It 'SQ027_AC2_RiskyBlockedSyncedEveryBranch: synced, blocked, risky by state alone -> SignInBlocked Action is the security-lead step in all three AD cases and the four no-AD routes' {
         Assert-RiskyStepWording
         $cases = @(Get-Scenarios $script:RiskStateOnly | Where-Object { $_.Kind -eq 'Blocked' -and $_.Name -like 'synced*' })
-        $cases.Count | Should -Be 8
+        $cases.Count | Should -Be 7 -Because 'three AD cases and the four no-AD routes'
         foreach ($s in $cases) {
             $a = Get-M365UserAssessment -Facts $s.Facts
             (Get-Reason $a 'RiskyUser') | Should -Not -BeNullOrEmpty -Because $s.Name
@@ -1505,7 +1505,7 @@ Describe 'SQ-027 a risky user always escalates to the security lead' {
     It 'SQ027_AC8_NoConflictingStepsForRiskyUser: every D017 scenario with a risky user -> no manager step anywhere, every unblock/enable/reset step has "security lead" before it, and Test-M365StepNeedsApproval passes for every Action' {
         $script:M365RiskyUserStep | Should -Not -BeNullOrEmpty -Because 'the core must define $script:M365RiskyUserStep'
         $scenarios = @(Get-D017Scenarios $script:RiskHighAtRisk)
-        $scenarios.Count | Should -BeGreaterThan 40
+        $scenarios.Count | Should -Be 38 -Because 'the D017_NoRemovalStepForTier1 list has 38 scenarios'
         $security = 0
         foreach ($f in $scenarios) {
             foreach ($r in @((Get-M365UserAssessment -Facts $f).Reasons)) {
