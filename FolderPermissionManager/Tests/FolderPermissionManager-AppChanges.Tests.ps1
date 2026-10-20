@@ -1138,9 +1138,9 @@ Describe 'SQ-017 review notes: -WhatIf, writes, pool, started row' {
         $stub = { param($n) "param([Parameter(ValueFromRemainingArguments)]`$a) Add-Content -LiteralPath '$marker' -Value '$n'; [PSCustomObject]@{ ExitCode = 0; Output = '' }" }
         $override = @{}
         foreach ($n in 'Set-Acl', 'Invoke-AclTool', 'takeown', 'icacls') { $override[$n] = & $stub $n }
-        # PowerShell 7 pool runspaces do not load Get-Acl's type extensions, so Get-Acl(...).Sddl is empty
-        # there and the core's backup check would fail every change. Windows PowerShell 5.1, which the
-        # app runs under, does load them. Only this test (run under pwsh) swaps in an equivalent read.
+        # An equivalent read of the SDDL. It was needed while the pool used CreateDefault(), whose
+        # PowerShell 7 runspaces lack Get-Acl's type extensions; the pool now uses CreateDefault2 and
+        # PoolReadsRealPermissionsUnderEveryHost checks the real read. Kept so this test stays about writes.
         $override['Get-ItemSddl'] = 'param([string]$Path) try { (Get-Acl -LiteralPath $Path -ErrorAction Stop).GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::All) } catch { ''Could not read'' }'
         $dir = New-Folder 'PoolDir'
         $script:Current = [PSCustomObject]@{ DisplayPath = $dir; RealPath = $dir }
@@ -1176,6 +1176,29 @@ Describe 'SQ-017 review notes: -WhatIf, writes, pool, started row' {
             (Test-Path -LiteralPath $marker) | Should -BeFalse -Because 'a -WhatIf pool run reached Set-Acl, Invoke-AclTool, takeown or icacls'
             $result = Select-TaskResult -Output $dry.Out
             $result.Message | Should -BeLike 'WhatIf: nothing was changed*'
+        }
+        finally {
+            if ($script:BgPool) { try { $script:BgPool.Close() } catch { } }
+        }
+    }
+
+    It 'PoolReadsRealPermissionsUnderEveryHost' {
+        # Regression: started from PowerShell 7, every Add failed with "the backup file ... does
+        # not hold the permissions read from <folder>": the pool's Get-Acl(...).Sddl was empty,
+        # because a CreateDefault() runspace there lacks Get-Acl's type extensions (Sddl, Access).
+        # This suite runs under pwsh, so it reads through the real pool with no Get-ItemSddl stand-in.
+        $dir = New-Folder 'PoolReadDir'
+        try {
+            Initialize-BackgroundPool
+            $work = { param($p) [PSCustomObject]@{ Sddl = (Get-ItemSddl -Path $p); Rules = @((Get-Acl -LiteralPath $p).Access | Where-Object { $_ }).Count } }
+            $t = Start-BgTask -Work $work -ArgumentList @($dir) -OnDone { } -State $null -Kind Read
+            $t.Handle.AsyncWaitHandle.WaitOne(60000) | Should -BeTrue
+            $out = @($t.PS.EndInvoke($t.Handle))
+            $errs = @($t.PS.Streams.Error)
+            $t.PS.Dispose()
+            $errs.Count | Should -Be 0 -Because "$($errs | Out-String)"
+            $out[0].Sddl | Should -Match '^O:' -Because 'the pool must read the folder''s real permissions, or the backup check refuses every change'
+            $out[0].Rules | Should -BeGreaterThan 0 -Because 'Get-Acl(...).Access must list the folder''s entries in the pool too'
         }
         finally {
             if ($script:BgPool) { try { $script:BgPool.Close() } catch { } }

@@ -2419,7 +2419,13 @@ function Initialize-BackgroundPool {
     # passes it.
     # https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_command_precedence
     param([hashtable]$FunctionOverride)
-    $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    # CreateDefault2, not CreateDefault: under PowerShell 7 a CreateDefault() runspace has Get-Acl
+    # but not its type extensions, so (Get-Acl ...).Sddl and .Access are empty there and the
+    # backup check refused every change ("the backup file ... does not hold the permissions read
+    # from ..."). CreateDefault2 loads the default cmdlets through their modules, type data
+    # included, in Windows PowerShell 5.1 and PowerShell 7 alike.
+    # https://learn.microsoft.com/dotnet/api/system.management.automation.runspaces.initialsessionstate.createdefault2
+    $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault2()
     # The pool only runs this script's own work blocks and the core next to it, which the
     # window has already loaded; the process policy may not reach a new runspace.
     $iss.ExecutionPolicy = [Microsoft.PowerShell.ExecutionPolicy]::Bypass
