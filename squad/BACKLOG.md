@@ -419,13 +419,14 @@ so a failure never leaves the account with no entry; read back and report like A
 they come from. Destructive-operations checklist applies.
 
 ## SQ-026 · FolderPermissionManager: Copy targets on a remote share get the file-server checks
-- status: new
+- status: ready
 - priority: P2
 - feature: FolderPermissionManager rewrite
 - type: follow-up
 - found-in: SQ-022 (D-053)
-- depends-on: SQ-023
 - branch:
+- spec: squad/specs/SQ-026.md
+- depends-on: SQ-022, SQ-023
 
 A Copy Permissions target on a remote share is checked only on the client side: `\\fs01\Win`
 pointing at C:\Windows on the server is not refused. After SQ-023 moves the share helpers
@@ -434,33 +435,15 @@ them for every remote Copy target: the share's real server folder against D-036 
 high-impact roots, and the D-045 junction walk, failing closed. Same as whole-tree takeown
 (D-045), extended to Copy (D-053).
 
-## SQ-027 · M365 user check: a blocked risky user must escalate to the security lead, not the manager path
-- status: new
-- priority: P2
-- feature: M365 user check
-- type: follow-up
-- found-in: SQ-019
-- branch:
-
-D-050 limits the "check with their manager, note who approved it, then unblock/enable" step to a
-plain blocked account (no block marker, not a risky user). `M365UserCheck.Core.ps1` picks the
-SignInBlocked step (cloud-only, :831) and both 50057 steps (:738/:739) without looking at the
-ID Protection result. A user flagged atRisk/confirmedCompromised whom an admin blocked during an
-incident gets "involve the security lead before unblocking" (RiskyUser, a Warning) next to
-"check with their manager ... then unblock sign-in" (SignInBlocked, a Blocker), and only the
-Blocker's step reaches the ticket note. Tier 1 could unblock a compromised account. When
-RiskGate is Available and the user is risky, those steps should escalate to the security lead.
-Add a blocked + risky scenario test. Same pass: the synced 50057 step should not say "enable it
-in AD" when AD was read and the account carries the block marker (conflicts with the :678
-escalation on the same ticket).
-
 ## SQ-028 · FolderPermissionManager: a bare account name on a network folder must not resolve to this workstation's local account
-- status: new
+- status: ready
 - priority: P2
 - feature: FolderPermissionManager rewrite
 - type: follow-up
 - found-in: SQ-018
 - branch:
+- spec: squad/specs/SQ-028.md
+- depends-on: SQ-023, SQ-022, SQ-025
 
 Add Permission resolves a bare name such as `micha` on the workstation (NTAccount.Translate /
 LookupAccountName), which checks the local machine's accounts before the domain
@@ -480,13 +463,34 @@ directory symbolic link to `\FS01\Data` (Fixed drive) still rewrites `.\micha` t
 any folder from the target up to its root is a reparse point not known to be local, or cannot be
 read (Get-AppReparseInfo throws, so fail closed); test with a mocked symlink tag 0xA000000C.
 
+## SQ-027 · M365 user check: a blocked risky user must escalate to the security lead, not the manager path
+- status: ready
+- priority: P2
+- feature: M365 user check
+- type: follow-up
+- found-in: SQ-019
+- branch:
+- spec: squad/specs/SQ-027.md
+
+D-050 limits the "check with their manager, note who approved it, then unblock/enable" step to a
+plain blocked account (no block marker, not a risky user). `M365UserCheck.Core.ps1` picks the
+SignInBlocked step (cloud-only, :831) and both 50057 steps (:738/:739) without looking at the
+ID Protection result. A user flagged atRisk/confirmedCompromised whom an admin blocked during an
+incident gets "involve the security lead before unblocking" (RiskyUser, a Warning) next to
+"check with their manager ... then unblock sign-in" (SignInBlocked, a Blocker), and only the
+Blocker's step reaches the ticket note. Tier 1 could unblock a compromised account. When
+RiskGate is Available and the user is risky, those steps should escalate to the security lead.
+Add a blocked + risky scenario test. Same pass: the synced 50057 step should not say "enable it
+in AD" when AD was read and the account carries the block marker (conflicts with the :678
+escalation on the same ticket).
+
 ## SQ-029 · Add a smoke-test start mode
-- status: new
+- status: ready
 - priority: P1
 - feature: Squad tooling
 - type: feature
 - branch:
-- spec:
+- spec: squad/specs/SQ-029.md
 
 The build gate can only run unit tests, which all passed while FolderPermissionManager-GUI.ps1
 could not open at all (193a907: the startup guard always tripped). Give the WPF app a
@@ -495,3 +499,102 @@ closes it on a timer, and exits 0 only if the window came up, with no elevation 
 drive or network reads, no log writes and no admin rights needed. Once merged, set
 `smokeCommand` in squad/squad.config.json to it so the gate runs it after every implementer
 (/squad:configure). (From /squad:configure review 2026-10-20.)
+
+## SQ-030 · AD user check: re-enable and expiry steps note who approved it (D-050)
+- status: new
+- priority: P2
+- feature: AD user check
+- type: follow-up
+- found-in: SQ-027 (D-060)
+- branch:
+- spec:
+
+AD-UserQuickCheck (`Get-ADUserQuickCheck.ps1` ~:422 re-enable step and ~:442 "extend or clear the
+account expiry date") still says "Check with their manager ... then ..." without "note on the
+ticket who approved it", so it now differs from M365-UserQuickCheck (SQ-019, D-050). Match the
+wording, keep deliberate blocks on Escalate (P-004), add the D-059 caution only if this tool reads
+ID Protection, update the README row, and add a checker test over every step the tool can produce.
+
+## SQ-031 · Smoke-test start mode for RobocopyMigration
+- status: new
+- priority: P2
+- feature: Squad tooling
+- type: feature
+- branch:
+- spec:
+- depends-on: SQ-029
+
+Give RobocopyMigration/RobocopyMigration-GUI.ps1 a `-SmokeTest` start mode the same way SQ-029 does for FolderPermissionManager: real
+startup path, window rendered off-screen, closed on a timer, exit 0 plus a `[PASS]` line only if it
+came up, and no elevation, mutex, log, settings, drive, network or directory reads. Add it to
+`Tests\Invoke-SmokeTest.ps1`'s list. (D-061.)
+
+## SQ-032 · Smoke-test start mode for CopyFileToServer
+- status: new
+- priority: P2
+- feature: Squad tooling
+- type: feature
+- branch:
+- spec:
+- depends-on: SQ-029
+
+Give CopyFileToServer/CopyFileToServer-GUI.ps1 a `-SmokeTest` start mode the same way SQ-029 does for FolderPermissionManager: real
+startup path, window rendered off-screen, closed on a timer, exit 0 plus a `[PASS]` line only if it
+came up, and no elevation, mutex, log, settings, drive, network or directory reads. Add it to
+`Tests\Invoke-SmokeTest.ps1`'s list. (D-061.)
+
+## SQ-033 · Smoke-test start mode for M365-SyncedUserFixes
+- status: new
+- priority: P2
+- feature: Squad tooling
+- type: feature
+- branch:
+- spec:
+- depends-on: SQ-029
+
+Give M365-SyncedUserFixes/Start-M365SyncedUserFixes.ps1 a `-SmokeTest` start mode the same way SQ-029 does for FolderPermissionManager: real
+startup path, window rendered off-screen, closed on a timer, exit 0 plus a `[PASS]` line only if it
+came up, and no elevation, mutex, log, settings, drive, network or directory reads. Add it to
+`Tests\Invoke-SmokeTest.ps1`'s list. (D-061.)
+
+## SQ-034 · Smoke-test start mode for Search-DNSRecords
+- status: new
+- priority: P2
+- feature: Squad tooling
+- type: feature
+- branch:
+- spec:
+- depends-on: SQ-029
+
+Give Search-DNSRecords/Search-DNSRecords-GUI.ps1 a `-SmokeTest` start mode the same way SQ-029 does for FolderPermissionManager: real
+startup path, window rendered off-screen, closed on a timer, exit 0 plus a `[PASS]` line only if it
+came up, and no elevation, mutex, log, settings, drive, network or directory reads. Add it to
+`Tests\Invoke-SmokeTest.ps1`'s list. (D-061.)
+
+## SQ-035 · Smoke-test start mode for AD-Audit GUI
+- status: new
+- priority: P2
+- feature: Squad tooling
+- type: feature
+- branch:
+- spec:
+- depends-on: SQ-029
+
+Give AD-Audit (Show-ADAuditGUI) a `-SmokeTest` start mode the same way SQ-029 does for FolderPermissionManager: real
+startup path, window rendered off-screen, closed on a timer, exit 0 plus a `[PASS]` line only if it
+came up, and no elevation, mutex, log, settings, drive, network or directory reads. Add it to
+`Tests\Invoke-SmokeTest.ps1`'s list. (D-061.)
+
+## SQ-036 · Smoke-test start mode for Juniper console setup
+- status: new
+- priority: P2
+- feature: Squad tooling
+- type: feature
+- branch:
+- spec:
+- depends-on: SQ-029
+
+Give Juniper-ConsoleSetup (Invoke-JuniperConsoleSetup-GUI) a `-SmokeTest` start mode the same way SQ-029 does for FolderPermissionManager: real
+startup path, window rendered off-screen, closed on a timer, exit 0 plus a `[PASS]` line only if it
+came up, and no elevation, mutex, log, settings, drive, network or directory reads. Add it to
+`Tests\Invoke-SmokeTest.ps1`'s list. (D-061.)
