@@ -485,7 +485,7 @@ in AD" when AD was read and the account carries the block marker (conflicts with
 escalation on the same ticket).
 
 ## SQ-029 · Add a smoke-test start mode
-- status: review
+- status: done
 - priority: P1
 - feature: Squad tooling
 - type: feature
