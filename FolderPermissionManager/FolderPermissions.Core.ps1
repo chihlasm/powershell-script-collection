@@ -167,6 +167,11 @@
       https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-createfilew
       https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew
       https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-getlongpathnamew
+    - A typed '.' or '..' folder name is refused, not worked out (Get-DotSegmentRefusal):
+      Windows removes '..' only up to the root of the path ("the drive (C:\) for DOS paths, the
+      server/share for UNCs"), and "a segment of three or more periods ... is actually a valid
+      file/directory name":
+      https://learn.microsoft.com/dotnet/standard/io/file-path-formats
     - High-impact roots (Get-HighImpactRootRefusal): this computer's profiles folder from
       GetProfilesDirectoryW ("C:\Users" by default; ProfilesDirectory can move it):
       https://learn.microsoft.com/windows/win32/api/userenv/nf-userenv-getprofilesdirectoryw
@@ -804,6 +809,43 @@ function ConvertTo-ComparablePath {
     if ($unc) { return '\\' + ($segments.ToArray() -join '\') }
     if ($segments.Count -eq 1 -and $segments[0] -match '^[A-Za-z]:$') { return "$($segments[0])\" }
     $segments.ToArray() -join '\'
+}
+
+function Get-DotSegmentRefusal {
+    <#
+    .SYNOPSIS
+        Why a typed path with a folder name made only of dots ('.', '..', '...') is refused, or
+        $null when it has none. Text only.
+    .DESCRIPTION
+        The tool refuses such a path instead of working out which folder it means, because the
+        checks and the change would not agree. Windows evaluates '.' and '..' against the root
+        of the path, which is the share for a UNC path and the drive for a mapped drive:
+          "Parent directories are only removed if they aren't past the root of the path. The
+          root of the path depends on the type of path. It is the drive (C:\) for DOS paths,
+          the server/share for UNCs (\\Server\Share), and the device path prefix for device
+          paths (\\?\ or \\.\)."
+        So \\fs01\AppShare\..\Data changes the share's own folder, while the share check builds
+        the server's path (\\fs01\C$\...\..\Data) and would inspect a folder above it; H:\..\Data
+        stops at H:\ but its \\server\share mapping does not. And three or more dots are a real
+        name to Windows, which ConvertTo-ComparablePath trims away:
+          "A segment of three or more periods isn't normalized and is actually a valid
+          file/directory name."
+        Names that only contain dots (.hidden, HR.v2, a..b) are allowed. Empty segments (a
+        trailing or doubled \ or /) are skipped. The '?' or '.' of a leading \\?\ or \\.\ is the
+        device prefix, not a folder name.
+        https://learn.microsoft.com/dotnet/standard/io/file-path-formats
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$Path)
+
+    if ([string]::IsNullOrEmpty($Path)) { return $null }
+    $rest = $Path
+    if ($rest -match '^[\\/]{2}[?.][\\/](.*)$') { $rest = $Matches[1] }
+    foreach ($segment in @($rest -split '[\\/]')) {
+        if ($segment -match '^\.+$') {
+            return "$Path has a folder name made only of dots ('.' or '..') in it. Windows does not read those the way this tool checks them ('..' never goes above the share or the drive), so the tool cannot be sure which folder this is. Type the folder's full path without them, for example D:\Shares\HR or \\fs01\Data\HR. Nothing was changed."
+        }
+    }
+    $null
 }
 
 function Get-TreeOwnershipRefusal {

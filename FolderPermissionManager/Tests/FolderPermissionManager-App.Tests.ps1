@@ -1446,3 +1446,47 @@ Describe 'Banner and pane states' {
         $code | Should -Not -Match 'is created with the first change'
     }
 }
+
+Describe 'Go box: a typed . or .. folder name is not opened (SQ-024, AC9)' {
+    BeforeAll {
+        # No window and no STA thread: the tree is a plain list holder and the node a plain object.
+        function script:New-GoFakeNode { param($Path) $n = [PSCustomObject]@{ Tag = [PSCustomObject]@{ Path = $Path }; IsSelected = $false; IsExpanded = $false }; $n | Add-Member ScriptMethod BringIntoView { }; $n }
+    }
+    BeforeEach {
+        Mock Select-Folder { }
+        Mock Set-Status { $script:GoStatus.Add([PSCustomObject]@{ Text = $Text; Kind = $Kind }) }
+        Mock New-FolderNode { New-GoFakeNode -Path $Path }
+        $script:GoStatus = [System.Collections.Generic.List[object]]::new()
+        $script:GoItems = [System.Collections.Generic.List[object]]::new()
+        $script:GoItems.Add((New-GoFakeNode -Path 'C:\'))
+        $script:UI = @{
+            GoBox      = [PSCustomObject]@{ Text = '' }
+            FolderTree = [PSCustomObject]@{ Items = $script:GoItems }
+        }
+    }
+
+    It 'AC9_GoBox_DotSegmentPathIsNotOpened' {
+        $typed = '\\fs01\AppShare\..\Data'
+        $script:UI.GoBox.Text = $typed
+
+        Open-TypedPath
+
+        $script:GoItems.Count | Should -Be 1 -Because 'no tree item is added'
+        @($script:GoItems | Where-Object { $_.IsSelected }).Count | Should -Be 0
+        Should -Invoke Select-Folder -Times 0 -Exactly -Scope It
+        Should -Invoke Set-Status -Times 1 -Exactly -Scope It
+        $script:GoStatus[0].Kind | Should -Be 'Warning'
+        $script:GoStatus[0].Text | Should -Match ([regex]::Escape($typed))
+        $script:GoStatus[0].Text | Should -Match ([regex]::Escape("'.' or '..'"))
+    }
+
+    It 'AC9_GoBox_OrdinaryPathIsOpenedAsBefore' {
+        $script:UI.GoBox.Text = '\\fs01\AppShare\Data'
+
+        Open-TypedPath
+
+        $script:GoItems.Count | Should -Be 2
+        $script:GoItems[0].Tag.Path | Should -Be '\\fs01\AppShare\Data'
+        $script:GoItems[0].IsSelected | Should -BeTrue
+    }
+}

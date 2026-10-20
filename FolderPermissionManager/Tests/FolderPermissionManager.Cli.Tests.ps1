@@ -933,3 +933,70 @@ Describe 'FolderPermissionManager.ps1 (command line): mapped network drives and 
         Get-CliRefusalNextStep -Refusal 'x is in a Windows system folder.' | Should -Match '-AllowSystemFolder'
     }
 }
+
+Describe 'FolderPermissionManager.ps1 (command line): dot segments (SQ-024, AC10-AC12)' {
+    BeforeEach {
+        $script:Log = Join-Path $TestDrive ('cli-logs-' + [guid]::NewGuid().ToString('N'))
+        $script:Lines = [System.Collections.Generic.List[string]]::new()
+        Mock Set-Acl { throw 'Set-Acl must not run in the dot-segment tests.' }
+        Mock takeown { throw 'takeown must not run.' }
+        Mock icacls { throw 'icacls must not run.' }
+        Mock Invoke-AclTool { throw 'Invoke-AclTool must not run in the dot-segment tests.' }
+        Mock Test-CliHostInteractive { $true }
+        Mock Read-Host { 'n' }
+        Mock Write-Host { $script:Lines.Add("$Object") }
+        Mock Get-OwnerTreeItem { throw 'Get-OwnerTreeItem must not run.' }
+        Mock Get-TreeOwnershipTargetRefusal { throw 'Get-TreeOwnershipTargetRefusal must not run.' }
+        Mock Set-ItemOwnerToCurrentUser { }
+        $script:StartLocation = (Get-Location).Path
+    }
+    # Back to where the test started: $TestDrive is deleted after this file, and a session left
+    # in it breaks the test files that run after this one.
+    AfterEach { Set-Location -LiteralPath $script:StartLocation }
+
+    It 'AC10_Cli_RootedDotSegmentPath_FailsBeforeAnything_<Path>' -ForEach @(
+        @{ Path = '\\fs01\AppShare\..\..\..\Data' }
+        @{ Path = 'D:\Shares\..\Windows' }
+        @{ Path = 'H:\..\Data' }
+    ) {
+        $code = Invoke-FolderPermissionCli -Path $Path -Force -AllowSystemFolder -LogFolder $script:Log
+
+        $code | Should -Be 1
+        $fail = @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' })
+        $fail.Count | Should -Be 1
+        $fail[0] | Should -Match ([regex]::Escape((Get-DotSegmentRefusal -Path $Path)))
+        $fail[0] | Should -Not -Match 'AllowSystemFolder'
+        Should -Invoke Get-OwnerTreeItem -Times 0 -Exactly -Scope It
+        Should -Invoke Get-TreeOwnershipTargetRefusal -Times 0 -Exactly -Scope It
+        Should -Invoke Read-Host -Times 0 -Exactly -Scope It
+        Should -Invoke Set-ItemOwnerToCurrentUser -Times 0 -Exactly -Scope It
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+    }
+
+    It 'AC11_Cli_RelativeDotDotStillWorks' {
+        $hr = Join-Path $TestDrive 'a\HR'
+        New-Item -ItemType Directory -Path $hr -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $TestDrive 'a\b') -Force | Out-Null
+        Mock Get-OwnerTreeItem { [PSCustomObject]@{ Items = @(); Unlisted = @(); Links = @() } }
+        Mock Get-TreeOwnershipTargetRefusal { $null }
+        Mock Get-TreeLinkRefusal { $null }
+        Mock Get-HighImpactRootRefusal { $null }
+        Mock Write-CliChangeResult { $false }
+        Push-Location -LiteralPath (Join-Path $TestDrive 'a\b')
+        try { $null = Invoke-FolderPermissionCli -Path '..\HR' -LogFolder $script:Log -WhatIf }
+        finally { Pop-Location }
+
+        @($script:Lines | Where-Object { $_ -match [regex]::Escape("'.' or '..'") }).Count | Should -Be 0 -Because 'a relative path is not refused by the dot rule'
+        Should -Invoke Set-ItemOwnerToCurrentUser -Times 1 -Exactly -Scope It -ParameterFilter { $Path -eq $hr }
+    }
+
+    It 'AC12_Docs_NameTheDotSegmentRefusal' {
+        $readme = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\README.md') -Raw
+        $readme | Should -Match "'\.' or '\.\.'"
+        $help = Get-Help (Join-Path $PSScriptRoot '..\FolderPermissionManager.ps1') -Full
+        $pathHelp = (@($help.parameters.parameter | Where-Object { $_.name -eq 'Path' }).description | ForEach-Object { $_.Text }) -join ' '
+        $pathHelp | Should -Match "'\.' or '\.\.'"
+        $pathHelp | Should -Match ([regex]::Escape(".\HR")) -Because 'a relative path is still made a full path'
+        $pathHelp | Should -Match 'full path'
+    }
+}

@@ -3398,6 +3398,11 @@ function Update-DriveList {
 function Open-TypedPath {
     $p = $script:UI.GoBox.Text.Trim().Trim('"')
     if (-not $p) { return }
+    # SQ-024: a '.' or '..' folder name is not opened, so no change can start from it.
+    if (Get-DotSegmentRefusal -Path $p) {
+        Set-Status -Kind Warning -Text "$p has a folder name made only of dots ('.' or '..') in it, so it was not opened. Type the folder's full path without them, or browse to it."
+        return
+    }
     $tree = $script:UI.FolderTree
     $node = $null
     foreach ($i in $tree.Items) {
@@ -4411,13 +4416,20 @@ function Get-ServerSideLinkRefusal {
     # (FILE_ATTRIBUTE_REPARSE_POINT 0x400, "A file or directory that has an associated reparse
     # point, or a file that is a symbolic link") is refused, and so is one that is not there or
     # cannot be read ("a guard that cannot resolve the path fails closed", destructive-operations
-    # profile). $null when every folder on the way is an ordinary folder. -ServerPath is first
-    # put in one spelling (ConvertTo-ComparablePath: a trailing or doubled \ and . or ..
-    # segments do not skip the check); one that is still not \\server\X$\folder... is refused,
-    # except the bare \\server\X$, which has no folder to check (D-036 refuses it already).
+    # profile). $null when every folder on the way is an ordinary folder. A -ServerPath with a
+    # '.' or '..' folder name is refused (SQ-024): Windows stops '..' at \\server\share on the
+    # client, while on the server's own path it would climb above the share's folder, so which
+    # folders to check is not known. -ServerPath is then put in one spelling
+    # (ConvertTo-ComparablePath: a trailing or doubled \ does not skip the check); one that is
+    # still not \\server\X$\folder... is refused, except the bare \\server\X$, which has no
+    # folder to check (D-036 refuses it already).
     # https://learn.microsoft.com/windows/win32/fileio/file-attribute-constants
+    # https://learn.microsoft.com/dotnet/standard/io/file-path-formats
     param([Parameter(Mandatory)][string]$Server, [Parameter(Mandatory)][string]$ServerPath)
     $next = 'Nothing was changed. Run the tool on the server itself, or ask a senior admin.'
+    if (Get-DotSegmentRefusal -Path $ServerPath) {
+        return "$ServerPath has a folder name made only of dots ('.' or '..') in it, so which folders on $Server to check for junctions and symbolic links, and where the change would really land, is not known. $next"
+    }
     $p = ConvertTo-ComparablePath -Path $ServerPath
     if ($p -match '^\\\\[^\\]+\\[A-Za-z]\$$') { return $null }
     if ($p -notmatch '^(\\\\[^\\]+\\[A-Za-z]\$)((?:\\[^\\]+)+)$') {
@@ -4495,8 +4507,17 @@ function Get-ShareTreeRefusal {
     # high-impact roots see where it really is, and every folder on the way there is checked for
     # a junction or symbolic link on the server (Get-ServerSideLinkRefusal, D-045). A share whose
     # folder cannot be found out is refused: "a guard that cannot resolve the path fails closed"
-    # (destructive-operations profile). $null when it is allowed.
+    # (destructive-operations profile). A '.' or '..' folder name in -Rest is refused before
+    # anything is looked up (SQ-024): Windows stops '..' at \\server\share, but appended to the
+    # server's path it would climb above the share's folder, so the check would look at a
+    # different folder than the change reaches. $null when it is allowed.
+    # https://learn.microsoft.com/dotnet/standard/io/file-path-formats
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Server, [Parameter(Mandatory)][string]$Share, [string]$Rest)
+    if (Get-DotSegmentRefusal -Path $Rest) {
+        $dotRefusal = Get-DotSegmentRefusal -Path $Path
+        if (-not $dotRefusal) { $dotRefusal = Get-DotSegmentRefusal -Path "\\$Server\$Share\$Rest" }
+        return $dotRefusal
+    }
     $instead = "Open it by its administrative share path instead (for example \\$Server\D`$\...), or ask a senior admin."
     try { $local = Get-RemoteShareLocalPath -Server $Server -Share $Share }
     catch {
@@ -4508,8 +4529,8 @@ function Get-ShareTreeRefusal {
     }
     $serverPath = "\\$Server\$($Matches[1].ToUpper())`$" + "$($Matches[2])".TrimEnd('\')
     if ($Rest) { $serverPath += "\$Rest" }
-    # One spelling, so a trailing or doubled \ (or a . or .. segment) in what was typed is
-    # checked as the folder Windows reaches.
+    # One spelling, so a trailing or doubled \ in what was typed is checked as the folder Windows
+    # reaches ('.' and '..' were refused above).
     $serverPath = ConvertTo-ComparablePath -Path $serverPath
     $refusal = Get-TreeOwnershipRefusal -Path $serverPath
     if (-not $refusal) { $refusal = Get-HighImpactRootRefusal -Path $serverPath }
@@ -4539,8 +4560,10 @@ function Get-ChangeTarget {
         exist.
         - A mapped drive letter becomes its \\server\share path; IsRemembered when that mapping
           only came from Windows' remembered mappings (it may be out of date).
-        - Refused: a device path (\\?\, \\.\), a path that is not a full local or UNC path, and
-          an alternate data stream (a ':' after the drive or share part).
+        - Refused: a device path (\\?\, \\.\), a path that is not a full local or UNC path, a
+          path with a '.' or '..' folder name (Get-DotSegmentRefusal: Windows stops '..' at the
+          share or the drive, the checks would not), and an alternate data stream (a ':' after
+          the drive or share part).
         - A \\server name that is this computer (loopback, its own names) sets IsLocal; its X$
           share becomes X:\..., another share its local folder. When that folder is, or is
           inside, a DFS folder of a namespace this computer hosts, it is looked up in DFS like a
@@ -4578,6 +4601,9 @@ function Get-ChangeTarget {
     if ($display.Contains('/') -or $display -notmatch '^([A-Za-z]:\\|\\\\[^\\]+\\[^\\]+)') {
         return (& $refuse "$display is not a full path to a folder or file on a drive or share (for example D:\Data or \\fs01\Data), so nothing was changed." $display $false)
     }
+    # SQ-024: before the drive mapping, DFS and share lookups, so nothing is resolved from it.
+    $dotRefusal = Get-DotSegmentRefusal -Path $display
+    if ($dotRefusal) { return (& $refuse $dotRefusal $display $false) }
     if ($display.Substring(2).Contains(':')) { return (& $refuse (Get-StreamRefusal -Path $display) $display $false) }
     if ($display -match '^([A-Za-z]):' -and $DriveMapSource -and "$($DriveMapSource[$Matches[1].ToUpper()])" -eq 'Remembered' -and
         $DriveMap -and $DriveMap[$Matches[1].ToUpper()]) {
@@ -4701,6 +4727,8 @@ function Resolve-ChangeTargetSet {
         if ($prefix -and $p.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
             $rest = $p.Substring($prefix.Length)
             if ($rest.Contains(':')) { $refusals.Add((Get-StreamRefusal -Path $p)); continue }
+            $dotRefusal = Get-DotSegmentRefusal -Path $p
+            if ($dotRefusal) { $refusals.Add($dotRefusal); continue }
             $targets.Add((New-ChangeTarget -Ok $true -DisplayPath ($folder.DisplayPath.TrimEnd('\') + '\' + $rest) -ResolvedPath ($folder.ResolvedPath.TrimEnd('\') + '\' + $rest) `
                         -IsRemembered $folder.IsRemembered -IsLocal $folder.IsLocal))
             continue

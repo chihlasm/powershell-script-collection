@@ -56,8 +56,12 @@
     CHANGES ANYTHING? Yes: owners. Use -WhatIf first.
 
 .PARAMETER Path
-    The top folder. If not given, the script asks for it. A relative path ('.\HR') is made a
-    full path once, and that path is used for everything.
+    The top folder. If not given, the script asks for it. A relative path ('.\HR' or '..\HR')
+    is made a full path once, against the PowerShell location, and that path is used for
+    everything. A full path with a folder name made only of dots ('.' or '..'), such as
+    D:\Shares\..\Windows or \\fs01\Data\..\HR, is refused and nothing is changed, also with
+    -AllowSystemFolder: Windows stops '..' at the share or the drive, so the checks could look
+    at a different folder than the one changed. Type the folder's full path without them.
 
 .PARAMETER LogFolder
     Folder for the backups and the change log. Defaults to the Logs folder next to this script
@@ -117,6 +121,13 @@
     - takeown /R /A /D N: /D N skips a folder the account has no List Folder and Read
       permission on (/D Y would replace its permissions with full control for the user only):
       https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
+    - A full path with a '.' or '..' folder name is refused: Windows removes '..' only up to
+      the root of the path, which is the drive for D:\... and the server/share for
+      \\server\share\...; a rooted path starts with a drive letter and colon or a backslash
+      (Path.IsPathRooted, which on .NET Framework throws for invalid path characters, so the
+      script checks the same rule as text):
+      https://learn.microsoft.com/dotnet/standard/io/file-path-formats
+      https://learn.microsoft.com/dotnet/api/system.io.path.ispathrooted
     - #Requires and its PowerShell versions:
       https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_requires
     - WindowsPrincipal.IsInRole(WindowsBuiltInRole.Administrator) is true only in an elevated
@@ -320,8 +331,22 @@ function Invoke-FolderPermissionCli {
             return 1
         }
     }
-    # One full path for everything below: the snapshot, takeown, icacls and the log.
-    $Path = Resolve-AclTargetPath -Path "$Path".Trim()
+    # SQ-024: a full path with a '.' or '..' folder name is refused before anything else, also
+    # with -AllowSystemFolder (the next step is in the text). A relative path ('..\HR') is made
+    # a full path first and checked after that.
+    # Rooted the way Path.IsPathRooted reads it on Windows (a drive letter and colon, or a
+    # leading \ or /), as text: on .NET Framework IsPathRooted throws for a character such as |.
+    $typed = "$Path".Trim()
+    $dotRefusal = if ($typed -match '^(?:[A-Za-z]:|[\\/])') { Get-DotSegmentRefusal -Path $typed } else { $null }
+    if (-not $dotRefusal) {
+        # One full path for everything below: the snapshot, takeown, icacls and the log.
+        $Path = Resolve-AclTargetPath -Path $typed
+        $dotRefusal = Get-DotSegmentRefusal -Path $Path
+    }
+    if ($dotRefusal) {
+        Write-Host "[FAIL] $dotRefusal" -ForegroundColor Red
+        return 1
+    }
     if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Container)) {
         Write-Host "[FAIL] The folder '$Path' does not exist or is not a folder. Nothing was changed." -ForegroundColor Red
         return 1
