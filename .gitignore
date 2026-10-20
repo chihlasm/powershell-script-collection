@@ -19,6 +19,8 @@ AD-LockoutDiagnostics/Reports/
 **/UserQuickCheck_*.csv
 **/M365UserCheck_*.html
 **/M365UserCheck_*.csv
+**/MailboxCheck_*.html
+**/MailboxCheck_*.csv
 **/TempProfile_*.txt
 **/TempProfile_*.csv
 **/FSLogixTriage_*.txt

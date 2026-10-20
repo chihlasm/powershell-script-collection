@@ -14,6 +14,8 @@ It only reads. It never unblocks, resets, assigns licences or changes anything, 
 
 For the on-premises account's own state (locked out, password expired in AD), use [AD-UserQuickCheck](../AD-UserQuickCheck/).
 
+For **"mail is going missing" / "who can see this mailbox?"**, the same folder has the [mailbox check](#mailbox-check-get-m365mailboxcheckps1).
+
 ## Before the first run
 
 Install the Graph sign-in module once (no admin rights needed):
@@ -182,7 +184,95 @@ Evidence: (none saved)
 - The Entra Connect server itself: OU scope, filtering rules, the scheduler and staging mode (the next steps point there)
 - Cloud password expiry (use `Get-EntraPasswordPolicy`)
 - Non-interactive and service-principal sign-ins
-- The mailbox itself
+- The mailbox itself (use the [mailbox check](#mailbox-check-get-m365mailboxcheckps1))
+
+## Mailbox check (Get-M365MailboxCheck.ps1)
+
+**"Mail is going missing."** / **"Who can see this mailbox?"** / **"Is this mailbox compromised?"** One read-only report with what you would otherwise click through the Exchange admin center for, and a clear warning when anything looks like an account takeover.
+
+It only reads. It never removes a rule, forwarding or permission, never resets a password, never blocks sign-in and never opens a message, whatever account you sign in with (also the client's Global Administrator). There are no switches that change anything.
+
+### Before the first run
+
+```powershell
+Install-Module ExchangeOnlineManagement -Scope CurrentUser
+```
+
+Version 3.7.0 or later is needed for the message trace (`Update-Module ExchangeOnlineManagement` if yours is older; the rest of the check works without it). Windows PowerShell 5.1 or PowerShell 7.
+
+### The one command
+
+```powershell
+.\Get-M365MailboxCheck.ps1 -Identity accounts@contoso.com
+```
+
+A sign-in window opens: **sign in with an account in the client's tenant.** The check uses Exchange Online PowerShell only, so there is no Microsoft Graph permissions prompt. If a Microsoft prompt ever asks for consent, consent for yourself only and leave **"Consent on behalf of your organization"** unticked (owner decision D-007).
+
+If an Exchange Online session is already open in the window, the tool uses it and leaves it open. Otherwise it signs in and, when it finishes, closes only the connection it opened (a Security & Compliance session you had open stays open). If more than one Exchange Online connection is open, the banner warns you: close the others or use a new window.
+
+| Option | What it does |
+|---|---|
+| `-TraceDays 3` | Read 3 days of message trace instead of 7 (1 to 10; one Microsoft query covers at most 10 days). |
+| `-NoTrace` | Skip the message trace. |
+| `-OutputPath C:\Temp` | Save an HTML report and three CSVs (`_rules`, `_delegates`, `_trace`) named `MailboxCheck_<mailbox>_<date>_<time>`. **Rule conditions and message subjects are only in these files.** Without it no report is written. |
+| `-TicketNumber 482113` | Save the ticket note in the ticket's folder (and the reports too, when `-OutputPath` is given). Same rules as the [ticket note](#ticket-note) above. |
+| `-NoClipboard` / `-FullDetail` | As for the sign-in check. |
+| `-PassThru` / `-Quiet` | For scripts: return the result object instead of an exit code, and write nothing to the console. |
+
+### How to read it
+
+First comes the banner with the tenant (its `.onmicrosoft.com` name and tenant ID) and the account you signed in as, **before any mailbox is read**. If it is the wrong client, press Ctrl+C.
+
+Then the verdict, in one of three forms:
+
+| You see | Meaning | What to do |
+|---|---|---|
+| **Possible account takeover: do NOT reset the password or delete the rule yet. Escalate.** | At least one takeover sign, each listed in plain English underneath (for example "Mail is forwarded to an outside address at gmail.com"). | **Don't touch anything.** Escalate, and check CIPP's BEC report for this user. Resetting the password or deleting the rule first destroys what the investigation needs. |
+| **PARTLY CHECKED - no takeover signs in what could be read, but these could not be checked: ...** | Some sections could not be read; each is named with the reason and the role that can read it. | Nothing is ruled out. Run it again with an account that has the role, or look at those sections in the Exchange admin center. |
+| **No takeover signs found in the checks below.** | Every section was read and none showed a sign. This wording only ever appears when nothing failed. | If mail still goes missing, look at the message trace in the report. |
+
+The takeover signs are:
+
+- **Mail forwarded outside the tenant**, by the mailbox's own forwarding or by an inbox rule (forward, forward as attachment, redirect). "Outside" means the address is not in one of the tenant's accepted domains; an accepted domain of type ExternalRelay counts as outside. A subdomain counts as inside only when it is itself an accepted domain or falls under a wildcard one (`*.contoso.com`); any other subdomain of an accepted domain cannot be judged, so a rule forwarding there is a sign and mailbox forwarding there is listed under **Could not check**. When the mailbox forwards to a recipient in the tenant (for example a mail contact), the tool looks up where that recipient delivers, so a contact pointing at gmail.com is a sign. A mail contact or mail user is judged only by its external address, never by its address in the tenant; one without an external address is listed under **Could not check**. The sign names the domain and whether a copy stays in the mailbox. If that recipient cannot be looked up, forwarding is listed under **Could not check**.
+- **An inbox rule that forwards to a recipient the tool cannot classify** as inside or outside (for example a bare name). It is a sign until someone looks at it.
+- **An inbox rule that deletes mail.**
+- **An inbox rule that hides mail**: it moves mail to RSS Feeds, RSS Subscriptions, Conversation History, Deleted Items, Junk Email or Archive, or moves it anywhere and marks it read.
+- **A hidden inbox rule** (one Exchange only lists when asked for hidden rules). The built-in junk-mail rule is hidden too; it is listed but is not a sign, as long as it does none of the things above (a rule with that name that forwards, deletes or moves mail is a sign). A rule Exchange returns without an identity is a sign too, because the tool cannot tell whether it is hidden.
+
+A rule that is turned off still counts (someone made it); the sign says it is off.
+
+Under the verdict come the facts: mailbox type (user, shared, room, equipment), forwarding, total size and the prohibit-send quota, archive on/off and its size, litigation hold and other holds (eDiscovery holds and retention policies are labelled), who has **Full Access**, **Send As** and **Send on Behalf**, every inbox rule (hidden ones marked), and the message trace (sent and received). The console shows rule actions but not their conditions, and trace rows without subjects; both are in the HTML and CSV report.
+
+**Not checked here:** when a rule, forwarding or delegate was added, and by whom. That needs the audit log; the report says "not checked here, see CIPP's BEC report" (owner decision D-008).
+
+### Roles it needs
+
+From Microsoft Learn (cited in the scripts). Owner decision D-026: these are confirmed once against a real tenant with the Integration test before the tool goes into the bundle.
+
+| Section | Exchange Online role group that can read it |
+|---|---|
+| Mailbox, forwarding, size, holds, Full Access, Send As | Recipient Management or Organization Management (View-Only Organization Management can view these) |
+| Inbox rules | Recipient Management or Organization Management. **Global Reader and View-Only Organization Management cannot read inbox rules** (Microsoft says so on the Get-InboxRule page). |
+| Message trace | Organization Management, Compliance Management or Help Desk; also Exchange Administrator or Global Administrator in Entra ID |
+| Accepted domains | Organization Management (View-Only Organization Management can view them) |
+
+Because inbox rules cannot be read with a read-only role, the account you use can change mailboxes. This tool never does: a test reads the script's own commands and fails if any of them could change something.
+
+A section your role cannot read shows up under **Could not check** with the role named, and the verdict is **PARTLY CHECKED**, never the all-clear.
+
+### Ticket note
+
+Same four-part note as the sign-in check, written to the clipboard (and to the ticket folder with `-TicketNumber`). It carries the verdict, the sign kinds (for example `ExternalRuleForward`), rule names and the **outside domain only** (`gmail.com`, never the full address). The note names the checked mailbox, but never a forwarding, delegate or message-trace address. Rule conditions, delegate names and message-trace rows never go into the note (owner decision D-025); they stay in the local HTML and CSV. A section that could not be read is listed under **Could not check**, never under **Ruled out**, with a fixed reason (the role it needs, or "see the report"): the Exchange error text itself stays in the console and the HTML report. Rule names have line breaks and other control characters removed and are cut to 100 characters.
+
+### Exit codes
+
+`0` no takeover signs and every section read, `1` possible takeover, `2` partly checked, `3` could not run (module missing, sign-in failed, no mailbox found, or a ticket number that does not fit).
+
+### Known limits
+
+- Folders are recognised by their English names (`RSS Feeds`, `Deleted Items`, ...). In a mailbox with folders in another language a "hides mail" rule is listed but not flagged.
+- The built-in junk-mail rule is recognised by its English name, `Junk E-mail Rule`. In another language it shows up as a hidden-rule sign: a false alarm, never a missed one.
+- One message-trace query returns at most 5000 messages. When a direction hits that, the report says `results were cut off at 5000; rerun with a smaller -TraceDays`.
 
 ## Tests
 
@@ -190,4 +280,11 @@ Evidence: (none saved)
 Invoke-Pester .\M365-UserQuickCheck\Tests
 ```
 
-The tests fake Microsoft Graph, Active Directory and the clipboard, so no tenant or domain is needed.
+The tests fake Microsoft Graph, Exchange Online, Active Directory and the clipboard, so no tenant or domain is needed.
+
+To confirm the mailbox check's roles against a real tenant (once, before bundling; D-026), sign in with an account that has only the roles listed above and run:
+
+```powershell
+$env:MAILBOXCHECK_IT_IDENTITY = 'someone@client.com'
+Invoke-Pester .\M365-UserQuickCheck\Tests\MailboxCheck.Tests.ps1 -TagFilter Integration
+```
