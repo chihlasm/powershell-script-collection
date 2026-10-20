@@ -130,6 +130,7 @@ $sections = @(
     @{ Name = 'Users';             Label = 'User Accounts' }
     @{ Name = 'Groups';            Label = 'Group Analysis' }
     @{ Name = 'Computers';         Label = 'Computer Accounts' }
+    @{ Name = 'EndOfSupport';      Label = 'End of Support' }
     @{ Name = 'PasswordPolicy';    Label = 'Password Policy' }
     @{ Name = 'PrivilegedAccess';  Label = 'Privileged Access' }
     @{ Name = 'Security';          Label = 'Security Findings' }

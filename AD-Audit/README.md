@@ -1,6 +1,6 @@
 # AD-Audit
 
-Comprehensive Active Directory audit tool that checks users, groups, computers, security, replication, password policies, privileged access, infrastructure health, and OU structure. Outputs HTML reports and CSV files.
+Comprehensive Active Directory audit tool that checks users, groups, computers, Windows Server end of support, security, replication, password policies, privileged access, infrastructure health, and OU structure. Outputs HTML reports and CSV files.
 
 ## Requirements
 
@@ -34,6 +34,9 @@ Comprehensive Active Directory audit tool that checks users, groups, computers, 
 # Run only specific sections
 .\Invoke-ADAudit.ps1 -IncludeSection Users, Security, PrivilegedAccess
 
+# Quarterly end-of-support list on its own
+.\Invoke-ADAudit.ps1 -IncludeSection EndOfSupport
+
 # Capture results for further processing
 $results = .\Invoke-ADAudit.ps1 -SkipBrowserOpen
 $results.Users.StaleUsers | Export-Csv stale.csv -NoTypeInformation
@@ -65,7 +68,7 @@ The GUI calls `Invoke-ADAudit.ps1` internally. The UI stays responsive during th
 
 ### Section Names
 
-`DomainOverview`, `DomainControllers`, `Users`, `Groups`, `Computers`, `PasswordPolicy`, `PrivilegedAccess`, `Security`, `Infrastructure`, `OUStructure`
+`DomainOverview`, `DomainControllers`, `Users`, `Groups`, `Computers`, `EndOfSupport`, `PasswordPolicy`, `PrivilegedAccess`, `Security`, `Infrastructure`, `OUStructure`
 
 ## Audit Sections
 
@@ -93,7 +96,16 @@ All DCs with OS version, site, Global Catalog and RODC status, FSMO roles held, 
 - Enabled/disabled counts
 - Stale computers (no logon in X days)
 - OS distribution breakdown
-- Unsupported OS detection (Server 2003-2012, Windows XP/Vista/7/8)
+- Unsupported OS detection: Windows Server versions whose extended support has ended on the audit date (from the End of Support lifecycle table), plus Windows XP/Vista/7/8
+
+### End of Support
+One row per **enabled** Windows Server computer account:
+- OS as AD records it, matched product, and support status in plain words: *Mainstream support*, *Security updates only*, *Extended support ended* (covered only if the client bought ESU - AD cannot tell), *No support*, or *Unknown* (OS not in the table - check https://learn.microsoft.com/lifecycle manually; never shown as supported)
+- Mainstream, extended and ESU end dates, days until extended support ends (negative = ended that many days ago), last logon, and a "not seen in `-DaysInactive` days" flag
+- Severity: No support = High; Extended support ended = Warning; Security updates only with 365 days or fewer left = Warning; Unknown = Warning
+- A "Servers past end of support" count in the Audit Summary
+
+The dates come from a table inside `Invoke-ADAudit.ps1` (`Get-ServerLifecycleTable`), copied from the Microsoft Learn lifecycle page for each Windows Server version (2003 to 2025) and cited per row. Each end date is the last covered day; the ESU date is the latest end of any ESU offering (including Azure-only years). The report shows when the table was last checked and warns once that is more than 180 days before the audit. To update it, re-read each linked page, adjust the dates and set `CheckedOn`. Last logon comes from `lastLogonTimestamp`, which can be up to about 14 days behind.
 
 ### Password Policy
 - Default domain password policy settings
@@ -133,6 +145,8 @@ This is a concise summary. For full nested-group path analysis (who can reach Do
 
 **CSV files** - one CSV per audit sub-category (e.g., `AD-Audit-...-Users-Stale.csv`, `AD-Audit-...-Security-Findings.csv`). Only generated for sections that have data.
 
+**End of support CSV** - `AD-Audit-...-EndOfSupport.csv` has the same rows as the report plus the audit date, audited domain, the account that ran the audit (and the `-Credential` user name if one was given - never the password), the machine it ran on, and the date the lifecycle table was checked, on every row. Keep each quarter's file with the ticket to compare quarters side by side. It holds client server names and OS versions; delete local copies once attached to the ticket.
+
 **Pipeline output** - the script returns a hashtable of all audit results for further processing in PowerShell.
 
 ## Files
@@ -141,4 +155,4 @@ This is a concise summary. For full nested-group path analysis (who can reach Do
 |---|---|
 | `Invoke-ADAudit.ps1` | Main audit script (CLI) |
 | `Show-ADAuditGUI.ps1` | WinForms GUI launcher |
-| `Tests\Invoke-ADAudit.Tests.ps1` | Pester 5 tests (mocked AD cmdlets) for schema mapping, SID filtering and SID-based groups |
+| `Tests\Invoke-ADAudit.Tests.ps1` | Pester 5 tests (mocked AD cmdlets) for schema mapping, SID filtering, SID-based groups, and the End of Support section (lifecycle table, date boundaries, CSV/HTML output) |
