@@ -29,7 +29,7 @@ BeforeAll {
     $script:RunnerPath = Join-Path $PSScriptRoot 'Invoke-SmokeTest.ps1'
     $script:GuiPath = Join-Path $script:RepoRoot 'FolderPermissionManager\FolderPermissionManager-GUI.ps1'
     $script:CorePath = Join-Path $script:RepoRoot 'FolderPermissionManager\FolderPermissions.Core.ps1'
-    $script:PassLine = '[PASS] FolderPermissionManager-GUI.ps1: the window opened and closed by itself (render 1234 ms, background check 56 ms)'
+    $global:PassLine = '[PASS] FolderPermissionManager-GUI.ps1: the window opened and closed by itself (render 1234 ms, background check 56 ms)'
     . $script:RunnerPath -LoadFunctionsOnly
 
     # What the seam returns for a faked child.
@@ -51,6 +51,10 @@ BeforeAll {
 }
 
 Describe 'Runner (unit; no process is started)' {
+    AfterAll {
+        # Shared with the fakes through globals: in a mock body $script: is the runner run's scope.
+        foreach ($n in 'PassLine', 'TimedOutRun', 'Captured') { Remove-Variable -Name $n -Scope Global -ErrorAction SilentlyContinue }
+    }
     BeforeEach {
         # Backstops: nothing but the seam may start or stop a process.
         Mock Start-Process { throw 'Start-Process must not run in the runner tests.' }
@@ -59,10 +63,10 @@ Describe 'Runner (unit; no process is started)' {
     }
 
     It 'AC18_RunnerPassesOnExitZeroWithPassLine' {
-        Mock Start-SmokeProcess { New-FakeRun -ExitCode 0 -Output @('starting', $script:PassLine) }
+        Mock Start-SmokeProcess { New-FakeRun -ExitCode 0 -Output @('starting', $global:PassLine) }
         $result = $null
-        $out = @(& { $script:Captured = Invoke-SmokeTarget -ScriptPath $script:GuiPath } *>&1 | ForEach-Object { "$_" })
-        $script:Captured.Status | Should -Be 'Passed'
+        $out = @(& { $global:Captured = Invoke-SmokeTarget -ScriptPath $script:GuiPath } *>&1 | ForEach-Object { "$_" })
+        $global:Captured.Status | Should -Be 'Passed'
         ($out -join "`n") | Should -Match '\[PASS\] FolderPermissionManager-GUI\.ps1'
         Should -Invoke Stop-SmokeProcess -Times 0 -Exactly
 
@@ -74,9 +78,9 @@ Describe 'Runner (unit; no process is started)' {
     It 'AC19_RunnerFailsOnExitZeroWithoutPassLine' {
         # What 193a907 looked like: the script returned before the window and PowerShell said 0.
         Mock Start-SmokeProcess { New-FakeRun -ExitCode 0 -Output @() }
-        $out = @(& { $script:Captured = Invoke-SmokeTarget -ScriptPath $script:GuiPath } *>&1 | ForEach-Object { "$_" })
-        $script:Captured.Status | Should -Be 'Failed'
-        "$($script:Captured.Message)" | Should -Match 'the app ended without opening its window \(no PASS line\)'
+        $out = @(& { $global:Captured = Invoke-SmokeTarget -ScriptPath $script:GuiPath } *>&1 | ForEach-Object { "$_" })
+        $global:Captured.Status | Should -Be 'Failed'
+        "$($global:Captured.Message)" | Should -Match 'the app ended without opening its window \(no PASS line\)'
 
         $r = Invoke-RunnerInProcess
         $r.Text | Should -Match '\[FAIL\].*the app ended without opening its window \(no PASS line\)'
@@ -85,8 +89,8 @@ Describe 'Runner (unit; no process is started)' {
 
     It 'AC20_RunnerFailsOnNonZeroExit' {
         Mock Start-SmokeProcess { New-FakeRun -ExitCode 1 -Output @('[FAIL] the background check failed: boom') }
-        $out = @(& { $script:Captured = Invoke-SmokeTarget -ScriptPath $script:GuiPath } *>&1 | ForEach-Object { "$_" })
-        $script:Captured.Status | Should -Be 'Failed'
+        $out = @(& { $global:Captured = Invoke-SmokeTarget -ScriptPath $script:GuiPath } *>&1 | ForEach-Object { "$_" })
+        $global:Captured.Status | Should -Be 'Failed'
 
         $r = Invoke-RunnerInProcess
         $r.Text | Should -Match '\[FAIL\] FolderPermissionManager-GUI\.ps1' -Because "the runner reports the target (error: $($r.Error))"
@@ -97,23 +101,23 @@ Describe 'Runner (unit; no process is started)' {
 
     It 'AC21_RunnerTimeoutKillsChild' {
         $lines = 1..30 | ForEach-Object { "output line $_" }
-        $script:TimedOutRun = New-FakeRun -ExitCode -1 -Output $lines -TimedOut $true
-        Mock Start-SmokeProcess { $script:TimedOutRun }
+        $global:TimedOutRun = New-FakeRun -ExitCode -1 -Output $lines -TimedOut $true
+        Mock Start-SmokeProcess { $global:TimedOutRun }
         $r = Invoke-RunnerInProcess
         Should -Invoke Start-SmokeProcess -Times 1 -Exactly -ParameterFilter { $TimeoutSeconds -eq 90 } -Because 'the default timeout is 90 seconds'
-        Should -Invoke Stop-SmokeProcess -Times 1 -Exactly -ParameterFilter { [object]::ReferenceEquals($Process, $script:TimedOutRun.Process) } -Because "only the runner's own child is killed, by its process object (error: $($r.Error))"
+        Should -Invoke Stop-SmokeProcess -Times 1 -Exactly -ParameterFilter { [object]::ReferenceEquals($Process, $global:TimedOutRun.Process) } -Because "only the runner's own child is killed, by its process object (error: $($r.Error))"
         $r.Text | Should -Match 'did not close by itself within 90 seconds'
         $r.Text | Should -Match 'output line 30' -Because 'the last output lines are printed'
         $r.Text | Should -Match 'output line 11'
         $r.Text | Should -Not -Match 'output line 10\b' -Because 'only the last 20 lines are printed'
         $r.ExitCode | Should -Be 2
 
-        $out = @(& { $script:Captured = Invoke-SmokeTarget -ScriptPath $script:GuiPath } *>&1)
-        $script:Captured.Status | Should -Be 'TimedOut'
+        $out = @(& { $global:Captured = Invoke-SmokeTarget -ScriptPath $script:GuiPath } *>&1)
+        $global:Captured.Status | Should -Be 'TimedOut'
 
         # 2 wins over 1 when targets differ.
         Mock Start-SmokeProcess {
-            if ($Arguments -match 'one\.ps1') { New-FakeRun -ExitCode 1 -Output @('[FAIL] x') } else { $script:TimedOutRun }
+            if ($Arguments -match 'one\.ps1') { New-FakeRun -ExitCode 1 -Output @('[FAIL] x') } else { $global:TimedOutRun }
         }
         $r = Invoke-RunnerInProcess -Splat @{ ScriptPath = @((Join-Path $TestDrive 'one.ps1'), (Join-Path $TestDrive 'two.ps1')) }
         $r.ExitCode | Should -Be 2 -Because "one failed and one timed out (error: $($r.Error))"
@@ -125,26 +129,26 @@ Describe 'Runner (unit; no process is started)' {
     }
 
     It 'AC22_RunnerCommandLine' {
-        $script:Captured = $null
+        $global:Captured = $null
         Mock Start-SmokeProcess {
-            $script:Captured = [PSCustomObject]@{ FilePath = $FilePath; Arguments = $Arguments; WorkingDirectory = $WorkingDirectory }
-            New-FakeRun -ExitCode 0 -Output @($script:PassLine)
+            $global:Captured = [PSCustomObject]@{ FilePath = $FilePath; Arguments = $Arguments; WorkingDirectory = $WorkingDirectory }
+            New-FakeRun -ExitCode 0 -Output @($global:PassLine)
         }
         # Started from another folder: the path comes from the runner's own folder.
         Push-Location -LiteralPath $TestDrive
         try { $r = Invoke-RunnerInProcess } finally { Pop-Location }
         Should -Invoke Start-SmokeProcess -Times 1 -Exactly -Because "the default list is the Folder Permission Manager GUI (error: $($r.Error))"
-        $script:Captured.FilePath | Should -Be (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe')
+        $global:Captured.FilePath | Should -Be (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe')
         $expectedGui = [System.IO.Path]::GetFullPath($script:GuiPath)
-        $script:Captured.Arguments | Should -Be ('-NoProfile -ExecutionPolicy Bypass -STA -File "' + $expectedGui + '" -SmokeTest')
-        $script:Captured.Arguments | Should -Not -Match '-LogFolder|-DriveMap|-NoExit'
-        [System.IO.Path]::GetFullPath($script:Captured.WorkingDirectory).TrimEnd('\') | Should -Be ([System.IO.Path]::GetFullPath($script:RepoRoot).TrimEnd('\'))
+        $global:Captured.Arguments | Should -Be ('-NoProfile -ExecutionPolicy Bypass -STA -File "' + $expectedGui + '" -SmokeTest')
+        $global:Captured.Arguments | Should -Not -Match '-LogFolder|-DriveMap|-NoExit'
+        [System.IO.Path]::GetFullPath($global:Captured.WorkingDirectory).TrimEnd('\') | Should -Be ([System.IO.Path]::GetFullPath($script:RepoRoot).TrimEnd('\'))
 
         # -ScriptPath replaces the default list.
         $other = Join-Path $TestDrive 'app\Other-GUI.ps1'
         $r = Invoke-RunnerInProcess -Splat @{ ScriptPath = $other }
         Should -Invoke Start-SmokeProcess -Times 1 -Exactly -ParameterFilter { $Arguments -match [regex]::Escape($other) }
-        $script:Captured.Arguments | Should -Match ([regex]::Escape('-File "' + $other + '" -SmokeTest'))
+        $global:Captured.Arguments | Should -Match ([regex]::Escape('-File "' + $other + '" -SmokeTest'))
     }
 
     It 'Backstop_OnlyTheSeamStartsAProcess' {

@@ -106,6 +106,8 @@ Describe 'App in smoke mode' {
     AfterEach {
         $script:SmokeMode = $false
         Set-TestAppPaths
+        # AC6's fake records into a global: in a mock body $script: is the app run's scope.
+        Remove-Variable -Name SeenDriveMap -Scope Global -ErrorAction SilentlyContinue
     }
 
     Context 'Declaration and startup action' {
@@ -211,17 +213,17 @@ Describe 'App in smoke mode' {
         }
 
         It 'AC6_SmokeReadsNoDrivesOrRegistry' {
-            $script:SeenDriveMap = 'not set'
-            Mock Start-PermissionWindow { $script:SeenDriveMap = Get-AppScopeVariable -Name 'MappedDrives' }
+            $global:SeenDriveMap = 'not set'
+            Mock Start-PermissionWindow { $global:SeenDriveMap = Get-AppScopeVariable -Name 'MappedDrives' }
             $r = Invoke-AppInProcess
             foreach ($name in 'Get-LiveDriveMap', 'Get-RememberedDriveMap', 'Get-CimInstance', 'Get-OneDriveFolder', 'Get-OneDriveSyncRoot', 'Update-DriveList') {
                 Should -Invoke $name -Times 0 -Exactly -Because "$name must not run in smoke mode (error: $($r.Error))"
             }
             Should -Invoke Get-ChildItem -Times 0 -Exactly -ParameterFilter { "$Path$LiteralPath" -like 'HKCU:*' }
             Should -Invoke Get-ItemProperty -Times 0 -Exactly -ParameterFilter { "$Path$LiteralPath" -like 'HKCU:*' }
-            $script:SeenDriveMap | Should -Not -Be 'not set' -Because "the window must be started (error: $($r.Error))"
-            $null -ne $script:SeenDriveMap | Should -BeTrue -Because 'the window is handed a drive map, an empty one'
-            @($script:SeenDriveMap.Keys).Count | Should -Be 0 -Because 'the drive map handed to the window is empty'
+            $global:SeenDriveMap | Should -Not -Be 'not set' -Because "the window must be started (error: $($r.Error))"
+            $null -ne $global:SeenDriveMap | Should -BeTrue -Because 'the window is handed a drive map, an empty one'
+            @($global:SeenDriveMap.Keys).Count | Should -Be 0 -Because 'the drive map handed to the window is empty'
         }
 
         It 'AC7_SmokeWithoutStaFailsWithoutRelaunch' {
