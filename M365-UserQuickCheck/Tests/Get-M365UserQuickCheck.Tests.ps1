@@ -576,16 +576,19 @@ Describe 'AC3 read-only by construction' {
         # the AzureAD, MSOnline or Microsoft.Entra modules (AzureAD*, Msol*, Entra* nouns) is
         # used at all. Set-MgGraphOption is not allowed either: the script never calls it, and
         # it persists a client-side setting on the machine (SQ-011 review). Nouns that
-        # start with the English word "Address" (the core's Add-AddressConflictReasons) are not
-        # AD nouns: no ActiveDirectory cmdlet noun starts with it (checked against the real
-        # module in the test below where RSAT is installed).
+        # start with the English word "Address" (the core's Add-AddressConflictReasons) or
+        # "Admin" (Exchange Online's Get-AdminAuditLogConfig, read by the mailbox check, SQ-016)
+        # are not AD nouns: no ActiveDirectory cmdlet noun starts with either (checked against
+        # the real module in the test below where RSAT is installed;
+        # https://learn.microsoft.com/powershell/module/activedirectory/). Exchange writes such
+        # as Set-AdminAuditLogConfig are caught by the mailbox check's AC21 write-verb guard.
         $script:AllowedAdCommands = @('Get-ADUser')
         $script:AllowedMgCommands = @('Connect-MgGraph', 'Disconnect-MgGraph', 'Get-MgContext', 'Invoke-MgGraphRequest')
         function Test-ForbiddenCommand([string]$Name) {
             $bare = $Name -replace '^.*\\', ''
             if ($bare -notmatch '^(?<verb>\w+)-(?<noun>\w+)$') { return $false }
             $noun = $Matches['noun']
-            if ($noun -match '^AD' -and $noun -notmatch '^Address') { return ($bare -notin $script:AllowedAdCommands) }
+            if ($noun -match '^AD' -and $noun -notmatch '^(Address|Admin)') { return ($bare -notin $script:AllowedAdCommands) }
             if ($noun -match '^(AzureAD|Msol|Entra)') { return $true }
             if ($noun -match '^Mg') { return ($bare -notin $script:AllowedMgCommands) }
             return $false
@@ -688,7 +691,7 @@ Describe 'AC3 read-only by construction' {
             'Set-AzureADUser', 'Remove-AzureADUser', 'Get-AzureADUser', 'Set-MsolUser', 'Set-MsolUserPassword', 'Remove-MsolUser',
             'Set-EntraUser', 'Remove-EntraUser', 'Microsoft.Entra.Users\Update-EntraUser')
         foreach ($w in $mustCatch) { Test-ForbiddenCommand $w | Should -BeTrue -Because "$w writes and must be caught" }
-        foreach ($ok in 'Get-ADUser', 'get-aduser', 'ActiveDirectory\Get-ADUser', 'Add-AddressConflictReasons', 'Add-Reason', 'Invoke-MgGraphRequest',
+        foreach ($ok in 'Get-ADUser', 'get-aduser', 'ActiveDirectory\Get-ADUser', 'Add-AddressConflictReasons', 'Get-AdminAuditLogConfig', 'Add-Reason', 'Invoke-MgGraphRequest',
             'Connect-MgGraph', 'Disconnect-MgGraph', 'Get-MgContext', 'Import-Module', 'Get-M365Prop') {
             Test-ForbiddenCommand $ok | Should -BeFalse -Because "$ok is read-only or a local helper"
         }
