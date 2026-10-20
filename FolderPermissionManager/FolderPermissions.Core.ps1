@@ -3059,4 +3059,45 @@ function Get-ChangeResultMessage {
 
 #endregion
 
+#region Change an existing permission entry (SQ-025: stubs only, tests first)
+
+function Format-AppliesTo {
+    # SQ-025 stub: "This folder, subfolders and files" etc. in Explorer's words.
+    param(
+        [Parameter(Mandatory)][ValidateSet('Folder', 'File')][string]$ItemType,
+        [Parameter(Mandatory)]$InheritanceFlags,
+        [Parameter(Mandatory)]$PropagationFlags
+    )
+    throw 'Format-AppliesTo is not implemented yet (SQ-025).'
+}
+
+function Find-InheritanceSource {
+    # SQ-025 stub: the folder above that an inherited entry (-Row) comes from.
+    # Returns Source (path or $null), Root, Error.
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)]$Row
+    )
+    throw 'Find-InheritanceSource is not implemented yet (SQ-025).'
+}
+
+function Set-FolderPermissionEntry {
+    # SQ-025 stub: swaps one explicit entry for another in a single Set-Acl.
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][AllowEmptyCollection()][string[]]$Path,
+        [Parameter(Mandatory)][string]$Sid,
+        [Parameter(Mandatory)][ValidateSet('Allow', 'Deny')][string]$Type,
+        [Parameter(Mandatory)][int]$RightsValue,
+        [Parameter(Mandatory)]$InheritanceFlags,
+        [Parameter(Mandatory)]$PropagationFlags,
+        [Parameter(Mandatory)][ValidateSet('FullControl', 'Modify', 'ReadAndExecute', 'Read', 'Write', 'Current')][string]$NewRights,
+        [Parameter(Mandatory)][ValidateSet('Allow', 'Deny')][string]$NewType,
+        [Parameter(Mandatory)][string]$LogFolder
+    )
+    throw 'Set-FolderPermissionEntry is not implemented yet (SQ-025).'
+}
+
+#endregion
+
 if ($LoadFunctionsOnly) { return }

@@ -6264,6 +6264,99 @@ function Open-CopyTargets {
 }
 #endregion
 
+#region Change an existing permission entry (SQ-025: stubs only, tests first)
+
+function Get-ChangePermissionState {
+    # SQ-025 stub: whether Change Permission is on, its tooltip and mode (Edit / Inherited).
+    param($Row, [switch]$Files)
+    throw 'Get-ChangePermissionState is not implemented yet (SQ-025).'
+}
+
+function Invoke-AclRowDoubleClick {
+    # SQ-025 stub: a double-click on the permissions list.
+    param($Row)
+    throw 'Invoke-AclRowDoubleClick is not implemented yet (SQ-025).'
+}
+
+function Open-ChangePermission {
+    # SQ-025 stub: Change Permission for the selected entry (or -Row).
+    param([ValidateSet('Folder', 'Files')][string]$Scope = 'Folder', $Row)
+    throw 'Open-ChangePermission is not implemented yet (SQ-025).'
+}
+
+function Get-ChangeDialogModel {
+    # SQ-025 stub: what the Change Permission Entry dialog shows.
+    param([Parameter(Mandatory)]$Row, [object[]]$AllRows, [string]$Path, $Source, [object[]]$Choices)
+    throw 'Get-ChangeDialogModel is not implemented yet (SQ-025).'
+}
+
+function Get-ChangeDialogAnswer {
+    # SQ-025 stub: what pressing Change in the dialog means (Ok, Problem, Answer).
+    param([Parameter(Mandatory)]$Model, [Parameter(Mandatory)][string]$Level, [Parameter(Mandatory)][string]$Type)
+    throw 'Get-ChangeDialogAnswer is not implemented yet (SQ-025).'
+}
+
+function Show-ChangePermissionDialog {
+    # SQ-025 stub: shows the dialog for -Model; returns Row, Level, Type or $null.
+    param([Parameter(Mandatory)]$Model, [string]$TargetText)
+    throw 'Show-ChangePermissionDialog is not implemented yet (SQ-025).'
+}
+
+function Test-ChangeTakesAccessAway {
+    # SQ-025 stub: true for a change to Deny or to rights that are not a superset of the old ones.
+    param(
+        [Parameter(Mandatory)][ValidateSet('Allow', 'Deny')][string]$OldType,
+        [Parameter(Mandatory)][int]$OldRightsValue,
+        [Parameter(Mandatory)][ValidateSet('Allow', 'Deny')][string]$NewType,
+        [Parameter(Mandatory)][string]$NewRights
+    )
+    throw 'Test-ChangeTakesAccessAway is not implemented yet (SQ-025).'
+}
+
+function Get-CurrentIdentitySids {
+    # SQ-025 stub: the SIDs of the account running the tool (UserSid, GroupSid). The seam tests replace.
+    throw 'Get-CurrentIdentitySids is not implemented yet (SQ-025).'
+}
+
+function Get-SelfDenyWarning {
+    # SQ-025 stub: the confirm line when a Deny also applies to the tech.
+    param(
+        [Parameter(Mandatory)][string]$Type,
+        [Parameter(Mandatory)][string]$Sid,
+        [Parameter(Mandatory)][string]$UserSid,
+        [string[]]$GroupSid
+    )
+    throw 'Get-SelfDenyWarning is not implemented yet (SQ-025).'
+}
+
+function Invoke-ChangePermission {
+    # SQ-025 stub: confirm if needed, then Start-ChangeTask with $script:ChangePermissionWork.
+    param(
+        [Parameter(Mandatory)][ValidateSet('Folder', 'Files')][string]$Scope,
+        [Parameter(Mandatory)]$Row,
+        [Parameter(Mandatory)][string]$Level,
+        [Parameter(Mandatory)][ValidateSet('Allow', 'Deny')][string]$Type,
+        [object[]]$Targets,
+        [string]$Label,
+        [hashtable]$RefreshState
+    )
+    throw 'Invoke-ChangePermission is not implemented yet (SQ-025).'
+}
+
+# Work blocks (SQ-025 stubs). ChangePermissionWork parameters, in order:
+# Paths, Sid, OldType, RightsValue, InheritanceFlags, PropagationFlags, NewRights, NewType, LogFolder, WhatIf, CorePath
+$script:ChangePermissionWork = {
+    param([string[]]$Paths, [string]$Sid, [string]$OldType, [int]$RightsValue, [string]$InheritanceFlags, [string]$PropagationFlags,
+        [string]$NewRights, [string]$NewType, [string]$LogFolder, [bool]$WhatIf, [string]$CorePath)
+    throw 'ChangePermissionWork is not implemented yet (SQ-025).'
+}
+$script:InheritanceSourceWork = {
+    param([string]$Path, $Row, [string]$CorePath)
+    throw 'InheritanceSourceWork is not implemented yet (SQ-025).'
+}
+
+#endregion
+
 if ($LoadFunctionsOnly) { return }
 
 #region Startup
