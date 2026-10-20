@@ -157,8 +157,8 @@ until the owner's lab test. Robocopy tab and Copy Files To are dropped (D-037). 
 SQ-014 and SQ-015 (same core and GUI file). Split per D-039.
 
 ## SQ-018 · FolderPermissionManager WPF app: every change, confirmations and results
-- status: review
-- revision: D-043/D-044/D-045 (spec SQ-017.md Revision notes, SQ-018, AC47-AC53)
+- status: ready
+- revision: owner lab test 2026-10-19, AC55-AC57 (spec SQ-017.md "Revision notes, SQ-018 (owner lab test ...)"); earlier D-043/D-044/D-045 AC47-AC54
 - priority: P1
 - type: feature
 - branch: squad/SQ-018-fpm-wpf-changes (stacked: create it from squad/SQ-017-fpm-wpf-window as SQ-017 finishes this run; D-041)
@@ -176,7 +176,7 @@ README as "Changes anything? Yes" (owner, 2026-10-19: distribute only once the W
 make changes, via the toolkit bundle).
 
 ## SQ-020 · Whole-tree take ownership: WindowsApps aliases and Azure File Sync files count as plain files (D-042)
-- status: review
+- status: done
 - priority: P1
 - type: fix
 - branch: squad/SQ-020-allowlist-appexec-storagesync
@@ -364,3 +364,20 @@ segments in Get-ChangeTarget, or normalise the client UNC first (stopping `..` a
 `\\server\share`), then map to the server. Fix the comment in Get-ServerSideLinkRefusal that
 says `.`/`..` segments do not skip the check, and add a regression test.
 (Destructive-operations re-review of SQ-018 fix round 1, major.)
+
+## SQ-025 · FolderPermissionManager WPF app: change an existing permission in place
+- status: new
+- priority: P1
+- type: feature
+- depends-on: SQ-018
+- branch:
+
+Owner request during the SQ-018 lab test (2026-10-19): turning an Allow entry for `chihlas`
+into a Deny meant adding a second entry and retyping the whole account name. Add **Change
+Permission** for an explicit entry (folders and files): a button, and double-click on a row,
+open a dialog pre-filled with the entry's account (shown, not editable), permission level and
+Allow/Deny. Changing to Deny gets the AC47 destructive confirm (red button, real location).
+The old entry is replaced by the new one in a single ACL write after the usual backup and log,
+so a failure never leaves the account with no entry; read back and report like Add/Remove,
+-WhatIf end to end. Inherited entries cannot be changed here: the dialog says which folder above
+they come from. Destructive-operations checklist applies.
