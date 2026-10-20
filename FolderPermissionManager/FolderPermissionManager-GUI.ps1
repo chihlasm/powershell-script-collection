@@ -2450,7 +2450,7 @@ function New-FolderNode {
     [void]$sp.Children.Add($tx)
     $item.Header = $sp
     $item.ToolTip = $Path
-    $item.Tag = [PSCustomObject]@{ Path = $Path; State = 'NotLoaded' }
+    $item.Tag = [PSCustomObject]@{ Path = $Path; State = 'NotLoaded'; Fill = $null }
     $item.SetResourceReference([System.Windows.Controls.Control]::ForegroundProperty, 'Text')
     $item.Padding = [System.Windows.Thickness]::new(2, 3, 2, 3)
     [void]$item.Items.Add((New-TreeInfoItem -Text 'Loading...'))
@@ -2482,8 +2482,59 @@ function Set-FolderNodeChildren {
     }
     $Node.Tag.State = 'Loaded'
     # No subfolders: the node keeps no children, so its expander disappears.
-    foreach ($c in @($Result.Children)) {
-        [void](New-FolderNode -Parent $Node -Label $c.Name -Path (Join-DisplayPath -Parent $Node.Tag.Path -Name $c.Name))
+    # The first batch of entries goes in now (so the node is never empty in between), the rest a
+    # batch per timer tick (Update-TreeFills), so a big folder never freezes the window.
+    $plan = Get-TreeFillPlan -Children @($Result.Children) -Limit $script:TreeFillLimit
+    $fill = [PSCustomObject]@{ Node = $Node; Children = @($plan.Shown); Next = 0; Note = $plan.Note }
+    $Node.Tag.Fill = $fill
+    if (Add-TreeFillStep -Fill $fill -Count $script:TreeFillBatch) { $script:TreeFills.Add($fill) }
+}
+
+# A user's Temp folder can hold tens of thousands of subfolders, and each tree entry takes about
+# a millisecond to build on the window's thread: only the first TreeFillLimit are listed, and
+# TreeFillBatch of them per timer tick.
+$script:TreeFillLimit = 2000
+$script:TreeFillBatch = 100
+$script:TreeFills = [System.Collections.Generic.List[object]]::new()
+
+function Get-TreeFillPlan {
+    # The subfolders a tree node lists, and the note that says how many were left out ($null
+    # when none were).
+    param([AllowEmptyCollection()][object[]]$Children, [Parameter(Mandatory)][int]$Limit)
+    $all = @($Children)
+    if ($all.Count -le $Limit) { return [PSCustomObject]@{ Shown = $all; Note = $null } }
+    [PSCustomObject]@{
+        Shown = @($all[0..($Limit - 1)])
+        Note  = "Showing the first {0:N0} of {1:N0} folders. Type a path above to open one that isn't listed." -f $Limit, $all.Count
+    }
+}
+
+function Add-TreeFillStep {
+    # Adds up to Count of a fill's entries, and its note after the last one. $true while entries
+    # are left. A fill whose node has since been reloaded (Refresh) or failed adds nothing.
+    param([Parameter(Mandatory)]$Fill, [Parameter(Mandatory)][int]$Count)
+    $node = $Fill.Node
+    if ($node.Tag.State -ne 'Loaded' -or -not [object]::ReferenceEquals($node.Tag.Fill, $Fill)) { return $false }
+    $end = [Math]::Min($Fill.Next + $Count, $Fill.Children.Count)
+    for ($i = $Fill.Next; $i -lt $end; $i++) {
+        $c = $Fill.Children[$i]
+        [void](New-FolderNode -Parent $node -Label $c.Name -Path (Join-DisplayPath -Parent $node.Tag.Path -Name $c.Name))
+    }
+    $Fill.Next = $end
+    if ($end -lt $Fill.Children.Count) { return $true }
+    if ($Fill.Note) { [void]$node.Items.Add((New-TreeInfoItem -Text $Fill.Note)) }
+    $false
+}
+
+function Update-TreeFills {
+    # Timer tick: the next batch of tree entries, oldest fill first.
+    $budget = $script:TreeFillBatch
+    while ($script:TreeFills.Count -gt 0 -and $budget -gt 0) {
+        $fill = $script:TreeFills[0]
+        $before = $fill.Next
+        $more = Add-TreeFillStep -Fill $fill -Count $budget
+        $budget -= ($fill.Next - $before)
+        if (-not $more) { $script:TreeFills.RemoveAt(0) }
     }
 }
 
@@ -2832,6 +2883,7 @@ function Show-Banner {
 function Invoke-Tick {
     try { Update-BgTasks } catch { Write-AppError "Tick: $($_.Exception.Message)" }
     try { Update-BusyLine } catch { Write-AppError "Busy line: $($_.Exception.Message)" }
+    try { Update-TreeFills } catch { Write-AppError "Folder tree: $($_.Exception.Message)" }
 }
 
 function Hide-OwnConsole {
