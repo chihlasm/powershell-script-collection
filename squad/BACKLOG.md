@@ -344,7 +344,7 @@ for whole-tree changes on \\server\X$\... paths too, or change the advice to "ru
 the server itself, or ask a senior admin". (Advisory review of SQ-018 rev2, major.)
 
 ## SQ-022 · FolderPermissionManager: D-044 copy refusals and confirms only exist in the WPF app
-- status: review
+- status: done
 - priority: P2
 - feature: FolderPermissionManager rewrite
 - type: follow-up
@@ -361,7 +361,7 @@ and enforce it inside Copy-FolderPermission. Moot for the browser GUI once it is
 the SQ-018 lab test, but the CLI still needs it. (Destructive-operations review of SQ-018 rev2, major.)
 
 ## SQ-024 · FolderPermissionManager: a typed `..` in a share path makes the checks look at a different folder
-- status: review
+- status: done
 - priority: P2
 - feature: FolderPermissionManager rewrite
 - type: follow-up
@@ -400,7 +400,7 @@ and Get-AppReparseInfo into the core and call them from Get-TreeOwnershipTargetR
 (Destructive-operations review of SQ-018 rev2, major.)
 
 ## SQ-025 · FolderPermissionManager WPF app: change an existing permission in place
-- status: review
+- status: done
 - priority: P1
 - feature: FolderPermissionManager rewrite
 - type: feature
@@ -464,7 +464,7 @@ any folder from the target up to its root is a reparse point not known to be loc
 read (Get-AppReparseInfo throws, so fail closed); test with a mocked symlink tag 0xA000000C.
 
 ## SQ-027 · M365 user check: a blocked risky user must escalate to the security lead, not the manager path
-- status: review
+- status: done
 - priority: P2
 - feature: M365 user check
 - type: follow-up
