@@ -206,6 +206,19 @@ $script:M365NoP1VerdictNote = 'sign-in history not available (no Entra ID P1)'
 # the admin center (reference-reports-data-retention); the path is from concept-sign-ins.
 $script:M365NoSignInHistoryStep = 'Look at their recent sign-ins in the Microsoft Entra admin center (Entra ID > Monitoring & health > Sign-in logs, filtered to this user). A tenant without Entra ID P1 keeps seven days of sign-ins there.'
 
+# SQ-027 (D-050, D-017): the next step for every reason that would unblock, enable or reset the
+# password of a user ID Protection flags (Test-M365RiskyUser). It replaces the manager step and
+# the mapped sign-in steps for that user, so one report never offers both.
+$script:M365RiskyUserStep = 'Escalate to the security lead: Microsoft Entra ID Protection flags this user as a possible compromised account. Do not unblock sign-in, enable the account or reset the password until the security lead agrees.'
+
+# SQ-027 (D-059): appended to the manager-path steps when the risky-user check could not run
+# (no Entra ID P2, a role that cannot read risky users, or the read failed), so a block made
+# during an incident is not undone blind. NotAllowed is included because a 403 on riskyUsers
+# does not say whether P2 or the role is missing (Get-M365GateFromError). NotChecked is not:
+# it means there was no cloud user to check.
+$script:M365RiskNotCheckedSentence = 'ID Protection could not be checked: if this account was blocked during a security incident, escalate to the security lead instead.'
+$script:M365RiskNotCheckedStates = @('NotLicensed', 'NotAllowed', 'Failed')
+
 # --- On-premises AD stage (SQ-011) ---------------------------------------------------------
 
 # The M365-SyncedUserFixes block marker. That tool writes this value to this attribute, and its
@@ -526,6 +539,26 @@ function Test-M365BlockMarker {
     return ([string](Get-M365Prop -Object $AdUser -Name $script:M365BlockMarkerAttribute) -ceq $script:M365BlockMarkerValue)
 }
 
+function Test-M365RiskyUser {
+    # True only when the risky-user record was read (gate Available) and ID Protection flags the
+    # user: risk level high or medium, or risk state atRisk or confirmedCompromised (riskyUser
+    # resource, see REFERENCES). The RiskyUser warning and the SQ-027 step override both use
+    # this, so they cannot disagree.
+    param([object]$RiskGate, [object]$RiskyUser)
+    if ($null -eq $RiskGate -or $RiskGate.State -ne 'Available' -or $null -eq $RiskyUser) { return $false }
+    $level = [string](Get-M365Prop -Object $RiskyUser -Name 'riskLevel')
+    $state = [string](Get-M365Prop -Object $RiskyUser -Name 'riskState')
+    return ($level -eq 'high' -or $level -eq 'medium' -or $state -eq 'atRisk' -or $state -eq 'confirmedCompromised')
+}
+
+function Join-M365RiskNotCheckedSentence {
+    # A manager-path step, with the "ID Protection could not be checked" sentence appended when
+    # $RiskNotChecked is set (D-059).
+    param([string]$Step, [bool]$RiskNotChecked = $false)
+    if ($RiskNotChecked) { return ('{0} {1}' -f $Step, $script:M365RiskNotCheckedSentence) }
+    return $Step
+}
+
 function Get-M365PrimarySmtp {
     # The primary SMTP address: the proxyAddresses entry with the upper-case SMTP: prefix (user
     # resource, proxyAddresses), else mail. '' when neither is set.
@@ -558,8 +591,13 @@ function Get-M365OnPremisesAssessment {
         Returns { Reasons; Cleared; BlockedAction }: Reasons and Cleared in the assessment's
         shapes, and BlockedAction, the SignInBlocked next step to use when the AD account
         explains the block ($null keeps the default one).
+
+        IsRisky (ID Protection flags the user) replaces the AdDisabledCloudEnabled step with the
+        security-lead step; RiskNotChecked appends the "ID Protection could not be checked"
+        sentence to the manager-path steps (SQ-027). The caller overrides BlockedAction itself
+        for a risky user.
     #>
-    param([Parameter(Mandatory = $true)][object]$Facts)
+    param([Parameter(Mandatory = $true)][object]$Facts, [switch]$IsRisky, [switch]$RiskNotChecked)
     $reasons = New-Object System.Collections.Generic.List[object]
     $cleared = New-Object System.Collections.Generic.List[object]
     function Add-Reason($Level, $Code, $Message, $Action) {
@@ -677,15 +715,18 @@ function Get-M365OnPremisesAssessment {
             # D-017: removing the marker undoes a deliberate block, so it is escalated first.
             $blockedAction = 'Check with the senior engineer who blocked it whether to remove the marker with M365-SyncedUserFixes: it was blocked on purpose (block marker on the AD account). If they agree, wait for the next sync after it is removed.'
         } elseif ($adEnabled -eq $false) {
-            $blockedAction = 'Check with their manager that the account should be back in use, note on the ticket who approved it, then enable it in on-premises AD (AD-UserQuickCheck shows its state) and wait for the next sync: the AD account is disabled, and sync carries that to Microsoft 365.'
+            $blockedAction = Join-M365RiskNotCheckedSentence -RiskNotChecked $RiskNotChecked -Step 'Check with their manager that the account should be back in use, note on the ticket who approved it, then enable it in on-premises AD (AD-UserQuickCheck shows its state) and wait for the next sync: the AD account is disabled, and sync carries that to Microsoft 365.'
         } elseif ($adEnabled -eq $true) {
             Add-Reason 'Probable' 'AdEnabledMismatch' 'On-premises AD has this account enabled, but Microsoft 365 has sign-in blocked: AD and Microsoft 365 disagree.' `
                 ("$lastSyncText If the AD account was enabled after that, wait for the next sync (normally $script:M365SyncIntervalText). If it stays blocked, check the Entra Connect server for a sync rule or an export error for this account.")
             $blockedAction = 'On-premises AD has the account enabled and it was not blocked on purpose with M365-SyncedUserFixes, so the block has not come from AD this sync: see "AD and Microsoft 365 disagree".'
         }
     } elseif ($cloudEnabled -eq $true -and $adEnabled -eq $false) {
-        Add-Reason 'Warning' 'AdDisabledCloudEnabled' 'On-premises AD has this account disabled, but Microsoft 365 still allows sign-in: AD and Microsoft 365 disagree, and sync normally carries the AD state across.' `
-            ("Check with their manager whether they should still be able to sign in. If not (a leaver), Microsoft 365 blocks sign-in at the next sync: $lastSyncText If it stays allowed after that, check the Entra Connect server. If they should, note on the ticket who approved it, then enable the AD account (AD-UserQuickCheck shows its state).")
+        # SQ-027: enabling the AD account of a user ID Protection flags is the security lead's call.
+        $disabledAction = if ($IsRisky) { $script:M365RiskyUserStep } else {
+            Join-M365RiskNotCheckedSentence -RiskNotChecked $RiskNotChecked -Step ("Check with their manager whether they should still be able to sign in. If not (a leaver), Microsoft 365 blocks sign-in at the next sync: $lastSyncText If it stays allowed after that, check the Entra Connect server. If they should, note on the ticket who approved it, then enable the AD account (AD-UserQuickCheck shows its state).")
+        }
+        Add-Reason 'Warning' 'AdDisabledCloudEnabled' 'On-premises AD has this account disabled, but Microsoft 365 still allows sign-in: AD and Microsoft 365 disagree, and sync normally carries the AD state across.' $disabledAction
     }
 
     # --- UPN mismatch (AC25) -----------------------------------------------------------------
@@ -817,19 +858,28 @@ function Get-M365UserAssessment {
     $user = $Facts.User
     $synced = Test-M365UserSynced -User $user
     $days = if ($Facts.Days) { [int]$Facts.Days } else { 7 }
+    # SQ-027: a user ID Protection flags gets the security-lead step instead of any step that
+    # would unblock, enable or reset the password (D-050). When the risky-user check could not
+    # run, the manager-path steps say so (D-059).
+    $isRisky = Test-M365RiskyUser -RiskGate $Facts.RiskGate -RiskyUser $Facts.RiskyUser
+    $riskNotChecked = ($null -ne $Facts.RiskGate -and $script:M365RiskNotCheckedStates -contains $Facts.RiskGate.State)
     # The on-premises comparison first: what it found in AD can explain a cloud block.
-    $onPrem = Get-M365OnPremisesAssessment -Facts $Facts
+    $onPrem = Get-M365OnPremisesAssessment -Facts $Facts -IsRisky:$isRisky -RiskNotChecked:$riskNotChecked
 
     # --- Account blocked -------------------------------------------------------------------
     # accountEnabled false = sign-in blocked (user resource).
+    $blockedAction = $null
     if ((Get-M365Prop -Object $user -Name 'accountEnabled') -eq $false) {
-        if ($synced -and $onPrem.BlockedAction) {
+        if ($isRisky) {
+            $action = $script:M365RiskyUserStep
+        } elseif ($synced -and $onPrem.BlockedAction) {
             $action = $onPrem.BlockedAction
         } elseif ($synced) {
             $action = 'Check with the senior engineer before undoing this block. The account syncs from on-premises AD, so the block comes from there: either the AD account is disabled, or it was blocked on purpose with M365-SyncedUserFixes (block marker msDS-cloudExtensionAttribute10 = BlockCloudSignIn). This check could not compare it with the AD account: run it again where it can read AD (on a client server, or with -Server and -Credential) to see which.'
         } else {
-            $action = 'Check with their manager that the account should be back in use, note on the ticket who approved it, then unblock sign-in for the user in the Microsoft 365 admin center.'
+            $action = Join-M365RiskNotCheckedSentence -RiskNotChecked $riskNotChecked -Step 'Check with their manager that the account should be back in use, note on the ticket who approved it, then unblock sign-in for the user in the Microsoft 365 admin center.'
         }
+        $blockedAction = $action
         Add-Reason 'Blocker' 'SignInBlocked' 'Sign-in is blocked for this account in Microsoft 365.' $action
     } elseif (Test-M365Prop -Object $user -Name 'accountEnabled') {
         Add-Pass 'AccountEnabled' 'Account is turned on in Microsoft 365 (not blocked).'
@@ -877,10 +927,9 @@ function Get-M365UserAssessment {
 
     # --- Risky user ------------------------------------------------------------------------
     if ($Facts.RiskGate -and $Facts.RiskGate.State -eq 'Available') {
-        $risky = $Facts.RiskyUser
-        $level = [string](Get-M365Prop -Object $risky -Name 'riskLevel')
-        $state = [string](Get-M365Prop -Object $risky -Name 'riskState')
-        if ($null -ne $risky -and ($level -eq 'high' -or $level -eq 'medium' -or $state -eq 'atRisk' -or $state -eq 'confirmedCompromised')) {
+        if ($isRisky) {
+            $level = [string](Get-M365Prop -Object $Facts.RiskyUser -Name 'riskLevel')
+            $state = [string](Get-M365Prop -Object $Facts.RiskyUser -Name 'riskState')
             Add-Reason 'Warning' 'RiskyUser' ("Microsoft Entra ID Protection flags this user: risk level $level, risk state $state.") `
                 'Treat it as a possible compromised account: involve the security lead before unblocking anything. A risk policy may block them or force a password change.'
         } else {
@@ -926,8 +975,20 @@ function Get-M365UserAssessment {
                 } else {
                     # The next step is the mapped step exactly, so the D-017 / D-050 step check
                     # can pin the password steps by their text; the "meaning per Microsoft"
-                    # caveat and the lookup link go with the reason instead.
-                    $action = $step
+                    # caveat and the lookup link go with the reason instead. SQ-027: for a
+                    # risky user, the steps that re-enable the account or reset the password
+                    # escalate; 50057 (account disabled) is the condition SignInBlocked reports,
+                    # so it takes that step and the two never conflict; the manager-path 50057
+                    # step carries the D-059 sentence when ID Protection could not be checked.
+                    if ($isRisky -and @(50055, 50057, 50126) -contains $code) {
+                        $action = $script:M365RiskyUserStep
+                    } elseif ($code -eq 50057 -and $blockedAction) {
+                        $action = $blockedAction
+                    } elseif ($code -eq 50057) {
+                        $action = Join-M365RiskNotCheckedSentence -RiskNotChecked $riskNotChecked -Step $step
+                    } else {
+                        $action = $step
+                    }
                     $message += ' The next step is based on what Microsoft documents for this code ({0}: {1}).' -f $script:M365MeaningLabel, $link
                     $level = if ($script:M365BlockingCodes -contains $code) { 'Blocker' } else { 'Probable' }
                     $reasonCode = if ($level -eq 'Blocker') { 'BlockingSignInFailure' } else { 'LatestSignInFailed' }
