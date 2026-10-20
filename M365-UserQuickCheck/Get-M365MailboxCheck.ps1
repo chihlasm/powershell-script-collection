@@ -193,9 +193,11 @@ foreach ($coreName in 'MailboxCheck.Core.ps1', 'M365UserCheck.Core.ps1') {
         exit 3
     }
 }
-. (Join-Path $PSScriptRoot 'MailboxCheck.Core.ps1')
+$mailboxCorePath = Join-Path $PSScriptRoot 'MailboxCheck.Core.ps1'
+. $mailboxCorePath
 # For ConvertTo-M365CsvValue (CSV formula guard, IPs out of CSV cells), shared with the user check.
-. (Join-Path $PSScriptRoot 'M365UserCheck.Core.ps1') -LoadFunctionsOnly
+$userCorePath = Join-Path $PSScriptRoot 'M365UserCheck.Core.ps1'
+. $userCorePath -LoadFunctionsOnly
 $LoadFunctionsOnly = $entryLoadOnly
 
 # Get-EXOMailbox's error for a mailbox that does not exist (NOT VERIFIED, see .NOTES).
