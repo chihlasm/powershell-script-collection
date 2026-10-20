@@ -165,6 +165,13 @@ change is refused with "Another change is still running on `<path>`. Wait for it
   when the folder leads there through a junction, a symbolic link or a short name
   (`C:\PROGRA~1`); a target whose real location Windows cannot tell (it does not exist, or
   cannot be opened) is refused too. A refusal shows in the status line and in a message box.
+- **A typed `.` or `..` folder name is refused.** Any change on a path with a folder name made
+  only of dots ('.' or '..'), such as `\\fs01\AppShare\..\Data` or `D:\Shares\..\HR`, typed as
+  the folder or as a Copy Permissions target, is refused before anything is looked up, asked or
+  changed, and the Go box does not open such a path (the status line says why). Windows never
+  lets `..` go above the share or the drive, so the change would land somewhere other than the
+  folder the safety checks would look at. Type the folder's full path without them. Names that
+  only contain dots (`.hidden`, `HR.v2`) are fine.
 - **The result** shows in the status line, as in the browser version: what was done and where
   it was backed up and logged, "Partly done: ..." when some items failed, "Done, with items to
   check: ..." when the log could not be written or items cannot be restored from the backup,
@@ -642,7 +649,7 @@ permission onto every subfolder and file, including the ones that block inherita
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `-Path` | asks | The top folder |
+| `-Path` | asks | The top folder. A relative path (`.\HR`, `..\HR`) is made a full path against the PowerShell location; a full path with a folder name made only of dots ('.' or '..'), such as `D:\Shares\..\Windows`, is refused with `[FAIL]` and exit code `1` before anything is counted, asked or saved, also with `-AllowSystemFolder` |
 | `-LogFolder` | `Logs` next to the script | Where backups and the change log go (same rules as the GUI) |
 | `-Force` | — | Do not ask before taking ownership (needed, or `-WhatIf`, on a host that cannot ask) |
 | `-AllowSystemFolder` | — | Take ownership even of a drive root or a folder in `%SystemRoot%`, `%ProgramFiles%`, `%ProgramFiles(x86)%` or `%ProgramData%`, on `SYSVOL`, `NETLOGON` or `PRINT$`, or with a junction or symbolic link inside that leads into one, or of a `Users` folder (or this computer's profiles folder) or anything in `System Volume Information` or `$Recycle.Bin`, which is refused otherwise (see above) |

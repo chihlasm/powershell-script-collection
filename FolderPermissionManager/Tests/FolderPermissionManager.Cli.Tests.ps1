@@ -948,8 +948,11 @@ Describe 'FolderPermissionManager.ps1 (command line): dot segments (SQ-024, AC10
         Mock Get-OwnerTreeItem { throw 'Get-OwnerTreeItem must not run.' }
         Mock Get-TreeOwnershipTargetRefusal { throw 'Get-TreeOwnershipTargetRefusal must not run.' }
         Mock Set-ItemOwnerToCurrentUser { }
+        $script:StartLocation = (Get-Location).Path
     }
-    AfterEach { Set-Location -LiteralPath $TestDrive }
+    # Back to where the test started: $TestDrive is deleted after this file, and a session left
+    # in it breaks the test files that run after this one.
+    AfterEach { Set-Location -LiteralPath $script:StartLocation }
 
     It 'AC10_Cli_RootedDotSegmentPath_FailsBeforeAnything_<Path>' -ForEach @(
         @{ Path = '\\fs01\AppShare\..\..\..\Data' }
