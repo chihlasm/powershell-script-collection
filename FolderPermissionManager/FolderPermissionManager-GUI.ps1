@@ -13,8 +13,10 @@
       - Seeing the files in a folder (name, size, modified) and who has access to the selected
         files, with a warning when the selected files have different permissions
       - Changing them, one change at a time: Add Permission and Remove Permission (folder or
-        selected files), Take Ownership (this folder only, selected files, or the folder and
-        all its subfolders and files), and Copy Permissions To... (adds only)
+        selected files), Change Permission (one entry of the folder or of one selected file,
+        in place: its level or Allow/Deny; also by double-clicking the entry), Take Ownership
+        (this folder only, selected files, or the folder and all its subfolders and files), and
+        Copy Permissions To... (adds only)
       - Exporting a permission report for a folder and all its subfolders to CSV
 
     Every change is made by FolderPermissions.Core.ps1, the same code the command-line script
@@ -288,6 +290,18 @@
       confirmation (about_CommonParameters, about_Preference_Variables):
       https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_commonparameters
       https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_preference_variables
+    - Change Permission (SQ-025): a double-click on the permissions list (MouseDoubleClick, raised
+      for any mouse button, so only the left one counts) is mapped to its row with
+      ItemsControl.ContainerFromElement, which returns the container that owns the element (none
+      on the header or a scroll bar). The entry is swapped in one write by the core
+      (Set-FolderPermissionEntry: RemoveAccessRuleSpecific + AddAccessRule + one Set-Acl; see the
+      core's REFERENCES). A Deny for the tech's own account or groups is found with
+      WindowsIdentity.User and WindowsIdentity.Groups ("the groups the current Windows user
+      belongs to"):
+      https://learn.microsoft.com/dotnet/api/system.windows.controls.control.mousedoubleclick
+      https://learn.microsoft.com/dotnet/api/system.windows.controls.itemscontrol.containerfromelement
+      https://learn.microsoft.com/dotnet/api/system.security.principal.windowsidentity.user
+      https://learn.microsoft.com/dotnet/api/system.security.principal.windowsidentity.groups
     - See FolderPermissions.Core.ps1 for Get-Acl, the permission wording and the log folder.
 #>
 
@@ -973,22 +987,31 @@ function Get-AclOwnerName {
 
 function ConvertTo-AclViewModel {
     # Owner, inheritance and one row per permission entry, in the order the ACL holds them.
+    # Each row also carries what Change Permission needs to find that exact entry again: the
+    # SID, the raw rights mask (RightsValue), the inheritance and propagation flags, and where it
+    # applies in Explorer's words (AppliesTo, Format-AppliesTo in the core).
     # https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.commonobjectsecurity.getaccessrules
     param([Parameter(Mandatory)]$Acl)
     $rules = @($Acl.GetAccessRules($true, $true, [System.Security.Principal.NTAccount]))
     # The same entries, in the same order, by SID: Remove Permission is keyed on the SID, so two
     # names for one account (or a renamed one) are one choice.
     $sids = @($Acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+    $itemType = if ($Acl -is [System.Security.AccessControl.FileSecurity]) { 'File' } else { 'Folder' }
     $rows = @(for ($i = 0; $i -lt $rules.Count; $i++) {
             $r = $rules[$i]
             [PSCustomObject]@{
-                Identity        = "$($r.IdentityReference.Value)"
-                Sid             = $(if ($i -lt $sids.Count) { "$($sids[$i].IdentityReference.Value)" } else { '' })
-                PermissionLevel = Format-PermissionRights -Rights $r.FileSystemRights
-                Rights          = "$($r.FileSystemRights)"
-                Type            = "$($r.AccessControlType)"
-                IsInherited     = [bool]$r.IsInherited
-                InheritedText   = $(if ($r.IsInherited) { 'Inherited' } else { '' })
+                Identity         = "$($r.IdentityReference.Value)"
+                Sid              = $(if ($i -lt $sids.Count) { "$($sids[$i].IdentityReference.Value)" } else { '' })
+                PermissionLevel  = Format-PermissionRights -Rights $r.FileSystemRights
+                Rights           = "$($r.FileSystemRights)"
+                Type             = "$($r.AccessControlType)"
+                IsInherited      = [bool]$r.IsInherited
+                InheritedText    = $(if ($r.IsInherited) { 'Inherited' } else { '' })
+                RightsValue      = [int]$r.FileSystemRights
+                InheritanceFlags = $r.InheritanceFlags
+                PropagationFlags = $r.PropagationFlags
+                AppliesTo        = Format-AppliesTo -ItemType $itemType -InheritanceFlags $r.InheritanceFlags -PropagationFlags $r.PropagationFlags
+                ItemType         = $itemType
             }
         })
     [PSCustomObject]@{
@@ -1749,11 +1772,16 @@ function Get-ReadBackProblem {
     #   Remove: no explicit entry for the SID of that type is left;
     #   Owner:  the owner is the account running the tool;
     #   Copy:   every explicit entry of the source is on the target (an inherited one counts when
-    #           the target is under the source, as Copy-FolderPermission counts it).
+    #           the target is under the source, as Copy-FolderPermission counts it);
+    #   Change: an explicit entry for the SID of the new type (-Type) with the same inheritance
+    #           and propagation flags and at least the new rights (-Rights, or with 'Current' the
+    #           old entry's -OldRightsValue), and the old exact entry (-OldType, -OldRightsValue,
+    #           same flags) is gone. AddAccessRule may merge the new entry into another one of the
+    #           same account, type and flags, so "at least" the rights.
     # https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.commonobjectsecurity.getaccessrules
     # https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.objectsecurity.getowner
     param(
-        [Parameter(Mandatory)][ValidateSet('Add', 'Remove', 'Owner', 'Copy')][string]$Kind,
+        [Parameter(Mandatory)][ValidateSet('Add', 'Remove', 'Owner', 'Copy', 'Change')][string]$Kind,
         [Parameter(Mandatory)][string]$Path,
         [string]$Identity,
         [string]$Sid,
@@ -1761,7 +1789,11 @@ function Get-ReadBackProblem {
         [string]$Type,
         [string]$MySid,
         [AllowEmptyCollection()][object[]]$SourceRules,
-        [string]$SourcePath
+        [string]$SourcePath,
+        [string]$OldType,
+        [int]$OldRightsValue,
+        [string]$InheritanceFlags,
+        [string]$PropagationFlags
     )
     $sidType = [System.Security.Principal.SecurityIdentifier]
     $noSync = -bnot [int64]0x100000
@@ -1801,6 +1833,25 @@ function Get-ReadBackProblem {
             if ($missing -eq 0) { return $null }
             return "$missing of the $(Format-ItemCount @($SourceRules).Count 'permission' 'permissions') set on $SourcePath $(if ($missing -eq 1) { 'is' } else { 'are' }) not on it afterwards"
         }
+        'Change' {
+            $newRights = Get-PermissionEntryNewRights -RightsValue $OldRightsValue -NewRights $Rights
+            $need = (ConvertTo-SpecificFileRight $newRights) -band $noSync
+            $inheritance = [System.Security.AccessControl.InheritanceFlags]"$InheritanceFlags"
+            $propagation = [System.Security.AccessControl.PropagationFlags]"$PropagationFlags"
+            $found = $false
+            foreach ($r in @($acl.GetAccessRules($true, $false, $sidType))) {
+                if ("$($r.IdentityReference.Value)" -ne $Sid -or "$($r.AccessControlType)" -ne $Type) { continue }
+                if ($r.InheritanceFlags -ne $inheritance -or $r.PropagationFlags -ne $propagation) { continue }
+                if (((ConvertTo-SpecificFileRight $r.FileSystemRights) -band $need) -eq $need) { $found = $true; break }
+            }
+            $level = Format-PermissionRights -Rights $newRights
+            if (-not $found) { return "no explicit $Type $level entry for $Identity with the same Applies to was found on it afterwards" }
+            if (Find-ExplicitAccessRule -Acl $acl -Sid $Sid -Type $OldType -RightsValue $OldRightsValue -InheritanceFlags $inheritance -PropagationFlags $propagation) {
+                $oldLevel = Format-PermissionRights -Rights ([System.Enum]::ToObject([System.Security.AccessControl.FileSystemRights], $OldRightsValue))
+                return "the old $OldType $oldLevel entry for $Identity is still on it afterwards"
+            }
+            return $null
+        }
     }
 }
 
@@ -1815,15 +1866,21 @@ function Add-ChangeReadBack {
     # Returns $null, or, when those check rows could not be written to the change log, Unlogged
     # and UnloggedPath: the rows went to the Unlogged_ file instead (Save-UnloggedChangeRows;
     # $null when that failed too).
+    # Change: -OldType, -OldRightsValue and the flags describe the entry that was replaced, and a
+    # read that fails says "could not read the permissions back" (AC23).
     param(
-        [Parameter(Mandatory)][ValidateSet('Add', 'Remove', 'Owner', 'Copy')][string]$Kind,
+        [Parameter(Mandatory)][ValidateSet('Add', 'Remove', 'Owner', 'Copy', 'Change')][string]$Kind,
         [AllowEmptyCollection()][AllowNull()][object[]]$Entries,
         [string]$Identity,
         [string]$Sid,
         [string]$Rights,
         [string]$Type,
         [string]$SourcePath,
-        [string]$LogFolder
+        [string]$LogFolder,
+        [string]$OldType,
+        [int]$OldRightsValue,
+        [string]$InheritanceFlags,
+        [string]$PropagationFlags
     )
     $done = @($Entries | Where-Object { $null -ne $_ -and $_.Result -eq 'Done' })
     if ($done.Count -eq 0) { return }
@@ -1850,9 +1907,13 @@ function Add-ChangeReadBack {
         if (-not $problem) {
             try {
                 $problem = Get-ReadBackProblem -Kind $Kind -Path "$($e.Target)" -Identity $Identity -Sid $Sid -Rights $Rights -Type $Type `
-                    -MySid $mySid -SourceRules $sourceRules -SourcePath $SourcePath
+                    -MySid $mySid -SourceRules $sourceRules -SourcePath $SourcePath -OldType $OldType -OldRightsValue $OldRightsValue `
+                    -InheritanceFlags $InheritanceFlags -PropagationFlags $PropagationFlags
             }
-            catch { $problem = "it could not be read again to check the change ($(Get-InnermostErrorText $_))" }
+            catch {
+                $problem = if ($Kind -eq 'Change') { "the tool could not read the permissions back to check the change ($(Get-InnermostErrorText $_))" }
+                else { "it could not be read again to check the change ($(Get-InnermostErrorText $_))" }
+            }
         }
         if (-not $problem -and $Kind -eq 'Remove' -and "$($e.OldValue)" -and "$($e.OldValue)" -ne 'Could not read' -and "$($e.OldValue)" -ceq "$($e.NewValue)") {
             $e | Add-Member -NotePropertyName NothingRemoved -NotePropertyValue $true -Force
@@ -2192,6 +2253,51 @@ $script:CopyPermissionsWork = {
     }
     catch {
         [PSCustomObject]@{ Ok = $false; Entries = @(); LogPath = $null; Message = $null; Error = Get-InnermostErrorText $_ }
+    }
+}
+
+# Changes one explicit entry in place (SQ-025): the entry of $Sid of type $OldType with exactly
+# $RightsValue and the flags becomes $NewType with $NewRights (or 'Current': the same rights),
+# keeping its "applies to". The core finds the entry again by SID and refuses to write when it
+# is no longer there exactly (Set-FolderPermissionEntry); the read-back checks the new entry is
+# there and the old one is gone.
+$script:ChangePermissionWork = {
+    param([string[]]$Paths, [string]$Sid, [string]$OldType, [int]$RightsValue, [string]$InheritanceFlags, [string]$PropagationFlags,
+        [string]$NewRights, [string]$NewType, [string]$LogFolder, [bool]$WhatIf, [string]$CorePath)
+    try {
+        if ($CorePath -and -not (Get-Command -Name Get-ItemOwner -CommandType Function -ErrorAction SilentlyContinue)) { . $CorePath -LoadFunctionsOnly }
+        $Paths = @($Paths | Where-Object { "$_".Trim() })
+        $kind = if (@($Paths).Count -gt 0 -and (Get-AclItemType -Path $Paths[0]) -eq 'File') { 'File' } else { 'Folder' }
+        $detail = Get-PermissionEntryChangeDetail -Sid $Sid -Type $OldType -RightsValue $RightsValue -InheritanceFlags $InheritanceFlags `
+            -PropagationFlags $PropagationFlags -NewRights $NewRights -NewType $NewType -ItemType $kind
+        if (-not (Write-ChangeStartedLog -Action 'Change permission' -Detail $detail -Path $Paths -LogFolder $LogFolder -WhatIfMode $WhatIf)) {
+            return (New-ChangeNotStartedResult -LogFolder $LogFolder)
+        }
+        $done = Invoke-AppChange -LogFolder $LogFolder -WhatIfMode $WhatIf -Change {
+            Set-FolderPermissionEntry -Path $Paths -Sid $Sid -Type $OldType -RightsValue $RightsValue -InheritanceFlags $InheritanceFlags `
+                -PropagationFlags $PropagationFlags -NewRights $NewRights -NewType $NewType -LogFolder $LogFolder -Confirm:$false -WhatIf:$WhatIf
+        }
+        Complete-AppChangeWork -Done $done -LogFolder $LogFolder -WhatIfMode $WhatIf -ReadBack @{
+            Kind = 'Change'; Identity = (Get-SidDisplayName -Sid $Sid); Sid = $Sid; Rights = $NewRights; Type = $NewType
+            OldType = $OldType; OldRightsValue = $RightsValue; InheritanceFlags = $InheritanceFlags; PropagationFlags = $PropagationFlags
+        }
+    }
+    catch {
+        [PSCustomObject]@{ Ok = $false; Entries = @(); LogPath = $null; Message = $null; Error = Get-InnermostErrorText $_ }
+    }
+}
+
+# Read only: which folder above an inherited entry ($Row) of $Path comes from
+# (Find-InheritanceSource reads the folders above, which can wait on the network).
+$script:InheritanceSourceWork = {
+    param([string]$Path, $Row, [string]$CorePath)
+    try {
+        if ($CorePath -and -not (Get-Command -Name Get-ItemOwner -CommandType Function -ErrorAction SilentlyContinue)) { . $CorePath -LoadFunctionsOnly }
+        $found = Find-InheritanceSource -Path $Path -Row $Row
+        [PSCustomObject]@{ Ok = $true; Source = $found.Source; Root = $found.Root; Error = $found.Error }
+    }
+    catch {
+        [PSCustomObject]@{ Ok = $false; Source = $null; Root = $null; Error = Get-InnermostErrorText $_ }
     }
 }
 
@@ -2890,6 +2996,10 @@ $res
                       ToolTipService.ShowOnDisabled="True" ToolTip="Give a user or group access to this folder. Its current permissions are backed up first.">
                 <TextBlock><Run Text="+" FontWeight="Bold"/><Run Text="  Add Permission"/></TextBlock>
               </Button>
+              <Button x:Name="ChangePermissionBtn" Style="{StaticResource Btn}" Margin="0,0,8,6" IsEnabled="False"
+                      ToolTipService.ShowOnDisabled="True" ToolTip="Change the selected entry's permission level or Allow/Deny (or double-click it). Asks first when it takes access away; the current permissions are backed up first.">
+                <TextBlock><Run FontFamily="{StaticResource Sym}" Text="&#x270E;"/><Run Text="  Change Permission"/></TextBlock>
+              </Button>
               <Button x:Name="RemovePermissionBtn" Style="{StaticResource DangerBtn}" Margin="0,0,8,6" IsEnabled="False"
                       ToolTipService.ShowOnDisabled="True" ToolTip="Remove a user or group from this folder. Asks first; its current permissions are backed up first.">
                 <TextBlock><Run Text="&#x2212;" FontWeight="Bold"/><Run Text="  Remove Permission"/></TextBlock>
@@ -2975,6 +3085,10 @@ $res
                             ToolTipService.ShowOnDisabled="True" ToolTip="Give a user or group access to the selected files. Their current permissions are backed up first.">
                       <TextBlock><Run Text="+" FontWeight="Bold"/><Run Text="  Add Permission"/></TextBlock>
                     </Button>
+                    <Button x:Name="ChangeFilePermissionBtn" Style="{StaticResource Btn}" Margin="0,0,8,6" IsEnabled="False"
+                            ToolTipService.ShowOnDisabled="True" ToolTip="Change one permission entry of the selected file: its level or Allow/Deny. Select one file. Asks first when it takes access away.">
+                      <TextBlock><Run FontFamily="{StaticResource Sym}" Text="&#x270E;"/><Run Text="  Change Permission"/></TextBlock>
+                    </Button>
                     <Button x:Name="RemoveFilePermissionBtn" Style="{StaticResource DangerBtn}" Margin="0,0,8,6" IsEnabled="False"
                             ToolTipService.ShowOnDisabled="True" ToolTip="Remove a user or group from the selected files. Asks first.">
                       <TextBlock><Run Text="&#x2212;" FontWeight="Bold"/><Run Text="  Remove Permission"/></TextBlock>
@@ -3026,11 +3140,21 @@ function Get-PermissionDialogXaml {
     # Add and remove permission (folder or selected files). Remove mode hides the level and lists
     # only explicit entries (Show-PermissionDialog). Submit is the default button only for an
     # Allow add (Set-PermissionSubmitStyle).
+    # -Mode Change (Show-ChangePermissionDialog): the account is shown read-only in
+    # PermAccountText instead of the identity box, with "Applies to" (kept as it is), an entry
+    # picker for a file (PermEntryCombo) and a note line (PermDialogNote); for an inherited entry
+    # only the note and a Close button are shown.
+    param([ValidateSet('Add', 'Remove', 'Change')][string]$Mode = 'Add')
     $ns = $script:XamlNamespaces
     $res = Get-AppResourcesXaml
+    $isChange = $Mode -eq 'Change'
+    $title = if ($isChange) { 'Change Permission Entry' } else { 'Add Permission Entry' }
+    $editShown = if ($isChange) { 'Collapsed' } else { 'Visible' }
+    $changeShown = if ($isChange) { 'Visible' } else { 'Collapsed' }
+    $submitText = if ($isChange) { 'Change Permission' } else { 'Add Permission' }
     @"
 <Window $ns
-        Title="Add Permission Entry" Width="520" SizeToContent="Height" ResizeMode="NoResize"
+        Title="$title" Width="520" SizeToContent="Height" ResizeMode="NoResize"
         WindowStartupLocation="CenterOwner" ShowInTaskbar="False" FontFamily="Segoe UI" FontSize="13"
         Background="{DynamicResource Bg}" Foreground="{DynamicResource Text}"
         UseLayoutRounding="True" TextOptions.TextFormattingMode="Display">
@@ -3038,13 +3162,19 @@ function Get-PermissionDialogXaml {
 $res
   </Window.Resources>
   <StackPanel Margin="20,16,20,16">
-    <TextBlock x:Name="PermDialogTitle" Text="Add Permission Entry" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextStrong}"/>
+    <TextBlock x:Name="PermDialogTitle" Text="$title" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextStrong}"/>
     <TextBox x:Name="PermDialogTarget" Style="{StaticResource SelectableText}" FontFamily="{StaticResource Mono}" FontSize="12"
              Foreground="{DynamicResource Muted}" Margin="0,6,0,0" MaxHeight="90" VerticalScrollBarVisibility="Auto"/>
-    <TextBlock Style="{StaticResource Lbl}" Text="USER OR GROUP"/>
-    <TextBox x:Name="PermIdentityBox" FontFamily="{StaticResource Mono}"/>
+    <TextBlock x:Name="PermEntryLabel" Style="{StaticResource Lbl}" Text="PERMISSION ENTRY TO CHANGE" Visibility="Collapsed"/>
+    <ComboBox x:Name="PermEntryCombo" Visibility="Collapsed"/>
+    <TextBlock x:Name="PermIdentityLabel" Style="{StaticResource Lbl}" Text="USER OR GROUP"/>
+    <TextBox x:Name="PermIdentityBox" FontFamily="{StaticResource Mono}" Visibility="$editShown"/>
+    <TextBox x:Name="PermAccountText" IsReadOnly="True" Style="{StaticResource SelectableText}" FontFamily="{StaticResource Mono}" FontWeight="SemiBold"
+             Visibility="$changeShown"/>
     <ComboBox x:Name="PermIdentityCombo" Visibility="Collapsed"/>
     <TextBlock x:Name="PermIdentityHint" Style="{StaticResource Hint}" Text="For example CONTOSO\HR-Staff."/>
+    <TextBlock x:Name="PermAppliesToLabel" Style="{StaticResource Lbl}" Text="APPLIES TO (KEPT AS IT IS)" Visibility="$changeShown"/>
+    <TextBlock x:Name="PermAppliesToText" TextWrapping="Wrap" Visibility="$changeShown"/>
     <TextBlock x:Name="PermRightsLabel" Style="{StaticResource Lbl}" Text="PERMISSION LEVEL"/>
     <ComboBox x:Name="PermRightsCombo" SelectedIndex="1">
       <ComboBoxItem Content="Full Control" Tag="FullControl"/>
@@ -3053,15 +3183,16 @@ $res
       <ComboBoxItem Content="Read" Tag="Read"/>
       <ComboBoxItem Content="Write" Tag="Write"/>
     </ComboBox>
-    <TextBlock Style="{StaticResource Lbl}" Text="ALLOW OR DENY"/>
+    <TextBlock x:Name="PermTypeLabel" Style="{StaticResource Lbl}" Text="ALLOW OR DENY"/>
     <ComboBox x:Name="PermTypeCombo" SelectedIndex="0">
       <ComboBoxItem Content="Allow" Tag="Allow"/>
       <ComboBoxItem Content="Deny" Tag="Deny"/>
     </ComboBox>
+    <TextBlock x:Name="PermDialogNote" TextWrapping="Wrap" Margin="0,10,0,0" Visibility="Collapsed"/>
     <TextBlock x:Name="PermDialogError" Foreground="{DynamicResource Danger}" TextWrapping="Wrap" Margin="0,10,0,0" Visibility="Collapsed"/>
     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0">
       <Button x:Name="PermCancelBtn" Style="{StaticResource Btn}" Content="Cancel" IsCancel="True" Margin="0,0,8,0"/>
-      <Button x:Name="PermSubmitBtn" Style="{StaticResource PrimaryBtn}" Content="Add Permission" IsDefault="True"/>
+      <Button x:Name="PermSubmitBtn" Style="{StaticResource PrimaryBtn}" Content="$submitText" IsDefault="True"/>
     </StackPanel>
   </StackPanel>
 </Window>
@@ -3500,6 +3631,7 @@ function Show-FolderPermissions {
         $ui.OwnerText.Text = 'could not be read'
         $ui.InheritText.Text = ''
         Set-PaneStateView -Target $ui.FolderAclState -State (Get-PaneState -Pane FolderPermissions -Phase Failed -ErrorText $v.Error)
+        Update-ChangeControls
         return
     }
     $ui.OwnerText.Text = $v.Owner
@@ -3512,6 +3644,8 @@ function Show-FolderPermissions {
     $rows = @($v.Rows)
     $ui.FolderAclGrid.ItemsSource = $rows
     Set-PaneStateView -Target $ui.FolderAclState -State (Get-PaneState -Pane FolderPermissions -Phase Loaded -Count $rows.Count)
+    # Change Permission follows the selected entry, and these are new rows.
+    Update-ChangeControls
 }
 
 function Show-Files {
@@ -3614,6 +3748,8 @@ function Show-FileDetails {
     $ui = $script:UI
     $selected = @(Get-SelectedFileRows)
     $ui.FileAclPanel.Children.Clear()
+    # The files bar's Change Permission needs one selected file whose permissions are loaded.
+    Update-ChangeControls
     if ($selected.Count -eq 0) {
         $ui.FileAclTitle.Text = 'WHO HAS ACCESS TO THE SELECTED FILES'
         $ui.FileAclState.Text = 'Select one or more files to see who has access to them.'
@@ -3772,9 +3908,9 @@ function Initialize-PermissionWindow {
     $names = 'ThemeToggle', 'OpenLogFolderBtn', 'DryRunPill', 'BannerPanel', 'PathText', 'RealPathLabel', 'RealPathText', 'RealPathNote',
     'RefreshBtn', 'BusyBar', 'BusyText', 'BusyProgress', 'StopExportBtn', 'RefreshDrivesBtn', 'GoBox', 'GoBtn', 'FolderTree',
     'EmptyState', 'FolderView', 'FolderAclTitle', 'OwnerText', 'InheritText', 'FolderAclGrid', 'FolderAclState',
-    'AddPermissionBtn', 'RemovePermissionBtn', 'TakeOwnershipBtn', 'TakeOwnershipTreeBtn', 'CopyPermissionsBtn', 'ExportBtn',
+    'AddPermissionBtn', 'ChangePermissionBtn', 'RemovePermissionBtn', 'TakeOwnershipBtn', 'TakeOwnershipTreeBtn', 'CopyPermissionsBtn', 'ExportBtn',
     'SelectAllCheck', 'FilesCountText', 'FilesGrid', 'FilesState', 'FileActionBar', 'SelectedCountText',
-    'AddFilePermissionBtn', 'RemoveFilePermissionBtn', 'TakeFileOwnershipBtn', 'DiffWarning',
+    'AddFilePermissionBtn', 'ChangeFilePermissionBtn', 'RemoveFilePermissionBtn', 'TakeFileOwnershipBtn', 'DiffWarning',
     'FileAclTitle', 'FileAclPanel', 'FileAclState', 'StatusText'
     foreach ($n in $names) {
         $script:UI[$n] = $win.FindName($n)
@@ -3808,13 +3944,25 @@ function Initialize-PermissionWindow {
     # The changes. Each click first works out in the background where the change would land
     # (Open-*: never on this thread), then asks where it must, then runs it, one at a time.
     $ui.AddPermissionBtn.Add_Click({ Invoke-UiAction { Open-AddPermission -Scope Folder } })
+    $ui.ChangePermissionBtn.Add_Click({ Invoke-UiAction { Open-ChangePermission -Scope Folder } })
     $ui.RemovePermissionBtn.Add_Click({ Invoke-UiAction { Open-RemovePermission -Scope Folder } })
     $ui.TakeOwnershipBtn.Add_Click({ Invoke-UiAction { Open-TakeOwnership -Scope Folder } })
     $ui.TakeOwnershipTreeBtn.Add_Click({ Invoke-UiAction { Open-TakeOwnership -Scope Tree } })
     $ui.CopyPermissionsBtn.Add_Click({ Invoke-UiAction { Open-CopyPermissions } })
     $ui.AddFilePermissionBtn.Add_Click({ Invoke-UiAction { Open-AddPermission -Scope Files } })
+    $ui.ChangeFilePermissionBtn.Add_Click({ Invoke-UiAction { Open-ChangePermission -Scope Files } })
     $ui.RemoveFilePermissionBtn.Add_Click({ Invoke-UiAction { Open-RemovePermission -Scope Files } })
     $ui.TakeFileOwnershipBtn.Add_Click({ Invoke-UiAction { Open-TakeOwnership -Scope Files } })
+    # A double-click on an entry opens Change Permission for it; one on the header, empty space or
+    # a scroll bar has no row (Get-AclGridRowItem) and does nothing. The selected entry decides
+    # whether Change Permission is on (Update-ChangeControls).
+    $ui.FolderAclGrid.Add_MouseDoubleClick({
+            param($s, $e)
+            if ("$($e.ChangedButton)" -ne 'Left') { return }
+            $row = Get-AclGridRowItem -Grid $s -Source $e.OriginalSource
+            Invoke-UiAction { Invoke-AclRowDoubleClick -Row $row }
+        })
+    $ui.FolderAclGrid.Add_SelectionChanged({ Update-ChangeControls })
     Update-ChangeControls
     $ui.FolderTree.AddHandler([System.Windows.Controls.TreeViewItem]::ExpandedEvent, [System.Windows.RoutedEventHandler] {
             param($s, $e)
@@ -3871,8 +4019,8 @@ $script:NoTargetPathText = 'Enter at least one target path: the folders to copy 
 function Get-ChangeControlNames {
     # The buttons that start a change. They are switched off while a change runs (and until a
     # folder is chosen); browsing, Refresh and the export stay usable.
-    'AddPermissionBtn', 'RemovePermissionBtn', 'TakeOwnershipBtn', 'TakeOwnershipTreeBtn', 'CopyPermissionsBtn',
-    'AddFilePermissionBtn', 'RemoveFilePermissionBtn', 'TakeFileOwnershipBtn'
+    'AddPermissionBtn', 'ChangePermissionBtn', 'RemovePermissionBtn', 'TakeOwnershipBtn', 'TakeOwnershipTreeBtn', 'CopyPermissionsBtn',
+    'AddFilePermissionBtn', 'ChangeFilePermissionBtn', 'RemoveFilePermissionBtn', 'TakeFileOwnershipBtn'
 }
 
 function Get-ChangeControlState {
@@ -3894,15 +4042,23 @@ function Update-ChangeControls {
     # Change buttons are on when a folder is chosen and no change runs or is being prepared.
     # While they are off, their tooltip says why (the buttons show tooltips when disabled);
     # their own tooltip comes back when they are on. Names the window does not have are skipped.
+    # Change Permission also depends on what is selected (Get-ChangePermissionState): an entry in
+    # the permissions list, or exactly one file. That is checked where the window has the list.
     if (-not $script:UI) { return }
     $state = Get-ChangeControlState
+    $own = @{}
+    if ($state.Enabled -and $script:UI['FolderAclGrid']) { $own['ChangePermissionBtn'] = Get-ChangePermissionState -Row $script:UI['FolderAclGrid'].SelectedItem }
+    if ($state.Enabled -and $script:UI['FilesGrid']) { $own['ChangeFilePermissionBtn'] = Get-ChangePermissionState -Files }
     foreach ($name in Get-ChangeControlNames) {
         $control = $script:UI[$name]
         if (-not $control) { continue }
-        $control.IsEnabled = $state.Enabled
+        $enabled = $state.Enabled
+        $reason = $state.Reason
+        if ($own.ContainsKey($name)) { $enabled = [bool]$own[$name].Enabled; $reason = $own[$name].ToolTip }
+        $control.IsEnabled = $enabled
         if ($control.PSObject.Properties['ToolTip']) {
             if (-not $script:ChangeButtonTips.ContainsKey($name)) { $script:ChangeButtonTips[$name] = $control.ToolTip }
-            $control.ToolTip = if ($state.Enabled) { $script:ChangeButtonTips[$name] } else { $state.Reason }
+            $control.ToolTip = if ($enabled -or -not $reason) { $script:ChangeButtonTips[$name] } else { $reason }
         }
     }
 }
@@ -4807,7 +4963,7 @@ function Get-ConfirmSpec {
     # explicit Deny entries (or whose entries could not be checked), and a target that is the
     # root of a drive or share (Get-TargetRootKind).
     param(
-        [Parameter(Mandatory)][ValidateSet('AddPermission', 'RemovePermission', 'TakeOwnershipFolder', 'TakeOwnershipFiles', 'TakeOwnershipTree', 'CopyPermissions')][string]$Action,
+        [Parameter(Mandatory)][ValidateSet('AddPermission', 'ChangePermission', 'RemovePermission', 'TakeOwnershipFolder', 'TakeOwnershipFiles', 'TakeOwnershipTree', 'CopyPermissions')][string]$Action,
         [Parameter(Mandatory)][object[]]$Targets,
         $Counts,
         [string]$Detail,
@@ -4818,7 +4974,13 @@ function Get-ConfirmSpec {
         # Copy permissions: the source folder's explicit Deny entries, one text per entry (AC48).
         [string[]]$DenyEntries = @(),
         # Copy permissions: the source folder's entries could not be checked for Deny entries.
-        [switch]$DenyUnchecked
+        [switch]$DenyUnchecked,
+        # Change permission: the entry (Identity, From, To, AppliesTo, as "Allow Modify"); -Type is
+        # the new type. -LowersAccess: an Allow lowered to fewer rights (D-048).
+        $Change,
+        [switch]$LowersAccess,
+        # Change permission: the line that says a Deny also applies to the tech (Get-SelfDenyWarning).
+        [string]$SelfDenyWarning
     )
     $n = @($Targets).Count
     $where = Get-ConfirmTargetText -Targets $Targets
@@ -4829,7 +4991,7 @@ function Get-ConfirmSpec {
     # the Deny it inherits and still grants access there.
     # https://learn.microsoft.com/windows/win32/secauthz/order-of-aces-in-a-dacl
     $denyNote = 'A Deny blocks access even where another permission on the same folder allows it. Subfolders and files that inherit get it too, but a permission set directly on a subfolder can still allow access there.'
-    $rootNote = if ($Action -eq 'AddPermission' -or $Action -eq 'CopyPermissions') { Get-ConfirmRootText -Targets $Targets } else { $null }
+    $rootNote = if ($Action -eq 'AddPermission' -or $Action -eq 'CopyPermissions' -or $Action -eq 'ChangePermission') { Get-ConfirmRootText -Targets $Targets } else { $null }
     switch ($Action) {
         'AddPermission' {
             $title = if ($Type -eq 'Deny') { 'Add a Deny permission?' } else { 'Add a permission?' }
@@ -4841,6 +5003,23 @@ function Get-ConfirmSpec {
             $verb = if ($Type -eq 'Deny') { 'Add Deny permission' } else { 'Add permission' }
             $label = if ($n -eq 1) { $verb } else { "$verb to $(Format-ItemCount $n 'item' 'items')" }
             $destructive = ($Type -eq 'Deny') -or [bool]$rootNote
+        }
+        'ChangePermission' {
+            # D-048: a change to Deny, an Allow lowered, or one at the top of a drive or share asks
+            # here, red and never the default; the button says what it does.
+            $title = if ($Type -eq 'Deny') { 'Change to Deny?' } else { 'Change this permission?' }
+            $what = if ($n -eq 1) { 'on:' } else { "on these $(Format-ItemCount $n 'item' 'items'):" }
+            $body = "Change the permission of $($Change.Identity):`n  From: $($Change.From)`n  To: $($Change.To)`n  Applies to: $($Change.AppliesTo) (kept as it is)`n`n$what`n$where"
+            if ($Type -eq 'Deny') { $body += "`n`n$denyNote" }
+            elseif ($LowersAccess) { $body += "`n`nThe new level gives $($Change.Identity) less access than before." }
+            if ($SelfDenyWarning) { $body += "`n`n$SelfDenyWarning" }
+            if ($rootNote) { $body += "`n`n$rootNote" }
+            # AddAccessRule may merge the new rule into an existing entry of the same account, type
+            # and flags (Set-FolderPermissionEntry), so "stay" is qualified.
+            # https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.filesystemsecurity.addaccessrule
+            $body += "`n`nOnly this entry changes; any other entries for $($Change.Identity) stay (Windows may combine the new entry with one of them that is the same Allow or Deny and applies to the same items). $backup"
+            $label = if ($Type -eq 'Deny') { 'Change to Deny' } else { 'Change Permission' }
+            $destructive = ($Type -eq 'Deny') -or [bool]$LowersAccess -or [bool]$rootNote
         }
         'RemovePermission' {
             $title = 'Remove a permission?'
@@ -4982,9 +5161,11 @@ function Set-PermissionSubmitStyle {
     # danger style and never the default button, so Enter does not submit them. Add with Allow:
     # the normal style and the default button. Show-PermissionDialog calls it when the dialog
     # opens and whenever the Allow/Deny choice changes.
+    # Change (SQ-025 AC19): like Add, and the button also says what it does: "Change to Deny"
+    # or "Change Permission".
     # https://learn.microsoft.com/dotnet/api/system.windows.controls.button.isdefault
     param(
-        [Parameter(Mandatory)][ValidateSet('Add', 'Remove')][string]$Mode,
+        [Parameter(Mandatory)][ValidateSet('Add', 'Remove', 'Change')][string]$Mode,
         [Parameter(Mandatory)][ValidateSet('Allow', 'Deny')][string]$Type,
         [Parameter(Mandatory)]$Button,
         $DangerStyle,
@@ -4993,6 +5174,7 @@ function Set-PermissionSubmitStyle {
     $danger = $Mode -eq 'Remove' -or $Type -eq 'Deny'
     $Button.Style = if ($danger) { $DangerStyle } else { $NormalStyle }
     $Button.IsDefault = -not $danger
+    if ($Mode -eq 'Change') { $Button.Content = if ($Type -eq 'Deny') { 'Change to Deny' } else { 'Change Permission' } }
 }
 
 function Set-ConfirmDialog {
@@ -5042,7 +5224,9 @@ function Get-ChangeStatus {
     # found, "Nothing was changed: " when nothing was done (every item not found), else "Done,
     # with items to check: ", unless the message already starts "Partly done:".
     # Deliberate deviation: a dry run (every row Skipped (WhatIf)) is Info; the browser showed it
-    # as an error.
+    # as an error. A Change permission whose entry changed since it was shown (every row
+    # Skipped (entry not found)) is a Warning with the core's message as it is: nothing was
+    # written, and the next step is Refresh.
     # Added by the app's read-back (Add-ChangeReadBack), which the browser did not have: an item
     # whose read-back did not show the intended state (CheckProblem) makes a Success or Info a
     # Warning and is named after "Check this: <path> - <reason>"; a remove that had nothing to
@@ -5057,6 +5241,10 @@ function Get-ChangeStatus {
     $result = { param($kind, $text) [PSCustomObject]@{ Kind = $kind; Text = $text } }
     if ($all.Count -eq 0) { return (& $result 'Info' $Message) }
     if (@($all | Where-Object { $_.Result -ne 'Skipped (WhatIf)' }).Count -eq 0) { return (& $result 'Info' $Message) }
+    # Change permission found its entry changed since it was shown: nothing was written, and the
+    # message says so and what to do (Refresh). A warning, not an error.
+    $gone = @($all | Where-Object { $_.Result -eq 'Skipped (entry not found)' }).Count
+    if ($gone -eq $all.Count) { return (& $result 'Warning' $Message) }
 
     $noops = @($all | Where-Object { $_.PSObject.Properties['NothingRemoved'] -and $_.NothingRemoved })
     $problems = @($all | Where-Object { $_.PSObject.Properties['CheckProblem'] -and "$($_.CheckProblem)" })
@@ -5075,7 +5263,7 @@ function Get-ChangeStatus {
     $done = @($all | Where-Object { $_.Result -eq 'Done' }).Count
     $notFound = @($all | Where-Object { $_.Result -eq 'Skipped (not found)' }).Count
     $unchanged = @($all | Where-Object { $_.Result -eq 'Skipped (nothing to copy)' }).Count
-    $failed = $all.Count - $done - $notFound - $unchanged
+    $failed = $all.Count - $done - $notFound - $unchanged - $gone
     $incomplete = @($all | Where-Object { Test-TreeEntryIncomplete $_ }).Count
     $doneOrPartly = @($all | Where-Object { $_.Result -eq 'Done' -or $_.Result -eq 'Partly done' }).Count
     $partly = @($all | Where-Object { $_.Result -eq 'Partly done' }).Count
@@ -5085,7 +5273,7 @@ function Get-ChangeStatus {
     $kind = if ($partial) { 'Warning' }
     elseif ($failed -gt 0 -and $done -eq 0) { 'Error' }
     elseif ($unchanged -eq $all.Count) { 'Info' }
-    elseif ($failed -gt 0 -or $notFound -gt 0 -or -not $LogPath -or (Get-UnrestorableItemCount -Entries $all) -gt 0) { 'Warning' }
+    elseif ($failed -gt 0 -or $notFound -gt 0 -or $gone -gt 0 -or -not $LogPath -or (Get-UnrestorableItemCount -Entries $all) -gt 0) { 'Warning' }
     else { 'Success' }
     if (($problems.Count -gt 0 -or $noops.Count -gt 0) -and ($kind -eq 'Success' -or $kind -eq 'Info')) { $kind = 'Warning' }
 
@@ -5102,7 +5290,7 @@ function Get-ChangeStatus {
     }
     if ($kind -eq 'Warning' -and -not $Message.StartsWith('Partly done:')) {
         $someDone = $done -gt 0
-        $someShort = $failed -gt 0 -or $notFound -gt 0
+        $someShort = $failed -gt 0 -or $notFound -gt 0 -or $gone -gt 0
         $prefix = if ($someDone -and $someShort) { 'Partly done: ' } elseif (-not $someDone -and $partly -eq 0) { 'Nothing was changed: ' } else { 'Done, with items to check: ' }
         $text = $prefix + $text
     }
@@ -5367,6 +5555,10 @@ function Get-DryRunSummary {
                 else { "remove the permission $detail", 'from' }
             }
             'Take ownership' { 'take ownership', 'of' }
+            'Change permission' {
+                if ($detail -match '^From (.+?) to (.+?) for (.+) \(applies to: (.+)\)$') { "change the permission of $($Matches[3]) from $($Matches[1]) to $($Matches[2]) (applies to: $($Matches[4]))", 'on' }
+                else { "change the permission $detail", 'on' }
+            }
             'Take ownership (all subfolders and files)' { 'take ownership', 'of'; $suffix = ' and all its subfolders and files' }
             'Copy permissions' {
                 $source = Get-CopySourceText $first
@@ -5398,6 +5590,7 @@ function Get-DryRunSummary {
         $why = switch ($e.Result) {
             'Skipped (not found)' { 'it does not exist' }
             'Skipped (nothing to copy)' { 'it already has these permissions' }
+            'Skipped (entry not found)' { 'the permission entry changed since it was shown' }
             default { "$($e.Result)" }
         }
         $lines.Add("Left out: $($e.Target) ($why).")
@@ -6219,6 +6412,487 @@ function Open-CopyTargets {
             Open-CopyTargets -Source $s2.Source -TypedText $s2.Text
         })
 }
+#endregion
+
+#region Change an existing permission entry (SQ-025)
+
+# Change Permission swaps one explicit entry for another in a single write (the core's
+# Set-FolderPermissionEntry, after the backup and a Started log row). The account and "applies
+# to" are kept; only the level and Allow/Deny are chosen. Owner decisions: D-047 only the chosen
+# entry changes; D-048 a change that takes access away (to Deny, or an Allow lowered) or one at
+# the top of a drive or share asks first in the red confirm; D-049 files one at a time.
+
+function Get-PermissionLevelChoices {
+    # The five levels the Add and Change dialogs offer: Tag as the core takes it, Label as shown.
+    @(
+        [PSCustomObject]@{ Tag = 'FullControl'; Label = 'Full Control' }
+        [PSCustomObject]@{ Tag = 'Modify'; Label = 'Modify' }
+        [PSCustomObject]@{ Tag = 'ReadAndExecute'; Label = 'Read & Execute' }
+        [PSCustomObject]@{ Tag = 'Read'; Label = 'Read' }
+        [PSCustomObject]@{ Tag = 'Write'; Label = 'Write' }
+    )
+}
+
+function Test-SameAclEntry {
+    # True when two permission rows (ConvertTo-AclViewModel) are the same entry: account (by SID
+    # when both have one), Allow/Deny, raw rights, flags and inherited or not.
+    param($A, $B)
+    if ($null -eq $A -or $null -eq $B) { return $false }
+    if ([object]::ReferenceEquals($A, $B)) { return $true }
+    (Test-SameAclAccount -A $A -B $B) -and "$($A.Type)" -eq "$($B.Type)" -and [int]$A.RightsValue -eq [int]$B.RightsValue -and
+    "$($A.InheritanceFlags)" -eq "$($B.InheritanceFlags)" -and "$($A.PropagationFlags)" -eq "$($B.PropagationFlags)" -and
+    [bool]$A.IsInherited -eq [bool]$B.IsInherited
+}
+
+function Test-SameAclAccount {
+    # True when two permission rows are for the same account: by SID when both have one, else by name.
+    param($A, $B)
+    $sa = "$($A.Sid)".Trim(); $sb = "$($B.Sid)".Trim()
+    if ($sa -and $sb) { return $sa -eq $sb }
+    "$($A.Identity)".Trim() -ieq "$($B.Identity)".Trim()
+}
+
+function Get-ChangePermissionState {
+    # Whether Change Permission is on, the tooltip that says why not, and what it opens: Mode
+    # 'Edit' (an entry set on this folder or file) or 'Inherited' (read only: which folder above
+    # it comes from). The folder's button follows the entry selected in the list (-Row). The
+    # files bar's (-Files) needs exactly one selected file whose permissions are loaded and that
+    # has entries of its own (D-049); Entries lists those for the dialog's picker. Both are off
+    # while a change runs or is being prepared (Get-ChangeControlState, SQ-018's one-change rule).
+    param($Row, [switch]$Files)
+    $off = { param($tip) [PSCustomObject]@{ Enabled = $false; ToolTip = $tip; Mode = $null; Entries = @() } }
+    $general = Get-ChangeControlState
+    if (-not $general.Enabled) { return (& $off $general.Reason) }
+    if ($Files) {
+        $selected = @(Get-SelectedFileRows)
+        if ($selected.Count -ne 1) { return (& $off 'Select one file to change one of its permissions.') }
+        $model = $script:FileAclCache["$($selected[0].Path)"]
+        if (-not $model) { return (& $off 'The permissions of this file are still loading. Wait a moment, then try again.') }
+        if (-not $model.Ok) { return (& $off 'The permissions of this file could not be read, so there is nothing to change here.') }
+        $own = @($model.Rows | Where-Object { $null -ne $_ -and -not $_.IsInherited -and "$($_.Sid)".Trim() })
+        if ($own.Count -eq 0) { return (& $off 'This file only has inherited permissions. Change them on the folder they come from.') }
+        return [PSCustomObject]@{ Enabled = $true; ToolTip = $null; Mode = 'Edit'; Entries = $own }
+    }
+    $v = $script:ViewState.FolderPermissions
+    if (-not $v) { return (& $off 'The permissions of this folder are still loading. Wait a moment, then try again.') }
+    if (-not $v.Ok) { return (& $off 'The permissions of this folder could not be read, so there is nothing to change here.') }
+    if ($null -eq $Row) { return (& $off 'Select a permission in the list first.') }
+    if ($Row.IsInherited) { return [PSCustomObject]@{ Enabled = $true; ToolTip = $null; Mode = 'Inherited'; Entries = @() } }
+    if (-not "$($Row.Sid)".Trim()) { return (& $off "Windows did not say which account this entry is for, so it cannot be changed here. Press Refresh and try again.") }
+    [PSCustomObject]@{ Enabled = $true; ToolTip = $null; Mode = 'Edit'; Entries = @() }
+}
+
+function Get-AclGridRowItem {
+    # The permission row a mouse event in the permissions list happened on, or $null when it was
+    # on the header, empty space or a scroll bar: ItemsControl.ContainerFromElement returns the
+    # DataGridRow that owns the element, and null when no item container owns it.
+    # https://learn.microsoft.com/dotnet/api/system.windows.controls.itemscontrol.containerfromelement
+    param([Parameter(Mandatory)]$Grid, $Source)
+    if (-not ($Source -is [System.Windows.DependencyObject])) { return $null }
+    $container = $Grid.ContainerFromElement($Source)
+    if ($container -is [System.Windows.Controls.DataGridRow]) { return $container.Item }
+    $null
+}
+
+function Invoke-AclRowDoubleClick {
+    # A double-click on an entry in the folder's permissions list opens Change Permission for it;
+    # nothing for a double-click without a row. While a change runs or is being prepared, it says
+    # so and nothing opens.
+    # https://learn.microsoft.com/dotnet/api/system.windows.controls.control.mousedoubleclick
+    param($Row)
+    if ($null -eq $Row) { return }
+    if ($script:ChangeTask) {
+        Set-Status -Kind Warning -Text "Another change is still running on $($script:ChangeTask.Path). Wait for it to finish."
+        return
+    }
+    if ($script:ChangePending) { Set-Status -Kind Warning -Text (Get-ChangeControlState).Reason; return }
+    Open-ChangePermission -Scope Folder -Row $Row
+}
+
+function Open-ChangePermission {
+    # Change Permission for the entry selected in the folder's list (or -Row), or (-Scope Files)
+    # one entry of the one selected file. An entry set here: where it lands is looked up in the
+    # background first (SQ-018's target resolution: mapped drives, DFS with several targets
+    # refused, remembered mappings), then the dialog, then Invoke-ChangePermission. An inherited
+    # entry: which folder above it comes from is looked up in the background, then a read-only
+    # dialog says so; that result is dropped if another entry was selected meanwhile.
+    param([ValidateSet('Folder', 'Files')][string]$Scope = 'Folder', $Row)
+    $choices = @()
+    if ($Scope -eq 'Files') {
+        $state = Get-ChangePermissionState -Files
+        if (-not $state.Enabled) { Set-Status -Kind Warning -Text $state.ToolTip; return }
+        $choices = @($state.Entries)
+        if ($null -eq $Row) { $Row = $choices[0] }
+        $file = "$(@(Get-SelectedFileRows)[0].Path)"
+        $allRows = @($script:FileAclCache[$file].Rows)
+    }
+    else {
+        if ($null -eq $Row -and $script:UI -and $script:UI['FolderAclGrid']) { $Row = $script:UI['FolderAclGrid'].SelectedItem }
+        $state = Get-ChangePermissionState -Row $Row
+        if (-not $state.Enabled) { Set-Status -Kind Warning -Text $state.ToolTip; return }
+        if ($state.Mode -eq 'Inherited') { Open-InheritedPermission -Row $Row; return }
+        $v = $script:ViewState.FolderPermissions
+        if ("$($v.Path)" -ne "$($script:Current.RealPath)") {
+            Set-Status -Kind Warning -Text 'The permissions of this folder are still loading. Wait a moment, then try again.'
+            return
+        }
+        $allRows = @($v.Rows)
+    }
+    if (-not (Test-ReadyForChange -Scope $Scope)) { return }
+    $request = Get-ChangeRequest -Scope $Scope
+    if (-not (Enter-ChangePending -Action 'Change Permission' -Path $request.Label)) { return }
+    [void](Start-ChangeLookup -Paths $request.Paths -Label $request.Label -FolderDisplayPath $request.FolderDisplayPath -FolderRealPath $request.FolderRealPath `
+            -Request $request -State @{ Scope = $Scope; Request = $request; Row = $Row; AllRows = $allRows; Choices = $choices } -OnResolved {
+            param($targets, $s)
+            $model = Get-ChangeDialogModel -Row $s.Row -AllRows $s.AllRows -Path "$(@($targets)[0].DisplayPath)" -Choices $s.Choices
+            $answer = Show-ChangePermissionDialog -Model $model -TargetText (Get-DialogTargetText -Scope $s.Scope -Targets $targets)
+            if (-not $answer) { Set-Status -Text 'Cancelled: nothing was changed.'; return }
+            Invoke-ChangePermission -Scope $s.Scope -Row $answer.Row -Level $answer.Level -Type $answer.Type `
+                -Targets $targets -Label $s.Request.Label -RefreshState $s.Request.RefreshState
+        })
+}
+
+function Open-InheritedPermission {
+    # The read-only dialog for an inherited entry: which folder above this one it comes from
+    # (Find-InheritanceSource, read in the background because the folders above may be on a
+    # slow share). Shown only if the same entry is still selected in the same folder.
+    param([Parameter(Mandatory)]$Row)
+    $display = "$($script:Current.DisplayPath)"
+    $v = $script:ViewState.FolderPermissions
+    Set-Status -Text "Looking up which folder above $display this permission comes from. Nothing is changed."
+    [void](Start-ReadTask -Action 'Finding where a permission comes from for' -Path $display -Work $script:InheritanceSourceWork `
+            -ArgumentList @("$($script:Current.RealPath)", $Row, $script:CorePath) -State @{ Row = $Row; Display = $display; AllRows = @($v.Rows) } -OnDone {
+            param($result, $s)
+            $grid = if ($script:UI) { $script:UI['FolderAclGrid'] } else { $null }
+            if (-not $grid -or -not [object]::ReferenceEquals($grid.SelectedItem, $s.Row)) { return }
+            if (-not $script:Current -or "$($script:Current.DisplayPath)" -ne $s.Display) { return }
+            $source = if ($result -and $result.Ok) { $result }
+            else {
+                $why = if ($result -and "$($result.Error)".Trim()) { "$($result.Error)".Trim() } else { 'no reason was given' }
+                [PSCustomObject]@{ Source = $null; Root = $null; Error = $why }
+            }
+            $model = Get-ChangeDialogModel -Row $s.Row -AllRows $s.AllRows -Path $s.Display -Source $source
+            Set-Status -Text $model.Message
+            [void](Show-ChangePermissionDialog -Model $model -TargetText $s.Display)
+        })
+}
+
+function Get-ChangeDialogModel {
+    # What the Change Permission Entry dialog shows for -Row (a ConvertTo-AclViewModel row):
+    #   Edit (an entry set here): the account, read-only (a SID Windows can't look up gets
+    #   AccountNote), "applies to" (kept), the level preselected (LevelChoices: the five levels,
+    #   preceded by "Keep current (<rights>)" when the entry's rights are not exactly one of
+    #   them, generic rights included), Allow/Deny preselected, a Note when the account has other
+    #   entries set here (D-047: only the selected one changes) and, for a file, Choices: the
+    #   entry picker (-Choices, that file's own entries).
+    #   Inherited: Message, which folder above it comes from (-Source, Find-InheritanceSource),
+    #   and no submit button.
+    param([Parameter(Mandatory)]$Row, [object[]]$AllRows, [string]$Path, $Source, [object[]]$Choices)
+    $identity = "$($Row.Identity)".Trim()
+    if (-not $identity) { $identity = "$($Row.Sid)" }
+    $accountNote = if ($identity -match '^S-1-\d+(-\d+)+$') { "Windows can't look up this account from here (it may be deleted, or local to the server)" } else { $null }
+    $entryText = "$($Row.Type) $($Row.PermissionLevel)"
+    $common = [ordered]@{
+        Row         = $Row
+        AllRows     = @($AllRows | Where-Object { $null -ne $_ })
+        Path        = $Path
+        AccountText = $identity
+        AccountNote = $accountNote
+        Type        = "$($Row.Type)"
+        AppliesTo   = "$($Row.AppliesTo)"
+    }
+    if ($Row.IsInherited) {
+        $message = if ($Source -and "$($Source.Source)".Trim()) { "$identity gets $entryText here from $($Source.Source). To change it, open that folder." }
+        elseif ($Source -and "$($Source.Error)".Trim()) { "$identity gets $entryText here from a folder above this one. The tool could not check which ($("$($Source.Error)".Trim().TrimEnd('.')))." }
+        elseif ($Source -and "$($Source.Root)".Trim()) { "$identity gets $entryText here from above $($Source.Root) (on the server, or the folder above no longer has it)." }
+        else { "$identity gets $entryText here from a folder above this one. To change it, open the folder it comes from." }
+        $common['Mode'] = 'Inherited'
+        $common['Title'] = 'Inherited Permission Entry'
+        $common['Level'] = $null
+        $common['LevelChoices'] = @()
+        $common['SubmitLabel'] = $null
+        $common['Note'] = $null
+        $common['Message'] = $message
+        $common['ShowSubmit'] = $false
+        $common['Choices'] = @()
+        return [PSCustomObject]$common
+    }
+
+    # Synchronize is left out of the comparison: Windows sets it on Allow entries and leaves it off
+    # Deny ones, so "Modify, Synchronize" is Modify (Format-PermissionRights in the core).
+    # https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.filesystemrights
+    $noSync = -bnot [int][System.Security.AccessControl.FileSystemRights]::Synchronize
+    $raw = [int]$Row.RightsValue -band $noSync
+    $levels = @(Get-PermissionLevelChoices)
+    $match = @($levels | Where-Object { ([int][System.Security.AccessControl.FileSystemRights]$_.Tag -band $noSync) -eq $raw } | Select-Object -First 1)
+    if ($match.Count -gt 0) {
+        $level = $match[0].Tag
+        $levelChoices = $levels
+    }
+    else {
+        $level = 'Current'
+        $levelChoices = @([PSCustomObject]@{ Tag = 'Current'; Label = "Keep current ($($Row.PermissionLevel))" }) + $levels
+    }
+
+    $itemWord = if ("$($Row.ItemType)" -eq 'File') { 'file' } else { 'folder' }
+    $sameAccount = @($common.AllRows | Where-Object { -not $_.IsInherited -and (Test-SameAclAccount -A $_ -B $Row) })
+    $self = @($sameAccount | Where-Object { Test-SameAclEntry -A $_ -B $Row }).Count
+    $others = $sameAccount.Count - [Math]::Min(1, $self)
+    $note = if ($others -gt 0) { "$identity has $(Format-ItemCount $others 'other permission entry' 'other permission entries') set on this $itemWord. Only the selected one is changed." } else { $null }
+
+    $common['Mode'] = 'Edit'
+    $common['Title'] = 'Change Permission Entry'
+    $common['Level'] = $level
+    $common['LevelChoices'] = $levelChoices
+    $common['SubmitLabel'] = $(if ("$($Row.Type)" -eq 'Deny') { 'Change to Deny' } else { 'Change Permission' })
+    $common['Note'] = $note
+    $common['Message'] = $null
+    $common['ShowSubmit'] = $true
+    $common['Choices'] = @(@($Choices) | Where-Object { $null -ne $_ } | ForEach-Object {
+            [PSCustomObject]@{ Label = "$($_.Identity): $($_.Type) $($_.PermissionLevel)"; Row = $_ }
+        })
+    [PSCustomObject]$common
+}
+
+function Get-ChangeDialogAnswer {
+    # What pressing Change in the dialog means: Ok and Answer (Row, Level, Type), or Problem (shown
+    # in the dialog, which stays open). The level and Allow/Deny as they were is nothing to change.
+    param([Parameter(Mandatory)]$Model, [Parameter(Mandatory)][AllowEmptyString()][string]$Level, [Parameter(Mandatory)][AllowEmptyString()][string]$Type)
+    $no = { param($text) [PSCustomObject]@{ Ok = $false; Problem = $text; Answer = $null } }
+    if ($Model.Mode -ne 'Edit') { return (& $no 'This permission is inherited, so it cannot be changed here. Change it on the folder it comes from.') }
+    if (@($Model.LevelChoices | ForEach-Object { "$($_.Tag)" }) -notcontains $Level) { return (& $no 'Choose a permission level.') }
+    if (@('Allow', 'Deny') -notcontains $Type) { return (& $no 'Choose Allow or Deny.') }
+    if ($Level -eq "$($Model.Level)" -and $Type -eq "$($Model.Type)") {
+        return (& $no 'Nothing to change yet: choose a different permission level or Allow/Deny.')
+    }
+    [PSCustomObject]@{ Ok = $true; Problem = $null; Answer = [PSCustomObject]@{ Row = $Model.Row; Level = $Level; Type = $Type } }
+}
+
+function Set-ChangeDialogFields {
+    # Fills the Change dialog from a model (Get-ChangeDialogModel): when it opens, and when another
+    # entry is picked for a file.
+    param([Parameter(Mandatory)]$Dialog, [Parameter(Mandatory)]$Model)
+    $Dialog.FindName('PermAccountText').Text = $Model.AccountText
+    $hint = $Dialog.FindName('PermIdentityHint')
+    $hint.Text = "$($Model.AccountNote)"
+    $hint.Visibility = if ($Model.AccountNote) { 'Visible' } else { 'Collapsed' }
+    $Dialog.FindName('PermAppliesToText').Text = $Model.AppliesTo
+    $note = $Dialog.FindName('PermDialogNote')
+    $noteText = if ($Model.Mode -eq 'Edit') { $Model.Note } else { $Model.Message }
+    $note.Text = "$noteText"
+    $note.Visibility = if ($noteText) { 'Visible' } else { 'Collapsed' }
+    if ($Model.Mode -ne 'Edit') { return }
+    $rights = $Dialog.FindName('PermRightsCombo')
+    $rights.Items.Clear()
+    foreach ($c in @($Model.LevelChoices)) {
+        $item = New-Object System.Windows.Controls.ComboBoxItem
+        $item.Content = $c.Label
+        $item.Tag = $c.Tag
+        [void]$rights.Items.Add($item)
+        if ("$($c.Tag)" -eq "$($Model.Level)") { $rights.SelectedItem = $item }
+    }
+    $types = $Dialog.FindName('PermTypeCombo')
+    foreach ($item in @($types.Items)) { if ("$($item.Tag)" -eq "$($Model.Type)") { $types.SelectedItem = $item } }
+    Set-PermissionSubmitStyle -Mode Change -Type $Model.Type -Button $Dialog.FindName('PermSubmitBtn') `
+        -DangerStyle $Dialog.Resources['DangerBtn'] -NormalStyle $Dialog.Resources['PrimaryBtn']
+}
+
+function Show-ChangePermissionDialog {
+    # The Change Permission Entry dialog for -Model. Returns Row, Level and Type, or $null when
+    # cancelled or closed. Pressing Change with nothing changed keeps it open and says so
+    # (Get-ChangeDialogAnswer). Deny turns the button red, reads "Change to Deny" and Enter no
+    # longer presses it (Set-PermissionSubmitStyle). An inherited entry only says where it comes
+    # from, with a Close button.
+    param([Parameter(Mandatory)]$Model, [string]$TargetText)
+    $dlg = New-AppDialog -Xaml (Get-PermissionDialogXaml -Mode Change)
+    $dlg.Title = $Model.Title
+    $dlg.Tag = @{ Model = $Model; Answer = $null }
+    $dlg.FindName('PermDialogTitle').Text = $Model.Title
+    $dlg.FindName('PermDialogTarget').Text = if ($TargetText) { $TargetText } else { "$($Model.Path)" }
+    try { [void](Enable-LiveRegion -Element $dlg.FindName('PermDialogError') -Setting Assertive) } catch { }
+    $submit = $dlg.FindName('PermSubmitBtn')
+    $cancel = $dlg.FindName('PermCancelBtn')
+    Set-ChangeDialogFields -Dialog $dlg -Model $Model
+    if ($Model.Mode -ne 'Edit') {
+        foreach ($n in 'PermRightsLabel', 'PermRightsCombo', 'PermTypeLabel', 'PermTypeCombo') { $dlg.FindName($n).Visibility = 'Collapsed' }
+        $submit.Visibility = 'Collapsed'
+        $submit.IsDefault = $false
+        $cancel.Content = 'Close'
+        $cancel.IsDefault = $true
+        $dlg.Add_ContentRendered({ param($s, $e) [void]$s.FindName('PermCancelBtn').Focus() })
+        [void]$dlg.ShowDialog()
+        return $null
+    }
+    if (@($Model.Choices).Count -gt 0) {
+        $entryCombo = $dlg.FindName('PermEntryCombo')
+        $dlg.FindName('PermEntryLabel').Visibility = 'Visible'
+        $entryCombo.Visibility = 'Visible'
+        $entryCombo.ItemsSource = @($Model.Choices | ForEach-Object { $_.Label })
+        $index = 0
+        for ($i = 0; $i -lt @($Model.Choices).Count; $i++) { if ([object]::ReferenceEquals(@($Model.Choices)[$i].Row, $Model.Row)) { $index = $i; break } }
+        $entryCombo.SelectedIndex = $index
+        $entryCombo.Add_SelectionChanged({
+                param($s, $e)
+                $w = [System.Windows.Window]::GetWindow($s)
+                if (-not $w -or $s.SelectedIndex -lt 0) { return }
+                $m = $w.Tag.Model
+                $pick = @($m.Choices)[$s.SelectedIndex]
+                $next = Get-ChangeDialogModel -Row $pick.Row -AllRows @($m.AllRows) -Path $m.Path -Choices @($m.Choices | ForEach-Object { $_.Row })
+                $w.Tag.Model = $next
+                $w.FindName('PermDialogError').Visibility = 'Collapsed'
+                Set-ChangeDialogFields -Dialog $w -Model $next
+            })
+    }
+    $dlg.FindName('PermRightsCombo').Add_SelectionChanged({ param($s, $e) $w = [System.Windows.Window]::GetWindow($s); if ($w) { $w.FindName('PermDialogError').Visibility = 'Collapsed' } })
+    $dlg.FindName('PermTypeCombo').Add_SelectionChanged({
+            param($s, $e)
+            $w = [System.Windows.Window]::GetWindow($s)
+            if (-not $w) { return }
+            $w.FindName('PermDialogError').Visibility = 'Collapsed'
+            $chosen = if ("$($s.SelectedItem.Tag)" -eq 'Deny') { 'Deny' } else { 'Allow' }
+            Set-PermissionSubmitStyle -Mode Change -Type $chosen -Button $w.FindName('PermSubmitBtn') -DangerStyle $w.Resources['DangerBtn'] -NormalStyle $w.Resources['PrimaryBtn']
+        })
+    $submit.Add_Click({
+            param($s, $e)
+            $w = [System.Windows.Window]::GetWindow($s)
+            $rights = $w.FindName('PermRightsCombo')
+            $a = Get-ChangeDialogAnswer -Model $w.Tag.Model -Level "$($rights.SelectedItem.Tag)" -Type "$($w.FindName('PermTypeCombo').SelectedItem.Tag)"
+            if (-not $a.Ok) { Show-DialogError -ErrorBlock $w.FindName('PermDialogError') -Text $a.Problem -FocusTarget $rights; return }
+            $w.Tag.Answer = $a.Answer
+            $w.DialogResult = $true
+        })
+    $dlg.Add_ContentRendered({ param($s, $e) [void]$s.FindName('PermRightsCombo').Focus() })
+    if ($dlg.ShowDialog() -eq $true) { return $dlg.Tag.Answer }
+    $null
+}
+
+function Test-ChangeTakesAccessAway {
+    # D-048: true for a change to Deny, and for an Allow whose new rights are not all of its old
+    # rights (Modify to Read, Full control to Modify, a "Keep current" mix to Read), compared with
+    # generic rights mapped and without Synchronize. A Deny made an Allow, or an Allow raised,
+    # only gives access: false.
+    param(
+        [Parameter(Mandatory)][ValidateSet('Allow', 'Deny')][string]$OldType,
+        [Parameter(Mandatory)][int]$OldRightsValue,
+        [Parameter(Mandatory)][ValidateSet('Allow', 'Deny')][string]$NewType,
+        [Parameter(Mandatory)][string]$NewRights
+    )
+    if ($NewType -eq 'Deny') { return $true }
+    if ($OldType -eq 'Deny') { return $false }
+    $noSync = -bnot [int64]0x100000
+    $old = (ConvertTo-SpecificFileRight ([System.Enum]::ToObject([System.Security.AccessControl.FileSystemRights], $OldRightsValue))) -band $noSync
+    $new = (ConvertTo-SpecificFileRight (Get-PermissionEntryNewRights -RightsValue $OldRightsValue -NewRights $NewRights)) -band $noSync
+    ($new -band $old) -ne $old
+}
+
+function Get-CurrentIdentitySids {
+    # The SIDs of the account running the tool: UserSid (WindowsIdentity.User) and GroupSid
+    # (WindowsIdentity.Groups, "the groups the current Windows user belongs to"). The one place the
+    # real token is read; the tests replace it.
+    # https://learn.microsoft.com/dotnet/api/system.security.principal.windowsidentity.user
+    # https://learn.microsoft.com/dotnet/api/system.security.principal.windowsidentity.groups
+    # WindowsIdentity holds the token handle until it is disposed.
+    # https://learn.microsoft.com/dotnet/api/system.security.principal.windowsidentity.dispose
+    $me = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    try {
+        [PSCustomObject]@{
+            UserSid  = "$($me.User.Value)"
+            GroupSid = @($me.Groups | ForEach-Object { "$($_.Value)" })
+        }
+    }
+    finally {
+        $me.Dispose()
+    }
+}
+
+function Get-SelfDenyWarning {
+    # The confirm line when a Deny is for the tech's own account or one of their groups (-UserSid,
+    # -GroupSid: Get-CurrentIdentitySids), else $null. Such a Deny can lock the tool out of the
+    # folder, including reading it back. -Identity: the name shown for -Sid (looked up if empty).
+    param(
+        [Parameter(Mandatory)][string]$Type,
+        [Parameter(Mandatory)][string]$Sid,
+        [Parameter(Mandatory)][string]$UserSid,
+        [string[]]$GroupSid,
+        [string]$Identity,
+        [ValidateSet('Folder', 'File')][string]$ItemKind = 'Folder'
+    )
+    if ($Type -ne 'Deny') { return $null }
+    if ($Sid -eq $UserSid) { $why = 'it is your own account' }
+    elseif (@($GroupSid) -contains $Sid) {
+        $name = if ("$Identity".Trim()) { "$Identity".Trim() } else { ConvertTo-SidAccountName -Sid $Sid }
+        if (-not $name) { $name = $Sid }
+        $why = "you are in $name"
+    }
+    else { return $null }
+    $word = if ($ItemKind -eq 'File') { 'file' } else { 'folder' }
+    "This Deny also applies to you ($why). You could lose access to this $word, and the tool may not be able to read it back."
+}
+
+function Invoke-ChangePermission {
+    # Changes -Row (an entry set on the folder or the file) to -Level ('Current' keeps its rights)
+    # and -Type. D-048: the confirm opens first, red, with the account, the old and new entry,
+    # "applies to" and the real location, for a change that takes access away
+    # (Test-ChangeTakesAccessAway), one at the top of a drive or share, and one on a remembered
+    # mapping (with its warning); a Deny for the tech's own account or groups says they may lose
+    # access. Otherwise the dialog's Change button was the confirmation. -Targets, -Label and
+    # -RefreshState as for Invoke-AddPermission (one target: the folder, or the one file).
+    param(
+        [Parameter(Mandatory)][ValidateSet('Folder', 'Files')][string]$Scope,
+        [Parameter(Mandatory)]$Row,
+        [Parameter(Mandatory)][string]$Level,
+        [Parameter(Mandatory)][ValidateSet('Allow', 'Deny')][string]$Type,
+        [object[]]$Targets,
+        [string]$Label,
+        [hashtable]$RefreshState
+    )
+    $check = Get-ChangeDialogAnswer -Model (Get-ChangeDialogModel -Row $Row) -Level $Level -Type $Type
+    if (-not $check.Ok) { Set-Status -Kind Warning -Text $check.Problem; return }
+    if (-not "$($Row.Sid)".Trim()) {
+        Set-Status -Kind Warning -Text 'Windows did not say which account this entry is for, so it cannot be changed here. Press Refresh and try again.'
+        return
+    }
+    if (-not $PSBoundParameters.ContainsKey('Targets')) {
+        if (-not (Test-NoOtherChangePending)) { return }
+        $Targets = Get-ChangeScopeTargets -Scope $Scope
+        if (-not $Targets) { return }
+    }
+    if (-not $Label) { $Label = Get-ChangeLabel -Scope $Scope -Targets $Targets }
+    if (-not $RefreshState) {
+        $RefreshState = if ($Scope -eq 'Files') {
+            New-ChangeRefreshState -Scope Files -Paths @("$($script:Current.DisplayPath)") -ChangedFiles @($Targets | ForEach-Object { "$($_.DisplayPath)" })
+        }
+        else { Get-ScopeRefreshState -Scope Folder -Targets $Targets }
+    }
+    $newLevel = if ($Level -eq 'Current') { "$($Row.PermissionLevel)" } else { Format-PermissionRights -Rights ([System.Security.AccessControl.FileSystemRights]$Level) }
+    $change = [PSCustomObject]@{ Identity = "$($Row.Identity)"; From = "$($Row.Type) $($Row.PermissionLevel)"; To = "$Type $newLevel"; AppliesTo = "$($Row.AppliesTo)" }
+    $takesAway = Test-ChangeTakesAccessAway -OldType "$($Row.Type)" -OldRightsValue ([int]$Row.RightsValue) -NewType $Type -NewRights $Level
+    $remembered = @($Targets | Where-Object { $_.IsRemembered }).Count -gt 0
+    if ($takesAway -or $remembered -or (Get-ConfirmRootText -Targets $Targets)) {
+        $selfDeny = $null
+        if ($Type -eq 'Deny') {
+            $me = Get-CurrentIdentitySids
+            if ($me -and "$($me.UserSid)".Trim()) {
+                $kind = if ("$($Row.ItemType)" -eq 'File') { 'File' } else { 'Folder' }
+                $selfDeny = Get-SelfDenyWarning -Type $Type -Sid "$($Row.Sid)" -UserSid "$($me.UserSid)" -GroupSid @($me.GroupSid) -Identity "$($Row.Identity)" -ItemKind $kind
+            }
+        }
+        $spec = Get-ConfirmSpec -Action ChangePermission -Targets $Targets -Type $Type -Change $change -LowersAccess:($takesAway -and $Type -eq 'Allow') -SelfDenyWarning $selfDeny
+        if (-not (Show-ConfirmDialog -Spec $spec)) {
+            Set-Status -Text 'Cancelled: nothing was changed.'
+            return
+        }
+    }
+    $paths = [string[]]@($Targets | ForEach-Object { $_.ResolvedPath })
+    $started = Start-ChangeTask -Action 'Changing a permission on' -Path $Label -Work $script:ChangePermissionWork `
+        -ArgumentList @($paths, "$($Row.Sid)", "$($Row.Type)", [int]$Row.RightsValue, "$($Row.InheritanceFlags)", "$($Row.PropagationFlags)",
+        $Level, $Type, $script:ChangeLogFolder, [bool]$script:WhatIfMode, $script:CorePath) `
+        -State $RefreshState -OnDone { param($result, $state) Complete-ChangeTask -Result $result -State $state }
+    if ($started) {
+        Set-Status -Text "Backing up and changing the permission of $($Row.Identity) on $(Get-TargetLocationText -Targets $Targets)..."
+    }
+}
+
 #endregion
 
 if ($LoadFunctionsOnly) { return }

@@ -756,3 +756,23 @@ Describe 'Get-DotSegmentRefusal (SQ-024)' {
         Get-DotSegmentRefusal -Path $Path | Should -BeNullOrEmpty
     }
 }
+
+Describe 'Change permission result message (SQ-025)' {
+    It 'AC24_ResultMessageCase' {
+        $detail = 'From Allow Modify to Deny Modify for BUILTIN\Users (applies to: This folder, subfolders and files)'
+        $done = New-PermissionChangeEntry -Action 'Change permission' -Target 'C:\a' -ItemType 'Folder' -Detail $detail -Result 'Done' -BackupFile 'C:\b.csv'
+        Get-ChangeResultMessage -Entries @($done) -LogPath 'C:\log.csv' -LogFolder 'C:\logs' |
+            Should -BeLike 'Changed BUILTIN\Users from Allow Modify to Deny Modify on C:\a*'
+
+        $gone = New-PermissionChangeEntry -Action 'Change permission' -Target 'C:\a' -ItemType 'Folder' -Detail $detail -Result 'Skipped (entry not found)'
+        Get-ChangeResultMessage -Entries @($gone) -LogPath $null -LogFolder 'C:\logs' |
+            Should -BeLike 'The permission entry changed since it was shown (someone else may have changed it). Nothing was changed. Press Refresh and try again.*'
+
+        # Plurals follow the same rule as the other changes ("1 folder", "2 of 2 folders").
+        $two = @(
+            (New-PermissionChangeEntry -Action 'Change permission' -Target 'C:\a' -ItemType 'Folder' -Detail $detail -Result 'Done' -BackupFile 'C:\b.csv'),
+            (New-PermissionChangeEntry -Action 'Change permission' -Target 'C:\b' -ItemType 'Folder' -Detail $detail -Result 'Done' -BackupFile 'C:\b.csv'))
+        Get-ChangeResultMessage -Entries $two -LogPath 'C:\log.csv' -LogFolder 'C:\logs' |
+            Should -BeLike 'Changed BUILTIN\Users from Allow Modify to Deny Modify on 2 of 2 folders*'
+    }
+}

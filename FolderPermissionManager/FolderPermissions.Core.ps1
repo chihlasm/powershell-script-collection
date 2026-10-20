@@ -6,8 +6,8 @@
 <#
 .SYNOPSIS
     Shared logic for FolderPermissionManager: permission backups, the change log, the
-    single-item permission changes (add, remove, take ownership, copy), and taking ownership
-    of a whole folder tree.
+    single-item permission changes (add, remove, change one entry, take ownership, copy), and
+    taking ownership of a whole folder tree.
 .DESCRIPTION
     Dot-sourced by FolderPermissionManager-GUI.ps1 and FolderPermissionManager.ps1. Nothing
     here draws UI.
@@ -106,6 +106,26 @@
     - RemoveAccessRuleAll removes every rule for the rule's account, whatever its rights:
       https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.filesystemsecurity.removeaccessruleall
       https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.commonobjectsecurity.removeaccessruleall
+    - Change permission (Set-FolderPermissionEntry, checked 2026-10-20): RemoveAccessRuleSpecific
+      "Removes a single matching allow or deny access control list (ACL) permission"
+      (RemoveSpecific: "Remove authorization rules that exactly match the specified
+      authorization rule"); Reset removes every rule with the same SID before adding, so
+      SetAccessRule and ResetAccessRule are not used; AddAccessRule adds the new rule. Both edits
+      are made in memory and written with one Set-Acl. AreAccessRulesCanonical says whether the
+      rules are in canonical order (explicit before inherited, Deny before Allow); an ACL that
+      is not is refused. InheritanceFlags and PropagationFlags give Explorer's "Applies to":
+      https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.filesystemsecurity.removeaccessrulespecific
+      https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.filesystemsecurity.addaccessrule
+      https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.filesystemsecurity.setaccessrule
+      https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.filesystemsecurity.resetaccessrule
+      https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.accesscontrolmodification
+      https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.objectsecurity.areaccessrulescanonical
+      https://learn.microsoft.com/windows/win32/secauthz/order-of-aces-in-a-dacl
+      https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.commonobjectsecurity.getaccessrules
+      https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.propagationflags
+      Where an inherited entry comes from (Find-InheritanceSource) is found by reading the
+      folders above, not with GetInheritanceSourceW (P/Invoke):
+      https://learn.microsoft.com/windows/win32/api/aclapi/nf-aclapi-getinheritancesourcew
     - takeown /F /R /A /D N (/R recursive over all files in the directory and subdirectories;
       /A gives ownership to the Administrators group instead of the current user; /D answers
       the prompt for a folder the account has no List Folder and Read permission on and must
@@ -1796,7 +1816,8 @@ function Invoke-SingleItemAclChange {
         failure. It runs in a child scope of the calling change function, so it can use that
         function's parameters. It may output an object with Detail (what it really changed,
         instead of the planned Detail) and/or Result (it found nothing left to change and wrote
-        nothing; the row gets that Result). Only Copy permissions uses this.
+        nothing; the row gets that Result). Copy permissions and Change permission (an entry
+        that is no longer there) use this.
     .PARAMETER ProceedWhenUnreadable
         Change items whose current permissions cannot be read; the backup lists them as
         'Could not read' (D-027). Only Take ownership uses this: it exists for folders the
@@ -1808,7 +1829,8 @@ function Invoke-SingleItemAclChange {
         ErrorText (the item is not changed or backed up, and its row gets that Result). A Plan
         that cannot read the item's permissions should return $null, so the normal flow refuses
         the item as unreadable; any exception it throws makes the row Failed with that error,
-        and the item is not changed. Only Copy permissions uses this.
+        and the item is not changed. Copy permissions and Change permission (a Detail that
+        names the item's "applies to") use this.
     #>
     [CmdletBinding()]
     param(
@@ -3137,6 +3159,8 @@ function Get-ChangeResultMessage {
     # The backup failed: nothing was touched, and the error already says so.
     $backupFailed = @($failed | Where-Object { $_.Error -like 'Could not save a backup*' })
     if ($done.Count -eq 0 -and $backupFailed.Count -gt 0) { return $backupFailed[0].Error }
+    # Change permission: the entry was no longer there exactly as it was shown; nothing was written.
+    $entryGone = @($all | Where-Object { $_.Result -eq 'Skipped (entry not found)' })
 
     $phrase, $preposition = switch ($first.Action) {
         'Add permission'    { "Added $($first.Detail)", 'on' }
@@ -3147,6 +3171,11 @@ function Get-ChangeResultMessage {
             else { "Removed $($first.Detail)", 'from' }
         }
         'Take ownership'    { 'Took ownership', 'of' }
+        'Change permission' {
+            # Detail: "From Allow Modify to Deny Modify for BUILTIN\Users (applies to: ...)".
+            if ($first.Detail -match '^From (.+?) to (.+?) for (.+) \(applies to: .+\)$') { "Changed $($Matches[3]) from $($Matches[1]) to $($Matches[2])", 'on' }
+            else { "Changed $($first.Detail)", 'on' }
+        }
         'Copy permissions'  {
             # Each Done row's Detail lists the rules added to that target; the line names the source.
             $source = Get-CopySourceText @($done)[0]
@@ -3178,6 +3207,8 @@ function Get-ChangeResultMessage {
         }
     } elseif ($whatIf.Count -eq $all.Count) {
         $parts.Add("WhatIf: nothing was changed ($(Format-ItemCount $all.Count $noun $nouns) would be).")
+    } elseif ($entryGone.Count -eq $all.Count) {
+        $parts.Add((Get-EntryGoneText))
     } elseif ($all.Count -eq 1 -and $failed.Count -eq 1) {
         $state = Get-FailedChangeState $first
         if ($state -eq 'Partly') {
@@ -3221,6 +3252,9 @@ function Get-ChangeResultMessage {
         if ($all.Count -eq 1) { $parts.Add("$($first.Target) does not exist.") }
         else { $parts.Add("$($notFound.Count) not found and skipped.") }
     }
+    if ($entryGone.Count -gt 0 -and $entryGone.Count -lt $all.Count) {
+        $parts.Add("On $(Format-ItemCount $entryGone.Count $noun $nouns) the permission entry changed since it was shown, so $(if ($entryGone.Count -eq 1) { 'it was' } else { 'they were' }) not changed. Press Refresh and try again.")
+    }
     $unreadable = @($done | Where-Object { $_.OldValue -eq 'Could not read' })
     if ($unreadable.Count -gt 0) {
         $parts.Add("$(Format-ItemCount $unreadable.Count 'item' 'items') had no readable permissions before the change and cannot be restored from this backup.")
@@ -3240,6 +3274,290 @@ function Get-ChangeResultMessage {
     }
 
     $parts -join ' '
+}
+
+#endregion
+
+#region Change an existing permission entry
+
+function Get-EntryGoneText {
+    # What the result says when the entry to change is no longer there exactly as it was shown
+    # (Set-FolderPermissionEntry: Result 'Skipped (entry not found)').
+    'The permission entry changed since it was shown (someone else may have changed it). Nothing was changed. Press Refresh and try again.'
+}
+
+function Format-AppliesTo {
+    <#
+    .SYNOPSIS
+        Where an entry applies, in the words of Explorer's Advanced Security Settings: "This
+        folder only", "This folder, subfolders and files", "Subfolders and files only", ...,
+        with " (one level down only)" for "this folder and its direct children only". A file's
+        entry is always "This file only".
+    .DESCRIPTION
+        InheritanceFlags: ContainerInherit (subfolders), ObjectInherit (files). PropagationFlags:
+        InheritOnly ("propagated only to child objects", so not this folder itself) and
+        NoPropagateInherit ("not propagated to child objects" beyond the direct children);
+        both "are significant only if inheritance flags are present".
+        https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.inheritanceflags
+        https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.propagationflags
+        https://learn.microsoft.com/windows/win32/secauthz/ace-inheritance-rules
+    #>
+    param(
+        [Parameter(Mandatory)][ValidateSet('Folder', 'File')][string]$ItemType,
+        [Parameter(Mandatory)]$InheritanceFlags,
+        [Parameter(Mandatory)]$PropagationFlags
+    )
+    if ($ItemType -eq 'File') { return 'This file only' }
+    $inheritance = [System.Security.AccessControl.InheritanceFlags]"$InheritanceFlags"
+    $propagation = [System.Security.AccessControl.PropagationFlags]"$PropagationFlags"
+    $folders = [bool]($inheritance -band [System.Security.AccessControl.InheritanceFlags]::ContainerInherit)
+    $files = [bool]($inheritance -band [System.Security.AccessControl.InheritanceFlags]::ObjectInherit)
+    if (-not $folders -and -not $files) { return 'This folder only' }
+    $text = if ($propagation -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) {
+        if ($folders -and $files) { 'Subfolders and files only' } elseif ($folders) { 'Subfolders only' } else { 'Files only' }
+    } else {
+        if ($folders -and $files) { 'This folder, subfolders and files' } elseif ($folders) { 'This folder and subfolders' } else { 'This folder and files' }
+    }
+    if ($propagation -band [System.Security.AccessControl.PropagationFlags]::NoPropagateInherit) { $text += ' (one level down only)' }
+    $text
+}
+
+function Find-ExplicitAccessRule {
+    <#
+    .SYNOPSIS
+        The explicit (not inherited) access rule of an ACL that is exactly the entry described:
+        same SID, Allow or Deny, raw rights mask and inheritance and propagation flags. $null
+        when there is none. Nothing is read: -Acl is an ACL object already in memory.
+    .DESCRIPTION
+        Read by SID (GetAccessRules with SecurityIdentifier), so a renamed or deleted account is
+        matched the same way. The mask is compared as Windows stores it (generic rights and
+        Synchronize included), so a rule that was changed in any way since it was shown does not
+        match.
+        https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.commonobjectsecurity.getaccessrules
+    #>
+    param(
+        [Parameter(Mandatory)][System.Security.AccessControl.FileSystemSecurity]$Acl,
+        [Parameter(Mandatory)][string]$Sid,
+        [Parameter(Mandatory)][ValidateSet('Allow', 'Deny')][string]$Type,
+        [Parameter(Mandatory)][int]$RightsValue,
+        [Parameter(Mandatory)]$InheritanceFlags,
+        [Parameter(Mandatory)]$PropagationFlags
+    )
+    $inheritance = [System.Security.AccessControl.InheritanceFlags]"$InheritanceFlags"
+    $propagation = [System.Security.AccessControl.PropagationFlags]"$PropagationFlags"
+    foreach ($rule in @($Acl.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]))) {
+        if ("$($rule.IdentityReference.Value)" -ne $Sid -or "$($rule.AccessControlType)" -ne $Type) { continue }
+        if ([int]$rule.FileSystemRights -ne $RightsValue) { continue }
+        if ($rule.InheritanceFlags -ne $inheritance -or $rule.PropagationFlags -ne $propagation) { continue }
+        return $rule
+    }
+    $null
+}
+
+function Get-SidDisplayName {
+    # The account name a SID stands for, for messages and the change log, or the SID itself when
+    # Windows cannot translate it (a deleted account, or one local to another server). Never used
+    # to build a rule. https://learn.microsoft.com/dotnet/api/system.security.principal.securityidentifier.translate
+    param([Parameter(Mandatory)][string]$Sid)
+    try { (New-Object System.Security.Principal.SecurityIdentifier -ArgumentList $Sid).Translate([System.Security.Principal.NTAccount]).Value }
+    catch { $Sid }
+}
+
+function Get-PermissionEntryNewRights {
+    # The rights the changed entry gets: one of the five levels, or with 'Current' the entry's own
+    # mask with generic rights mapped to file rights (what Windows gives the items that inherit
+    # it, ConvertTo-SpecificFileRight).
+    param([Parameter(Mandatory)][int]$RightsValue, [Parameter(Mandatory)][string]$NewRights)
+    $fs = [System.Security.AccessControl.FileSystemRights]
+    if ($NewRights -ne 'Current') { return [System.Security.AccessControl.FileSystemRights]$NewRights }
+    [System.Enum]::ToObject($fs, [int](ConvertTo-SpecificFileRight ([System.Enum]::ToObject($fs, $RightsValue))))
+}
+
+function Get-PermissionEntryChangeDetail {
+    # A change's Detail for the change log and the messages: "From Allow Modify to Deny Modify for
+    # BUILTIN\Users (applies to: This folder, subfolders and files)".
+    param(
+        [Parameter(Mandatory)][string]$Sid,
+        [Parameter(Mandatory)][string]$Type,
+        [Parameter(Mandatory)][int]$RightsValue,
+        [Parameter(Mandatory)]$InheritanceFlags,
+        [Parameter(Mandatory)]$PropagationFlags,
+        [Parameter(Mandatory)][string]$NewRights,
+        [Parameter(Mandatory)][string]$NewType,
+        [ValidateSet('Folder', 'File')][string]$ItemType = 'Folder'
+    )
+    $oldRights = [System.Enum]::ToObject([System.Security.AccessControl.FileSystemRights], $RightsValue)
+    $from = "$Type $(Format-PermissionRights -Rights $oldRights)"
+    $to = "$NewType $(Format-PermissionRights -Rights (Get-PermissionEntryNewRights -RightsValue $RightsValue -NewRights $NewRights))"
+    $appliesTo = Format-AppliesTo -ItemType $ItemType -InheritanceFlags $InheritanceFlags -PropagationFlags $PropagationFlags
+    "From $from to $to for $(Get-SidDisplayName -Sid $Sid) (applies to: $appliesTo)"
+}
+
+function Get-NonCanonicalAclText {
+    # Why an ACL that is not in canonical order is not edited. Canonical order puts explicit
+    # entries before inherited ones and, within each group, Deny before Allow; .NET's rule edits
+    # assume it, and Explorer offers to reorder such an ACL.
+    # https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.objectsecurity.areaccessrulescanonical
+    # https://learn.microsoft.com/windows/win32/secauthz/order-of-aces-in-a-dacl
+    param([Parameter(Mandatory)][string]$Path)
+    "The permissions on $Path are not in the order Windows expects, so the tool will not edit them. Nothing was changed. Ask a senior admin to check them in Explorer (Advanced Security Settings)."
+}
+
+function Find-InheritanceSource {
+    <#
+    .SYNOPSIS
+        The folder above that an inherited entry (-Row: Sid, Type, RightsValue) comes from.
+        Returns Source (that folder, or $null), Root (the drive or share root that was reached,
+        or $null) and Error (why a folder above could not be read, or $null).
+    .DESCRIPTION
+        Walks up from the item's parent to the root of its drive or share and reads each folder
+        (Get-Acl -LiteralPath), until one has an explicit entry that would give this one: same
+        account, same Allow or Deny, inheritable (and, above the direct parent, not "this folder
+        and its direct children only"), and rights the inherited entry holds after generic rights
+        are mapped (Windows maps them in the entry that applies to the child; the flags of an
+        inherited entry differ from the source's, so they are not compared). The first folder
+        that cannot be read stops the walk. Nothing is changed.
+        Above a share root the tool cannot look, so an entry that comes from the server's own
+        folders is reported as "above <root>".
+        https://learn.microsoft.com/windows/win32/secauthz/ace-inheritance-rules
+        https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.propagationflags
+        https://learn.microsoft.com/dotnet/api/system.io.path.getdirectoryname
+        Not chosen: GetInheritanceSourceW, which asks Windows directly but needs P/Invoke:
+        https://learn.microsoft.com/windows/win32/api/aclapi/nf-aclapi-getinheritancesourcew
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)]$Row
+    )
+    $sid = "$($Row.Sid)"
+    $type = "$($Row.Type)"
+    $childRights = ConvertTo-SpecificFileRight ([System.Enum]::ToObject([System.Security.AccessControl.FileSystemRights], [int]$Row.RightsValue))
+    $noPropagate = [System.Security.AccessControl.PropagationFlags]::NoPropagateInherit
+    $current = $Path
+    if ($current -ne [System.IO.Path]::GetPathRoot($current)) { $current = $current.TrimEnd('\') }
+    $root = $null
+    $depth = 0
+    while ($true) {
+        $parent = $null
+        try { $parent = [System.IO.Path]::GetDirectoryName($current) } catch { $parent = $null }
+        if (-not $parent) { break }
+        $depth++
+        $root = $parent
+        try {
+            $acl = Get-Acl -LiteralPath $parent -ErrorAction Stop
+        } catch {
+            return [PSCustomObject]@{ Source = $null; Root = $null; Error = (Format-Sentence $_.Exception.Message).TrimEnd('.') }
+        }
+        foreach ($rule in @($acl.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]))) {
+            if ("$($rule.IdentityReference.Value)" -ne $sid -or "$($rule.AccessControlType)" -ne $type) { continue }
+            if ($rule.InheritanceFlags -eq [System.Security.AccessControl.InheritanceFlags]::None) { continue }
+            if ($depth -gt 1 -and ($rule.PropagationFlags -band $noPropagate)) { continue }
+            $ruleRights = ConvertTo-SpecificFileRight $rule.FileSystemRights
+            if (($childRights -band $ruleRights) -eq $ruleRights) {
+                return [PSCustomObject]@{ Source = $parent; Root = [System.IO.Path]::GetPathRoot($parent); Error = $null }
+            }
+        }
+        # The root of the drive (D:\) or share (\\fs01\Data) is the last folder this tool can see.
+        if ($parent -eq [System.IO.Path]::GetPathRoot($parent) -or $parent -eq $current) { break }
+        $current = $parent
+    }
+    [PSCustomObject]@{ Source = $null; Root = $root; Error = $null }
+}
+
+function Set-FolderPermissionEntry {
+    <#
+    .SYNOPSIS
+        Changes one explicit permission entry of each folder or file in place: the entry for
+        -Sid of type -Type with exactly -RightsValue and the inheritance and propagation flags
+        becomes -NewType with -NewRights, with the same account and the same "applies to".
+        Backed up first; one row per item; one Set-Acl per item.
+    .DESCRIPTION
+        The entry is found again when the change runs (Find-ExplicitAccessRule), by SID, so a
+        deleted account's entry can be changed too and a name is never looked up again. When it
+        is not there exactly as it was shown, nothing is written and the row is
+        'Skipped (entry not found)'. An ACL that is not in canonical order is refused
+        (AreAccessRulesCanonical). Otherwise both edits are made on the ACL object in memory and
+        written with one Set-Acl, so a failed write leaves the old entry in place:
+        - RemoveAccessRuleSpecific removes "a single matching allow or deny" rule, the one that
+          matches exactly (RemoveSpecific: "Remove authorization rules that exactly match"), not
+          SetAccessRule or ResetAccessRule, which replace other entries of the account too
+          (Reset: "Remove authorization rules that contain the same SID ... then add"), and
+          not RemoveAccessRuleAll (every rule of the account);
+        - AddAccessRule ("Add the specified authorization rule to the ACL") adds the new rule
+          with the old entry's SID object and flags; Windows may merge it into an existing entry
+          of the same account, type and flags, which only adds rights to that entry.
+        Synchronize is left to Windows as for every other change (set on Allow, left off Deny).
+        https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.filesystemsecurity.removeaccessrulespecific
+        https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.filesystemsecurity.addaccessrule
+        https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.filesystemsecurity.setaccessrule
+        https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.filesystemsecurity.resetaccessrule
+        https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.accesscontrolmodification
+        https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.objectsecurity.areaccessrulescanonical
+        https://learn.microsoft.com/dotnet/api/system.security.accesscontrol.filesystemaccessrule.-ctor
+    .PARAMETER NewRights
+        One of the five levels, or Current: the entry's own rights (generic rights mapped to file
+        rights), so Allow can become Deny without losing an unusual mix of rights.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][AllowEmptyCollection()][string[]]$Path,
+        [Parameter(Mandatory)][string]$Sid,
+        [Parameter(Mandatory)][ValidateSet('Allow', 'Deny')][string]$Type,
+        [Parameter(Mandatory)][int]$RightsValue,
+        [Parameter(Mandatory)]$InheritanceFlags,
+        [Parameter(Mandatory)]$PropagationFlags,
+        [Parameter(Mandatory)][ValidateSet('FullControl', 'Modify', 'ReadAndExecute', 'Read', 'Write', 'Current')][string]$NewRights,
+        [Parameter(Mandatory)][ValidateSet('Allow', 'Deny')][string]$NewType,
+        [Parameter(Mandatory)][string]$LogFolder
+    )
+
+    # Checked before anything is backed up: a SID that is not one is a caller error.
+    $entrySid = New-Object System.Security.Principal.SecurityIdentifier -ArgumentList $Sid
+    $entryInheritance = [System.Security.AccessControl.InheritanceFlags]"$InheritanceFlags"
+    $entryPropagation = [System.Security.AccessControl.PropagationFlags]"$PropagationFlags"
+    $entryNewRights = Get-PermissionEntryNewRights -RightsValue $RightsValue -NewRights $NewRights
+    $detailFor = {
+        param($itemType)
+        $kind = if ($itemType -eq 'File') { 'File' } else { 'Folder' }
+        Get-PermissionEntryChangeDetail -Sid $Sid -Type $Type -RightsValue $RightsValue -InheritanceFlags $entryInheritance `
+            -PropagationFlags $entryPropagation -NewRights $NewRights -NewType $NewType -ItemType $kind
+    }
+
+    # The Change block runs inside Invoke-SingleItemAclChange, so its names must not hide that
+    # function's own variables ($old, $state, $item, ...).
+    Invoke-SingleItemAclChange -Cmdlet $PSCmdlet -Path $Path -Action 'Change permission' -ActionSlug 'ChangePermission' `
+        -Detail (& $detailFor 'Folder') -LogFolder $LogFolder -Plan {
+        param($p, $itemType)
+        [PSCustomObject]@{ Detail = (& $detailFor $itemType) }
+    } -Change {
+        param($p, $itemType)
+        $acl = Get-Acl -LiteralPath $p -ErrorAction Stop
+        if (-not $acl.AreAccessRulesCanonical) { throw (Get-NonCanonicalAclText -Path $p) }
+        $entryRule = Find-ExplicitAccessRule -Acl $acl -Sid $Sid -Type $Type -RightsValue $RightsValue `
+            -InheritanceFlags $entryInheritance -PropagationFlags $entryPropagation
+        if (-not $entryRule) { return [PSCustomObject]@{ Result = 'Skipped (entry not found)' } }
+        $sddlBefore = $acl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::All)
+
+        $acl.RemoveAccessRuleSpecific($entryRule)
+        if (Find-ExplicitAccessRule -Acl $acl -Sid $Sid -Type $Type -RightsValue $RightsValue -InheritanceFlags $entryInheritance -PropagationFlags $entryPropagation) {
+            throw 'The old permission entry could not be taken out of the permissions in memory, so nothing was changed.'
+        }
+        $newRule = New-Object System.Security.AccessControl.FileSystemAccessRule -ArgumentList @(
+            $entrySid, $entryNewRights, $entryInheritance, $entryPropagation, [System.Security.AccessControl.AccessControlType]$NewType)
+        $acl.AddAccessRule($newRule)
+        try {
+            Set-Acl -LiteralPath $p -AclObject $acl -ErrorAction Stop
+        } catch {
+            # Say "nothing was changed" only when the permissions read back are the ones from
+            # before; otherwise Invoke-SingleItemAclChange says they were partly changed or
+            # could not be read.
+            $why = Format-Sentence $_.Exception.Message
+            $now = $null
+            try { $now = (Get-Acl -LiteralPath $p -ErrorAction Stop).GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::All) } catch { $now = $null }
+            if ($now -and $now -ceq $sddlBefore) { throw "$why Nothing was changed." }
+            throw
+        }
+    }
 }
 
 #endregion

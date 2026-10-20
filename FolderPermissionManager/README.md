@@ -73,10 +73,12 @@ PowerShell**, or run it from a PowerShell window:
 **Making changes.** One change runs at a time: while it runs, the change buttons are off, the
 busy line shows what is being changed and for how long, and you can keep browsing. A second
 change is refused with "Another change is still running on `<path>`. Wait for it to finish."
-- **Folder:** Add Permission, Remove Permission, Take Ownership (this folder only), Take
-  Ownership of all subfolders and files, and Copy Permissions To... (adds only; see below).
-- **Selected files** (the bar under the file list): Add Permission, Remove Permission, Take
-  Ownership. Files whose permissions are not read yet are read first for Remove Permission.
+- **Folder:** Add Permission, Change Permission, Remove Permission, Take Ownership (this folder
+  only), Take Ownership of all subfolders and files, and Copy Permissions To... (adds only; see
+  below).
+- **Selected files** (the bar under the file list): Add Permission, Change Permission (one file
+  at a time), Remove Permission, Take Ownership. Files whose permissions are not read yet are
+  read first for Remove Permission.
 - **Where it really lands is checked first.** Each button first works out, in the background,
   where the change would really go (the share behind a mapped drive, the server behind a DFS
   path, the local folder behind this computer's own share); the busy line says "Checking where
@@ -111,6 +113,46 @@ change is refused with "Another change is still running on `<path>`. Wait for it
   `D:\.`, because `"D:\"` would end in `\"`, which Windows reads as a quote).
   Each item gets its own file, named after the folder and the time. The file holds the
   folder's permissions (account SIDs and paths): delete it once the ticket is closed.
+- **Change a permission** (for example turn `chihlas`'s Allow into a Deny without typing the
+  name again): select the entry in the folder's permissions list and press **Change
+  Permission**, or double-click the entry. The **Change Permission Entry** dialog shows the
+  account (not editable; an account Windows can't look up from here shows as its `S-1-...` SID,
+  and the change still works because it acts on the SID), **Applies to** in Explorer's words
+  ("This folder, subfolders and files", "This folder only", ...), which is kept as it is, and
+  the permission level and Allow or Deny already set to what the entry has. You pick the new
+  level or Allow/Deny; pressing Change with nothing different says "Nothing to change yet:
+  choose a different permission level or Allow/Deny." An entry with an unusual mix of rights
+  (for example `DeleteSubdirectoriesAndFiles, Modify`) starts on **Keep current (...)**, so you
+  can flip Allow and Deny without losing the exact rights. Only the selected entry changes: when
+  the account has other entries set on the folder, the dialog says how many and that they stay.
+  (If one of them is the same Allow or Deny and applies to the same items as the changed entry,
+  Windows may combine the two into one entry.)
+  - **Files:** select exactly one file and press **Change Permission** in the files bar; the
+    dialog has a picker of that file's own entries. A file with only inherited entries can't be
+    changed here.
+  - **Inherited entries** can't be changed here: the dialog (Close only) says which folder above
+    the entry comes from ("... gets Allow Read & execute here from `D:\Data`. To change it, open
+    that folder."), looked up in the background, or that it comes from above the top of the
+    drive or share, or that the folder above could not be checked.
+  - **It asks first when it takes access away:** a change to Deny (the button turns red and reads
+    **Change to Deny**, and Enter no longer presses it), an Allow lowered (Modify to Read), and
+    any change at the top of a drive or share open the red confirm with the account, the old and
+    new entry, Applies to, the path and its real location. When the Deny also applies to you (your
+    own account or one of your groups, such as Administrators), the confirm says you could lose
+    access to the folder. A change that only gives more access (Read to Modify, Deny to Allow) is
+    made when you press Change in the dialog.
+  - **One write.** The permissions are backed up and a `Started` row is logged first; then the old
+    entry is taken out and the new one put in, in memory, and written to the folder in one write,
+    so a write that fails leaves the old entry in place (the permissions are read again, and the
+    result says whether anything was changed). The entry is found again by its SID, rights and flags just before the write: if it
+    changed since it was shown, nothing is written ("The permission entry changed since it was
+    shown ... Press Refresh and try again."). Permissions that are not in the order Windows
+    expects are not edited. Afterwards the entry is read back like every other change, and the
+    result says "Changed `<account>` from Allow Modify to Deny Modify on `<path>`." With
+    `-WhatIf`, the dry-run message names the account, the old and new entry, Applies to and the
+    location, and nothing is changed, backed up or logged.
+  - The command-line script and the browser version have no change command: use the Windows app
+    (or remove and add the entry there).
 - **It asks first.** Remove Permission and every Take Ownership open a dialog that names the
   path, its real location and how many items, with the action on the button ("Take ownership
   of 12,408 items") and **Cancel** as the default (Enter and Esc both cancel). For the whole
