@@ -336,6 +336,15 @@ function Format-Sentence {
     $t
 }
 
+function Format-ItemCount {
+    # "1 folder", "3 folders", "12,408 items" (the number in this computer's format). Every count
+    # in a change result, real or dry run, takes its word from the count (AC57); the GUI uses it
+    # for its own messages too.
+    param([Parameter(Mandatory)][long]$Count, [Parameter(Mandatory)][string]$Singular, [Parameter(Mandatory)][string]$Plural)
+    $word = if ($Count -eq 1) { $Singular } else { $Plural }
+    '{0} {1}' -f $Count.ToString('N0'), $word
+}
+
 function Get-PermissionChangeColumn {
     # The shared change-log columns, in order (owner decision D-030). Write-PermissionChangeLog
     # writes exactly these: a row can carry extra counts for the messages (a whole-tree row's
@@ -1406,7 +1415,7 @@ function Get-LinkListText {
     <#
     .SYNOPSIS
         How the links found in a folder are counted and listed in messages: Noun ("2
-        junction(s) or symbolic link(s)", or "2 link(s)" when any is of another kind) and Items
+        junctions or symbolic links", or "1 link" when any is of another kind) and Items
         (the paths, each named by its kind when the noun does not already say what they are:
         "DFS link \\fs01\share\Apps").
     #>
@@ -1416,10 +1425,10 @@ function Get-LinkListText {
     $kinds = @($paths | ForEach-Object { Get-LinkKind -Path $_ })
     $otherKinds = @($kinds | Where-Object { $_ -ne 'junction' -and $_ -ne 'symbolic link' })
     if ($otherKinds.Count -eq 0) {
-        return [PSCustomObject]@{ Noun = "$($paths.Count) junction(s) or symbolic link(s)"; Items = $paths }
+        return [PSCustomObject]@{ Noun = (Format-ItemCount $paths.Count 'junction or symbolic link' 'junctions or symbolic links'); Items = $paths }
     }
     $items = @(for ($i = 0; $i -lt $paths.Count; $i++) { "$($kinds[$i]) $($paths[$i])" })
-    [PSCustomObject]@{ Noun = "$($paths.Count) link(s)"; Items = $items }
+    [PSCustomObject]@{ Noun = (Format-ItemCount $paths.Count 'link' 'links'); Items = $items }
 }
 
 # The words every "where it leads could not be found out" refusal contains, so a caller can tell
@@ -2513,11 +2522,11 @@ function Invoke-TreeOwnershipChange {
     $linkText = Get-LinkListText -LinkPaths @($snapshot.LinkPaths)
     $notes = @(
         "$detail."
-        $(if ($snapshot.Unreadable -gt 0) { "$($snapshot.Unreadable) item(s) had no readable owner before the change." })
-        $(if ($snapshot.Unlisted -gt 0) { "$($snapshot.Unlisted) folder(s) could not be opened, so takeown /D N skipped them and the owners inside them are not in the backup: $(Format-PathList -Path @($snapshot.UnlistedFolders) -First 20 -More $fullList)." })
+        $(if ($snapshot.Unreadable -gt 0) { "$(Format-ItemCount $snapshot.Unreadable 'item' 'items') had no readable owner before the change." })
+        $(if ($snapshot.Unlisted -gt 0) { "$(Format-ItemCount $snapshot.Unlisted 'folder' 'folders') could not be opened, so takeown /D N skipped $(if ($snapshot.Unlisted -eq 1) { 'it' } else { 'them' }) and the owners inside $(if ($snapshot.Unlisted -eq 1) { 'it' } else { 'them' }) are not in the backup: $(Format-PathList -Path @($snapshot.UnlistedFolders) -First 20 -More $fullList)." })
         $(if ($unlistedChanged.Count -gt 0) { "The owner of $($unlistedChanged.Count) of them was changed anyway (read back), but not their permissions: $(Format-PathList -Path $unlistedChanged -First 20)." })
         $(if ($unlistedUnchecked.Count -gt 0) { "The owner of $($unlistedUnchecked.Count) of them could not be read afterwards, so it is not known whether it changed: $(Format-PathList -Path $unlistedUnchecked -First 20)." })
-        $(if ($snapshot.Links -gt 0) { "$($linkText.Noun) were listed but not gone into: $(Format-PathList -Path @($linkText.Items) -First 20)." })
+        $(if ($snapshot.Links -gt 0) { "$($linkText.Noun) $(if (@($linkText.Items).Count -eq 1) { 'was' } else { 'were' }) listed but not gone into: $(Format-PathList -Path @($linkText.Items) -First 20)." })
         "Ran: $(Format-AclToolCommand -Tool takeown -Arguments $takeownArgs); $(Format-AclToolCommand -Tool icacls -Arguments $icaclsArgs)"
     ) | Where-Object { $_ }
 
@@ -2757,7 +2766,7 @@ function Get-NotOpenedEscalation {
     <#
     .SYNOPSIS
         The next step for the folders a whole-tree row could not open (D-034), as one passage:
-        "Escalate: <n> folder(s) could not be opened, so they were left alone." (or, for those
+        "Escalate: <n> folders could not be opened, so they were left alone." (or, for those
         whose owner was read back changed, that their owner was changed but not their
         permissions, and for those whose owner could not be read back, that it could not be
         checked), the first three names and the file with all of them (or that it could not be
@@ -2773,26 +2782,30 @@ function Get-NotOpenedEscalation {
     $count = Get-TreeEntryCount $Entry 'Unlisted'
     $changed = @($Entry.TreeCounts.UnlistedChangedFolders)
     $unchecked = @($Entry.TreeCounts.UnlistedUncheckedFolders)
-    $opening = if ($changed.Count -eq 0 -and $unchecked.Count -eq 0) {
-        "Escalate: $count folder(s) could not be opened, so they were left alone."
+    $folders = Format-ItemCount $count 'folder' 'folders'
+    $opening = if ($changed.Count -eq 0 -and $unchecked.Count -eq 0 -and $count -eq 1) {
+        'Escalate: 1 folder could not be opened, so it was left alone.'
+    } elseif ($changed.Count -eq 0 -and $unchecked.Count -eq 0) {
+        "Escalate: $folders could not be opened, so they were left alone."
     } elseif ($unchecked.Count -eq 0 -and $changed.Count -ge $count -and $count -eq 1) {
-        'Escalate: 1 folder(s) could not be opened: its owner was changed, but its permissions were not.'
+        'Escalate: 1 folder could not be opened: its owner was changed, but its permissions were not.'
     } elseif ($unchecked.Count -eq 0 -and $changed.Count -ge $count) {
-        "Escalate: $count folder(s) could not be opened: their owners were changed, but their permissions were not."
+        "Escalate: $folders could not be opened: their owners were changed, but their permissions were not."
     } elseif ($unchecked.Count -eq 0) {
-        "Escalate: $count folder(s) could not be opened. $($changed.Count) of them had their owner changed, but not their permissions ($(Format-PathList -Path $changed -First 3)); the other $($count - $changed.Count) were left alone."
+        $left = $count - $changed.Count
+        "Escalate: $folders could not be opened. $($changed.Count) of them had their owner changed, but not their permissions ($(Format-PathList -Path $changed -First 3)); the other $left $(if ($left -eq 1) { 'was' } else { 'were' }) left alone."
     } elseif ($changed.Count -eq 0 -and $unchecked.Count -ge $count -and $count -eq 1) {
-        'Escalate: 1 folder(s) could not be opened, and its owner could not be checked afterwards.'
+        'Escalate: 1 folder could not be opened, and its owner could not be checked afterwards.'
     } elseif ($changed.Count -eq 0 -and $unchecked.Count -ge $count) {
-        "Escalate: $count folder(s) could not be opened, and their owners could not be checked afterwards."
+        "Escalate: $folders could not be opened, and their owners could not be checked afterwards."
     } else {
         # A folder that is neither changed nor unchecked was read back with its old owner.
         $alone = $count - $changed.Count - $unchecked.Count
         @(
-            "Escalate: $count folder(s) could not be opened."
+            "Escalate: $folders could not be opened."
             $(if ($changed.Count -gt 0) { "$($changed.Count) of them had their owner changed, but not their permissions ($(Format-PathList -Path $changed -First 3))." })
             "The owner of $($unchecked.Count) of them could not be checked afterwards ($(Format-PathList -Path $unchecked -First 3))."
-            $(if ($alone -gt 0) { "The other $alone were left alone." })
+            $(if ($alone -gt 0) { "The other $alone $(if ($alone -eq 1) { 'was' } else { 'were' }) left alone." })
         ) -join ' '
     }
     $file = "$($Entry.TreeCounts.NotOpenedFile)"
@@ -2860,20 +2873,21 @@ function Get-TreeChangeResultMessage {
         if ($links -gt 0) {
             # LinkNoun and LinkItems name each link's kind (Get-LinkListText); a row from before
             # they were added only has the paths.
-            $noun = if ($e.TreeCounts.LinkNoun) { $e.TreeCounts.LinkNoun } else { "$links junction(s) or symbolic link(s)" }
+            $noun = if ($e.TreeCounts.LinkNoun) { $e.TreeCounts.LinkNoun } else { Format-ItemCount $links 'junction or symbolic link' 'junctions or symbolic links' }
             $linkItems = if (@($e.TreeCounts.LinkItems).Count -gt 0) { @($e.TreeCounts.LinkItems) } else { @($e.TreeCounts.LinkPaths) }
             $linkNames = @($linkItems | Select-Object -First 3)
             $linkMore = if ($links -gt $linkNames.Count) { " and $($links - $linkNames.Count) more" } else { '' }
-            $parts.Add("$noun ($($linkNames -join '; ')$linkMore) were listed but not gone into. Microsoft's documentation does not say whether takeown and icacls follow them, and icacls changes what a symbolic link points to, so check them and what they point to.")
+            $parts.Add("$noun ($($linkNames -join '; ')$linkMore) $(if ($links -eq 1) { 'was' } else { 'were' }) listed but not gone into. Microsoft's documentation does not say whether takeown and icacls follow them, and icacls changes what a symbolic link points to, so check them and what they point to.")
         }
         $unchecked = Get-TreeEntryCount $e 'Unchecked'
         if ($unchecked -gt 0 -and $e.Result -ne 'Skipped (WhatIf)') {
-            $parts.Add("$unchecked item(s) could not be read after the change, so it is not known who owns them now; check them.")
+            $them = if ($unchecked -eq 1) { 'it' } else { 'them' }
+            $parts.Add("$(Format-ItemCount $unchecked 'item' 'items') could not be read after the change, so it is not known who owns $them now; check $them.")
         }
     }
     $unreadable = Get-UnrestorableItemCount -Entries $Entries
     if ($unreadable -gt 0) {
-        $parts.Add("$unreadable item(s) had no readable permissions before the change and cannot be restored from this backup.")
+        $parts.Add("$(Format-ItemCount $unreadable 'item' 'items') had no readable permissions before the change and cannot be restored from this backup.")
     }
 
     $changed = @($Entries | Where-Object { $_.Result -eq 'Done' -or $_.Result -eq 'Partly done' -or ($_.Result -eq 'Failed' -and (Get-FailedChangeState $_) -ne 'Unchanged') })
@@ -2968,7 +2982,7 @@ function Get-ChangeResultMessage {
             $parts.Add('That is expected: Windows passes permissions down only to the items that inherit them, as Explorer does.')
         }
     } elseif ($whatIf.Count -eq $all.Count) {
-        $parts.Add("WhatIf: nothing was changed ($($all.Count) $(if ($all.Count -eq 1) { $noun } else { $nouns }) would be).")
+        $parts.Add("WhatIf: nothing was changed ($(Format-ItemCount $all.Count $noun $nouns) would be).")
     } elseif ($all.Count -eq 1 -and $failed.Count -eq 1) {
         $state = Get-FailedChangeState $first
         if ($state -eq 'Partly') {
@@ -2994,7 +3008,7 @@ function Get-ChangeResultMessage {
         $already = @($upToDate | Where-Object { $_.Detail -notlike 'Nothing to copy:*' })
         if ($already.Count -gt 0) {
             if ($all.Count -eq 1) { $parts.Add("$($first.Target) already has these permissions, so nothing was changed.") }
-            else { $parts.Add("$($already.Count) folder(s) already had these permissions and were not changed.") }
+            else { $parts.Add("$(Format-ItemCount $already.Count 'folder' 'folders') already had these permissions and $(if ($already.Count -eq 1) { 'was' } else { 'were' }) not changed.") }
         }
     }
     if ($failed.Count -gt 0 -and $all.Count -gt 1) {
@@ -3005,7 +3019,7 @@ function Get-ChangeResultMessage {
         if ($all.Count -eq 1) {
             if ($backupPath) { $parts.Add("Its permissions before the change are in $backupPath; see ""Undo a change"" in the README to put them back.") }
         } else {
-            $parts.Add("$($touched.Count) item(s) were partly changed or could not be checked.$restore")
+            $parts.Add("$(Format-ItemCount $touched.Count 'item' 'items') $(if ($touched.Count -eq 1) { 'was' } else { 'were' }) partly changed or could not be checked.$restore")
         }
     }
     if ($notFound.Count -gt 0) {
@@ -3014,7 +3028,7 @@ function Get-ChangeResultMessage {
     }
     $unreadable = @($done | Where-Object { $_.OldValue -eq 'Could not read' })
     if ($unreadable.Count -gt 0) {
-        $parts.Add("$($unreadable.Count) item(s) had no readable permissions before the change and cannot be restored from this backup.")
+        $parts.Add("$(Format-ItemCount $unreadable.Count 'item' 'items') had no readable permissions before the change and cannot be restored from this backup.")
     }
 
     $backupNote = if ($backupPath) { " The backup is at $backupPath." } else { '' }

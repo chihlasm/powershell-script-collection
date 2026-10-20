@@ -577,7 +577,7 @@ Describe 'Take ownership and copy permissions (AC32-AC38)' {
         [void](Complete-Captured)
         $last = Get-LastStatus
         $last.Kind | Should -Be 'Warning'
-        $last.Text | Should -Match ([regex]::Escape('Escalate: 2 folder(s) could not be opened'))
+        $last.Text | Should -Match ([regex]::Escape('Escalate: 2 folders could not be opened'))
 
         # A Done row with nothing unreadable or unopened is a success.
         $script:Row = New-TreeRow -Target $folder -Result 'Done' -Counts @{ Changed = 7; ItemCount = 7 }
@@ -710,15 +710,15 @@ Describe 'Results, refresh, closing (AC39-AC41)' {
             @{ Name = 'partial batch'; Entries = @((New-Row -Result 'Done' -Target 'C:\a'), (New-Row -Result 'Failed' -Target 'C:\b' -ErrorText 'denied')); Log = $log; Msg = 'Added on 1 of 2 files.'; Kind = 'Warning'; Text = 'Partly done: Added on 1 of 2 files.' }
             @{ Name = 'all failed'; Entries = @((New-Row -Result 'Failed' -Target 'C:\a' -ErrorText 'denied'), (New-Row -Result 'Failed' -Target 'C:\b' -ErrorText 'denied')); Log = $log; Msg = 'Add permission failed.'; Kind = 'Error'; Text = 'Add permission failed.' }
             @{ Name = 'log not written'; Entries = @(& $done); Log = $null; Msg = 'Added it. The change log could not be written.'; Kind = 'Warning'; Text = 'Done, with items to check: Added it. The change log could not be written.' }
-            @{ Name = 'unrestorable items'; Entries = @((New-Row -Result 'Done' -OldValue 'Could not read')); Log = $log; Msg = 'Took ownership. 1 item(s) cannot be restored.'; Kind = 'Warning'; Text = 'Done, with items to check: Took ownership. 1 item(s) cannot be restored.' }
-            @{ Name = 'tree partly done'; Entries = @((New-TreeRow -Result 'Partly done' -Counts @{ Unlisted = 2; UnlistedFolders = @('a', 'b') })); Log = $log; Msg = 'Took ownership of C:\x and every subfolder and file that could be opened. Escalate: 2 folder(s) could not be opened.'; Kind = 'Warning'; Text = 'Done, with items to check: Took ownership of C:\x and every subfolder and file that could be opened. Escalate: 2 folder(s) could not be opened.' }
+            @{ Name = 'unrestorable items'; Entries = @((New-Row -Result 'Done' -OldValue 'Could not read')); Log = $log; Msg = 'Took ownership. 1 item cannot be restored.'; Kind = 'Warning'; Text = 'Done, with items to check: Took ownership. 1 item cannot be restored.' }
+            @{ Name = 'tree partly done'; Entries = @((New-TreeRow -Result 'Partly done' -Counts @{ Unlisted = 2; UnlistedFolders = @('a', 'b') })); Log = $log; Msg = 'Took ownership of C:\x and every subfolder and file that could be opened. Escalate: 2 folders could not be opened.'; Kind = 'Warning'; Text = 'Done, with items to check: Took ownership of C:\x and every subfolder and file that could be opened. Escalate: 2 folders could not be opened.' }
             @{ Name = 'tree partly done, message already says so'; Entries = @((New-TreeRow -Result 'Partly done' -Counts @{ NotOwned = 1 })); Log = $log; Msg = 'Partly done: took ownership but not on every item.'; Kind = 'Warning'; Text = 'Partly done: took ownership but not on every item.' }
-            @{ Name = 'tree incomplete'; Entries = @((New-TreeRow -Result 'Done' -Counts @{ Unchecked = 2 })); Log = $log; Msg = 'Took ownership. 2 item(s) could not be read after the change.'; Kind = 'Warning'; Text = 'Done, with items to check: Took ownership. 2 item(s) could not be read after the change.' }
+            @{ Name = 'tree incomplete'; Entries = @((New-TreeRow -Result 'Done' -Counts @{ Unchecked = 2 })); Log = $log; Msg = 'Took ownership. 2 items could not be read after the change.'; Kind = 'Warning'; Text = 'Done, with items to check: Took ownership. 2 items could not be read after the change.' }
             @{ Name = 'tree failed'; Entries = @((New-TreeRow -Result 'Failed' -NewValue '' -ErrorText 'Nothing was changed.')); Log = $log; Msg = 'Could not take ownership.'; Kind = 'Error'; Text = 'Could not take ownership.' }
-            @{ Name = 'nothing to copy'; Entries = @((New-Row -Result 'Skipped (nothing to copy)' -Action 'Copy permissions'), (New-Row -Result 'Skipped (nothing to copy)' -Action 'Copy permissions')); Log = $log; Msg = '2 folder(s) already had these permissions and were not changed.'; Kind = 'Info'; Text = '2 folder(s) already had these permissions and were not changed.' }
+            @{ Name = 'nothing to copy'; Entries = @((New-Row -Result 'Skipped (nothing to copy)' -Action 'Copy permissions'), (New-Row -Result 'Skipped (nothing to copy)' -Action 'Copy permissions')); Log = $log; Msg = '2 folders already had these permissions and were not changed.'; Kind = 'Info'; Text = '2 folders already had these permissions and were not changed.' }
             @{ Name = 'done plus up-to-date target'; Entries = @((New-Row -Result 'Done' -Action 'Copy permissions'), (New-Row -Result 'Skipped (nothing to copy)' -Action 'Copy permissions')); Log = $log; Msg = 'Permissions copied to 1 of 2 folders.'; Kind = 'Success'; Text = 'Permissions copied to 1 of 2 folders.' }
             @{ Name = 'done plus not found'; Entries = @((New-Row -Result 'Done'), (New-Row -Result 'Skipped (not found)')); Log = $log; Msg = 'Added on 1 of 2 files. 1 not found and skipped.'; Kind = 'Warning'; Text = 'Partly done: Added on 1 of 2 files. 1 not found and skipped.' }
-            @{ Name = 'dry run'; Entries = @((New-Row -Result 'Skipped (WhatIf)')); Log = $null; Msg = 'WhatIf: nothing was changed (1 folders would be).'; Kind = 'Info'; Text = 'WhatIf: nothing was changed (1 folders would be).' }
+            @{ Name = 'dry run'; Entries = @((New-Row -Result 'Skipped (WhatIf)')); Log = $null; Msg = 'WhatIf: nothing was changed (1 folder would be).'; Kind = 'Info'; Text = 'WhatIf: nothing was changed (1 folder would be).' }
         )
         foreach ($c in $cases) {
             $s = Get-ChangeStatus -Entries $c.Entries -LogPath $c.Log -Message $c.Msg
@@ -3093,6 +3093,105 @@ Describe 'Revision 3 (owner lab test, 2026-10-19): .\name, account lookup in the
         Get-DryMessage -Type File -Count 3 | Should -BeExactly 'WhatIf: nothing was changed (3 files would be).'
         Get-DryMessage -Type Unknown -Count 1 | Should -BeExactly 'WhatIf: nothing was changed (1 item would be).'
         Get-DryMessage -Type Unknown -Count 2 | Should -BeExactly 'WhatIf: nothing was changed (2 items would be).'
+    }
+
+    It 'AC57_RealResultCountsUseTheRightPlural' {
+        # Review round 1: AC57 covers real results too, not only dry runs.
+        function script:Get-RealMessage { param([object[]]$Rows) Get-ChangeResultMessage -Entries $Rows -LogPath 'C:\logs\change.csv' -LogFolder 'C:\logs' }
+        $copy = { param($n) @((New-Row -Action 'Copy permissions' -Target 'E:\Done' -Result 'Done')) + @(1..$n | ForEach-Object { New-Row -Action 'Copy permissions' -Target "E:\Same$_" -Result 'Skipped (nothing to copy)' }) }
+        $one = Get-RealMessage -Rows (& $copy 1)
+        $two = Get-RealMessage -Rows (& $copy 2)
+        $one | Should -Match ([regex]::Escape(' 1 folder already had these permissions and was not changed.'))
+        $two | Should -Match ([regex]::Escape(' 2 folders already had these permissions and were not changed.'))
+
+        $tree = { param($n) Get-RealMessage -Rows @(New-TreeRow -Result 'Done' -Counts @{ Unlisted = $n; UnlistedFolders = @(1..$n | ForEach-Object { "C:\x\locked$_" }); Unchecked = $n }) }
+        $tree1 = & $tree 1
+        $tree2 = & $tree 2
+        $tree1 | Should -Match ([regex]::Escape('Escalate: 1 folder could not be opened'))
+        $tree2 | Should -Match ([regex]::Escape('Escalate: 2 folders could not be opened'))
+        $tree1 | Should -Match ([regex]::Escape('1 item could not be read after the change, so it is not known who owns it now; check it.'))
+        $tree2 | Should -Match ([regex]::Escape('2 items could not be read after the change, so it is not known who owns them now; check them.'))
+
+        $unreadable = { param($n) Get-RealMessage -Rows @(1..$n | ForEach-Object { New-Row -Action 'Take ownership' -Target "C:\x$_" -Result 'Done' -OldValue 'Could not read' }) }
+        & $unreadable 1 | Should -Match ([regex]::Escape('1 item had no readable permissions before the change'))
+        & $unreadable 2 | Should -Match ([regex]::Escape('2 items had no readable permissions before the change'))
+
+        foreach ($m in $one, $two, $tree1, $tree2) { $m | Should -Not -Match '\(s\)' -Because 'every count picks its own word' }
+    }
+
+    It 'AC57_LinkCountsUseTheRightPlural' {
+        Mock Get-LinkKind { 'junction' }
+        (Get-LinkListText -LinkPaths @('C:\x\j1')).Noun | Should -BeExactly '1 junction or symbolic link'
+        (Get-LinkListText -LinkPaths @('C:\x\j1', 'C:\x\j2')).Noun | Should -BeExactly '2 junctions or symbolic links'
+    }
+
+    It 'AC55_ReviewFix_DriveLetterTargetIsLocalOnlyWhenTheDriveItselfIsThisComputers' {
+        # H: is not in the drive map (mapped after the app started), so the target lookup did not
+        # mark it IsLocal; the drive's own type decides, and a drive that cannot be read refuses.
+        $text = "Type the server's name instead, for example FS01\name."
+        $h = New-FakeTarget -Display 'H:\HR' -Local $false
+
+        Mock Get-DriveLetterType { 'Network' }
+        $r = Resolve-AddIdentity -Identity '.\micha' -Targets @($h)
+        $r.Ok | Should -BeFalse -Because 'H: is a network drive'
+        $r.Problem | Should -BeExactly $text
+        Should -Invoke Get-DriveLetterType -Times 1 -Exactly -Scope It -ParameterFilter { $Letter -eq 'H' }
+
+        foreach ($other in 'Unknown', 'NoRootDirectory', 'CDRom', '') {
+            Mock Get-DriveLetterType { $other }.GetNewClosure()
+            (Resolve-AddIdentity -Identity '.\micha' -Targets @($h)).Ok | Should -BeFalse -Because "DriveType '$other' is not this computer's own disk"
+        }
+
+        Mock Get-DriveLetterType { throw 'The drive could not be read' }
+        $r = Resolve-AddIdentity -Identity '.\micha' -Targets @($h)
+        $r.Ok | Should -BeFalse -Because 'a drive that cannot be read is refused (fail closed)'
+        $r.Problem | Should -BeExactly $text
+
+        foreach ($own in 'Fixed', 'Removable') {
+            Mock Get-DriveLetterType { $own }.GetNewClosure()
+            $r = Resolve-AddIdentity -Identity '.\micha' -Targets @($h)
+            $r.Ok | Should -BeTrue -Because "DriveType $own is this computer's own drive"
+            $r.Identity | Should -BeExactly "$($script:Me)\micha"
+        }
+    }
+
+    It 'AC56_ReviewFix_MessagesNameWhatWasTypedAndWhatWasLookedUp' {
+        $r = Find-PermissionAccount -Identity 'PC01\micha' -TypedIdentity '.\micha' -Lookup { param($identity) $null }
+        $r.Found | Should -BeFalse
+        $r.Problem | Should -BeExactly 'Windows could not find the account .\micha (looked up as PC01\micha). Check the name, or ask a senior admin.'
+
+        $t = Find-PermissionAccount -Identity 'PC01\micha' -TypedIdentity '.\micha' -TimeoutMilliseconds 300 -Lookup { param($identity) Start-Sleep -Seconds 10; 'S-FAKE-LATE' }
+        $t.TimedOut | Should -BeTrue
+        $t.Problem | Should -Match ([regex]::Escape('the account .\micha (looked up as PC01\micha) in time'))
+
+        $same = Find-PermissionAccount -Identity 'CONTOSO\nobody' -TypedIdentity '  CONTOSO\nobody ' -Lookup { param($identity) $null }
+        $same.Problem | Should -BeExactly 'Windows could not find the account CONTOSO\nobody. Check the name, or ask a senior admin.' -Because 'nothing is added when the typed name is the one looked up'
+
+        $fn = $script:Ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Show-PermissionDialog' }, $true)
+        $lookup = @($fn.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Find-PermissionAccount' }, $true))
+        $lookup.Count | Should -Be 1
+        @($lookup[0].CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -eq 'TypedIdentity' }).Count | Should -Be 1 -Because 'the dialog hands over what the tech typed'
+    }
+
+    It 'AC56_ReviewFix_TheDialogShowsItIsBusyBeforeTheLookupAndRestoresAfter' {
+        $fn = $script:Ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Show-PermissionDialog' }, $true)
+        $lookup = @($fn.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Find-PermissionAccount' }, $true))[0]
+        $try = $lookup.Parent
+        while ($try -and $try -isnot [System.Management.Automation.Language.TryStatementAst]) { $try = $try.Parent }
+        $try | Should -Not -BeNullOrEmpty -Because 'the lookup runs in a try whose finally restores the dialog'
+        $before = $fn.Extent.Text.Substring(0, $try.Extent.StartOffset - $fn.Extent.StartOffset)
+        $before | Should -Match '\$s\.IsEnabled\s*=\s*\$false' -Because 'Add is disabled before the wait'
+        $before | Should -Match '\$cancel\.IsEnabled\s*=\s*\$false' -Because 'Cancel is disabled before the wait'
+        $before | Should -Match "Content\s*=\s*'Checking\.\.\.'"
+        $before | Should -Match '\[System\.Windows\.Input\.Mouse\]::OverrideCursor\s*=\s*\[System\.Windows\.Input\.Cursors\]::Wait'
+        $body = $try.Body.Extent.Text
+        $body | Should -Match 'DispatcherPriority\]::Render' -Because 'the busy state is painted before the wait'
+        $body.IndexOf('DispatcherPriority]::Render') | Should -BeLessThan $body.IndexOf('Find-PermissionAccount')
+        $finally = $try.Finally.Extent.Text
+        $finally | Should -Match '\[System\.Windows\.Input\.Mouse\]::OverrideCursor\s*=\s*\$null'
+        $finally | Should -Match '\$s\.Content\s*=\s*\$label'
+        $finally | Should -Match '\$s\.IsEnabled\s*=\s*\$true'
+        $finally | Should -Match '\$cancel\.IsEnabled\s*=\s*\$true'
     }
 
     It 'AC57_DryRunSummaryNamesWhatWouldChangeAndWhere' {

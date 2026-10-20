@@ -154,13 +154,13 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         $script:Prompts[0] | Should -Be 'Continue? (y/N)'
         $scope = @($script:Lines | Where-Object { $_ -like '`[WARN`] Taking ownership makes *' })
         $scope.Count | Should -Be 1
-        $scope[0] | Should -BeLike "*the owner of 3 item(s): $($script:Dir) and every subfolder and file under it*"
+        $scope[0] | Should -BeLike "*the owner of 3 items: $($script:Dir) and every subfolder and file under it*"
     }
 
     It 'AC19_Cli_WhatIf_ShowsTheItemCount' {
         Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log -WhatIf
 
-        @($script:Lines | Where-Object { $_ -like '`[WARN`] Taking ownership makes * 3 item(s): *' }).Count | Should -Be 1
+        @($script:Lines | Where-Object { $_ -like '`[WARN`] Taking ownership makes * 3 items: *' }).Count | Should -Be 1
         Should -Invoke Read-Host -Times 0 -Exactly -Scope It
     }
 
@@ -173,7 +173,7 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         $result = @($script:Lines | Where-Object { $_ -match '^\[(PASS|WARN|FAIL)\] Took ownership' })
         $result.Count | Should -Be 1
         $result[0] | Should -Match '^\[WARN\] '
-        $result[0] | Should -BeLike "*Escalate: 1 folder(s) could not be opened, so they were left alone. Not opened: $locked.*cannot be restored from this backup*"
+        $result[0] | Should -BeLike "*Escalate: 1 folder could not be opened, so it was left alone. Not opened: $locked.*cannot be restored from this backup*"
     }
 
     It 'AC17_Cli_ExitCodeIsOneWhenOwnershipIsPartlyDoneOrFailed' -ForEach @(
@@ -216,7 +216,7 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
 
         $scope = @($script:Lines | Where-Object { $_ -like '`[WARN`] Taking ownership makes *' })
         $scope.Count | Should -Be 1
-        $scope[0] | Should -BeLike "*1 folder(s) cannot be opened, so they are skipped and left alone: $locked.*"
+        $scope[0] | Should -BeLike "*1 folder cannot be opened, so it is skipped and left alone: $locked.*"
         $scope[0] | Should -Not -Match 'full control'
         $code | Should -Be 1 -Because 'a folder that could not be opened leaves the result incomplete'
         @(Get-ChildItem -LiteralPath (Join-Path $script:Log 'Backups') -Filter '*_TakeOwnership_Permissions.csv').Count | Should -Be 0
@@ -230,7 +230,7 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         $null = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log -WhatIf
 
         $scope = @($script:Lines | Where-Object { $_ -like '`[WARN`] Taking ownership makes *' })
-        $scope[0] | Should -BeLike "*1 folder(s) cannot be opened, so they are skipped and left alone: $locked.*"
+        $scope[0] | Should -BeLike "*1 folder cannot be opened, so it is skipped and left alone: $locked.*"
         $scope[0] | Should -Not -Match 'lost'
     }
 
@@ -259,8 +259,8 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
 
         $code | Should -Be 1
         $scope = @($script:Lines | Where-Object { $_ -like '`[WARN`] Taking ownership makes *' })
-        $scope[0] | Should -BeLike "*It contains 1 junction(s) or symbolic link(s), which are listed but not gone into. Microsoft's documentation does not say whether takeown and icacls follow them*$link*"
-        @($script:Lines | Where-Object { $_ -like '`[WARN`] Took ownership*1 junction(s) or symbolic link(s)*' }).Count | Should -Be 1
+        $scope[0] | Should -BeLike "*It contains 1 junction or symbolic link, which is listed but not gone into. Microsoft's documentation does not say whether takeown and icacls follow them*$link*"
+        @($script:Lines | Where-Object { $_ -like '`[WARN`] Took ownership*1 junction or symbolic link (*) was listed*' }).Count | Should -Be 1
     }
 
     It 'AC20_Cli_SaysHowToRecogniseAnInterruptedRunBeforeTakingOwnership' {
@@ -311,7 +311,7 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         $code | Should -Be 1
         $result = @($script:Lines | Where-Object { $_ -match '^\[WARN\] Partly done' })
         $result.Count | Should -Be 1
-        $result[0] | Should -Match ([regex]::Escape('Escalate: 1 folder(s) could not be opened, so they were left alone.'))
+        $result[0] | Should -Match ([regex]::Escape('Escalate: 1 folder could not be opened, so it was left alone.'))
         $result[0] | Should -Match ([regex]::Escape($locked))
         $scope = @($script:Lines | Where-Object { $_ -like '`[WARN`] Taking ownership makes *' })
         $scope.Count | Should -Be 1
@@ -688,7 +688,7 @@ Describe 'FolderPermissionManager.ps1 (command line): DFS targets, unresolvable 
             $scope.Count | Should -Be 1
             $scope[0] | Should -Match 'DFS link'
             $scope[0] | Should -Match ([regex]::Escape($script:DfsLink))
-            $scope[0] | Should -Not -Match ([regex]::Escape('junction(s) or symbolic link(s)'))
+            $scope[0] | Should -Not -Match 'junctions? or symbolic links?'
             # The "[INFO] ... are skipped" line came from the copy-to-subfolders step, which D-035
             # removed from the CLI, so it is no longer asserted here.
         }

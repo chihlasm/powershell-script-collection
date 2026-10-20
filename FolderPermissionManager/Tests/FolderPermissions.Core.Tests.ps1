@@ -478,7 +478,7 @@ Describe 'FolderPermissions.Core' {
             $saved = @(Import-Csv -LiteralPath (Get-BackupFiles $log)[0].FullName)
             $saved[0].Sddl | Should -Be 'Could not read'
             Get-ChangeResultMessage -Entries $rows -LogPath 'C:\log.csv' -LogFolder $log |
-                Should -BeLike '*1 item(s) had no readable permissions before the change and cannot be restored from this backup.*'
+                Should -BeLike '*1 item had no readable permissions before the change and cannot be restored from this backup.*'
         }
     }
 

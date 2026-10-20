@@ -1800,7 +1800,7 @@ function Get-ReadBackProblem {
                 if ($found.Count -eq 0) { $missing++ }
             }
             if ($missing -eq 0) { return $null }
-            return "$missing of the $(@($SourceRules).Count) permission(s) set on $SourcePath are not on it afterwards"
+            return "$missing of the $(Format-ItemCount @($SourceRules).Count 'permission' 'permissions') set on $SourcePath $(if ($missing -eq 1) { 'is' } else { 'are' }) not on it afterwards"
         }
     }
 }
@@ -4806,13 +4806,6 @@ function Get-SelectedFileTargets {
     if (-not $set.Ok) { Show-ChangeRefusal -Text $set.Refusal; return $null }
     , @($set.Targets)
 }
-function Format-ItemCount {
-    # "1 file", "3 files", "12,408 items" (the number in this computer's format).
-    param([Parameter(Mandatory)][long]$Count, [Parameter(Mandatory)][string]$Singular, [Parameter(Mandatory)][string]$Plural)
-    $word = if ($Count -eq 1) { $Singular } else { $Plural }
-    '{0} {1}' -f $Count.ToString('N0'), $word
-}
-
 function Get-ConfirmTargetText {
     # One line per target with its real location when that differs, at most $Max lines.
     param([Parameter(Mandatory)][object[]]$Targets, [int]$Max = 20)
@@ -5292,8 +5285,8 @@ function Resolve-AddIdentity {
     # not a name NTAccount.Translate resolves: the owner's lab test found ".\micha" throws while
     # "<COMPUTERNAME>\micha" and "micha" resolve.
     # https://learn.microsoft.com/dotnet/api/system.security.principal.ntaccount.translate
-    # So it becomes <COMPUTERNAME>\name when every target is on this computer (a drive path, or
-    # a share on this computer: IsLocal). On a network share or mapped drive "." would mean the
+    # So it becomes <COMPUTERNAME>\name when every target is on this computer
+    # (Test-AddTargetOnThisComputer). On a network share or mapped drive "." would mean the
     # server, whose name this computer does not know, so it is refused and the tech types it.
     # Any other text is returned as typed.
     param([AllowNull()][AllowEmptyString()][string]$Identity, [object[]]$Targets)
@@ -5302,11 +5295,29 @@ function Resolve-AddIdentity {
     $name = $Matches[1].Trim()
     if (-not $name) { return [PSCustomObject]@{ Ok = $false; Identity = $id; Problem = (Get-PermissionInputError -Identity '') } }
     $all = @($Targets | Where-Object { $null -ne $_ })
-    $elsewhere = @($all | Where-Object { -not ($_.IsLocal -or "$($_.ResolvedPath)" -match '^[A-Za-z]:\\') })
+    $elsewhere = @($all | Where-Object { -not (Test-AddTargetOnThisComputer -Target $_) })
     if ($all.Count -eq 0 -or $elsewhere.Count -gt 0) {
         return [PSCustomObject]@{ Ok = $false; Identity = $id; Problem = "Type the server's name instead, for example FS01\name." }
     }
     [PSCustomObject]@{ Ok = $true; Identity = "$env:COMPUTERNAME\$name"; Problem = $null }
+}
+
+function Test-AddTargetOnThisComputer {
+    # Whether a change target is on this computer, so ".\name" means this computer's account
+    # (Resolve-AddIdentity). IsLocal (a share on this computer, from the target lookup) is
+    # enough. Otherwise only a drive path counts, and only when the drive itself is this
+    # computer's own (DriveType Fixed or Removable): a letter mapped to a share after the app
+    # started is missing from its drive map but is DriveType Network, and Unknown or
+    # NoRootDirectory says nothing. A drive that cannot be read is not counted (fail closed).
+    # Get-DriveLetterType (the core) is the seam the tests replace.
+    # https://learn.microsoft.com/dotnet/api/system.io.drivetype
+    param([AllowNull()][object]$Target)
+    if ($null -eq $Target) { return $false }
+    if ($Target.IsLocal) { return $true }
+    if ("$($Target.ResolvedPath)" -notmatch '^([A-Za-z]):\\') { return $false }
+    $letter = $Matches[1]
+    try { $type = "$(Get-DriveLetterType -Letter $letter)" } catch { return $false }
+    @('Fixed', 'Removable') -contains $type
 }
 
 function Find-PermissionAccount {
@@ -5319,6 +5330,8 @@ function Find-PermissionAccount {
     # -Lookup: { param($identity) } returning the SID text or $null (a test seam); it runs in
     # that runspace from its text, so it must not rely on variables around it. The default is
     # the app's own lookup, ConvertTo-IdentitySid.
+    # -TypedIdentity: the name as the tech typed it. The messages name it, and add the name that
+    # was looked up when they differ (".\micha (looked up as PC01\micha)"), so they match the box.
     # https://learn.microsoft.com/dotnet/api/system.management.automation.powershell.begininvoke
     # https://learn.microsoft.com/dotnet/api/system.threading.waithandle.waitone
     # https://learn.microsoft.com/dotnet/api/system.management.automation.powershell.beginstop
@@ -5326,12 +5339,15 @@ function Find-PermissionAccount {
     param(
         [AllowNull()][AllowEmptyString()][string]$Identity,
         [scriptblock]$Lookup,
-        [int]$TimeoutMilliseconds = 4000
+        [int]$TimeoutMilliseconds = 4000,
+        [AllowNull()][AllowEmptyString()][string]$TypedIdentity
     )
     $id = "$Identity".Trim()
     $notFound = { param($timedOut, $problem) [PSCustomObject]@{ Found = $false; Sid = $null; TimedOut = $timedOut; Problem = $problem } }
     if (-not $id) { return (& $notFound $false (Get-PermissionInputError -Identity '')) }
-    $missing = "Windows could not find the account $id. Check the name, or ask a senior admin."
+    $typed = "$TypedIdentity".Trim()
+    $named = if (-not $typed -or $typed -eq $id) { $id } else { "$typed (looked up as $id)" }
+    $missing = "Windows could not find the account $named. Check the name, or ask a senior admin."
     if (-not $Lookup) { $Lookup = ${function:ConvertTo-IdentitySid} }
 
     # Lookups left running by earlier calls that have finished since.
@@ -5354,7 +5370,7 @@ function Find-PermissionAccount {
             try { [void]$ps.BeginStop($null, $null) } catch { }
             $script:AbandonedLookups.Add([PSCustomObject]@{ PS = $ps; Handle = $handle })
             $kept = $true
-            return (& $notFound $true "Windows could not look up the account $id in time (its domain may not be reachable from here), so nothing was changed. Check the name and the network, then try again, or ask a senior admin.")
+            return (& $notFound $true "Windows could not look up the account $named in time (its domain may not be reachable from here), so nothing was changed. Check the name and the network, then try again, or ask a senior admin.")
         }
         $sid = @($ps.EndInvoke($handle) | Where-Object { $null -ne $_ -and "$_".Trim() } | Select-Object -Last 1)
         if ($sid.Count -eq 0) { return (& $notFound $false $missing) }
@@ -5889,10 +5905,30 @@ function Show-PermissionDialog {
                 if ($problem) { Show-DialogError -ErrorBlock $err -Text $problem -FocusTarget $box; return }
                 $named = Resolve-AddIdentity -Identity $identity -Targets @($w.Tag.Targets)
                 if (-not $named.Ok) { Show-DialogError -ErrorBlock $err -Text $named.Problem -FocusTarget $box; return }
-                # The window cannot repaint while the lookup is waited for: the wait cursor says so.
-                $w.Cursor = [System.Windows.Input.Cursors]::Wait
-                try { $account = Find-PermissionAccount -Identity $named.Identity }
-                finally { $w.Cursor = $null }
+                # The window cannot repaint while the lookup is waited for (a few seconds at most),
+                # so the busy state is set and painted first: Add and Cancel disabled (no second
+                # lookup from a click or Enter), Add reads "Checking...", and the wait cursor. One
+                # dispatcher pass at Render priority draws it before the wait.
+                # https://learn.microsoft.com/dotnet/api/system.windows.input.mouse.overridecursor
+                # https://learn.microsoft.com/dotnet/api/system.windows.threading.dispatcherpriority
+                $cancel = $w.FindName('PermCancelBtn')
+                $label = $s.Content
+                $s.IsEnabled = $false
+                $cancel.IsEnabled = $false
+                $s.Content = 'Checking...'
+                [System.Windows.Input.Mouse]::OverrideCursor = [System.Windows.Input.Cursors]::Wait
+                try {
+                    $w.Dispatcher.Invoke([Action] { }, [System.Windows.Threading.DispatcherPriority]::Render)
+                    $account = Find-PermissionAccount -Identity $named.Identity -TypedIdentity $identity
+                }
+                finally {
+                    [System.Windows.Input.Mouse]::OverrideCursor = $null
+                    $s.Content = $label
+                    # Re-enabled at Background priority, after the input that queued up during the
+                    # wait: a click or Enter made then finds the buttons still disabled.
+                    $restore = { $s.IsEnabled = $true; $cancel.IsEnabled = $true }.GetNewClosure()
+                    [void]$w.Dispatcher.BeginInvoke([Action]$restore, [System.Windows.Threading.DispatcherPriority]::Background)
+                }
                 if (-not $account.Found) { Show-DialogError -ErrorBlock $err -Text $account.Problem -FocusTarget $box; return }
                 $w.Tag.Answer = [PSCustomObject]@{ Identity = $named.Identity; Rights = "$($w.FindName('PermRightsCombo').SelectedItem.Tag)"; Type = $type; Sid = $account.Sid }
             }

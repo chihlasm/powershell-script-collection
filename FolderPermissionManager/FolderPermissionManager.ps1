@@ -351,19 +351,19 @@ function Invoke-FolderPermissionCli {
         Write-Host "[FAIL] $linkRefusal $(Get-CliRefusalNextStep -Refusal $linkRefusal) Nothing was changed." -ForegroundColor Red
         return 1
     }
-    $scope = "$(@($tree.Items).Count) item(s): $Path and every subfolder and file under it"
+    $scope = "$(Format-ItemCount @($tree.Items).Count 'item' 'items'): $Path and every subfolder and file under it"
     $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
     $warning = "[WARN] Taking ownership makes $me the owner of $scope. The current owners are saved to a backup first."
     $unlisted = @($tree.Unlisted)
     if ($unlisted.Count -gt 0) {
         # takeown /D N skips a folder the account cannot list, so it keeps its permissions (D-034).
         # https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
-        $warning += " $($unlisted.Count) folder(s) cannot be opened, so they are skipped and left alone: $($unlisted -join '; ')."
+        $warning += " $(if ($unlisted.Count -eq 1) { '1 folder cannot be opened, so it is' } else { "$(Format-ItemCount $unlisted.Count 'folder' 'folders') cannot be opened, so they are" }) skipped and left alone: $($unlisted -join '; ')."
     }
     $links = @($tree.Links)
     if ($links.Count -gt 0) {
         $linkText = Get-LinkListText -LinkPaths $links
-        $warning += " It contains $($linkText.Noun), which are listed but not gone into. Microsoft's documentation does not say whether takeown and icacls follow them, and icacls changes what a symbolic link points to, so check them afterwards: $(@($linkText.Items) -join '; ')."
+        $warning += " It contains $($linkText.Noun), which $(if ($links.Count -eq 1) { 'is' } else { 'are' }) listed but not gone into. Microsoft's documentation does not say whether takeown and icacls follow them, and icacls changes what a symbolic link points to, so check them afterwards: $(@($linkText.Items) -join '; ')."
     }
     Write-Host $warning -ForegroundColor Yellow
     $takeOwnership = $whatIf -or $Force

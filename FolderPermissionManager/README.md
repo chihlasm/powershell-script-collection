@@ -168,7 +168,7 @@ change is refused with "Another change is still running on `<path>`. Wait for it
 - **The result** shows in the status line, as in the browser version: what was done and where
   it was backed up and logged, "Partly done: ..." when some items failed, "Done, with items to
   check: ..." when the log could not be written or items cannot be restored from the backup,
-  and the "Escalate: `<n>` folder(s) could not be opened..." line after a whole-tree take
+  and the "Escalate: `<n>` folders could not be opened..." line after a whole-tree take
   ownership. Each item that was done is then **read back**: when the entry that was added is
   not there, the removed one is still there, the owner is not you, or a copied permission is
   missing, the result is "Done, with items to check: ... Check this: `<path>` - `<reason>`. ...
@@ -402,7 +402,7 @@ at all, because the page says it must be used with `/R`). Its permissions are no
 there is nothing extra to back up. `icacls /setowner /T` may still change the owner of the
 skipped folder itself (Microsoft's documentation does not say), so its owner is read back too.
 The result is `Partly done`, and the status bar (or the console, with `[WARN]`) gives the next
-step: `Escalate: 1 folder(s) could not be opened, so they were left alone.` (or, when its owner
+step: `Escalate: 1 folder could not be opened, so it was left alone.` (or, when its owner
 was changed: `its owner was changed, but its permissions were not`), the first three folders,
 the `..._NotOpened.txt` file that lists all of them, and `Ask a senior engineer to take
 ownership of them with an account that can open them.` The console also prints every such
