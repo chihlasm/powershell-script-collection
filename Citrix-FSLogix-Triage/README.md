@@ -135,7 +135,7 @@ Looks fine:
   ...
 ```
 
-It is **read-only**: it reads services, registry, event logs and disk space and changes nothing.
+It is **read-only**: it reads services, registry, event logs and disk space (and, on AVD hosts, runs `qwinsta`) and changes nothing.
 
 ## Quick start
 
@@ -166,6 +166,27 @@ Run as an account that is a local administrator on the session host.
 
 **A check that could not run is a warning, never a pass.** If the tool can't read something,
 it says so.
+
+### Azure Virtual Desktop hosts
+
+When the server has the AVD agent (the **Remote Desktop Agent Loader** service,
+`RDAgentBootLoader`, or the `HKLM\SOFTWARE\Microsoft\RDInfraAgent` key), four more items
+appear, all named `AVD ...`. Citrix and RDS hosts get none of them. Every AVD problem's
+"What to do" links to Microsoft's fix:
+[Troubleshoot common Azure Virtual Desktop Agent issues](https://learn.microsoft.com/troubleshoot/azure/virtual-desktop/troubleshoot-agent).
+
+| Check | Problem when | Warning when |
+|---|---|---|
+| AVD agent service | `RDAgentBootLoader` is not running, or the agent key exists but the service is missing | The service list can't be read |
+| AVD host pool registration | `IsRegistered` in `HKLM\SOFTWARE\Microsoft\RDInfraAgent` is not 1 ("host is not registered to its host pool") | The registry can't be read |
+| AVD agent events (Application log, lookback window) | Event 3277 with `INVALID_REGISTRATION_TOKEN` / `EXPIRED_MACHINE_TOKEN` (new registration key needed), `INVALID_FORM` (broker blocked by firewall/DNS), `ENDPOINT_NOT_FOUND` (host off, full or not registered), `InstallMsiException` (installer busy or msiexec blocked), `DownloadMsiException` (disk full), `InstallationHealthCheckFailedException` (stack listener); event 3703 (RD Gateway URLs blocked); event 3019 (web socket URLs blocked) | Event 3389 `MissingMethodException` (agent update reverted; .NET older than 4.7.2), a 3277/3703/3389 the tool does not recognize, or the log can't be read |
+| AVD stack listener (`qwinsta /server:<host>`) | The `rdp-sxs` row is missing or not in the `Listen` state | qwinsta can't run, reports an error such as `Error [5]` (no rights or RPC blocked), or its output can't be read (for example a non-English Windows): "could not check", never a pass |
+
+The registration key's secret (`RegistrationToken`) is never read. The `qwinsta` check needs the
+same administrator rights on the host as the rest of the tool. `qwinsta` lists every session with
+its user name; the tool keeps only the `rdp-sxs` listener state and a count of signed-in
+sessions, never the names. Fixes that restart, reinstall or upgrade anything on the host say
+**Escalate**: a restart signs everyone out.
 
 ### Why "share not confirmed" is only a warning from your PC
 

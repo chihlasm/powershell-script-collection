@@ -38,6 +38,8 @@ BeforeAll {
         $script:PolicyValues = $Policy
 
         Mock Test-Connection { $true }
+        Mock Get-AvdAgentRegistry { [PSCustomObject]@{ Found = $false; Error = '' } }  # non-AVD host, no real registry
+        Mock Get-AvdStackListenerOutput { throw 'unmocked Get-AvdStackListenerOutput' }
         Mock Get-CimInstance -ParameterFilter { $ClassName -eq 'Win32_Service' } {
             @(
                 [PSCustomObject]@{ Name = 'frxsvc'; DisplayName = 'FSLogix Apps Services'; State = 'Running'; StartMode = 'Auto' }
@@ -596,7 +598,13 @@ Describe 'ticket note (script, in-process)' {
         function global:TrgFake-Clipboard { param($Text) $global:TrgClipboard.Add($Text) }
         function global:TrgFake-DefaultRoot { $global:TrgRoot }
         function global:TrgFake-Throw { throw 'simulated note failure' }
-        $script:AliasNames = 'Get-FSLogixRegistrySnapshot', 'Invoke-WinFormsClipboard', 'Get-TicketNoteDefaultRoot', 'ConvertTo-CitrixFSLogixTriageTicketNote'
+        # The AVD seams are script functions too, so a Pester Mock loses to the script's own
+        # definition here: global-alias fakes instead. The registry fake answers "no agent key"
+        # (a non-AVD host) and counts its calls, so a test can prove it was the one used; the
+        # qwinsta fake throws, because on a non-AVD host it must never run.
+        function global:TrgFake-AvdRegistry { param($ComputerName, $IsLocal) $global:TrgAvdRegistryHits++; [PSCustomObject]@{ Found = $false; Error = '' } }
+        function global:TrgFake-AvdListener { param($ComputerName, $IsLocal) throw 'unfaked Get-AvdStackListenerOutput' }
+        $script:AliasNames = 'Get-FSLogixRegistrySnapshot', 'Invoke-WinFormsClipboard', 'Get-TicketNoteDefaultRoot', 'ConvertTo-CitrixFSLogixTriageTicketNote', 'Get-AvdAgentRegistry', 'Get-AvdStackListenerOutput'
         function Clear-TrgAliases { foreach ($a in $script:AliasNames) { Remove-Item -LiteralPath "Alias:\$a" -Force -ErrorAction SilentlyContinue } }
         function Set-TriageScriptMocks {
             Mock Test-Connection { $true }
@@ -624,13 +632,16 @@ Describe 'ticket note (script, in-process)' {
         Set-Alias -Name Get-FSLogixRegistrySnapshot -Value TrgFake-Registry -Scope Global
         Set-Alias -Name Invoke-WinFormsClipboard -Value TrgFake-Clipboard -Scope Global
         Set-Alias -Name Get-TicketNoteDefaultRoot -Value TrgFake-DefaultRoot -Scope Global
+        Set-Alias -Name Get-AvdAgentRegistry -Value TrgFake-AvdRegistry -Scope Global
+        Set-Alias -Name Get-AvdStackListenerOutput -Value TrgFake-AvdListener -Scope Global
+        $global:TrgAvdRegistryHits = 0
         Set-TriageScriptMocks
     }
     AfterEach { Clear-TrgAliases }
     AfterAll {
         Clear-TrgAliases
-        Remove-Item -LiteralPath Function:\TrgFake-Registry, Function:\TrgFake-RegistryMalformed, Function:\TrgFake-Clipboard, Function:\TrgFake-DefaultRoot, Function:\TrgFake-Throw -ErrorAction SilentlyContinue
-        Remove-Variable -Name TrgRoot, TrgClipboard -Scope Global -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath Function:\TrgFake-Registry, Function:\TrgFake-RegistryMalformed, Function:\TrgFake-Clipboard, Function:\TrgFake-DefaultRoot, Function:\TrgFake-Throw, Function:\TrgFake-AvdRegistry, Function:\TrgFake-AvdListener -ErrorAction SilentlyContinue
+        Remove-Variable -Name TrgRoot, TrgClipboard, TrgAvdRegistryHits -Scope Global -ErrorAction SilentlyContinue
     }
 
     It 'loading the functions also loads the kit (the adapter can call New-TicketNote)' {
@@ -739,6 +750,13 @@ Describe 'ticket note (script, in-process)' {
         $fullNote = [System.IO.File]::ReadAllText((Get-ChildItem -LiteralPath $full -Filter 'Note_*.txt')[0].FullName)
         $fullNote | Should -Match 'A Cloud Cache \(CCDLocations\) entry is misspelled'
         $fullNote | Should -Not -Match '(?i)connection\s?string'
+    }
+
+    It 'Wiring_AvdSeamsFaked: the in-process run reads the AVD agent key through the fake, never the real registry' {
+        $x = Invoke-Trg @{ ComputerName = 'RDSH01'; NoClipboard = $true }
+        $x.ExitCode | Should -Be 0
+        $global:TrgAvdRegistryHits | Should -BeGreaterThan 0 -Because 'the alias fake, not the script function (OpenRemoteBaseKey), answered'
+        $x.Text | Should -Not -Match 'AVD ' -Because 'the fake host has no AVD agent'
     }
 
     It 'Wiring_ExitCodesUnchanged: with the note on, exit is 0 when healthy, 1 on a warning, 2 on a problem' {
