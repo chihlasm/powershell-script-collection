@@ -802,6 +802,13 @@ function ConvertTo-ComparablePath {
     $segments.ToArray() -join '\'
 }
 
+function Get-DotSegmentRefusal {
+    # STUB (SQ-024): the real helper is written by the implementer. Returns the refusal text for a
+    # typed path with a '.' or '..' folder name, or $null.
+    param([AllowNull()][AllowEmptyString()][string]$Path)
+    throw 'Get-DotSegmentRefusal is not implemented (SQ-024).'
+}
+
 function Get-TreeOwnershipRefusal {
     <#
     .SYNOPSIS

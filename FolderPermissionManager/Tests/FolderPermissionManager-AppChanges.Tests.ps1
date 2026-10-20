@@ -3255,4 +3255,82 @@ Describe 'Revision 3 (owner lab test, 2026-10-19): .\name, account lookup in the
         @($script:BackstopHit).Count | Should -Be 0
     }
 }
-}
+
+Describe 'A typed . or .. folder name is refused before any lookup (SQ-024, AC3-AC8)' {
+    It 'AC3_Regression_TypedDotDotOnShare_IsRefusedBeforeAnyLookup' {
+        $typed = '\\fs01\AppShare\..\..\..\Data'
+        Mock Get-RemoteShareLocalPath { 'C:\ProgramData\App\Share' }
+
+        $t = Get-ChangeTarget -Path $typed -WholeTree
+
+        $t.Ok | Should -BeFalse
+        $t.Refusal | Should -BeExactly (Get-DotSegmentRefusal -Path $typed)
+        Should -Invoke Get-RemoteShareLocalPath -Times 0 -Exactly -Scope It
+        Should -Invoke Get-AppDfsTarget -Times 0 -Exactly -Scope It
+        Should -Invoke Get-AppReparseInfo -Times 0 -Exactly -Scope It
+        Should -Invoke Get-Win32PathName -Times 0 -Exactly -Scope It
+    }
+
+    It 'AC4_ChangeTarget_RefusesDotSegments_<Case>' -ForEach @(
+        @{ Case = 'MappedDrive'; Typed = 'H:\..\Data' }
+        @{ Case = 'LocalPath'; Typed = 'D:\Shares\..\HR' }
+        @{ Case = 'ThisComputerAdminShare'; Typed = '\\testpc\C$\Data\..\Windows' }
+        @{ Case = 'DfsPath'; Typed = '\\contoso.com\dfs\HR\..\Finance' }
+    ) {
+        Mock Get-LocalSharePath { $null }
+        $map = @{ H = '\\fs01\Data\Dept' }
+        $source = @{ H = 'Live' }
+        foreach ($switches in @({ Get-ChangeTarget -Path $Typed -DriveMap $map -DriveMapSource $source },
+                { Get-ChangeTarget -Path $Typed -DriveMap $map -DriveMapSource $source -WholeTree },
+                { Get-ChangeTarget -Path $Typed -DriveMap $map -DriveMapSource $source -RefuseProtected })) {
+            $t = & $switches
+
+            $t.Ok | Should -BeFalse
+            $t.Refusal | Should -BeExactly (Get-DotSegmentRefusal -Path $Typed)
+            $t.ResolvedPath | Should -BeExactly $Typed -Because 'no drive mapping or DFS lookup was applied'
+        }
+        Should -Invoke Get-AppDfsTarget -Times 0 -Exactly -Scope It
+        Should -Invoke Get-LocalSharePath -Times 0 -Exactly -Scope It
+    }
+
+    It 'AC5_CopyTargets_DotSegmentLineIsRefused' {
+        $bad = '\\fs01\AppShare\..\Data'
+
+        $set = Resolve-ChangeTargetSet -Path @('\\fs01\Data\HR', $bad) -RefuseProtected
+
+        $set.Ok | Should -BeFalse
+        @($set.Targets).Count | Should -Be 0
+        $set.Refusal | Should -Match ([regex]::Escape((Get-DotSegmentRefusal -Path $bad)))
+    }
+
+    It 'AC6_SelectedFiles_DotSegmentAfterFolderPrefix_IsRefused' {
+        $bad = '\\fs01\Data\HR\..\..\x.txt'
+
+        $set = Resolve-ChangeTargetSet -Path @('\\fs01\Data\HR\a.txt', $bad) -FolderDisplayPath '\\fs01\Data\HR' -FolderRealPath '\\fs01\Data\HR'
+
+        $set.Ok | Should -BeFalse
+        $set.Refusal | Should -Match ([regex]::Escape((Get-DotSegmentRefusal -Path $bad))) -Because 'the file is not given the folder''s resolved location'
+    }
+
+    It 'AC7_ShareTreeRefusal_DotSegmentInRest_FailsClosed_<Rest>' -ForEach @(
+        @{ Rest = '..\..\..\Data' }
+        @{ Rest = '.\Data' }
+    ) {
+        Mock Get-RemoteShareLocalPath { 'C:\ProgramData\App\Share' }
+        $typed = '\\fs01\AppShare\' + $Rest
+
+        $text = Get-ShareTreeRefusal -Path $typed -Server fs01 -Share AppShare -Rest $Rest
+
+        $text | Should -BeExactly (Get-DotSegmentRefusal -Path $typed)
+        $text | Should -Not -Match ([regex]::Escape('\\fs01\C$\Data'))
+        Should -Invoke Get-AppReparseInfo -Times 0 -Exactly -Scope It
+    }
+
+    It 'AC8_ServerSideLinkRefusal_DotSegment_FailsClosed' {
+        $text = Get-ServerSideLinkRefusal -Server fs01 -ServerPath '\\fs01\C$\ProgramData\App\Share\..\..\..\Data'
+
+        $text | Should -Not -BeNullOrEmpty
+        $text | Should -Match ([regex]::Escape('Nothing was changed. Run the tool on the server itself, or ask a senior admin.') + '$')
+        Should -Invoke Get-AppReparseInfo -Times 0 -Exactly -Scope It
+    }
+}}

@@ -716,3 +716,41 @@ Describe 'Real cmdlet parameter names' {
         $setUsed | Should -Contain 'AclObject'
     }
 }
+
+Describe 'Get-DotSegmentRefusal (SQ-024)' {
+    It 'AC1_DotSegmentRefusal_Refuses_<Path>' -ForEach @(
+        @{ Path = '\\fs01\AppShare\..\..\..\Data' }
+        @{ Path = '\\fs01\AppShare\.\Data' }
+        @{ Path = '\\fs01\AppShare\Data\.' }
+        @{ Path = '\\fs01\AppShare\Data\..\' }
+        @{ Path = 'D:\Shares\..\Windows' }
+        @{ Path = 'C:\..\Windows' }
+        @{ Path = 'H:\..\Data' }
+        @{ Path = 'D:\Shares\...\HR' }
+        @{ Path = 'D:/Shares/../Windows' }
+        @{ Path = '\\?\C:\Data\..\Windows' }
+    ) {
+        $text = Get-DotSegmentRefusal -Path $Path
+
+        $text | Should -Not -BeNullOrEmpty
+        $text | Should -Match ([regex]::Escape($Path))
+        $text | Should -Match ([regex]::Escape("'.' or '..'"))
+        $text | Should -Match ([regex]::Escape('Nothing was changed.') + '$')
+    }
+
+    It 'AC2_DotSegmentRefusal_Allows_<Path>' -ForEach @(
+        @{ Path = 'D:\Shares\HR' }
+        @{ Path = 'D:\Shares\HR\' }
+        @{ Path = 'D:\' }
+        @{ Path = '\\fs01\AppShare' }
+        @{ Path = '\\fs01\AppShare\Data\' }
+        @{ Path = '\\fs01.contoso.com\Data' }
+        @{ Path = 'D:\Shares\.hidden' }
+        @{ Path = 'D:\Shares\HR.v2' }
+        @{ Path = 'D:\Shares\a..b' }
+        @{ Path = 'D:\Shares\..HR' }
+        @{ Path = '' }
+    ) {
+        Get-DotSegmentRefusal -Path $Path | Should -BeNullOrEmpty
+    }
+}
