@@ -28,3 +28,17 @@ where a bad change hits every logged-on user.
   that genuinely need the machine are tagged `Integration` and excluded from the gate.
 - The run report flags these items for Michael to verify on a real (test) machine before
   release.
+
+## Machine reads and test fakes (added 2026-10-20)
+- Machine-state reads behind a seam (registry-backed Win32 APIs such as
+  `GetProfilesDirectoryW`, `NetShareGetInfo`, `FindFirstFileW`, and `Add-Type` helpers) are
+  mocked in every suite that reaches them, including background-pool and child-runspace
+  function overrides.
+- A guard that depends on reading machine state fails closed when the read fails (for example
+  `Add-Type` blocked by constrained language mode or AppLocker).
+- Tests that run a script in-process (`& script.ps1`) fake its own reader functions with
+  something that outranks script-defined functions (global aliases, the Citrix-FSLogix-Triage
+  convention) and assert the fake was hit.
+- Pre-checks that read remote servers through administrative shares (`\server\X$`) are
+  flagged in the run report for Michael to verify on a real server; the D-045 server-side
+  junction check has only been exercised through mocks.

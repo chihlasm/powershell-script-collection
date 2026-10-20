@@ -25,6 +25,7 @@ why it matters, and anything you already know (screens, edge cases, examples).
 ## SQ-001 · Ticket note from every quick check (kit, joiner, AD-UserQuickCheck)
 - status: done
 - priority: P1
+- feature: Ticket notes
 - type: feature
 - branch: squad/SQ-001-clipboard-history
 - spec: squad/specs/SQ-001.md (Part A, AC1-AC26)
@@ -41,6 +42,7 @@ Approved by Michael in the 2026-10-17 pitch session; split per D-004.
 ## SQ-002 · M365 user check: can this user sign in? (Graph stage)
 - status: done
 - priority: P1
+- feature: M365 user check
 - type: feature
 - branch: squad/SQ-002-m365-user-check
 - spec: squad/specs/SQ-002.md (AC1-AC17, AC26-AC29)
@@ -55,6 +57,7 @@ tenant without Entra ID P1 the headline is PROBABLY YES with "sign-in history no
 ## SQ-011 · M365 user check: is it a sync problem? (on-prem AD comparison)
 - status: done
 - priority: P1
+- feature: M365 user check
 - type: feature
 - branch: squad/SQ-011-m365-sync-check
 - spec: squad/specs/SQ-002.md (AC18-AC25)
@@ -69,6 +72,7 @@ Split from SQ-002 per D-004.
 ## SQ-019 · M365 user check: blocked synced user advice must escalate, not "change it" (D-017)
 - status: review
 - priority: P1
+- feature: M365 user check
 - type: fix
 - branch: squad/SQ-019-m365-blocked-escalate
 - spec: squad/specs/SQ-019.md
@@ -86,6 +90,7 @@ cloud-only users. Builds on SQ-011 (same files).
 ## SQ-003 · "Why did this user get a temporary profile?" one-user VDI verdict
 - status: done
 - priority: P1
+- feature: VDI temp-profile triage
 - type: feature
 - branch: squad/SQ-003-temp-profile-verdict
 - spec: squad/specs/SQ-003.md
@@ -100,6 +105,7 @@ step, with the evidence for each candidate cause. A second entry script in Citri
 ## SQ-008 · FolderPermissionManager: back up permissions and log every change (single items)
 - status: done
 - priority: P1
+- feature: FolderPermissionManager rewrite
 - type: fix
 - branch: squad/SQ-008-fpm-backup-log
 - spec: squad/specs/SQ-008.md (ACs 1-13 and 21)
@@ -114,6 +120,7 @@ in the GUI. A change whose backup can't be written is refused. Split per D-004.
 - status: done
 - revision: D-040 allowlist for reparse tags (spec SQ-008.md Revision notes 2026-10-18, AC20a-d)
 - priority: P1
+- feature: FolderPermissionManager rewrite
 - type: fix
 - branch: squad/SQ-014-fpm-tree-cli
 - spec: squad/specs/SQ-008.md (ACs 16-20, minus the copy case of AC17; see Revision notes)
@@ -128,6 +135,7 @@ ownership, `-Force` and a help block (D-010). Builds after SQ-008. Split per D-0
 ## SQ-015 · FolderPermissionManager: fix recursive copy permissions
 - status: done
 - priority: P1
+- feature: FolderPermissionManager rewrite
 - type: fix
 - branch: squad/SQ-015-fpm-recursive-copy (stacked on SQ-014; SQ-014's tip 33d09c5 merged in at 43ca5a3, owner 2026-10-19, D-041)
 - spec: squad/specs/SQ-015.md
@@ -142,6 +150,7 @@ subfolders untouched (D-031). Fix with a regression test for each. Builds after 
 ## SQ-017 · FolderPermissionManager as a WPF app: the window, browsing and viewing (read-only)
 - status: done
 - priority: P1
+- feature: FolderPermissionManager rewrite
 - type: feature
 - branch: squad/SQ-017-fpm-wpf-window (stacked: create it from squad/SQ-015-fpm-recursive-copy as SQ-015 finishes this run, not from main; D-041)
 - spec: squad/specs/SQ-017.md (AC1-AC25)
@@ -160,6 +169,7 @@ SQ-014 and SQ-015 (same core and GUI file). Split per D-039.
 - status: review
 - revision: owner lab test 2026-10-19, AC55-AC57 (spec SQ-017.md "Revision notes, SQ-018 (owner lab test ...)"); earlier D-043/D-044/D-045 AC47-AC54
 - priority: P1
+- feature: FolderPermissionManager rewrite
 - type: feature
 - branch: squad/SQ-018-fpm-wpf-changes (stacked: create it from squad/SQ-017-fpm-wpf-window as SQ-017 finishes this run; D-041)
 - spec: squad/specs/SQ-017.md (AC26-AC46)
@@ -178,6 +188,7 @@ make changes, via the toolkit bundle).
 ## SQ-020 · Whole-tree take ownership: WindowsApps aliases and Azure File Sync files count as plain files (D-042)
 - status: done
 - priority: P1
+- feature: FolderPermissionManager rewrite
 - type: fix
 - branch: squad/SQ-020-allowlist-appexec-storagesync
 - spec: squad/specs/SQ-020.md
@@ -187,6 +198,7 @@ Add IO_REPARSE_TAG_APPEXECLINK and IO_REPARSE_TAG_STORAGE_SYNC to the D-040 allo
 ## SQ-010 · Ticket note in Network-QuickCheck and Citrix-FSLogix-Triage
 - status: done
 - priority: P2
+- feature: Ticket notes
 - type: feature
 - branch: squad/SQ-010-ticket-note-network-triage
 - spec: squad/specs/SQ-001.md (Part B, AC27-AC33)
@@ -199,6 +211,7 @@ Split from SQ-001 per D-004.
 ## SQ-004 · "Can this user open this folder?" access evidence and hedged verdict
 - status: done
 - priority: P2
+- feature: Folder access check
 - type: feature
 - branch: squad/SQ-004-folder-access-check
 - spec: squad/specs/SQ-004.md (ACs 1-27)
@@ -213,6 +226,7 @@ the past primary-group bug. Split per D-004.
 ## SQ-013 · Folder access: what to do about it
 - status: done
 - priority: P2
+- feature: Folder access check
 - type: feature
 - branch: squad/SQ-013-folder-access-next-step
 - spec: squad/specs/SQ-004.md (ACs 28-36)
@@ -226,6 +240,7 @@ Split from SQ-004 per D-004.
 ## SQ-006 · Lockout tools recognize Kerberos encryption-type blocks (RC4 enforcement)
 - status: done
 - priority: P2
+- feature: Lockout diagnostics
 - type: feature
 - branch: squad/SQ-006-kerberos-etype-block
 - spec: squad/specs/SQ-006.md
@@ -240,6 +255,7 @@ password problem, encryption type blocked") with the next step, in the report an
 - status: review
 - revision: merge to main failed one test at review 2026-10-18 (see spec Revision notes)
 - priority: P2
+- feature: Mailbox takeover check
 - type: feature
 - branch: squad/SQ-007-mailbox-check
 - spec: squad/specs/SQ-007.md
@@ -256,6 +272,7 @@ Second entry script in the SQ-002 folder; builds after SQ-002.
 - waiting: SQ-007 (stacked on it; SQ-007 went back to ready at review 2026-10-18). Owner approved
   the merge; merge right after SQ-007 lands.
 - priority: P2
+- feature: Mailbox takeover check
 - type: feature
 - branch: squad/SQ-016-mailbox-audit-log (stacked on squad/SQ-007-mailbox-check; merge SQ-007 first)
 - spec: squad/specs/SQ-016.md
@@ -270,6 +287,7 @@ the audit role is missing or auditing is off. Builds after SQ-007.
 ## SQ-009 · LocalAdminManager: make remote changes work, and log every add and remove
 - status: done
 - priority: P2
+- feature: LocalAdminManager
 - type: fix
 - branch: squad/SQ-009-localadmin-remote-log
 - spec: squad/specs/SQ-009.md
@@ -284,6 +302,7 @@ can't be written (D-029).
 ## SQ-012 · AVD host checks in Citrix-FSLogix-Triage
 - status: review
 - priority: P2
+- feature: VDI temp-profile triage
 - type: feature
 - branch: squad/SQ-012-avd-host-checks
 - spec: squad/specs/SQ-003.md (section "Proposed split: SQ-012 · AVD host checks")
@@ -296,6 +315,7 @@ Learn fix. No new folder. Split from SQ-003 per D-004; P2 per D-016.
 ## SQ-005 · End-of-support section in AD-Audit
 - status: review
 - priority: P3
+- feature: AD-Audit
 - type: feature
 - branch: squad/SQ-005-end-of-support
 - spec: squad/specs/SQ-005.md
@@ -309,6 +329,7 @@ hedged for ESU. The existing Unsupported OS list draws its server entries from t
 ## SQ-021 · FolderPermissionManager: admin-share route skips the server-side junction check
 - status: dropped
 - priority: P2
+- feature: FolderPermissionManager rewrite
 - type: follow-up
 - found-in: SQ-018
 - branch:
@@ -325,6 +346,7 @@ the server itself, or ask a senior admin". (Advisory review of SQ-018 rev2, majo
 ## SQ-022 · FolderPermissionManager: D-044 copy refusals and confirms only exist in the WPF app
 - status: ready
 - priority: P2
+- feature: FolderPermissionManager rewrite
 - type: follow-up
 - found-in: SQ-018
 - branch:
@@ -341,6 +363,7 @@ the SQ-018 lab test, but the CLI still needs it. (Destructive-operations review 
 ## SQ-024 · FolderPermissionManager: a typed `..` in a share path makes the checks look at a different folder
 - status: ready
 - priority: P2
+- feature: FolderPermissionManager rewrite
 - type: follow-up
 - found-in: SQ-018
 - branch:
@@ -362,6 +385,7 @@ says `.`/`..` segments do not skip the check, and add a regression test.
 ## SQ-023 · FolderPermissionManager: CLI and browser whole-tree paths lack the D-045 and resolved high-impact checks
 - status: ready
 - priority: P2
+- feature: FolderPermissionManager rewrite
 - type: follow-up
 - found-in: SQ-018
 - branch:
@@ -378,6 +402,7 @@ and Get-AppReparseInfo into the core and call them from Get-TreeOwnershipTargetR
 ## SQ-025 · FolderPermissionManager WPF app: change an existing permission in place
 - status: ready
 - priority: P1
+- feature: FolderPermissionManager rewrite
 - type: feature
 - branch:
 - spec: squad/specs/SQ-025.md
@@ -396,6 +421,7 @@ they come from. Destructive-operations checklist applies.
 ## SQ-026 · FolderPermissionManager: Copy targets on a remote share get the file-server checks
 - status: new
 - priority: P2
+- feature: FolderPermissionManager rewrite
 - type: follow-up
 - found-in: SQ-022 (D-053)
 - depends-on: SQ-023
@@ -411,6 +437,7 @@ high-impact roots, and the D-045 junction walk, failing closed. Same as whole-tr
 ## SQ-027 · M365 user check: a blocked risky user must escalate to the security lead, not the manager path
 - status: new
 - priority: P2
+- feature: M365 user check
 - type: follow-up
 - found-in: SQ-019
 - branch:
@@ -430,6 +457,7 @@ escalation on the same ticket).
 ## SQ-028 · FolderPermissionManager: a bare account name on a network folder must not resolve to this workstation's local account
 - status: new
 - priority: P2
+- feature: FolderPermissionManager rewrite
 - type: follow-up
 - found-in: SQ-018
 - branch:
@@ -451,3 +479,19 @@ directory symbolic link to `\FS01\Data` (Fixed drive) still rewrites `.\micha` t
 `PC01\micha` and writes a workstation-local SID onto FS01's folder (reported Done). Refuse when
 any folder from the target up to its root is a reparse point not known to be local, or cannot be
 read (Get-AppReparseInfo throws, so fail closed); test with a mocked symlink tag 0xA000000C.
+
+## SQ-029 · Add a smoke-test start mode
+- status: new
+- priority: P1
+- feature: Squad tooling
+- type: feature
+- branch:
+- spec:
+
+The build gate can only run unit tests, which all passed while FolderPermissionManager-GUI.ps1
+could not open at all (193a907: the startup guard always tripped). Give the WPF app a
+`-SmokeTest` switch that loads the core and the window off-screen (or hidden), renders it,
+closes it on a timer, and exits 0 only if the window came up, with no elevation prompt, no
+drive or network reads, no log writes and no admin rights needed. Once merged, set
+`smokeCommand` in squad/squad.config.json to it so the gate runs it after every implementer
+(/squad:configure). (From /squad:configure review 2026-10-20.)

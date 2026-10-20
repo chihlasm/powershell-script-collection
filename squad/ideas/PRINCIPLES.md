@@ -33,3 +33,9 @@ faster troubleshooting and faster, more accurate data collection.
   carry the verdict, checks and next step. IPs, paths, raw error text and third-party data
   stay in the local reports, and no new files are left on client servers. `-FullDetail` is
   the explicit opt-out. From D-009, D-013, D-025 and D-033.
+- **P-006 A change lands where the tool checked, or not at all.** When a tool that changes
+  things cannot tell where the change really lands (DFS with several targets, a junction or
+  link it cannot read, an account that resolves on the wrong machine), it refuses rather than
+  guessing. The checks live in the shared core so every front end (CLI, GUI, browser) gets
+  them, and they run again on the resolved path just before the write. From D-036, D-040,
+  D-043, D-045, D-051, D-052, D-054, SQ-022, SQ-023 and SQ-026.

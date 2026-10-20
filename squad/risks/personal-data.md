@@ -45,10 +45,17 @@ ConnectWise Manage. "Output stays on the machine" above means everything else.
   https://learn.microsoft.com/windows/win32/dataxchg/clipboard-formats). A fallback that
   cannot opt out warns at run time. There is a way to skip the clipboard (`-NoClipboard`),
   and the README mentions RDP clipboard redirection.
+- Names written by tenant or domain admins (Conditional Access policy names, sign-in failure
+  reasons, GPO names) count as client-controlled free text and stay out of the note unless the
+  item's spec says otherwise. The same goes for directory identifiers (DistinguishedName/OU
+  path, SIDs) and DC or host names that appear inside error text.
+- Text the tech can copy by hand (selectable status or path boxes in a GUI) is either
+  paste-safe or documented in the README as raw.
 
 ## Exports, logs and returned objects (added 2026-10-18)
 - CSV cells taken from AD, event logs or Graph that start with `=`, `+`, `-`, `@`, tab or CR
-  are neutralised (leading `'`), with a regression test. Reuse the existing helper
+  are neutralised (leading `'`), with a test for every column that carries client-controlled
+  text, including file and folder names. Reuse the existing helper
   (FolderPermissions.Core.ps1, FolderAccess-Check, M365-UserQuickCheck).
 - HTML encoding fits the context: values in attributes need quote escaping, and a
   `& < >`-only encoder is safe only in element content. Browser GUIs insert client values with
@@ -78,3 +85,29 @@ ConnectWise Manage. "Output stays on the machine" above means everything else.
   reserved characters.
 - Graph sign-in uses `Connect-MgGraph -ContextScope Process` where available, and a
   compatibility fallback that drops a protective option warns or refuses.
+
+## Saved files, command lines and raw output (added 2026-10-20)
+- Exports a tech saves through a dialog default to local storage too. Documents and Desktop
+  under OneDrive Known Folder Move or folder redirection are not local, although they sit on a
+  fixed disk.
+- Synced OneDrive/SharePoint folders are detected from the OneDrive client's registered sync
+  roots, with a test each. Environment variables miss library sync roots and belong to the
+  wrong user in an elevated or alternate-admin process.
+- Tool-private diagnostic logs (`%LOCALAPPDATA%\<Tool>\*-errors.log`) that can hold raw
+  exception text with client paths have a retention or size cap, stated in the README.
+- Client data passed on a command line (relaunch or elevation arguments) is limited to
+  infrastructure identifiers (server, share, local path): never credentials, user names or
+  ticket numbers. Event 4688, Sysmon and EDR record command lines and ship them off the machine.
+- Advice that tells someone to run a command that saves client data (`icacls /save`,
+  `Export-*`) uses a full, unique path on local fixed storage, never a bare file name, and the
+  README says what the file holds and when to delete it.
+- Raw command output that lists sessions or users (qwinsta, quser, `Get-BrokerSession`) is
+  trimmed to the rows the verdict needs before it is stored in RawOutput or returned. The
+  fixture includes another user's row and asserts it does not leak.
+- RawOutput from one tool nested in another tool's result is re-trimmed by the outer tool
+  (it is a joiner), not passed through whole.
+- Registry keys that hold secrets next to the diagnosed value (RDInfraAgent
+  RegistrationToken, Cloud Cache connection strings) are read by named value only, never
+  enumerated, with a test pinning that.
+- Event log queries by an ID that is not unique to one provider filter on the provider before
+  anything is stored, not only before evidence is built.

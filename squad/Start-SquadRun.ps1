@@ -7,12 +7,26 @@
     saves the full event log to squad/logs/.
     Default: a build run (/squad:run). To stop a build run gracefully, create an empty file
     named STOP in the squad folder; the squad finishes cleanly and writes its report.
+    With -Pick: lists the items a run could build and asks which to build; the ready items
+    they depend on are added automatically. -Items SQ-014,SQ-018 picks without asking, and
+    -Feature "Problem management" picks every ready item of a feature.
+    Without either, a pick saved by /squad:pick in the last 24 hours applies, else every
+    ready item is built.
     With -Ideate: a thinker-squad session (/squad:ideate), optionally focused with -Focus.
     Needs the Squad plugin installed and at least one interactive Claude Code session in this
     repo since the last plugin update (that session refreshes the scripts this launcher uses).
 
 .EXAMPLE
     .\squad\Start-SquadRun.ps1
+
+.EXAMPLE
+    .\squad\Start-SquadRun.ps1 -Pick
+
+.EXAMPLE
+    .\squad\Start-SquadRun.ps1 -Items SQ-014,SQ-018
+
+.EXAMPLE
+    .\squad\Start-SquadRun.ps1 -Feature "Problem management"
 
 .EXAMPLE
     .\squad\Start-SquadRun.ps1 -MaxItems 2
@@ -22,6 +36,9 @@
 #>
 param(
     [int]$MaxItems = 0,
+    [switch]$Pick,
+    [string[]]$Items = @(),
+    [string[]]$Feature = @(),
     [switch]$Ideate,
     [string]$Focus = ''
 )
@@ -64,6 +81,69 @@ if (-not $scriptsDir) {
 }
 . (Join-Path $scriptsDir 'squad-lib.ps1')
 $config = Get-SquadConfig $root
+
+# Which items this run builds: -Items, -Pick, a pick saved by /squad:pick, or every ready item.
+if (-not $Ideate) {
+    if (-not (Get-Command Get-SquadPickLines -ErrorAction SilentlyContinue)) {
+        if ($Pick -or $Items.Count -gt 0 -or $Feature.Count -gt 0) { throw 'This version of the Squad plugin cannot pick items. Update the plugin, open Claude Code in this repo once, then try again.' }
+    }
+    elseif ($Feature.Count -gt 0 -and -not (Get-Command Get-SquadFeatureItemIds -ErrorAction SilentlyContinue)) {
+        throw 'This version of the Squad plugin cannot pick features. Update the plugin, open Claude Code in this repo once, then try again.'
+    }
+    else {
+        $backlog = Get-SquadItems $root
+        $chosen = @()
+        foreach ($name in @($Feature | Where-Object { $_ })) {
+            $ids = @(Get-SquadFeatureItemIds $backlog $name)
+            if ($ids.Count -eq 0) { throw ('No ready item belongs to a feature called "{0}".' -f $name) }
+            $chosen += $ids
+        }
+        if ($Items.Count -gt 0) {
+            $named = @([regex]::Matches(($Items -join ' '), '(?i)SQ-\d+') | ForEach-Object { $_.Value.ToUpperInvariant() })
+            if ($named.Count -eq 0) { throw 'Name items like -Items SQ-014,SQ-018.' }
+            $chosen += $named
+        }
+        if ($chosen.Count -eq 0 -and $Pick) {
+            $lines = @(Get-SquadPickLines $backlog)
+            if ($lines.Count -eq 0) { Write-Host 'Nothing is ready to build. Run /squad:plan first.' -ForegroundColor Yellow; return }
+            Write-Host ''
+            Write-Host 'Items a run can build (ID | priority | title | needs):' -ForegroundColor Cyan
+            for ($n = 0; $n -lt $lines.Count; $n++) { Write-Host ('{0,3}. {1}' -f ($n + 1), $lines[$n]) }
+            $features = @()
+            if (Get-Command Get-SquadFeatureStatus -ErrorAction SilentlyContinue) { $features = @(Get-SquadFeatureStatus $backlog | Where-Object { $_.Ready -gt 0 }) }
+            if ($features.Count -gt 0) {
+                Write-Host 'Whole features (type F1, F2, ... to pick every ready item of one):' -ForegroundColor Cyan
+                for ($n = 0; $n -lt $features.Count; $n++) { Write-Host ('  F{0}. {1} ({2} of {3} done, {4} ready)' -f ($n + 1), $features[$n].Name, $features[$n].Done, $features[$n].Total, $features[$n].Ready) }
+            }
+            Write-Host 'Picking an item also picks the ready items it needs.'
+            $answer = Read-Host 'Numbers, F-numbers or IDs to build, separated by commas (Enter = every ready item)'
+            if (-not $answer.Trim()) { Remove-SquadSelection $root }
+            foreach ($word in @($answer -split '[,\s]+' | Where-Object { $_ })) {
+                if ($word -match '^\d+$' -and [int]$word -ge 1 -and [int]$word -le $lines.Count) { $chosen += ($lines[[int]$word - 1] -split ' ')[0] }
+                elseif ($word -match '(?i)^F(\d+)$' -and [int]$Matches[1] -ge 1 -and [int]$Matches[1] -le $features.Count) { $chosen += @(Get-SquadFeatureItemIds $backlog $features[[int]$Matches[1] - 1].Name) }
+                elseif ($word -match '(?i)^SQ-\d+$') { $chosen += $word.ToUpperInvariant() }
+                else { throw ('"{0}" is not a number from the list or an item ID.' -f $word) }
+            }
+        }
+        if ($chosen.Count -gt 0) {
+            $picked = Set-SquadSelection $root $chosen $backlog
+            foreach ($s in @($picked.Skipped)) { Write-Host ('Skipped: {0}.' -f $s) -ForegroundColor Yellow }
+            if (@($picked.Items).Count -eq 0) { throw 'None of the picked items can be built; nothing was started.' }
+            Write-Host ('This run builds: {0}' -f (@($picked.Items) -join ', ')) -ForegroundColor Cyan
+            if (@($picked.Added).Count -gt 0) { Write-Host ('  (added because a picked item needs them: {0})' -f (@($picked.Added) -join ', ')) }
+            if ($Pick) {
+                $go = Read-Host 'Start the run? [Y/n]'
+                if ($go -match '^(n|no)$') { Remove-SquadSelection $root; Write-Host 'Not started; the pick was discarded.'; return }
+            }
+        }
+        elseif (-not $Pick) {
+            $saved = Get-SquadSelection $root
+            $fresh = $false
+            if ($saved) { try { $fresh = ([DateTimeOffset]::Now - [DateTimeOffset]::Parse([string]$saved.createdAt)).TotalHours -lt 24 } catch { } }
+            if ($fresh) { Write-Host ('Using the pick saved by /squad:pick: {0}' -f (@($saved.items) -join ', ')) -ForegroundColor Cyan }
+        }
+    }
+}
 $contextWindow = 200000
 if ($config -and $config.contextWindowTokens) { $contextWindow = [int]$config.contextWindowTokens }
 $script:leadContextTokens = 0

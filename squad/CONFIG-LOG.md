@@ -75,3 +75,44 @@ Set up by /squad:setup (Squad plugin 2.0.0) with Michael.
 - Process suggestions in the 2026-10-18 report (background agents, implementer assumptions
   file, stacked branches): plugin behaviour, not project config.
 - Build and test commands, guard (still no packs, per setup), uiPaths, owner.notes.
+
+---
+
+## 2026-10-20 — Configure (review)
+
+**Michael said:** `/squad:configure review`, then approved all five findings and dropping the
+leftover stash.
+
+**Changes (all [inferred], each approved individually)**
+- Backlog grouped into features (squad set up before 2.4.0): `- feature:` added under each
+  item's priority line. FolderPermissionManager rewrite (SQ-008, 014, 015, 017, 018, 020, 021,
+  022, 023, 024, 025, 026, 028), M365 user check (002, 011, 019, 027), Mailbox takeover check
+  (007, 016), VDI temp-profile triage (003, 012), AD-Audit (005), and closed ones: Ticket notes
+  (001, 010), Folder access check (004, 013), Lockout diagnostics (006), LocalAdminManager (009).
+  Follow-ups were already marked; no half-slices found.
+- Risk profiles: checklist gaps from the 2026-10-19 (two runs) and 2026-10-20 reports folded in.
+  destructive-operations: Right target (DFS, `.`/`..`, redirected drives, local-vs-remote from
+  resolved location, account names resolved where the ACL lives, re-resolve before every write),
+  Results, Tests; new sections Safety rules live in the core, Overrides and refusals, Advice and
+  commands in tools that change things, Elevation/prompts/shutdown, Read-only tools that match
+  these keywords. Stale "waits on Q-005" line now points at D-040/D-042. personal-data: admin-
+  authored names as free text, selectable GUI text, per-column formula tests, new section Saved
+  files, command lines and raw output. read-only-advisory: verb list, risky user escalates first
+  (D-050), escalation in ticket-bound steps, cross-reason consistency, call-by-variable guard.
+  system-configuration: new section Machine reads and test fakes.
+- PRINCIPLES.md: P-006 "A change lands where the tool checked, or not at all" (from D-036,
+  D-040, D-043, D-045, D-051, D-052, D-054, SQ-022/023/026).
+- squad/Start-SquadRun.ps1 replaced with the 2.4.0 template (-Pick, -Items, -Feature); it had
+  no owner-added lines.
+- SQ-029 "Add a smoke-test start mode" (P1, feature Squad tooling) for FolderPermissionManager-GUI;
+  set `smokeCommand` once it merges.
+- Housekeeping: dropped stash "squad bookkeeping during run" (only a transient status line was
+  not already on main).
+
+**Verified:** `self-test.ps1 -Part all` passed.
+
+**Deliberately left unchanged**
+- Plugin-behaviour suggestions in the reports (stale `squad/` on item branches, cherry-pick under
+  the guard, reviewer shell/web access, implementer "needs a test-side change").
+- Lenses, signals, graveyard (still one ideation session), guard, uiPaths, build/test commands,
+  maxStackDepth (stackOnReview not set).
