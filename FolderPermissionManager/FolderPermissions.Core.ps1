@@ -31,7 +31,9 @@
     folder (ItemType 'Folder tree', Result Done, Partly done or Failed). The root of a drive,
     the Windows system folders and the SYSVOL, NETLOGON and PRINT$ shares are refused, under
     any spelling and through junctions, symbolic links and DFS (also links inside the folder),
-    unless the caller passes -AllowSystemFolder. A link whose destination cannot be found out
+    and so are a Users folder, this computer's profiles folder, System Volume Information and
+    $Recycle.Bin (also checked once more just before takeown), unless the caller passes
+    -AllowSystemFolder. A link whose destination cannot be found out
     is refused the same way, and DFS targets are looked up with NetDfsGetClientInfo. A path on
     a mapped network drive is checked by its server path (WNetGetConnection), and a network
     drive or network path that cannot be resolved is refused.
@@ -161,6 +163,10 @@
       https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-createfilew
       https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew
       https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-getlongpathnamew
+    - High-impact roots (Get-HighImpactRootRefusal): this computer's profiles folder from
+      GetProfilesDirectoryW ("C:\Users" by default; ProfilesDirectory can move it):
+      https://learn.microsoft.com/windows/win32/api/userenv/nf-userenv-getprofilesdirectoryw
+      https://learn.microsoft.com/windows-hardware/customize/desktop/unattend/microsoft-windows-shell-setup-folderlocations-profilesdirectory
     - Where a DFS path really is (Get-DfsTarget): NetDfsGetClientInfo(DfsEntryPath, ServerName,
       ShareName, Level, *Buffer) from netapi32.dll reads the DFS client's cache; level 3 returns
       DFS_INFO_3 (EntryPath, Comment, State, NumberOfStorages, Storage) with one
@@ -330,6 +336,15 @@ function Format-Sentence {
     $t = "$Text".Trim()
     if ($t -and $t -notmatch '[.!?]$') { $t += '.' }
     $t
+}
+
+function Format-ItemCount {
+    # "1 folder", "3 folders", "12,408 items" (the number in this computer's format). Every count
+    # in a change result, real or dry run, takes its word from the count (AC57); the GUI uses it
+    # for its own messages too.
+    param([Parameter(Mandatory)][long]$Count, [Parameter(Mandatory)][string]$Singular, [Parameter(Mandatory)][string]$Plural)
+    $word = if ($Count -eq 1) { $Singular } else { $Plural }
+    '{0} {1}' -f $Count.ToString('N0'), $word
 }
 
 function Get-PermissionChangeColumn {
@@ -867,6 +882,75 @@ function Get-TreeOwnershipRefusal {
     $null
 }
 
+function Get-AppProfilesDirectory {
+    <#
+    .SYNOPSIS
+        This computer's folder for user profiles, or $null when it cannot be read.
+    .DESCRIPTION
+        GetProfilesDirectory ("C:\Users" on Windows 7 and later; the ProfilesDirectory setting
+        can move it to another volume). The registry value behind it is not documented on
+        Learn, so the function is used. Only read. Tests replace it.
+        https://learn.microsoft.com/windows/win32/api/userenv/nf-userenv-getprofilesdirectoryw
+        https://learn.microsoft.com/windows-hardware/customize/desktop/unattend/microsoft-windows-shell-setup-folderlocations-profilesdirectory
+    #>
+    try {
+        if (-not ('FolderPermissionManager.AppProfiles' -as [type])) {
+            Add-Type -Namespace FolderPermissionManager -Name AppProfiles -ErrorAction Stop -MemberDefinition @'
+[DllImport("userenv.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+public static extern bool GetProfilesDirectoryW(System.Text.StringBuilder lpProfileDir, ref uint lpcchSize);
+'@
+        }
+        $size = [uint32]1024
+        $sb = New-Object System.Text.StringBuilder -ArgumentList 1024
+        if (-not [FolderPermissionManager.AppProfiles]::GetProfilesDirectoryW($sb, [ref]$size)) { return $null }
+        $sb.ToString()
+    }
+    catch { $null }
+}
+
+function Get-HighImpactRootRefusal {
+    <#
+    .SYNOPSIS
+        Why a whole-tree change is refused on a high-impact root, or $null when it is allowed.
+    .DESCRIPTION
+        "C:\Users, System Volume Information and $Recycle.Bin on data volumes"
+        (destructive-operations profile):
+        - a folder that holds user profiles: the Users folder at the top of any drive, here
+          (<letter>:\Users) and on another computer (\\server\<letter>$\Users), and this
+          computer's profiles folder wherever it is (Get-AppProfilesDirectory). Another
+          computer's profiles folder cannot be read from here, so one it has moved elsewhere is
+          not detected. One profile folder below it (C:\Users\bob) is allowed;
+        - anything in System Volume Information or $Recycle.Bin, on any drive.
+        Text only, apart from reading this computer's profiles folder. Invoke-TreeOwnershipChange
+        runs it with D-036, also once more just before takeown, and Get-TreeOwnershipTargetRefusal
+        and Get-TreeLinkRefusal run it on where a path really leads (the mapped drive's server
+        path, the final and long path, a link's destination), so a junction swapped in after the
+        confirm is caught by that late check too. The GUI also applies it to a share's
+        server-side folder.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    $p = ConvertTo-ComparablePath -Path $Path
+    if (-not $p) { return $null }
+    $tail = 'Taking ownership of everything in it cannot easily be undone. Choose the one folder that needs fixing instead.'
+    foreach ($segment in $p.Split('\')) {
+        if ($segment -ieq 'System Volume Information') { return "$Path is in System Volume Information, where Windows keeps restore points and volume data. $tail" }
+        if ($segment -ieq '$Recycle.Bin') { return "$Path is in `$Recycle.Bin, the Recycle Bin of every user of that drive. $tail" }
+    }
+    $profileTail = 'Taking ownership of everything in it changes the owner of every user profile, so users can lose access to their own files, and it cannot easily be undone. Choose the one profile folder that needs fixing instead (for example ...\Users\<name>).'
+    if ($p -match '^\\\\([^\\]+)\\([A-Za-z])\$\\Users$') {
+        return "$Path is the Users folder of drive $($Matches[2].ToUpper()): on $($Matches[1]), where Windows keeps every user profile. $profileTail"
+    }
+    if ($p -match '^([A-Za-z]):\\Users$') {
+        return "$Path is the Users folder of drive $($Matches[1].ToUpper()):, where Windows keeps user profiles. $profileTail"
+    }
+    if ($p -match '^[A-Za-z]:\\') {
+        $profiles = Get-AppProfilesDirectory
+        $c = if ($profiles) { (ConvertTo-ComparablePath -Path $profiles).TrimEnd('\') } else { '' }
+        if ($c -and $p.TrimEnd('\') -ieq $c) { return "$Path is the folder that holds every user profile on this computer ($profiles). $profileTail" }
+    }
+    $null
+}
+
 function Get-Win32PathName {
     <#
     .SYNOPSIS
@@ -1341,7 +1425,7 @@ function Get-LinkListText {
     <#
     .SYNOPSIS
         How the links found in a folder are counted and listed in messages: Noun ("2
-        junction(s) or symbolic link(s)", or "2 link(s)" when any is of another kind) and Items
+        junctions or symbolic links", or "1 link" when any is of another kind) and Items
         (the paths, each named by its kind when the noun does not already say what they are:
         "DFS link \\fs01\share\Apps").
     #>
@@ -1351,10 +1435,10 @@ function Get-LinkListText {
     $kinds = @($paths | ForEach-Object { Get-LinkKind -Path $_ })
     $otherKinds = @($kinds | Where-Object { $_ -ne 'junction' -and $_ -ne 'symbolic link' })
     if ($otherKinds.Count -eq 0) {
-        return [PSCustomObject]@{ Noun = "$($paths.Count) junction(s) or symbolic link(s)"; Items = $paths }
+        return [PSCustomObject]@{ Noun = (Format-ItemCount $paths.Count 'junction or symbolic link' 'junctions or symbolic links'); Items = $paths }
     }
     $items = @(for ($i = 0; $i -lt $paths.Count; $i++) { "$($kinds[$i]) $($paths[$i])" })
-    [PSCustomObject]@{ Noun = "$($paths.Count) link(s)"; Items = $items }
+    [PSCustomObject]@{ Noun = (Format-ItemCount $paths.Count 'link' 'links'); Items = $items }
 }
 
 # The words every "where it leads could not be found out" refusal contains, so a caller can tell
@@ -1411,7 +1495,10 @@ function Get-TreeOwnershipTargetRefusal {
         Get-TreeOwnershipRefusal for a folder as Windows will really reach it: also refused when
         -Path leads into a protected folder through a mapped network drive, a junction, a
         symbolic link or DFS (on the folder or on any folder above it) or is spelt with 8.3
-        short names (C:\PROGRA~1). The text names -Path as given. $null when it is allowed.
+        short names (C:\PROGRA~1). Where it really leads (the server path of a mapped drive,
+        the final path and the long path) is also checked against the high-impact roots
+        (Get-HighImpactRootRefusal); -Path itself as typed is left to the caller. The text names
+        -Path as given. $null when it is allowed.
     .DESCRIPTION
         Reads the disk (Get-Win32PathName, attributes only; nothing is opened for reading or
         changed). A path on a mapped network drive is first turned into its server path
@@ -1448,6 +1535,7 @@ function Get-TreeOwnershipTargetRefusal {
     $given = ConvertTo-ComparablePath -Path $resolved
     if ($given -ine (ConvertTo-ComparablePath -Path $Path)) {
         $refusal = Get-TreeOwnershipRefusal -Path $given
+        if (-not $refusal) { $refusal = Get-HighImpactRootRefusal -Path $given }
         if ($refusal) { return "$Path is on a network drive and leads to $given. $refusal" }
     }
     $onNetwork = $given.StartsWith('\\')
@@ -1478,6 +1566,7 @@ function Get-TreeOwnershipTargetRefusal {
         if ($comparable -ieq $given) { continue }
         if ($form -ceq $final) { $finalLeadsElsewhere = $true }
         $refusal = Get-TreeOwnershipRefusal -Path $comparable
+        if (-not $refusal) { $refusal = Get-HighImpactRootRefusal -Path $comparable }
         if ($refusal) {
             return "$Path leads to $comparable (through a junction, a symbolic link or a short name). $refusal"
         }
@@ -1511,7 +1600,8 @@ function Get-TreeLinkRefusal {
     .SYNOPSIS
         Why a link found inside -Path (Save-OwnerSnapshot LinkPaths, Get-OwnerTreeItem Links)
         stops taking ownership of the whole tree, or $null when none does. A link is refused
-        when it leads into a protected folder (D-036) or where it leads cannot be found out.
+        when it leads into a protected folder (D-036) or a high-impact root
+        (Get-HighImpactRootRefusal), or where it leads cannot be found out.
         The text names what was found (Get-LinkKindName).
     .DESCRIPTION
         Microsoft's documentation does not say whether takeown /R or icacls /T follow links,
@@ -1546,6 +1636,7 @@ function Get-TreeLinkRefusal {
         $asListed = ConvertTo-ComparablePath -Path $link
         $comparableLink = $asListed
         $refusal = Get-TreeOwnershipRefusal -Path $link
+        if (-not $refusal) { $refusal = Get-HighImpactRootRefusal -Path $link }
         if (-not $refusal) {
             try {
                 $comparableLink = ConvertTo-ComparablePath -Path (Resolve-NetworkDrivePath -Path $link)
@@ -1555,6 +1646,7 @@ function Get-TreeLinkRefusal {
         }
         if (-not $refusal -and $comparableLink -ine $asListed) {
             $refusal = Get-TreeOwnershipRefusal -Path $comparableLink
+            if (-not $refusal) { $refusal = Get-HighImpactRootRefusal -Path $comparableLink }
             if ($refusal) { $refusal = "$link is $kind on a network drive that leads to $comparableLink. $refusal" }
         }
         if (-not $refusal) {
@@ -1568,6 +1660,7 @@ function Get-TreeLinkRefusal {
                     $refusal = "$link is $kind, and $script:UnresolvedDestinationText, $tail"
                 } else {
                     $refusal = Get-TreeOwnershipRefusal -Path $comparable
+                    if (-not $refusal) { $refusal = Get-HighImpactRootRefusal -Path $comparable }
                     if ($refusal) {
                         $refusal = "$link is $kind that leads to $comparable. $refusal"
                     } elseif ($comparable.StartsWith('\\')) {
@@ -1855,15 +1948,17 @@ function Set-ItemOwnerToCurrentUser {
 
         -Recurse (one row per folder, see Invoke-TreeOwnershipChange): the owner of every item
         is saved to an owner snapshot first, then takeown /R and icacls /setowner /T change the
-        whole tree. The root of a drive and the Windows system folders are refused
-        (Get-TreeOwnershipTargetRefusal) unless -AllowSystemFolder is given.
+        whole tree. The root of a drive, the Windows system folders (Get-TreeOwnershipTargetRefusal)
+        and the high-impact roots (Get-HighImpactRootRefusal) are refused unless
+        -AllowSystemFolder is given.
         https://learn.microsoft.com/windows-server/administration/windows-commands/takeown
     .PARAMETER Recurse
         Take ownership of each folder and of all its subfolders and files.
     .PARAMETER AllowSystemFolder
         With -Recurse: also take ownership of the root of a drive or of a folder in
-        %SystemRoot%, %ProgramFiles%, %ProgramFiles(x86)% or %ProgramData%, which is refused
-        otherwise (D-036). Only the command line offers this; the GUI never passes it.
+        %SystemRoot%, %ProgramFiles%, %ProgramFiles(x86)% or %ProgramData% (D-036), or of a
+        high-impact root (a Users folder, System Volume Information, $Recycle.Bin), which are
+        refused otherwise. Only the command line offers this; the GUI never passes it.
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param(
@@ -2253,15 +2348,18 @@ function Invoke-TreeOwnershipChange {
         1. The path is made a full path once (Resolve-AclTargetPath) and used for everything.
         2. The root of a drive and the Windows system folders are refused, also when reached
            through a junction, a symbolic link or a short name (Get-TreeOwnershipTargetRefusal,
-           D-036), unless -AllowSystemFolder: only the folder's name and attributes are read,
-           and nothing is written or changed.
+           D-036), and so are the high-impact roots (Get-HighImpactRootRefusal: a Users folder
+           or this computer's profiles folder, System Volume Information, $Recycle.Bin), unless
+           -AllowSystemFolder: only the folder's name and attributes are read, and nothing is
+           written or changed.
         3. ShouldProcess once for the folder (-WhatIf: no owner is read, nothing is written or
            changed).
         4. Save-OwnerSnapshot: if it cannot be written and checked, nothing is changed.
         5. Unless -AllowSystemFolder, every junction and symbolic link the snapshot found inside
            the folder is checked like the folder (Get-TreeLinkRefusal): one that leads into a
            protected folder, or whose destination cannot be found out, refuses the whole tree.
-           The folder itself is checked again too, so a junction swapped in after step 2 is
+           The folder itself is checked again too (D-036 and the high-impact roots, on the path
+           as given and on where it really leads), so a junction swapped in after step 2 is
            caught. A refused tree is Failed and nothing is changed; the snapshot is kept (the
            row names it, so it is not taken for an interrupted run) and needs no restoring.
         6. takeown /F <dir> /R /A /D N gives every item to Administrators, so an administrator
@@ -2325,6 +2423,7 @@ function Invoke-TreeOwnershipChange {
     }
     if (-not $AllowSystemFolder) {
         $refusal = Get-TreeOwnershipTargetRefusal -Path $Path
+        if (-not $refusal) { $refusal = Get-HighImpactRootRefusal -Path $Path }
         if ($refusal) {
             return New-PermissionChangeEntry -Action $action -Target $Path -ItemType 'Folder tree' -Detail $detail -Result 'Failed' `
                 -ErrorText "$refusal Nothing was changed."
@@ -2358,11 +2457,13 @@ function Invoke-TreeOwnershipChange {
 
     # D-036 for what only the listing shows: a junction or symbolic link inside the folder
     # that leads into a protected folder, or somewhere that cannot be checked. Then the folder
-    # itself once more, as late as possible, in case a junction was swapped in since the first
-    # check. The snapshot is kept and named, so it is not mistaken for an interrupted run.
+    # itself once more, D-036 and the high-impact roots, as late as possible, in case a
+    # junction was swapped in since the first check (time of check, time of use). The snapshot
+    # is kept and named, so it is not mistaken for an interrupted run.
     if (-not $AllowSystemFolder) {
         $refusal = Get-TreeLinkRefusal -Path $Path -LinkPaths @($snapshot.LinkPaths)
         if (-not $refusal) { $refusal = Get-TreeOwnershipTargetRefusal -Path $Path }
+        if (-not $refusal) { $refusal = Get-HighImpactRootRefusal -Path $Path }
         if ($refusal) {
             return New-PermissionChangeEntry -Action $action -Target $Path -ItemType 'Folder tree' -Detail $detail -Result 'Failed' `
                 -OldValue "Saved in $($snapshot.File)" -BackupFile $snapshot.File `
@@ -2431,11 +2532,11 @@ function Invoke-TreeOwnershipChange {
     $linkText = Get-LinkListText -LinkPaths @($snapshot.LinkPaths)
     $notes = @(
         "$detail."
-        $(if ($snapshot.Unreadable -gt 0) { "$($snapshot.Unreadable) item(s) had no readable owner before the change." })
-        $(if ($snapshot.Unlisted -gt 0) { "$($snapshot.Unlisted) folder(s) could not be opened, so takeown /D N skipped them and the owners inside them are not in the backup: $(Format-PathList -Path @($snapshot.UnlistedFolders) -First 20 -More $fullList)." })
+        $(if ($snapshot.Unreadable -gt 0) { "$(Format-ItemCount $snapshot.Unreadable 'item' 'items') had no readable owner before the change." })
+        $(if ($snapshot.Unlisted -gt 0) { "$(Format-ItemCount $snapshot.Unlisted 'folder' 'folders') could not be opened, so takeown /D N skipped $(if ($snapshot.Unlisted -eq 1) { 'it' } else { 'them' }) and the owners inside $(if ($snapshot.Unlisted -eq 1) { 'it' } else { 'them' }) are not in the backup: $(Format-PathList -Path @($snapshot.UnlistedFolders) -First 20 -More $fullList)." })
         $(if ($unlistedChanged.Count -gt 0) { "The owner of $($unlistedChanged.Count) of them was changed anyway (read back), but not their permissions: $(Format-PathList -Path $unlistedChanged -First 20)." })
         $(if ($unlistedUnchecked.Count -gt 0) { "The owner of $($unlistedUnchecked.Count) of them could not be read afterwards, so it is not known whether it changed: $(Format-PathList -Path $unlistedUnchecked -First 20)." })
-        $(if ($snapshot.Links -gt 0) { "$($linkText.Noun) were listed but not gone into: $(Format-PathList -Path @($linkText.Items) -First 20)." })
+        $(if ($snapshot.Links -gt 0) { "$($linkText.Noun) $(if (@($linkText.Items).Count -eq 1) { 'was' } else { 'were' }) listed but not gone into: $(Format-PathList -Path @($linkText.Items) -First 20)." })
         "Ran: $(Format-AclToolCommand -Tool takeown -Arguments $takeownArgs); $(Format-AclToolCommand -Tool icacls -Arguments $icaclsArgs)"
     ) | Where-Object { $_ }
 
@@ -2675,7 +2776,7 @@ function Get-NotOpenedEscalation {
     <#
     .SYNOPSIS
         The next step for the folders a whole-tree row could not open (D-034), as one passage:
-        "Escalate: <n> folder(s) could not be opened, so they were left alone." (or, for those
+        "Escalate: <n> folders could not be opened, so they were left alone." (or, for those
         whose owner was read back changed, that their owner was changed but not their
         permissions, and for those whose owner could not be read back, that it could not be
         checked), the first three names and the file with all of them (or that it could not be
@@ -2691,26 +2792,30 @@ function Get-NotOpenedEscalation {
     $count = Get-TreeEntryCount $Entry 'Unlisted'
     $changed = @($Entry.TreeCounts.UnlistedChangedFolders)
     $unchecked = @($Entry.TreeCounts.UnlistedUncheckedFolders)
-    $opening = if ($changed.Count -eq 0 -and $unchecked.Count -eq 0) {
-        "Escalate: $count folder(s) could not be opened, so they were left alone."
+    $folders = Format-ItemCount $count 'folder' 'folders'
+    $opening = if ($changed.Count -eq 0 -and $unchecked.Count -eq 0 -and $count -eq 1) {
+        'Escalate: 1 folder could not be opened, so it was left alone.'
+    } elseif ($changed.Count -eq 0 -and $unchecked.Count -eq 0) {
+        "Escalate: $folders could not be opened, so they were left alone."
     } elseif ($unchecked.Count -eq 0 -and $changed.Count -ge $count -and $count -eq 1) {
-        'Escalate: 1 folder(s) could not be opened: its owner was changed, but its permissions were not.'
+        'Escalate: 1 folder could not be opened: its owner was changed, but its permissions were not.'
     } elseif ($unchecked.Count -eq 0 -and $changed.Count -ge $count) {
-        "Escalate: $count folder(s) could not be opened: their owners were changed, but their permissions were not."
+        "Escalate: $folders could not be opened: their owners were changed, but their permissions were not."
     } elseif ($unchecked.Count -eq 0) {
-        "Escalate: $count folder(s) could not be opened. $($changed.Count) of them had their owner changed, but not their permissions ($(Format-PathList -Path $changed -First 3)); the other $($count - $changed.Count) were left alone."
+        $left = $count - $changed.Count
+        "Escalate: $folders could not be opened. $($changed.Count) of them had their owner changed, but not their permissions ($(Format-PathList -Path $changed -First 3)); the other $left $(if ($left -eq 1) { 'was' } else { 'were' }) left alone."
     } elseif ($changed.Count -eq 0 -and $unchecked.Count -ge $count -and $count -eq 1) {
-        'Escalate: 1 folder(s) could not be opened, and its owner could not be checked afterwards.'
+        'Escalate: 1 folder could not be opened, and its owner could not be checked afterwards.'
     } elseif ($changed.Count -eq 0 -and $unchecked.Count -ge $count) {
-        "Escalate: $count folder(s) could not be opened, and their owners could not be checked afterwards."
+        "Escalate: $folders could not be opened, and their owners could not be checked afterwards."
     } else {
         # A folder that is neither changed nor unchecked was read back with its old owner.
         $alone = $count - $changed.Count - $unchecked.Count
         @(
-            "Escalate: $count folder(s) could not be opened."
+            "Escalate: $folders could not be opened."
             $(if ($changed.Count -gt 0) { "$($changed.Count) of them had their owner changed, but not their permissions ($(Format-PathList -Path $changed -First 3))." })
             "The owner of $($unchecked.Count) of them could not be checked afterwards ($(Format-PathList -Path $unchecked -First 3))."
-            $(if ($alone -gt 0) { "The other $alone were left alone." })
+            $(if ($alone -gt 0) { "The other $alone $(if ($alone -eq 1) { 'was' } else { 'were' }) left alone." })
         ) -join ' '
     }
     $file = "$($Entry.TreeCounts.NotOpenedFile)"
@@ -2778,20 +2883,21 @@ function Get-TreeChangeResultMessage {
         if ($links -gt 0) {
             # LinkNoun and LinkItems name each link's kind (Get-LinkListText); a row from before
             # they were added only has the paths.
-            $noun = if ($e.TreeCounts.LinkNoun) { $e.TreeCounts.LinkNoun } else { "$links junction(s) or symbolic link(s)" }
+            $noun = if ($e.TreeCounts.LinkNoun) { $e.TreeCounts.LinkNoun } else { Format-ItemCount $links 'junction or symbolic link' 'junctions or symbolic links' }
             $linkItems = if (@($e.TreeCounts.LinkItems).Count -gt 0) { @($e.TreeCounts.LinkItems) } else { @($e.TreeCounts.LinkPaths) }
             $linkNames = @($linkItems | Select-Object -First 3)
             $linkMore = if ($links -gt $linkNames.Count) { " and $($links - $linkNames.Count) more" } else { '' }
-            $parts.Add("$noun ($($linkNames -join '; ')$linkMore) were listed but not gone into. Microsoft's documentation does not say whether takeown and icacls follow them, and icacls changes what a symbolic link points to, so check them and what they point to.")
+            $parts.Add("$noun ($($linkNames -join '; ')$linkMore) $(if ($links -eq 1) { 'was' } else { 'were' }) listed but not gone into. Microsoft's documentation does not say whether takeown and icacls follow them, and icacls changes what a symbolic link points to, so check them and what they point to.")
         }
         $unchecked = Get-TreeEntryCount $e 'Unchecked'
         if ($unchecked -gt 0 -and $e.Result -ne 'Skipped (WhatIf)') {
-            $parts.Add("$unchecked item(s) could not be read after the change, so it is not known who owns them now; check them.")
+            $them = if ($unchecked -eq 1) { 'it' } else { 'them' }
+            $parts.Add("$(Format-ItemCount $unchecked 'item' 'items') could not be read after the change, so it is not known who owns $them now; check $them.")
         }
     }
     $unreadable = Get-UnrestorableItemCount -Entries $Entries
     if ($unreadable -gt 0) {
-        $parts.Add("$unreadable item(s) had no readable permissions before the change and cannot be restored from this backup.")
+        $parts.Add("$(Format-ItemCount $unreadable 'item' 'items') had no readable permissions before the change and cannot be restored from this backup.")
     }
 
     $changed = @($Entries | Where-Object { $_.Result -eq 'Done' -or $_.Result -eq 'Partly done' -or ($_.Result -eq 'Failed' -and (Get-FailedChangeState $_) -ne 'Unchanged') })
@@ -2865,7 +2971,8 @@ function Get-ChangeResultMessage {
     }
     $upToDate = @($all | Where-Object { $_.Result -eq 'Skipped (nothing to copy)' })
     $types = @($all | ForEach-Object { $_.ItemType } | Where-Object { $_ -ne 'Unknown' } | Sort-Object -Unique)
-    $noun = if ($types.Count -eq 1 -and $types[0] -eq 'File') { 'files' } elseif ($types.Count -eq 1 -and $types[0] -eq 'Folder') { 'folders' } else { 'items' }
+    $noun = if ($types.Count -eq 1 -and $types[0] -eq 'File') { 'file' } elseif ($types.Count -eq 1 -and $types[0] -eq 'Folder') { 'folder' } else { 'item' }
+    $nouns = "$($noun)s"
     $backup = @($all | Where-Object { $_.BackupFile } | ForEach-Object { $_.BackupFile } | Select-Object -First 1)
     $backupPath = if ($backup.Count -gt 0) { $backup[0] } else { '' }
 
@@ -2875,7 +2982,8 @@ function Get-ChangeResultMessage {
         $err = if ((Get-FailedChangeState $f) -eq 'Unchanged') { Get-PlainErrorText $f.Error } else { Format-Sentence $f.Error }
     }
     if ($done.Count -gt 0) {
-        $where = if ($all.Count -eq 1) { $first.Target } else { "$($done.Count) of $($all.Count) $noun" }
+        # Only used for two or more items, so "<n> of <all>" always takes the plural.
+        $where = if ($all.Count -eq 1) { $first.Target } else { "$($done.Count) of $($all.Count) $nouns" }
         $parts.Add("$phrase $preposition $where.")
         if ($first.Action -eq 'Copy permissions' -and -not $NoInheritanceNote) {
             # One Set-Acl on each target: Windows passes the new rules to the items below that
@@ -2884,7 +2992,7 @@ function Get-ChangeResultMessage {
             $parts.Add('That is expected: Windows passes permissions down only to the items that inherit them, as Explorer does.')
         }
     } elseif ($whatIf.Count -eq $all.Count) {
-        $parts.Add("WhatIf: nothing was changed ($($all.Count) $noun would be).")
+        $parts.Add("WhatIf: nothing was changed ($(Format-ItemCount $all.Count $noun $nouns) would be).")
     } elseif ($all.Count -eq 1 -and $failed.Count -eq 1) {
         $state = Get-FailedChangeState $first
         if ($state -eq 'Partly') {
@@ -2910,7 +3018,7 @@ function Get-ChangeResultMessage {
         $already = @($upToDate | Where-Object { $_.Detail -notlike 'Nothing to copy:*' })
         if ($already.Count -gt 0) {
             if ($all.Count -eq 1) { $parts.Add("$($first.Target) already has these permissions, so nothing was changed.") }
-            else { $parts.Add("$($already.Count) folder(s) already had these permissions and were not changed.") }
+            else { $parts.Add("$(Format-ItemCount $already.Count 'folder' 'folders') already had these permissions and $(if ($already.Count -eq 1) { 'was' } else { 'were' }) not changed.") }
         }
     }
     if ($failed.Count -gt 0 -and $all.Count -gt 1) {
@@ -2921,7 +3029,7 @@ function Get-ChangeResultMessage {
         if ($all.Count -eq 1) {
             if ($backupPath) { $parts.Add("Its permissions before the change are in $backupPath; see ""Undo a change"" in the README to put them back.") }
         } else {
-            $parts.Add("$($touched.Count) item(s) were partly changed or could not be checked.$restore")
+            $parts.Add("$(Format-ItemCount $touched.Count 'item' 'items') $(if ($touched.Count -eq 1) { 'was' } else { 'were' }) partly changed or could not be checked.$restore")
         }
     }
     if ($notFound.Count -gt 0) {
@@ -2930,7 +3038,7 @@ function Get-ChangeResultMessage {
     }
     $unreadable = @($done | Where-Object { $_.OldValue -eq 'Could not read' })
     if ($unreadable.Count -gt 0) {
-        $parts.Add("$($unreadable.Count) item(s) had no readable permissions before the change and cannot be restored from this backup.")
+        $parts.Add("$(Format-ItemCount $unreadable.Count 'item' 'items') had no readable permissions before the change and cannot be restored from this backup.")
     }
 
     $backupNote = if ($backupPath) { " The backup is at $backupPath." } else { '' }

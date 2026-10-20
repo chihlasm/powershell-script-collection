@@ -60,6 +60,10 @@ BeforeAll {
         throw "Get-NetworkDriveRemoteName ($Letter) was called without a mock in a test."
     }
     Mock Resolve-NetworkDrivePath { $Path }
+    # Backstop: the high-impact-root check reads this computer's profiles folder
+    # (GetProfilesDirectoryW). Tests never read the real machine, so it is always C:\Users
+    # here unless a test mocks it otherwise.
+    Mock Get-AppProfilesDirectory { 'C:\Users' }
     $script:RealGetAcl = Get-Command Get-Acl -CommandType Cmdlet
     $script:RealGetItemOwner = ${function:Get-ItemOwner}
     $script:MySid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -235,7 +239,7 @@ Describe 'Recursive take ownership' {
         @($saved | Where-Object { $_.Owner -ne 'Could not read' }).Count | Should -Be 4 -Because 'readable items are still saved'
 
         $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
-        $message | Should -Match '1 item\(s\) had no readable permissions before the change and cannot be restored from this backup'
+        $message | Should -Match '1 item had no readable permissions before the change and cannot be restored from this backup'
     }
 
     It 'AC19_CoreRecursiveTakeOwnership_WhatIfCallsNoToolAndWritesNoSnapshot' {
@@ -271,7 +275,7 @@ Describe 'Recursive take ownership' {
         @($saved | ForEach-Object { $_.Path }) | Should -Not -Contain (Join-Path $locked 'a.txt')
         $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
         # One merged escalation (review 2026-10-17, UI): the pinned sentence, then the names.
-        $message | Should -BeLike "*Escalate: 1 folder(s) could not be opened, so they were left alone. Not opened: $locked.*"
+        $message | Should -BeLike "*Escalate: 1 folder could not be opened, so it was left alone. Not opened: $locked.*"
         $message | Should -Match 'cannot be restored from this backup'
     }
 
@@ -404,11 +408,11 @@ Describe 'Recursive take ownership' {
             @($c.BackupFiles) | Should -Be @($rows[0].BackupFile) -Because 'the owner snapshot is the only backup'
         }
         $rows[0].TreeCounts.PSObject.Properties.Name | Should -Not -Contain 'PermissionsFile'
-        $rows[0].Detail | Should -BeLike "*1 folder(s) could not be opened, so takeown /D N skipped them*$locked*"
+        $rows[0].Detail | Should -BeLike "*1 folder could not be opened, so takeown /D N skipped it*$locked*"
         $rows[0].Detail | Should -Not -Match 'full control'
 
         $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
-        $message | Should -BeLike '*Escalate: 1 folder(s) could not be opened, so they were left alone.*'
+        $message | Should -BeLike '*Escalate: 1 folder could not be opened, so it was left alone.*'
         $message | Should -Not -Match 'full control'
     }
 
@@ -424,7 +428,7 @@ Describe 'Recursive take ownership' {
         $rows[0].TreeCounts.Unlisted | Should -Be 1
         @($rows[0].TreeCounts.UnlistedFolders) | Should -Be @($locked)
         $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
-        $message | Should -BeLike "*Escalate: 1 folder(s) could not be opened, so they were left alone. Not opened: $locked.*cannot be restored from this backup*"
+        $message | Should -BeLike "*Escalate: 1 folder could not be opened, so it was left alone. Not opened: $locked.*cannot be restored from this backup*"
         $message | Should -Not -Match 'are lost'
     }
 
@@ -474,7 +478,7 @@ Describe 'Recursive take ownership' {
         @($rows[0].TreeCounts.LinkPaths) | Should -Be @($link)
         Test-TreeEntryIncomplete $rows[0] | Should -BeTrue
         $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
-        $message | Should -BeLike "*1 junction(s) or symbolic link(s) ($link) were listed but not gone into. Microsoft's documentation does not say whether takeown and icacls follow them*"
+        $message | Should -BeLike "*1 junction or symbolic link ($link) was listed but not gone into. Microsoft's documentation does not say whether takeown and icacls follow them*"
     }
 
     It 'AC18_FailedTreeRowThatChangedSomething_CountsItsUnreadableItems' {
@@ -539,7 +543,7 @@ Describe 'Native tool guard and tool output' {
 #          takeown cannot open is skipped and keeps its permissions: no
 #          *_TakeOwnership_Permissions.csv is written, Set-Acl is not used on it, the read-back
 #          marks it not owned, the row is Partly done, and the message says
-#          "Escalate: <n> folder(s) could not be opened, so they were left alone."
+#          "Escalate: <n> folders could not be opened, so they were left alone."
 #   D-036  Get-TreeOwnershipRefusal -Path <string> (pure, no file system access) returns $null
 #          when whole-tree take ownership is allowed, else the plain-English refusal text
 #          (contains the path). Refused: a volume root (C:\, D:\) and anything under
@@ -612,7 +616,7 @@ Describe 'Recursive take ownership: skip folders it cannot open (D-034) and refu
         $rows[0].TreeCounts.Unlisted | Should -Be 1
         @($rows[0].TreeCounts.UnlistedFolders) | Should -Be @($locked)
         $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
-        $message | Should -Match ([regex]::Escape('Escalate: 1 folder(s) could not be opened, so they were left alone.'))
+        $message | Should -Match ([regex]::Escape('Escalate: 1 folder could not be opened, so it was left alone.'))
         $message | Should -Match ([regex]::Escape($locked))
         # Their permissions are never changed, so there is nothing to back up.
         @(Get-ChildItem -LiteralPath (Join-Path $script:Log 'Backups') -Filter '*_Permissions.csv').Count | Should -Be 0
@@ -634,7 +638,7 @@ Describe 'Recursive take ownership: skip folders it cannot open (D-034) and refu
         $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
 
         $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
-        $message | Should -Match ([regex]::Escape('Escalate: 2 folder(s) could not be opened, so they were left alone.'))
+        $message | Should -Match ([regex]::Escape('Escalate: 2 folders could not be opened, so they were left alone.'))
         $message | Should -Not -Match 'full control'
         $message | Should -Not -Match 'replaces the permissions'
         $message | Should -Not -Match '_Permissions\.csv'
@@ -706,6 +710,64 @@ Describe 'Recursive take ownership: skip folders it cannot open (D-034) and refu
         $rows = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
 
         $rows[0].Result | Should -Be 'Done'
+    }
+
+    # SQ-018 revision (AC53a): the high-impact roots are refused by the core's first check too.
+    It 'SQ018_HighImpactRoot_<Path>_IsRefusedWithNoSnapshotAndNoToolCall' -ForEach @(
+        @{ Path = 'C:\Users' }
+        @{ Path = '\\fs01\D$\Users' }
+    ) {
+        # Only the high-impact check is under test: nothing about the real folder is read.
+        Mock Get-AclItemType { 'Folder' }
+        Mock Get-TreeOwnershipTargetRefusal { $null }
+        Mock Save-OwnerSnapshot { throw 'snapshot must not be taken (test)' }
+
+        $rows = @(Set-ItemOwnerToCurrentUser -Path $Path -Recurse -LogFolder $script:Log)
+
+        $rows.Count | Should -Be 1
+        $rows[0].Result | Should -Be 'Failed'
+        $rows[0].Error | Should -Match ([regex]::Escape($Path))
+        $rows[0].Error | Should -Match 'user profile'
+        $rows[0].Error | Should -Match 'Nothing was changed\.$'
+        Should -Invoke Save-OwnerSnapshot -Times 0 -Exactly -Scope It
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        Test-Path -LiteralPath (Join-Path $script:Log 'Backups') | Should -BeFalse
+    }
+
+    It 'SQ018_FolderIn<Name>_IsRefusedUnlessAllowSystemFolder' -ForEach @(
+        @{ Name = 'System Volume Information' }
+        @{ Name = '$Recycle.Bin' }
+    ) {
+        $dir = Join-Path (Join-Path (Join-Path $TestDrive ('hi-' + [guid]::NewGuid().ToString('N'))) $Name) 'S-1-5-21-1-2-3-1001'
+        New-Item -ItemType Directory -Path (Join-Path $dir 'sub') -Force | Out-Null
+
+        $refused = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+        $refused[0].Result | Should -Be 'Failed'
+        $refused[0].Error | Should -Match ([regex]::Escape($Name))
+        $refused[0].Error | Should -Match 'Nothing was changed\.$'
+        $script:ToolCalls.Count | Should -Be 0 -Because 'takeown and icacls must not run'
+        Test-Path -LiteralPath (Join-Path $script:Log 'Backups') | Should -BeFalse
+
+        # -AllowSystemFolder is the command line's way past it.
+        $allowed = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -AllowSystemFolder -LogFolder $script:Log)
+        $allowed[0].Result | Should -Be 'Done'
+        @($script:ToolCalls | Where-Object { $_.Tool -eq 'takeown' }).Count | Should -Be 1
+    }
+
+    It 'SQ018_ThisComputersProfilesFolder_IsRefusedUnlessAllowSystemFolder' {
+        $dir = New-TestTree ('profiles-' + [guid]::NewGuid().ToString('N'))
+        $script:ProfilesDir = $dir
+        Mock Get-AppProfilesDirectory { $script:ProfilesDir }
+
+        $refused = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -LogFolder $script:Log)
+
+        $refused[0].Result | Should -Be 'Failed'
+        $refused[0].Error | Should -Match 'every user profile on this computer'
+        $script:ToolCalls.Count | Should -Be 0
+
+        $allowed = @(Set-ItemOwnerToCurrentUser -Path $dir -Recurse -AllowSystemFolder -LogFolder $script:Log)
+        $allowed[0].Result | Should -Be 'Done'
     }
 }
 
@@ -798,7 +860,7 @@ Describe 'README after D-034 and D-036' {
 #          found that way names the path as given. Invoke-TreeOwnershipChange and the CLI use it.
 #   D-034  A folder that could not be opened always makes the row at best Partly done. Its owner
 #          is read back: "left alone" only when unchanged, otherwise "its owner was changed, but
-#          its permissions were not". The message keeps "Escalate: <n> folder(s) could not be
+#          its permissions were not". The message keeps "Escalate: <n> folders could not be
 #          opened, so they were left alone." (or the owner-changed form), then "Not opened:
 #          <first 3>[ and <n> more]." and "Full list: <Backups\<stamp>_NotOpened.txt>.", then
 #          "Ask a senior engineer to take ownership of them with an account that can open them."
@@ -1029,7 +1091,7 @@ public static extern uint GetShortPathNameW(string lpszLongPath, System.Text.Str
             @($rows[0].TreeCounts.UnlistedChangedFolders) | Should -Be @($script:Locked)
             $rows[0].Detail | Should -BeLike "*owner*changed*$($script:Locked)*"
             $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
-            $message | Should -Match ([regex]::Escape('Escalate: 1 folder(s) could not be opened: its owner was changed, but its permissions were not.'))
+            $message | Should -Match ([regex]::Escape('Escalate: 1 folder could not be opened: its owner was changed, but its permissions were not.'))
             $message | Should -Not -Match 'left alone'
             $message | Should -Match ([regex]::Escape($script:Locked))
             $message | Should -Match ([regex]::Escape('Ask a senior engineer to take ownership of them with an account that can open them.'))
@@ -1049,7 +1111,7 @@ public static extern uint GetShortPathNameW(string lpszLongPath, System.Text.Str
             $rows[0].Result | Should -Be 'Partly done'
             $rows[0].TreeCounts.UnlistedChanged | Should -Be 0
             $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
-            $message | Should -Match ([regex]::Escape('Escalate: 1 folder(s) could not be opened, so they were left alone.'))
+            $message | Should -Match ([regex]::Escape('Escalate: 1 folder could not be opened, so it was left alone.'))
             $message | Should -Not -Match 'owner was changed'
         }
 
@@ -1072,7 +1134,7 @@ public static extern uint GetShortPathNameW(string lpszLongPath, System.Text.Str
             foreach ($p in $script:LockedSet) { $listed | Should -Contain $p }
 
             $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
-            $message | Should -Match ([regex]::Escape('Escalate: 5 folder(s) could not be opened, so they were left alone.'))
+            $message | Should -Match ([regex]::Escape('Escalate: 5 folders could not be opened, so they were left alone.'))
             $shown = @($rows[0].TreeCounts.UnlistedFolders | Select-Object -First 3)
             $message | Should -Match ([regex]::Escape("Not opened: $($shown -join '; ') and 2 more."))
             $message | Should -Match ([regex]::Escape("Full list: $file."))
@@ -1874,11 +1936,11 @@ Describe 'D-040 fix round 1 (review 2026-10-19): DFS targets, unresolvable links
             $rows[0].Result | Should -Not -Be 'Failed'
             Should -Invoke Invoke-AclTool -Times 1 -Exactly -Scope It -ParameterFilter { $Tool -eq 'takeown' }
             $rows[0].Detail | Should -Match 'DFS link'
-            $rows[0].Detail | Should -Not -Match ([regex]::Escape('junction(s) or symbolic link(s)'))
+            $rows[0].Detail | Should -Not -Match 'junctions? or symbolic links?'
             $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
             $message | Should -Match 'DFS link'
             $message | Should -Match ([regex]::Escape($script:DfsLink))
-            $message | Should -Not -Match ([regex]::Escape('junction(s) or symbolic link(s)'))
+            $message | Should -Not -Match 'junctions? or symbolic links?'
         }
 
         It 'AC20c_DfsLinkWhoseTargetLookupFails_IsRefused' {
@@ -2036,10 +2098,10 @@ Describe 'D-040 fix round 1 (review 2026-10-19): DFS targets, unresolvable links
 
             $rows[0].Result | Should -Not -Be 'Failed'
             $rows[0].Detail | Should -Match ([regex]::Escape('other redirect (reparse point 0x8000ABCD)'))
-            $rows[0].Detail | Should -Not -Match ([regex]::Escape('junction(s) or symbolic link(s)'))
+            $rows[0].Detail | Should -Not -Match 'junctions? or symbolic links?'
             $message = Get-ChangeResultMessage -Entries $rows -LogPath (Join-Path $script:Log 'Changes_x.csv') -LogFolder $script:Log
             $message | Should -Match ([regex]::Escape('other redirect (reparse point 0x8000ABCD)'))
-            $message | Should -Not -Match ([regex]::Escape('junction(s) or symbolic link(s)'))
+            $message | Should -Not -Match 'junctions? or symbolic links?'
         }
 
         It 'AC20_UnresolvableRefusal_IsToldApartFromAProtectedFolderRefusal' {

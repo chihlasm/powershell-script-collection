@@ -20,6 +20,10 @@ BeforeAll {
         )
         throw "Invoke-AclTool ($Tool) was called without a mock in a test."
     }
+    # Backstop: the high-impact-root check reads this computer's profiles folder
+    # (GetProfilesDirectoryW). Tests never read the real machine, so it is always C:\Users
+    # here unless a test mocks it otherwise.
+    Mock Get-AppProfilesDirectory { 'C:\Users' }
 }
 
 Describe 'FolderPermissionManager.ps1 has no copy-to-subfolders step (D-035)' {

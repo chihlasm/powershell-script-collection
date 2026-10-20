@@ -681,7 +681,7 @@ Describe 'GUI replicate endpoint ignores an old client''s recursive flag (SQ-015
         $script:Sent.status | Should -Be 'complete'
         ($script:Sent.results.status -join ',') | Should -Be 'unchanged,unchanged'
         $script:Sent.results[0].message | Should -Be 'Already has these permissions; nothing changed.'
-        $script:Sent.message | Should -BeLike '*2 folder(s) already had these permissions and were not changed.*'
+        $script:Sent.message | Should -BeLike '*2 folders already had these permissions and were not changed.*'
         $script:Sent.message | Should -Not -BeLike '*failed*'
     }
 
@@ -697,7 +697,7 @@ Describe 'GUI replicate endpoint ignores an old client''s recursive flag (SQ-015
 
         ($script:Sent.results.status -join ',') | Should -Be 'success,unchanged'
         $script:Sent.logPath | Should -Not -BeNullOrEmpty
-        $script:Sent.message | Should -BeLike "Permissions copied from $([WildcardPattern]::Escape($src)) to 1 of 2 folders.*1 folder(s) already had these permissions*"
+        $script:Sent.message | Should -BeLike "Permissions copied from $([WildcardPattern]::Escape($src)) to 1 of 2 folders.*1 folder already had these permissions and was not changed.*"
     }
 
     It 'Review1_DoneAndFailed_RowsAreSuccessAndError' {

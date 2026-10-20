@@ -46,6 +46,10 @@ BeforeAll {
         throw "Get-NetworkDriveRemoteName ($Letter) was called without a mock in a test."
     }
     Mock Resolve-NetworkDrivePath { $Path }
+    # Backstop: the high-impact-root check reads this computer's profiles folder
+    # (GetProfilesDirectoryW). Tests never read the real machine, so it is always C:\Users
+    # here unless a test mocks it otherwise.
+    Mock Get-AppProfilesDirectory { 'C:\Users' }
     $script:RealGetItemOwner = ${function:Get-ItemOwner}
 
     $script:GuiPath = (Resolve-Path (Join-Path $folder 'FolderPermissionManager-WebGUI.ps1')).Path
@@ -155,7 +159,7 @@ Describe 'GUI recursive take ownership' {
 
         $response.StatusCode | Should -Be 200
         $script:Sent.status | Should -Be 'partial'
-        $script:Sent.message | Should -BeLike "*Escalate: 1 folder(s) could not be opened, so they were left alone. Not opened: $([WildcardPattern]::Escape($locked)).*cannot be restored from this backup*"
+        $script:Sent.message | Should -BeLike "*Escalate: 1 folder could not be opened, so it was left alone. Not opened: $([WildcardPattern]::Escape($locked)).*cannot be restored from this backup*"
     }
 
     It 'AC17_GuiPage_ShowsPartialAsAWarningWithoutDoublingThePrefix' {
@@ -201,7 +205,7 @@ Describe 'GUI recursive take ownership' {
         Invoke-TakeOwnership $null $response
 
         $script:Sent.status | Should -Be 'partial'
-        $script:Sent.message | Should -BeLike '*Escalate: 1 folder(s) could not be opened, so they were left alone.*'
+        $script:Sent.message | Should -BeLike '*Escalate: 1 folder could not be opened, so it was left alone.*'
         $script:Sent.message | Should -Not -Match 'full control'
         @(Get-ChildItem -LiteralPath (Join-Path $script:ChangeLogFolder 'Backups') -Filter '*_TakeOwnership_Permissions.csv').Count | Should -Be 0
     }
@@ -217,7 +221,7 @@ Describe 'GUI recursive take ownership' {
             Invoke-TakeOwnership $null $response
 
             $script:Sent.status | Should -Be 'partial'
-            $script:Sent.message | Should -BeLike '*1 junction(s) or symbolic link(s) (*link) were listed but not gone into*'
+            $script:Sent.message | Should -BeLike '*1 junction or symbolic link (*link) was listed but not gone into*'
         } finally {
             [System.IO.Directory]::Delete((Join-Path $script:Dir 'link'))
         }
@@ -341,7 +345,7 @@ Describe 'GUI recursive take ownership' {
         $response.StatusCode | Should -Be 200
         $script:Sent.status | Should -Be 'partial'
         $script:Sent.message | Should -Match '^Partly done'
-        $script:Sent.message | Should -Match ([regex]::Escape('Escalate: 1 folder(s) could not be opened, so they were left alone.'))
+        $script:Sent.message | Should -Match ([regex]::Escape('Escalate: 1 folder could not be opened, so it was left alone.'))
         $script:Sent.message | Should -Match ([regex]::Escape($locked))
         $script:Sent.message | Should -Not -Match 'full control'
         $script:Sent.message | Should -Not -Match '_Permissions\.csv'
@@ -548,7 +552,7 @@ Describe 'GUI recursive take ownership: DFS targets and unresolvable links' {
 
             $script:Response.StatusCode | Should -Be 200
             $script:Sent.message | Should -Match 'DFS link'
-            $script:Sent.message | Should -Not -Match ([regex]::Escape('junction(s) or symbolic link(s)'))
+            $script:Sent.message | Should -Not -Match 'junctions? or symbolic links?'
             Should -Invoke Invoke-AclTool -Times 1 -Exactly -Scope It -ParameterFilter { $Tool -eq 'takeown' }
         }
 

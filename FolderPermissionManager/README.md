@@ -7,15 +7,11 @@ command-line script, and the older browser-based GUI.
 
 ### FolderPermissionManager-GUI.ps1 (Windows app)
 
-A normal Windows window (WPF) for looking at folder and file permissions on local drives,
-mapped drives and network shares. Nothing listens on the network, and slow work (opening a
-folder on a busy share, reading permissions, the export) runs in the background, so the
-window never freezes.
-
-**View only in this version.** The buttons that change permissions (Add Permission, Remove
-Permission, Take Ownership, Copy Permissions To...) are shown but switched off; the window
-says so. Until they are switched on, make changes with the browser version,
-`FolderPermissionManager-WebGUI.ps1` (below). Changes anything? **No.**
+A normal Windows window (WPF) for looking at and changing folder and file permissions on local
+drives, mapped drives and network shares. Nothing listens on the network, and slow work
+(opening a folder on a busy share, reading permissions, a change, the export) runs in the
+background, so the window never freezes. Changes anything? **Yes**: permissions and owners,
+always backed up and logged first (see "Changes are backed up and logged" below).
 
 **How to start it:** right-click `FolderPermissionManager-GUI.ps1` and choose **Run with
 PowerShell**, or run it from a PowerShell window:
@@ -74,6 +70,149 @@ PowerShell**, or run it from a PowerShell window:
   Unexpected errors are written to `gui-errors.log` in the same folder.
 - **F5** or **Refresh** reads the current folder again.
 
+**Making changes.** One change runs at a time: while it runs, the change buttons are off, the
+busy line shows what is being changed and for how long, and you can keep browsing. A second
+change is refused with "Another change is still running on `<path>`. Wait for it to finish."
+- **Folder:** Add Permission, Remove Permission, Take Ownership (this folder only), Take
+  Ownership of all subfolders and files, and Copy Permissions To... (adds only; see below).
+- **Selected files** (the bar under the file list): Add Permission, Remove Permission, Take
+  Ownership. Files whose permissions are not read yet are read first for Remove Permission.
+- **Where it really lands is checked first.** Each button first works out, in the background,
+  where the change would really go (the share behind a mapped drive, the server behind a DFS
+  path, the local folder behind this computer's own share); the busy line says "Checking where
+  `<path>` really is...". Until the dialog or confirm closes, that change is being prepared:
+  the change buttons stay off (their tooltip says why) and other change clicks are refused.
+  The dialogs show the **Real location**. For Copy Permissions, the folders you type are
+  checked after the dialog; the status line names their real locations, and a folder that
+  cannot be checked is refused before anything starts. When a typed folder is refused, the
+  reason is shown and the Copy dialog opens again with your list still in it.
+- **Add Permission** looks the user or group up when you press Add, before the dialog closes.
+  A name Windows cannot find keeps the dialog open with your text and says "Windows could not
+  find the account `<name>`. Check the name, or ask a senior admin."; a lookup that takes more
+  than a few seconds (a domain that cannot be reached) is stopped and says so. `.\name` means an
+  account of this computer: on a folder or files here it is added as `<this computer>\name`; on
+  a share or mapped drive the dialog asks for the server's name instead (`FS01\name`). The name
+  is looked up again when the change runs.
+- **Remove Permission** lists only the entries set on the folder or file itself (an
+  inherited entry is removed on the folder above), once per account, with Allow or Deny
+  already set to the type it has. Every explicit entry of that type for the account goes,
+  whatever its level, so no level is asked. Just before the change, the account's name is
+  looked up again: if it now stands for a different account than the entry you chose (after a
+  domain migration, or a rename and a new account with the old name), nothing is changed and
+  the status line says so. An entry whose account Windows can't look up from here (shown as
+  `S-1-...`: the account may be deleted, or local to the server) cannot be removed here yet.
+  The status line tells a senior admin to look at the entry on the server itself first (run
+  the tool there, or `icacls "<path>"` there): if it shows a name there, it is an account of
+  that server and still in use, so it must not be removed. Only if it is still `S-1-...` there,
+  it gives the commands, a backup first and then the removal by SID, for example
+  `icacls "D:\Data" /save "%USERPROFILE%\acl-backup-Data-2026-10-19_143000.txt"`, then
+  `icacls "D:\Data" /remove:g *S-1-5-21-...` (`:d` for a Deny entry), and how to put it back:
+  `icacls "D:\." /restore "<that file>"` on the folder above (the top of a drive is written
+  `D:\.`, because `"D:\"` would end in `\"`, which Windows reads as a quote).
+  Each item gets its own file, named after the folder and the time. The file holds the
+  folder's permissions (account SIDs and paths): delete it once the ticket is closed.
+- **It asks first.** Remove Permission and every Take Ownership open a dialog that names the
+  path, its real location and how many items, with the action on the button ("Take ownership
+  of 12,408 items") and **Cancel** as the default (Enter and Esc both cancel). For the whole
+  tree, the folders, files and junctions in it are counted in the background first. A plain
+  Allow added, or permissions copied, onto ordinary folders that are where you typed them ask
+  through their own dialog, as in the browser version (Enter submits there). These ask again
+  in the confirm dialog, with the real locations, and the button is red and never the default:
+  - **Add a Deny** (the Add dialog's button turns red and Enter no longer submits it).
+  - **Add or copy onto the top of a drive or share** (`D:\`, `\\fs01\Data`, `\\fs01\D$`,
+    also behind a mapped drive such as `H:\` or a DFS path): it reaches everything on it that
+    inherits.
+  - **Copy from a folder with Deny permissions of its own**: the confirm lists them. When the
+    folder's permissions are not loaded, it says they could not be checked.
+  - **Copy to a folder that is really somewhere else** than what you typed (a mapped drive,
+    DFS, this computer's own share): the confirm lists what you typed and where it really is
+    (not red unless one of the cases above applies).
+- **Remembered mappings.** When the folder is on a drive letter that only Windows' remembered
+  mappings explain, every change (Add and Copy included) asks first and warns that the real
+  location may be out of date. A `-LogFolder` on such a letter gets a warning in the bar under
+  the title, and the tool does not start again as administrator from such a letter unless the
+  files there (the script and `FolderPermissions.Core.ps1`) are the same files (sizes, then
+  SHA-256; this reads them from the server the remembered mapping names).
+- **Refused, nothing changed:** taking ownership of a whole tree on the root of a drive
+  (`D:\`, `\\server\D$`), on a Windows folder (`%SystemRoot%`, `%ProgramFiles%`,
+  `%ProgramFiles(x86)%`, `%ProgramData%`) or on `ADMIN$`, `SYSVOL`, `NETLOGON`, `PRINT$` or
+  `IPC$` (D-036); on a folder that holds user profiles (the `Users` folder at the top of any
+  drive, `D:\Users` as well as `C:\Users`, here and as `\\server\<letter>$\Users`, and this
+  computer's profiles folder wherever it was moved; one profile folder such as `C:\Users\bob`
+  is allowed); and on anything in `System Volume Information` or `$Recycle.Bin`. This is
+  checked on the real location: a mapped drive, a DFS path and this computer's own name
+  (`\\<this computer>\C$\Windows`) are resolved first, and for an ordinary share on a server
+  (`\\fs01\Data`) the tool asks that server which folder the share is (it needs administrator
+  rights there) and checks that folder; when the server does not say, the whole-tree change
+  is refused. Each folder on the way to it on the server (`\\fs01\D$\Shares`,
+  `\\fs01\D$\Shares\Data`, ...) is then checked over the administrative share: when one is a
+  junction or symbolic link, or cannot be checked (not found, or access denied), the
+  whole-tree change is refused before anything is counted, because the server follows its own
+  junctions and the tool cannot see where the change would really land. Then the same checks run on where Windows really reaches the folder: through a
+  junction or symbolic link on it or above it, and with 8.3 short names (`D:\USERPR~1`)
+  expanded; when Windows cannot tell where the folder really is, the change is refused. Every
+  junction and symbolic link found inside the tree while counting is checked the same way,
+  and one that leads into a protected folder, or somewhere nobody can tell, stops the change
+  before the confirm opens. The profiles folder on another server is only recognised as
+  `<letter>$\Users`: one that server has moved elsewhere (its ProfilesDirectory setting) is not
+  detected, so check the folder before taking ownership of everything in it. Any change on a path that points at hidden data inside a file (an alternate data
+  stream, `file.txt:stream`), on a DFS path Windows cannot look up, or on a DFS folder that
+  points to several servers (open the one you mean) is refused too, and so is a DFS folder of
+  a namespace this computer hosts that cannot be looked up. Copy Permissions refuses a target
+  that is an administrative share (`\\fs01\D$`, `ADMIN$`, `IPC$`, `PRINT$`), `SYSVOL` or
+  `NETLOGON`, the root of a drive (`D:\`), a Windows folder, a `Users` folder or anything in
+  `System Volume Information` or `$Recycle.Bin` (a folder inside `\\fs01\D$` is fine), also
+  when the folder leads there through a junction, a symbolic link or a short name
+  (`C:\PROGRA~1`); a target whose real location Windows cannot tell (it does not exist, or
+  cannot be opened) is refused too. A refusal shows in the status line and in a message box.
+- **The result** shows in the status line, as in the browser version: what was done and where
+  it was backed up and logged, "Partly done: ..." when some items failed, "Done, with items to
+  check: ..." when the log could not be written or items cannot be restored from the backup,
+  and the "Escalate: `<n>` folders could not be opened..." line after a whole-tree take
+  ownership. Each item that was done is then **read back**: when the entry that was added is
+  not there, the removed one is still there, the owner is not you, or a copied permission is
+  missing, the result is "Done, with items to check: ... Check this: `<path>` - `<reason>`. ...
+  If it is still wrong after Refresh, check the change log or ask a senior admin.", and the
+  change log gets a row with Result `Done, with items to check` (when that row cannot be
+  written, it goes to the `Unlogged_` file below and the status line names it). A remove that
+  found no entry of that type set on the item says "Nothing was removed: `<user or group>` had
+  no explicit `<Allow or Deny>` entry here. `<path>` was left as it was. It may be inherited:
+  remove it on the folder above."; when that happens on only some of the items, the result is a
+  warning that names them. When nothing was done because no item was found, the result starts
+  "Nothing was changed: ". Then the folder (or the changed files' permissions) is read again,
+  also after a change that failed.
+- **Closing** is refused while a change runs ("A permission change is still running on
+  `<path>`. Wait for it to finish: closing now could leave it half done."). Changes have no
+  cancel button: stopping takeown or a batch midway would leave it half done.
+- **A stuck change.** A change that never finishes (for example a server that stops answering
+  mid-change) keeps the window from closing, and after an unexpected error the tool waits for
+  it before it ends: the console comes back with a `[WARN]` line saying so. Until then the
+  process keeps running and holds the single-instance lock (the mutex), so the tool cannot be
+  opened again with the same log folder. Wait for the change; if the server is gone for good,
+  end the `powershell.exe` process in Task Manager, then check the change log: the items with
+  a `Started` row and no result row were being changed when it stopped.
+- **Change log.** Before each change, a row with Result `Started` is written to the change log
+  for every item, so a change that is cut off (the computer restarted) still shows what was
+  being changed; the result row follows as each item completes. An **orphan** `Started` row
+  (an item with `Started` and no later row for the same `Target` and `Action`) means the change
+  was cut off before that item finished: check that item, and restore it from the backup in
+  `Backups\` if needed. If the change log cannot be written, nothing is changed. If it cannot be
+  written after a change (the folder went away), the result rows are saved to
+  `%LOCALAPPDATA%\FolderPermissionManager\Logs\Unlogged_<yyyy-MM-dd>.csv` instead and the status
+  line names that file.
+- **`-WhatIf`** (dry run): every change reports "WhatIf: nothing was changed (`<n>` items would
+  be)." (for example "1 folder", "3 files") on the status line, and a **Dry run** message names
+  what would have changed: the account, level and Allow or Deny for an add or remove, the
+  source for a copy, and every location. Nothing is changed, backed up or logged: no `Started` or result rows are written, and a
+  log folder that does not exist yet is not created by a change. (Starting the app still
+  creates the `Logs` folder and its probe file, see below.)
+- **Log folder in OneDrive.** When the script itself is in a OneDrive or synced SharePoint
+  folder, backups and the change log go to `%LOCALAPPDATA%\FolderPermissionManager\Logs`
+  instead of the `Logs` folder next to it, and the bar under the title says so. A `-LogFolder`
+  inside such a folder is used as given, with a warning (a relative `-LogFolder` is checked as
+  the full path it stands for). When the script is in such a folder and the session has no
+  `%LOCALAPPDATA%`, the `Logs` folder next to it is used and the bar warns that it is uploaded.
+
 **Client data in what it saves.** The export CSV holds the folder paths, owners and account
 names of the client's whole folder tree. `gui-errors.log` holds the raw text of unexpected
 errors, which can name client folders and accounts; it is trimmed to its last 1 MB each time
@@ -82,9 +221,9 @@ anyone who can read that folder can read it. Save the export locally (not in One
 share), attach it to the ticket, then delete the local copy. The status line and the path
 boxes show raw paths and error text: they are not ticket-note-safe, and anything you copy from
 them goes into Windows clipboard history and, in a Remote Desktop (RDP) session, to the other
-computer's clipboard. Even in this view-only version and with `-WhatIf`, starting the app
-creates the `Logs` folder next to the script (when that is a local fixed disk) and writes and
-deletes a small probe file there, to check that backups could be saved.
+computer's clipboard. Even with `-WhatIf`, starting the app creates the `Logs` folder next to
+the script (when that is a local fixed disk and not in a OneDrive or SharePoint sync folder) and writes and deletes a small probe file there,
+to check that backups could be saved.
 
 **Mapped drives.** The real location behind a drive letter comes, in this order, from the
 drives the window itself sees, then the ones the first (non-elevated) window passed on, then
@@ -122,8 +261,8 @@ Requires Windows PowerShell 5.1 (or PowerShell 7 on Windows). Keep
 ### FolderPermissionManager-WebGUI.ps1 (browser version, kept until the Windows app is lab-tested)
 
 The browser version of the tool, until now `FolderPermissionManager-GUI.ps1`. It is kept only
-until the Windows app above has been lab-tested and can make changes, then it is removed. Use
-it to make changes in the meantime.
+until the Windows app above has been lab-tested, then it is removed. Use the Windows app
+instead; this version is there to compare against while the Windows app is lab-tested.
 
 A browser-based interface for managing folder permissions across local drives and network shares. Runs a local web server and opens an interactive dashboard.
 
@@ -185,7 +324,12 @@ to each folder you list. Nothing already on a target folder is removed.
   added again as the target's own, so removing it from the current folder later still removes
   it everywhere below.
 - If the current folder has a Deny permission of its own, the dialog says so before you copy:
-  a Deny is copied too and blocks access even where another permission allows it.
+  a Deny is copied too and blocks access even where another permission allows it. The GUI
+  then asks again in a red confirm that lists the Deny permissions and every target's real
+  location.
+- In the GUI, a target that is an administrative share, `SYSVOL`, `NETLOGON`, the root of a
+  drive, a Windows folder, a `Users` folder, `System Volume Information` or `$Recycle.Bin` is
+  refused, and nothing is copied to any of the folders listed.
 - Each target folder is changed once. **Subfolders and files under it that inherit permissions
   get the new ones automatically**, as they would in Explorer.
 - A target that is a file is refused: "<path> is a file. Copy permissions copies to folders only."
@@ -213,7 +357,11 @@ The console shows the log folder at startup.
 | `Logs\Backups\<yyyy-MM-dd_HHmmss>_TakeOwnership.csv` (whole folder) | The owner snapshot written before taking ownership of a folder and everything under it: `Path`, `ItemType`, `Owner`, `OwnerSid`, one row for the folder and every subfolder and file under it (hidden ones too). |
 | `Logs\Backups\<yyyy-MM-dd_HHmmss>_NotOpened.txt` (whole folder) | Written after taking ownership when some folders could not be opened: all of them, one path per line, for the escalation. Not a backup: their permissions were not changed. |
 
-`Result` is one of `Done`, `Partly done`, `Failed`, `Skipped (not found)`, `Skipped (nothing to copy)` or `Skipped (WhatIf)`. A `Failed`
+`Result` is one of `Done`, `Partly done`, `Failed`, `Skipped (not found)`, `Skipped (nothing to copy)` or `Skipped (WhatIf)`.
+The Windows app also writes `Started` (one row per item just before its change; an orphan
+`Started` row, with no later row for the same `Target` and `Action`, means the change was cut
+off before that item finished: check it) and `Done, with items to check` (the item was read
+back after a `Done` row and was not as intended; `Error` says what). A `Failed`
 row whose `NewValue` differs from its `OldValue` was **partly changed** (for example, takeown
 gave the folder to Administrators but the owner could not then be set to you); the status bar
 says so and points at the backup. Each row is written as soon as that item is done, so a batch
@@ -254,7 +402,7 @@ at all, because the page says it must be used with `/R`). Its permissions are no
 there is nothing extra to back up. `icacls /setowner /T` may still change the owner of the
 skipped folder itself (Microsoft's documentation does not say), so its owner is read back too.
 The result is `Partly done`, and the status bar (or the console, with `[WARN]`) gives the next
-step: `Escalate: 1 folder(s) could not be opened, so they were left alone.` (or, when its owner
+step: `Escalate: 1 folder could not be opened, so it was left alone.` (or, when its owner
 was changed: `its owner was changed, but its permissions were not`), the first three folders,
 the `..._NotOpened.txt` file that lists all of them, and `Ask a senior engineer to take
 ownership of them with an account that can open them.` The console also prints every such
@@ -342,7 +490,9 @@ the network the console warns, because every change is refused while it cannot b
 no local folder can be found at all, the tool stops with `[FAIL]` and asks for `-LogFolder`.
 
 `Logs\` holds client paths, account names and SIDs:
-keep it with the ticket and delete it when the ticket is closed.
+keep it with the ticket and delete it when the ticket is closed. That goes for
+`%LOCALAPPDATA%\FolderPermissionManager\Logs` too, when the tool used that folder instead
+(and, for the Windows app, its `Unlogged_<yyyy-MM-dd>.csv` files).
 The logs and backups stay on the machine that ran the tool and are never deleted
 automatically. **They get the permissions of the folder they
 are in**: the tool does not lock them down. Keep the tool in a folder only administrators can
@@ -495,7 +645,7 @@ permission onto every subfolder and file, including the ones that block inherita
 | `-Path` | asks | The top folder |
 | `-LogFolder` | `Logs` next to the script | Where backups and the change log go (same rules as the GUI) |
 | `-Force` | — | Do not ask before taking ownership (needed, or `-WhatIf`, on a host that cannot ask) |
-| `-AllowSystemFolder` | — | Take ownership even of a drive root or a folder in `%SystemRoot%`, `%ProgramFiles%`, `%ProgramFiles(x86)%` or `%ProgramData%`, on `SYSVOL`, `NETLOGON` or `PRINT$`, or with a junction or symbolic link inside that leads into one, which is refused otherwise (see above) |
+| `-AllowSystemFolder` | — | Take ownership even of a drive root or a folder in `%SystemRoot%`, `%ProgramFiles%`, `%ProgramFiles(x86)%` or `%ProgramData%`, on `SYSVOL`, `NETLOGON` or `PRINT$`, or with a junction or symbolic link inside that leads into one, or of a `Users` folder (or this computer's profiles folder) or anything in `System Volume Information` or `$Recycle.Bin`, which is refused otherwise (see above) |
 | `-WhatIf` | — | Show what would be changed and change nothing |
 
 Before taking ownership it prints what will change with `[WARN]` (how many items: the folder is
@@ -518,7 +668,8 @@ After the owner list the script names the subfolders that block inheritance. A s
 permissions it cannot read is counted as "could not be checked" (it may block inheritance too),
 so check those by hand.
 
-A drive root or a Windows folder is refused straight away, before any question, with one
+A drive root, a Windows folder, a `Users` folder, or anything in `System Volume Information` or
+`$Recycle.Bin` is refused straight away, before any question, with one
 `[FAIL]` line that names the folder and `-AllowSystemFolder`, and exit code `1`. Nothing is
 counted, saved or changed. A junction or symbolic link inside the folder that leads into one is
 refused the same way once the folder has been counted, before any question: the `[FAIL]` line

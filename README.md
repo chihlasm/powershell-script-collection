@@ -71,7 +71,7 @@ handed out, so it always matches this repository.
 | Folder | What it does |
 |---|---|
 | [FolderAccess-Check](FolderAccess-Check/) | Can this user open this folder? Share and folder permissions walked the way Windows does, with a hedged verdict and next steps |
-| [FolderPermissionManager](FolderPermissionManager/) | Browser GUI for NTFS permissions |
+| [FolderPermissionManager](FolderPermissionManager/) | Windows app for NTFS permissions: view, change with backup and change log |
 | [RobocopyMigration](RobocopyMigration/) | GUI for server-to-server file migrations |
 | [CopyFileToServer](CopyFileToServer/) | GUI to copy files to many servers |
 | [DeleteOldFolders](DeleteOldFolders/) | Delete `.old` folders past an age |
@@ -518,22 +518,23 @@ For full documentation, see [Get-CitrixSessions/README.md](Get-CitrixSessions/RE
 
 ## FolderPermissionManager
 
-**Description**: A PowerShell script for managing permissions on folders and their sub-folders. It takes ownership of a folder and everything under it and shows the current permissions. It asks before taking ownership, and the change is backed up and logged (same change log as the GUI). It does not change permissions. To give someone access, add it on the folder they need: everything inside it that inherits gets it too (on a share root, that is everything below). The script names the sub-folders that block inheritance, which do not get it; see [FolderPermissionManager/README.md](FolderPermissionManager/README.md) for the `icacls` command to use without a browser.
+**Description**: A PowerShell script for managing permissions on folders and their sub-folders. It takes ownership of a folder and everything under it, shows the current permissions, and copies the top-level folder's permissions to all sub-folders. It asks before each change, and every change is backed up and logged (same change log as the GUI).
 
 **Parameters**:
 - `-Path <string>` (Optional): The path to the top-level folder. If not provided, the script will prompt for it.
 - `-LogFolder <string>` (Optional): Where backups and the change log go. Defaults to `Logs` next to the script.
-- `-Force` (Optional): Do not ask before taking ownership. Needed, or `-WhatIf`, on a host that cannot ask (a scheduled task or `-NonInteractive`).
+- `-Force` (Optional): Do not ask before taking ownership or copying permissions.
 - `-WhatIf` (Optional): Show what would be changed; nothing is changed, backed up or logged.
 
 **Usage Examples**:
 - Dry run: `.\FolderPermissionManager\FolderPermissionManager.ps1 -Path "C:\SharedFolder" -WhatIf`
-- Run with path (asks before taking ownership): `.\FolderPermissionManager\FolderPermissionManager.ps1 -Path "C:\SharedFolder"`
+- Run with path (asks before each step): `.\FolderPermissionManager\FolderPermissionManager.ps1 -Path "C:\SharedFolder"`
 - Run without path (prompts): `.\FolderPermissionManager\FolderPermissionManager.ps1`
 
 **Notes**:
 - Run from an elevated PowerShell session (checked at start). PowerShell 3.0 or later.
-- The owner of every item is saved before ownership is taken; see "Undo a change" in [FolderPermissionManager/README.md](FolderPermissionManager/README.md).
+- The owner of every item is saved before ownership is taken, and the permissions of every sub-folder before they are copied; see "Undo a change" in [FolderPermissionManager/README.md](FolderPermissionManager/README.md).
+- Copying permissions adds the top-level folder's access rules to sub-folders without removing existing permissions.
 - Test on a small folder first to understand the behavior.
 
 ## FSLogix-Profile-Backup

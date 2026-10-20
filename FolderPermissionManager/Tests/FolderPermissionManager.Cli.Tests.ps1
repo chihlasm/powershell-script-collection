@@ -56,6 +56,10 @@ BeforeAll {
         throw "Get-NetworkDriveRemoteName ($Letter) was called without a mock in a test."
     }
     Mock Resolve-NetworkDrivePath { $Path }
+    # Backstop: the high-impact-root check reads this computer's profiles folder
+    # (GetProfilesDirectoryW). Tests never read the real machine, so it is always C:\Users
+    # here unless a test mocks it otherwise.
+    Mock Get-AppProfilesDirectory { 'C:\Users' }
 }
 
 Describe 'FolderPermissionManager.ps1 (command line)' {
@@ -150,13 +154,13 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         $script:Prompts[0] | Should -Be 'Continue? (y/N)'
         $scope = @($script:Lines | Where-Object { $_ -like '`[WARN`] Taking ownership makes *' })
         $scope.Count | Should -Be 1
-        $scope[0] | Should -BeLike "*the owner of 3 item(s): $($script:Dir) and every subfolder and file under it*"
+        $scope[0] | Should -BeLike "*the owner of 3 items: $($script:Dir) and every subfolder and file under it*"
     }
 
     It 'AC19_Cli_WhatIf_ShowsTheItemCount' {
         Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log -WhatIf
 
-        @($script:Lines | Where-Object { $_ -like '`[WARN`] Taking ownership makes * 3 item(s): *' }).Count | Should -Be 1
+        @($script:Lines | Where-Object { $_ -like '`[WARN`] Taking ownership makes * 3 items: *' }).Count | Should -Be 1
         Should -Invoke Read-Host -Times 0 -Exactly -Scope It
     }
 
@@ -169,7 +173,7 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         $result = @($script:Lines | Where-Object { $_ -match '^\[(PASS|WARN|FAIL)\] Took ownership' })
         $result.Count | Should -Be 1
         $result[0] | Should -Match '^\[WARN\] '
-        $result[0] | Should -BeLike "*Escalate: 1 folder(s) could not be opened, so they were left alone. Not opened: $locked.*cannot be restored from this backup*"
+        $result[0] | Should -BeLike "*Escalate: 1 folder could not be opened, so it was left alone. Not opened: $locked.*cannot be restored from this backup*"
     }
 
     It 'AC17_Cli_ExitCodeIsOneWhenOwnershipIsPartlyDoneOrFailed' -ForEach @(
@@ -212,7 +216,7 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
 
         $scope = @($script:Lines | Where-Object { $_ -like '`[WARN`] Taking ownership makes *' })
         $scope.Count | Should -Be 1
-        $scope[0] | Should -BeLike "*1 folder(s) cannot be opened, so they are skipped and left alone: $locked.*"
+        $scope[0] | Should -BeLike "*1 folder cannot be opened, so it is skipped and left alone: $locked.*"
         $scope[0] | Should -Not -Match 'full control'
         $code | Should -Be 1 -Because 'a folder that could not be opened leaves the result incomplete'
         @(Get-ChildItem -LiteralPath (Join-Path $script:Log 'Backups') -Filter '*_TakeOwnership_Permissions.csv').Count | Should -Be 0
@@ -226,7 +230,7 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         $null = Invoke-FolderPermissionCli -Path $script:Dir -LogFolder $script:Log -WhatIf
 
         $scope = @($script:Lines | Where-Object { $_ -like '`[WARN`] Taking ownership makes *' })
-        $scope[0] | Should -BeLike "*1 folder(s) cannot be opened, so they are skipped and left alone: $locked.*"
+        $scope[0] | Should -BeLike "*1 folder cannot be opened, so it is skipped and left alone: $locked.*"
         $scope[0] | Should -Not -Match 'lost'
     }
 
@@ -255,8 +259,8 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
 
         $code | Should -Be 1
         $scope = @($script:Lines | Where-Object { $_ -like '`[WARN`] Taking ownership makes *' })
-        $scope[0] | Should -BeLike "*It contains 1 junction(s) or symbolic link(s), which are listed but not gone into. Microsoft's documentation does not say whether takeown and icacls follow them*$link*"
-        @($script:Lines | Where-Object { $_ -like '`[WARN`] Took ownership*1 junction(s) or symbolic link(s)*' }).Count | Should -Be 1
+        $scope[0] | Should -BeLike "*It contains 1 junction or symbolic link, which is listed but not gone into. Microsoft's documentation does not say whether takeown and icacls follow them*$link*"
+        @($script:Lines | Where-Object { $_ -like '`[WARN`] Took ownership*1 junction or symbolic link (*) was listed*' }).Count | Should -Be 1
     }
 
     It 'AC20_Cli_SaysHowToRecogniseAnInterruptedRunBeforeTakingOwnership' {
@@ -307,7 +311,7 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         $code | Should -Be 1
         $result = @($script:Lines | Where-Object { $_ -match '^\[WARN\] Partly done' })
         $result.Count | Should -Be 1
-        $result[0] | Should -Match ([regex]::Escape('Escalate: 1 folder(s) could not be opened, so they were left alone.'))
+        $result[0] | Should -Match ([regex]::Escape('Escalate: 1 folder could not be opened, so it was left alone.'))
         $result[0] | Should -Match ([regex]::Escape($locked))
         $scope = @($script:Lines | Where-Object { $_ -like '`[WARN`] Taking ownership makes *' })
         $scope.Count | Should -Be 1
@@ -370,6 +374,54 @@ Describe 'FolderPermissionManager.ps1 (command line)' {
         $refusedCode | Should -Be 1
         $refusedLines.Count | Should -Be 1
         $refusedLines[0] | Should -Match ([regex]::Escape($dir))
+        $refusedLines[0] | Should -Match '-AllowSystemFolder'
+        $allowedCode | Should -Be 0
+        Should -Invoke Invoke-AclTool -Times 1 -Exactly -Scope It -ParameterFilter { $Tool -eq 'takeown' }
+    }
+
+    # SQ-018 revision (AC53a): the CLI refuses the high-impact roots before asking.
+    It 'SQ018_Cli_HighImpactRoot_<Path>_IsRefusedWithAFailLine' -ForEach @(
+        @{ Path = 'C:\Users' }
+        @{ Path = '\\fs01\D$\Users' }
+    ) {
+        # Only the high-impact check is under test: nothing about the real folder is read.
+        $script:HighImpactPath = $Path
+        Mock Test-Path { $true } -ParameterFilter { $LiteralPath -eq $script:HighImpactPath }
+        Mock Get-TreeOwnershipTargetRefusal { $null }
+        Mock Get-OwnerTreeItem { throw 'the folder must not be counted (test)' }
+        Mock Save-OwnerSnapshot { throw 'snapshot must not be taken (test)' }
+
+        $code = Invoke-FolderPermissionCli -Path $Path -LogFolder $script:Log -Force
+
+        $code | Should -Be 1
+        $fail = @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' })
+        $fail.Count | Should -Be 1
+        $fail[0] | Should -Match ([regex]::Escape($Path))
+        $fail[0] | Should -Match 'user profile'
+        $fail[0] | Should -Match '-AllowSystemFolder'
+        $fail[0] | Should -Match 'Nothing was changed'
+        Should -Invoke Get-OwnerTreeItem -Times 0 -Exactly -Scope It
+        Should -Invoke Save-OwnerSnapshot -Times 0 -Exactly -Scope It
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+    }
+
+    It 'SQ018_Cli_FolderIn<Name>_IsRefusedUnlessAllowSystemFolder' -ForEach @(
+        @{ Name = 'System Volume Information' }
+        @{ Name = '$Recycle.Bin' }
+    ) {
+        $dir = Join-Path (Join-Path (Join-Path $TestDrive ('cli-hi-' + [guid]::NewGuid().ToString('N'))) $Name) 'S-1-5-21-1-2-3-1001'
+        New-Item -ItemType Directory -Path (Join-Path $dir 'sub') -Force | Out-Null
+
+        $refusedCode = Invoke-FolderPermissionCli -Path $dir -LogFolder $script:Log -Force
+        $refusedLines = @($script:Lines | Where-Object { $_ -like '`[FAIL`] *' })
+        Should -Invoke Invoke-AclTool -Times 0 -Exactly -Scope It
+        $script:Lines.Clear()
+
+        $allowedCode = Invoke-FolderPermissionCli -Path $dir -LogFolder $script:Log -Force -AllowSystemFolder
+
+        $refusedCode | Should -Be 1
+        $refusedLines.Count | Should -Be 1
+        $refusedLines[0] | Should -Match ([regex]::Escape($Name))
         $refusedLines[0] | Should -Match '-AllowSystemFolder'
         $allowedCode | Should -Be 0
         Should -Invoke Invoke-AclTool -Times 1 -Exactly -Scope It -ParameterFilter { $Tool -eq 'takeown' }
@@ -663,7 +715,7 @@ Describe 'FolderPermissionManager.ps1 (command line): DFS targets, unresolvable 
             $scope.Count | Should -Be 1
             $scope[0] | Should -Match 'DFS link'
             $scope[0] | Should -Match ([regex]::Escape($script:DfsLink))
-            $scope[0] | Should -Not -Match ([regex]::Escape('junction(s) or symbolic link(s)'))
+            $scope[0] | Should -Not -Match 'junctions? or symbolic links?'
             # The "[INFO] ... are skipped" line came from the copy-to-subfolders step, which D-035
             # removed from the CLI, so it is no longer asserted here.
         }

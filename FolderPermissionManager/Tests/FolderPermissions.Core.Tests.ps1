@@ -47,6 +47,10 @@ BeforeAll {
         throw "Get-NetworkDriveRemoteName ($Letter) was called without a mock in a test."
     }
     Mock Resolve-NetworkDrivePath { $Path }
+    # Backstop: the high-impact-root check reads this computer's profiles folder
+    # (GetProfilesDirectoryW). Tests never read the real machine, so it is always C:\Users
+    # here unless a test mocks it otherwise.
+    Mock Get-AppProfilesDirectory { 'C:\Users' }
 
     # The real cmdlet object: Pester mocks also intercept the module-qualified name.
     $script:RealGetAcl = Get-Command Get-Acl -CommandType Cmdlet
@@ -474,7 +478,7 @@ Describe 'FolderPermissions.Core' {
             $saved = @(Import-Csv -LiteralPath (Get-BackupFiles $log)[0].FullName)
             $saved[0].Sddl | Should -Be 'Could not read'
             Get-ChangeResultMessage -Entries $rows -LogPath 'C:\log.csv' -LogFolder $log |
-                Should -BeLike '*1 item(s) had no readable permissions before the change and cannot be restored from this backup.*'
+                Should -BeLike '*1 item had no readable permissions before the change and cannot be restored from this backup.*'
         }
     }
 
