@@ -254,9 +254,47 @@ Windows app has no Robocopy tab and no "Copy Files To...".
 | `-LogFolder` | `Logs` next to the script | Where permission backups and the change log go (see below) |
 | `-WhatIf` | | Dry run: the window says nothing will be changed |
 | `-DriveMap` | | Used by the tool itself when it opens again as administrator; leave it out |
+| `-SmokeTest` | | Checks the tool starts, then closes by itself (see "Smoke test" below) |
 
 Requires Windows PowerShell 5.1 (or PowerShell 7 on Windows). Keep
 `FolderPermissions.Core.ps1` in the same folder.
+
+#### Smoke test
+
+`-SmokeTest` checks that a copy of the tool starts on this computer (for example after copying
+it from the bundle) without anyone clicking anything. The real window is built and drawn
+off-screen (it never shows up on a monitor or in the taskbar and does not take the focus), a
+small check runs in the background workers, and the window closes by itself. It then prints one
+line, `[PASS] FolderPermissionManager-GUI.ps1: the window opened and closed by itself (render
+<n> ms, background check <n> ms)`, or a `[FAIL]` line per problem: the window did not render
+within 30 seconds, the background check failed or did not come back, or a message box, an error
+or a change would have happened.
+
+It asks for no administrator rights (no UAC prompt), takes no single-instance lock (an open
+window is not disturbed), lists no drives and reads no drive mappings, OneDrive folders or
+settings, and writes no file: no `Logs` folder, no probe file, no `settings.json`, no
+`gui-errors.log`. It refuses `-LogFolder` and `-DriveMap`; `-WhatIf` is allowed. It needs a
+single-threaded apartment (`powershell.exe -STA`).
+
+```powershell
+powershell.exe -NoProfile -STA -File .\FolderPermissionManager-GUI.ps1 -SmokeTest
+```
+
+From the repository root, the runner starts it with a time limit and checks the result:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Tests\Invoke-SmokeTest.ps1
+```
+
+| Exit code | App (`-SmokeTest`) | Runner (`Tests\Invoke-SmokeTest.ps1`) |
+|-----------|--------------------|---------------------------------------|
+| 0 | Passed | Every app passed (exit code 0 and its `[PASS]` line) |
+| 1 | Failed (the `[FAIL]` lines say why) | An app failed, or ended without a `[PASS]` line |
+| 2 | | An app did not close by itself within the runner's time limit (`-TimeoutSeconds`, default 90); it was ended |
+
+The runner lists the last 20 output lines of an app that did not close. What it cannot see:
+anything after the first render (listing drives, opening folders, changes), and anything that
+only happens when the tool runs as administrator.
 
 ### FolderPermissionManager-WebGUI.ps1 (browser version, kept until the Windows app is lab-tested)
 
