@@ -118,6 +118,38 @@ BeforeAll {
     }
 
     function Get-Reason($A, [string]$Code) { @($A.Reasons | Where-Object { $_.Code -eq $Code })[0] }
+
+    # SQ-019: the next-step checker. Returns the reason a step fails, or $null when it passes.
+    # A step that undoes a block, or mentions the block marker, must put an escalation before
+    # the first such word. A step that only turns a plain disabled account back on (no marker,
+    # only enable / re-enable / unblock) must put the manager check AND the approver note
+    # before the first such word (D-050). The four password steps are exempt by exact string.
+    $script:ReversalPattern = '\b(remov\w*|delet\w*|clear\w*|undo\w*|undoing|change it|unblock\w*|re-?enable\w*|enable|reset)\b'
+    $script:MarkerPattern = 'block marker|BlockCloudSignIn|cloudExtensionAttribute10'
+    $script:EscalationPhrases = 'Escalate', 'Check with the senior engineer', 'Ask the senior engineer', 'involve the security lead'
+    $script:ManagerPhrase = 'Check with their manager'
+    $script:ApproverNote = 'note on the ticket who approved'
+    $script:PasswordSteps = @(foreach ($c in 50055, 50126) { foreach ($sy in $true, $false) { Get-M365SignInNextStep -Code $c -Synced $sy } })
+    function Test-M365StepNeedsApproval {
+        param([string]$Step)
+        if ($script:PasswordSteps -ccontains $Step) { return $null }
+        $rev = @([regex]::Matches($Step, $script:ReversalPattern, 'IgnoreCase'))
+        $mk = @([regex]::Matches($Step, $script:MarkerPattern, 'IgnoreCase'))
+        $all = @($rev + $mk)
+        if ($all.Count -eq 0) { return $null }
+        $first = ($all | Measure-Object -Property Index -Minimum).Minimum
+        foreach ($e in $script:EscalationPhrases) {
+            $i = $Step.IndexOf($e, [StringComparison]::OrdinalIgnoreCase)
+            if ($i -ge 0 -and $i -lt $first) { return $null }
+        }
+        if ($mk.Count -eq 0 -and @($rev | Where-Object { $_.Value -notmatch '^(enable|re-?enable|unblock)$' }).Count -eq 0) {
+            $m = $Step.IndexOf($script:ManagerPhrase, [StringComparison]::OrdinalIgnoreCase)
+            $n = $Step.IndexOf($script:ApproverNote, [StringComparison]::OrdinalIgnoreCase)
+            if ($m -ge 0 -and $m -lt $first -and $n -ge 0 -and $n -lt $first) { return $null }
+            return "turns an account back on without the manager check and the approver note first: $Step"
+        }
+        return "undoes a block or names the block marker without an escalation first: $Step"
+    }
     function Get-ReasonText($R) { '{0} {1}' -f $R.Message, $R.Action }
 }
 
@@ -810,6 +842,11 @@ Describe 'SQ-011 on-premises comparison, pure assessment' {
         $scenarios.Add((New-HybridFacts @{ AdUser = (New-AdUser @{ UserPrincipalName = 'jane.doe@contoso.com' }) }))
         $scenarios.Add((New-HybridFacts @{ AdMatchedBy = 'UserPrincipalName' }))
         $scenarios.Add((New-HybridFacts @{ AddressConflicts = @($holder) }))
+        # SQ-019: the four routes into the synced "could not compare with AD" fallback.
+        $scenarios.Add((New-Facts @{ User = (New-User @{ accountEnabled = $false; onPremisesSyncEnabled = $true }) }))
+        $scenarios.Add((New-HybridFacts @{ OnPremisesGate = (New-AdGate -State NotChecked -Reason 'skipped with -SkipOnPremises'); AdUser = $null } @{ accountEnabled = $false }))
+        $scenarios.Add((New-HybridFacts @{ OnPremisesGate = (New-AdGate -State Failed -Reason 'no domain controller answered'); AdUser = $null } @{ accountEnabled = $false }))
+        $scenarios.Add((New-HybridFacts @{ AdUser = $null } @{ accountEnabled = $false }))
 
         $reasons = @(foreach ($f in $scenarios) { @((Get-M365UserAssessment -Facts $f).Reasons) })
         $produced = @($reasons | ForEach-Object Code | Sort-Object -Unique)
@@ -817,8 +854,8 @@ Describe 'SQ-011 on-premises comparison, pure assessment' {
 
         # The next steps shown outside a reason (Could not check), too.
         $actions = @($reasons | ForEach-Object Action) + $script:M365NoSignInHistoryStep + $script:M365AddressCheckStep
-        foreach ($a in @($actions | Where-Object { $_ -match '(?i)\b(remov|delet)' })) {
-            $a | Should -Match '^(Escalate|Check with the senior engineer)' -Because 'D-017: tier 1 never sees a removal or deletion step'
+        foreach ($a in @($actions | Where-Object { $_ })) {
+            Test-M365StepNeedsApproval $a | Should -BeNullOrEmpty -Because 'D-017 / D-050: tier 1 never sees a step that undoes a block, or turns an account back on, without the check first'
         }
     }
 
@@ -994,6 +1031,199 @@ Describe 'SQ-011 on-premises comparison, pure assessment' {
     It 'Edge_ExistingFactsWithoutAdKeys: Facts built before SQ-011 (no OnPremisesGate/AdUser keys) still assess' {
         $a = Get-M365UserAssessment -Facts (New-Facts)
         $a.Verdict | Should -Be 'YES'
+    }
+}
+
+Describe 'SQ-019 next steps never undo a block without a check' {
+    BeforeAll {
+        $script:Sid = 'S-1-5-21-1111111111-2222222222-3333333333-1105'
+        # Same fixtures as the SQ-011 pure-assessment Describe (a Describe's BeforeAll is not
+        # visible to its siblings).
+        function New-AdUser {
+            param([hashtable]$Set = @{})
+            $a = @{
+                Enabled = $true; UserPrincipalName = 'jdoe@contoso.com'; mail = 'jdoe@contoso.com'
+                proxyAddresses = @('SMTP:jdoe@contoso.com'); SamAccountName = 'jdoe'
+                DistinguishedName = 'CN=Jane Doe,OU=Staff,DC=contoso,DC=com'; pwdLastSet = 133700000000000000
+                'msDS-cloudExtensionAttribute10' = $null
+            }
+            foreach ($k in $Set.Keys) { $a[$k] = $Set[$k] }
+            return $a
+        }
+        function New-AdGate { param([string]$State = 'Available', [string]$Reason) New-M365Gate -Source 'On-premises AD' -State $State -Reason $Reason }
+        function New-HybridFacts {
+            param([hashtable]$Override = @{}, [hashtable]$UserSet = @{})
+            $s = @{ onPremisesSyncEnabled = $true; onPremisesSecurityIdentifier = $script:Sid; onPremisesProvisioningErrors = @() }
+            foreach ($k in $UserSet.Keys) { $s[$k] = $UserSet[$k] }
+            $o = @{
+                User = (New-User $s); OnPremisesGate = (New-AdGate); AdUser = (New-AdUser); AdMatchedBy = 'SID'
+                AddressConflicts = @(); TenantLastSync = ($script:Now - (New-TimeSpan -Minutes 20)).ToString('yyyy-MM-ddTHH:mm:ssZ')
+            }
+            foreach ($k in $Override.Keys) { $o[$k] = $Override[$k] }
+            return (New-Facts $o)
+        }
+        function Get-BlockedAction($Facts) { (Get-Reason (Get-M365UserAssessment -Facts $Facts) 'SignInBlocked').Action }
+
+        # The four routes into the synced "could not compare with AD" fallback (AC1).
+        $script:NoAdCases = [ordered]@{
+            'no OnPremisesGate (SQ-002 shape)' = (New-Facts @{ User = (New-User @{ accountEnabled = $false; onPremisesSyncEnabled = $true }) })
+            'gate NotChecked (-SkipOnPremises)' = (New-HybridFacts @{ OnPremisesGate = (New-AdGate -State NotChecked -Reason 'skipped with -SkipOnPremises'); AdUser = $null } @{ accountEnabled = $false })
+            'gate Failed' = (New-HybridFacts @{ OnPremisesGate = (New-AdGate -State Failed -Reason 'no domain controller answered'); AdUser = $null } @{ accountEnabled = $false })
+            'gate Available, AdUser null' = (New-HybridFacts @{ AdUser = $null } @{ accountEnabled = $false })
+        }
+
+        # What the new texts must look like (D-050 wording for the re-enable steps). Accepted by
+        # the checker on their own, so AC8 can show the checker is not simply rejecting everything.
+        $script:NewNoAdText = 'Check with the senior engineer before undoing this block. The account syncs from on-premises AD, so the block comes from there: either the AD account is disabled, or it was blocked on purpose with M365-SyncedUserFixes (block marker msDS-cloudExtensionAttribute10 = BlockCloudSignIn). This check could not compare it with the AD account: run it again where it can read AD (on a client server, or with -Server and -Credential) to see which.'
+        $script:NewAdDisabledText = 'Check with their manager that the account should be back in use, note on the ticket who approved it, then enable it in on-premises AD (AD-UserQuickCheck shows its state) and wait for the next sync: the AD account is disabled, and sync carries that to Microsoft 365.'
+        $script:NewAdDisabledCloudEnabledText = 'Check with their manager whether they should still be able to sign in. If not (a leaver), Microsoft 365 blocks sign-in at the next sync: The tenant last received changes from on-premises AD at 2026-10-17 13:40 UTC. If it stays allowed after that, check the Entra Connect server. If they should, note on the ticket who approved it, then enable the AD account (AD-UserQuickCheck shows its state).'
+    }
+
+    It 'SQ019_AC1_NoAdSyncedBlockedEscalates: a synced, blocked user the AD comparison did not explain -> "Check with the senior engineer", names on-premises AD, M365-SyncedUserFixes and -Server, never "Change it" (all four no-AD routes)' {
+        foreach ($case in $script:NoAdCases.Keys) {
+            $r = Get-Reason (Get-M365UserAssessment -Facts $script:NoAdCases[$case]) 'SignInBlocked'
+            $r | Should -Not -BeNullOrEmpty -Because $case
+            $r.Action | Should -Match '^Check with the senior engineer' -Because $case
+            $r.Action | Should -Match 'on-premises AD' -Because $case
+            $r.Action | Should -Match 'M365-SyncedUserFixes' -Because $case
+            $r.Action | Should -Match '-Server' -Because $case
+            $r.Action | Should -Not -Match 'Change it' -Because "$case : the old line-829 text told tier 1 to change it on their own"
+        }
+    }
+
+    It 'SQ019_AC2_AdDisabledBlockedNeedsManagerCheck: synced, blocked in Microsoft 365, AD account disabled, no marker -> manager check, then the approver note, then enable it in on-premises AD and wait for the next sync' {
+        $a = Get-BlockedAction (New-HybridFacts @{ AdUser = (New-AdUser @{ Enabled = $false }) } @{ accountEnabled = $false })
+        $a | Should -Match '^Check with their manager'
+        $a | Should -Match '(?s)^Check with their manager.*note on the ticket who approved.*\benable\b.*on-premises AD.*next sync'
+        Test-M365StepNeedsApproval $a | Should -BeNullOrEmpty
+    }
+
+    It 'SQ019_AC3_AdDisabledCloudEnabledNeedsManagerCheck: AD disabled, Microsoft 365 allows sign-in -> manager check first, last-sync sentence, leaver and Entra Connect advice, the approver note before "enable"; Warning level and Message unchanged' {
+        $r = Get-Reason (Get-M365UserAssessment -Facts (New-HybridFacts @{ AdUser = (New-AdUser @{ Enabled = $false }) })) 'AdDisabledCloudEnabled'
+        $r | Should -Not -BeNullOrEmpty
+        $r.Level | Should -Be 'Warning'
+        $r.Message | Should -BeExactly 'On-premises AD has this account disabled, but Microsoft 365 still allows sign-in: AD and Microsoft 365 disagree, and sync normally carries the AD state across.'
+        $r.Action | Should -Match '^Check with their manager'
+        $r.Action | Should -Match '2026-10-17 13:40 UTC'
+        $r.Action | Should -Match '(?i)leaver'
+        $r.Action | Should -Match 'next sync'
+        $r.Action | Should -Match 'Entra Connect'
+        $approver = $r.Action.IndexOf('note on the ticket who approved', [StringComparison]::OrdinalIgnoreCase)
+        $enable = [regex]::Match($r.Action, '(?i)\benable\b')
+        $approver | Should -BeGreaterThan 0 -Because 'D-050: the approver is noted on the ticket'
+        $enable.Success | Should -BeTrue
+        $enable.Index | Should -BeGreaterThan $approver -Because 'the instruction to enable the AD account comes after the manager phrase and the approver note'
+        Test-M365StepNeedsApproval $r.Action | Should -BeNullOrEmpty
+    }
+
+    It 'SQ019_AC4_Error50057NeedsManagerCheck: 50057 synced puts the manager check and the approver note before "enable" and names the senior engineer for a block set with M365-SyncedUserFixes; cloud-only 50057 gets the approver note before "unblock"' {
+        $s = Get-M365SignInNextStep -Code 50057 -Synced $true
+        $manager = $s.IndexOf('check with their manager', [StringComparison]::OrdinalIgnoreCase)
+        $approver = $s.IndexOf('note on the ticket who approved', [StringComparison]::OrdinalIgnoreCase)
+        $enable = [regex]::Match($s, '(?i)\benable\b')
+        $manager | Should -BeGreaterOrEqual 0
+        $approver | Should -BeGreaterOrEqual 0 -Because 'D-050'
+        $enable.Index | Should -BeGreaterThan $manager
+        $enable.Index | Should -BeGreaterThan $approver
+        $s | Should -Match 'M365-SyncedUserFixes'
+        $s | Should -Match '(?i)senior engineer'
+        Test-M365StepNeedsApproval $s | Should -BeNullOrEmpty
+
+        $c = Get-M365SignInNextStep -Code 50057 -Synced $false
+        $c | Should -Match '^The account is disabled\. Check with their manager'
+        $c.IndexOf('note on the ticket who approved', [StringComparison]::OrdinalIgnoreCase) | Should -BeGreaterThan 0 -Because 'D-050 amends the cloud-only step too'
+        Test-M365StepNeedsApproval $c | Should -BeNullOrEmpty
+    }
+
+    It 'SQ019_AC5_EnabledMismatchStepDropsMarkerWording: AD enabled, Microsoft 365 blocked, no marker -> still points to "AD and Microsoft 365 disagree", no block-marker wording' {
+        $a = Get-BlockedAction (New-HybridFacts @{} @{ accountEnabled = $false })
+        $a | Should -Match 'AD and Microsoft 365 disagree'
+        $a | Should -Not -Match $script:MarkerPattern
+        $a | Should -Match 'not blocked on purpose with M365-SyncedUserFixes'
+    }
+
+    It 'SQ019_AC6_NoReversalStepWithoutApproval: the no-AD cases, the AdDisabledCloudEnabled case, the two fixed steps and every mapped code (synced and cloud-only) pass the checker; the full reason sweep is D017_NoRemovalStepForTier1' {
+        $actions = New-Object System.Collections.Generic.List[string]
+        foreach ($case in $script:NoAdCases.Keys) { $actions.Add((Get-BlockedAction $script:NoAdCases[$case])) }
+        $actions.Add((Get-Reason (Get-M365UserAssessment -Facts (New-HybridFacts @{ AdUser = (New-AdUser @{ Enabled = $false }) })) 'AdDisabledCloudEnabled').Action)
+        $actions.Add($script:M365NoSignInHistoryStep)
+        $actions.Add($script:M365AddressCheckStep)
+        foreach ($code in 50053, 50055, 50057, 50126, 53003, 530035) { foreach ($sync in $false, $true) { $actions.Add((Get-M365SignInNextStep -Code $code -Synced $sync)) } }
+        $actions.Count | Should -Be 19
+        foreach ($step in $actions) { Test-M365StepNeedsApproval $step | Should -BeNullOrEmpty }
+    }
+
+    It 'SQ019_AC7_PasswordStepsPinned: exactly four exempt steps (50055 and 50126, synced and cloud-only), each reaching the reversal pattern only through "reset" / "change it"' {
+        $script:PasswordSteps.Count | Should -Be 4
+        @($script:PasswordSteps | Sort-Object -Unique).Count | Should -Be 4
+        foreach ($step in $script:PasswordSteps) {
+            $hits = @([regex]::Matches($step, $script:ReversalPattern, 'IgnoreCase') | ForEach-Object { $_.Value.ToLowerInvariant() } | Sort-Object -Unique)
+            $hits.Count | Should -BeGreaterThan 0
+            @($hits | Where-Object { $_ -notin 'reset', 'change it' }).Count | Should -Be 0 -Because "password wording only: $step"
+        }
+        # Exempt by exact string, not by pattern: a near-copy is not exempt.
+        Test-M365StepNeedsApproval ($script:PasswordSteps[0] + ' Reset it.') | Should -Not -BeNullOrEmpty
+        Test-M365StepNeedsApproval 'If they cannot remember it, reset it.' | Should -Not -BeNullOrEmpty
+    }
+
+    It 'SQ019_AC8_CheckerIsNotVacuous: rejects the old line-829, AdDisabledCloudEnabled and line-680 texts and the bad samples; accepts the new AC1, AC2 and AC3 texts, and the texts the core produces' {
+        $bad = @(
+            'This account syncs from on-premises AD, so the block comes from there: check whether the AD account is disabled (AD-UserQuickCheck), or whether it carries the M365-SyncedUserFixes block marker (msDS-cloudExtensionAttribute10 = BlockCloudSignIn). Change it in on-premises AD if it is wrong, then wait for the next sync.'
+            'The tenant last received changes from on-premises AD at 2026-10-17 13:40 UTC. If they should be able to sign in, enable the AD account (AD-UserQuickCheck shows its state).'
+            'The on-premises AD account is disabled, and sync carries that to Microsoft 365. If it should be in use, enable it in AD (AD-UserQuickCheck shows its state), then wait for the next sync.'
+            'Clear the marker and wait for the next sync.'
+            'Undo the block in AD.'
+            'Check with their manager, then remove the block marker.'
+            'Reset the sign-in block.'
+            # D-050: the manager phrase without the approver note is not enough.
+            'Check with their manager that the account should be back in use, then enable it in on-premises AD and wait for the next sync.'
+        )
+        foreach ($b in $bad) { Test-M365StepNeedsApproval $b | Should -Not -BeNullOrEmpty -Because "known-bad: $b" }
+
+        foreach ($g in $script:NewNoAdText, $script:NewAdDisabledText, $script:NewAdDisabledCloudEnabledText) { Test-M365StepNeedsApproval $g | Should -BeNullOrEmpty -Because $g }
+
+        # The status text must not trip the checker: "enabled" / "enabling" are not "enable".
+        Test-M365StepNeedsApproval 'On-premises AD has the account enabled, so enabling it again changes nothing.' | Should -BeNullOrEmpty
+
+        # The texts the core produces must be accepted ones, not the old ones.
+        $produced = @(
+            (Get-BlockedAction $script:NoAdCases['gate Failed'])
+            (Get-BlockedAction (New-HybridFacts @{ AdUser = (New-AdUser @{ Enabled = $false }) } @{ accountEnabled = $false }))
+            (Get-Reason (Get-M365UserAssessment -Facts (New-HybridFacts @{ AdUser = (New-AdUser @{ Enabled = $false }) })) 'AdDisabledCloudEnabled').Action
+        )
+        foreach ($p in $produced) { Test-M365StepNeedsApproval $p | Should -BeNullOrEmpty -Because $p }
+    }
+
+    It 'SQ019_AC9_ReadmeStepsMatch: every "What to do" cell in the two reason tables passes the checker; the blocked row, the cloud-only part and the new AdDisabledCloudEnabled row say the right things' {
+        $lines = Get-Content -LiteralPath (Join-Path $script:Root 'README.md')
+        $sections = 'What each reason means', 'Is it a sync problem?'
+        $rows = New-Object System.Collections.Generic.List[object]
+        $inSection = $false
+        foreach ($line in $lines) {
+            if ($line -match '^## ') { $inSection = @($sections | Where-Object { $line -match [regex]::Escape($_) }).Count -gt 0; continue }
+            if (-not $inSection -or $line -notmatch '^\|') { continue }
+            $cells = @($line.Trim().Trim('|').Split('|') | ForEach-Object { $_.Trim() })
+            if ($cells.Count -ne 3 -or $cells[0] -eq 'You see' -or $cells[0] -match '^-+$') { continue }
+            $rows.Add([PSCustomObject]@{ See = $cells[0]; Means = $cells[1]; Todo = $cells[2] })
+        }
+        $rows.Count | Should -BeGreaterThan 15
+
+        foreach ($row in $rows) { Test-M365StepNeedsApproval $row.Todo | Should -BeNullOrEmpty -Because "README row '$($row.See)'" }
+
+        $blocked = @($rows | Where-Object { $_.See -eq 'Sign-in is blocked' })
+        $blocked.Count | Should -Be 1
+        $todo = $blocked[0].Todo
+        $todo | Should -Match '(?i)check with the senior engineer before undoing'
+        $todo | Should -Match '(?i)run the check .*where it can read AD'
+        $todo | Should -Match '(?i)which kind of block'
+        $todo | Should -Match 'Cloud-only user: Check with their manager'
+        $todo | Should -Match 'note on the ticket who approved'
+
+        $disabled = @($rows | Where-Object { $_.See -eq 'AD has the account disabled, Microsoft 365 still allows sign-in (warning)' })
+        $disabled.Count | Should -Be 1 -Because 'a new row carries the AC3 advice'
+        $disabled[0].Todo | Should -Match '^Check with their manager'
+        $disabled[0].Todo | Should -Match 'note on the ticket who approved'
+        $disabled[0].Todo | Should -Match 'Entra Connect'
     }
 }
 
