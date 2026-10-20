@@ -924,7 +924,11 @@ function Get-M365UserAssessment {
                 if ($null -eq $step) {
                     Add-Reason 'Probable' 'UnmappedSignInFailure' $message ("Look the code up in Microsoft's live lookup: $link")
                 } else {
-                    $action = '{0} ({1}: {2})' -f $step, $script:M365MeaningLabel, $link
+                    # The next step is the mapped step exactly, so the D-017 / D-050 step check
+                    # can pin the password steps by their text; the "meaning per Microsoft"
+                    # caveat and the lookup link go with the reason instead.
+                    $action = $step
+                    $message += ' The next step is based on what Microsoft documents for this code ({0}: {1}).' -f $script:M365MeaningLabel, $link
                     $level = if ($script:M365BlockingCodes -contains $code) { 'Blocker' } else { 'Probable' }
                     $reasonCode = if ($level -eq 'Blocker') { 'BlockingSignInFailure' } else { 'LatestSignInFailed' }
                     # A block from days ago may have cleared on its own (a lockout ends, a CA
