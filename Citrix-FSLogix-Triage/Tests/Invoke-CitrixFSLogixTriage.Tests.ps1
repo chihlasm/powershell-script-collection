@@ -38,6 +38,8 @@ BeforeAll {
         $script:PolicyValues = $Policy
 
         Mock Test-Connection { $true }
+        Mock Get-AvdAgentRegistry { [PSCustomObject]@{ Found = $false; Error = '' } }  # non-AVD host, no real registry
+        Mock Get-AvdStackListenerOutput { throw 'unmocked Get-AvdStackListenerOutput' }
         Mock Get-CimInstance -ParameterFilter { $ClassName -eq 'Win32_Service' } {
             @(
                 [PSCustomObject]@{ Name = 'frxsvc'; DisplayName = 'FSLogix Apps Services'; State = 'Running'; StartMode = 'Auto' }
@@ -600,6 +602,8 @@ Describe 'ticket note (script, in-process)' {
         function Clear-TrgAliases { foreach ($a in $script:AliasNames) { Remove-Item -LiteralPath "Alias:\$a" -Force -ErrorAction SilentlyContinue } }
         function Set-TriageScriptMocks {
             Mock Test-Connection { $true }
+            Mock Get-AvdAgentRegistry { [PSCustomObject]@{ Found = $false; Error = '' } }  # non-AVD host, no real registry
+            Mock Get-AvdStackListenerOutput { throw 'unmocked Get-AvdStackListenerOutput' }
             Mock Get-CimInstance -ParameterFilter { $ClassName -eq 'Win32_Service' } {
                 @(
                     [PSCustomObject]@{ Name = 'frxsvc'; DisplayName = 'FSLogix Apps Services'; State = 'Running'; StartMode = 'Auto' }

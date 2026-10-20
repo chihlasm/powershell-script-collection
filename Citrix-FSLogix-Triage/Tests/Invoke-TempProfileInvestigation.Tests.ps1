@@ -113,6 +113,8 @@ BeforeAll {
         param([ValidateSet('Healthy', 'DiskWarn', 'DiskFail', 'Unreachable', 'FSLogixOff', 'NotConfigured', 'ServiceStopped', 'CloudCacheAllDown', 'CloudCacheSomeDown')][string]$Name)
         $script:Scn = $Name
         Mock Test-Connection { if (-not $script:Scn) { throw 'unmocked Test-Connection' }; $script:Scn -ne 'Unreachable' }
+        Mock Get-AvdAgentRegistry { [PSCustomObject]@{ Found = $false; Error = '' } }  # non-AVD host, no real registry
+        Mock Get-AvdStackListenerOutput { throw 'unmocked Get-AvdStackListenerOutput' }
         Mock Get-CimInstance -ParameterFilter { $ClassName -eq 'Win32_Service' } {
             if (-not $script:Scn) { throw 'unmocked Get-CimInstance' }
             if ($script:Scn -eq 'Unreachable') { throw 'The WinRM client cannot process the request.' }
@@ -177,6 +179,8 @@ BeforeAll {
         Mock Get-BrokerSession { throw 'unmocked Get-BrokerSession' }
         Mock Resolve-DnsName { throw 'unmocked Resolve-DnsName' }
         Mock Get-FSLogixRegistrySnapshot { throw 'unmocked Get-FSLogixRegistrySnapshot' }
+        Mock Get-AvdAgentRegistry { throw 'unmocked Get-AvdAgentRegistry' }
+        Mock Get-AvdStackListenerOutput { throw 'unmocked Get-AvdStackListenerOutput' }
         Mock Set-Clipboard { }
         Mock Invoke-WinFormsClipboard { }
         Mock Get-TempProfileHostAddress { throw 'unmocked Get-TempProfileHostAddress (DNS)' }
