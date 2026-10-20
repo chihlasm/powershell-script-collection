@@ -53,6 +53,18 @@
     Used by the tool itself when it opens again as administrator: the mapped drives of the
     first, non-elevated window. Leave it out.
 
+.PARAMETER SmokeTest
+    Checks that this copy of the tool starts, then closes by itself: the real window is built and
+    rendered off-screen (it never takes the focus), a small probe runs in the background workers,
+    and one [PASS] or [FAIL] line is written with exit code 0 (passed) or 1 (failed). It asks for
+    no administrator rights (no UAC prompt), takes no single-instance lock (an open window is not
+    disturbed), lists no drives and reads no drive mappings, OneDrive folders or settings, and
+    writes no file: no Logs folder, no probe file, no settings.json and no gui-errors.log
+    (errors go to the console instead). A message box or a change action during the smoke test
+    counts as a failure and is not shown or run. Cannot be combined with -LogFolder or -DriveMap;
+    -WhatIf is allowed. Needs powershell.exe -STA. Tests\Invoke-SmokeTest.ps1 in the repository
+    runs it with a time limit.
+
 .PARAMETER LoadFunctionsOnly
     Define the script's functions and return without opening the window. Used by the Pester
     tests.
@@ -71,6 +83,12 @@
     reports "WhatIf: nothing was changed (<n> items would be)." on the status line and ends
     with a "Dry run" message naming what would have changed and where. Nothing is backed up or logged:
     no Started or result rows are written and the change log is not created.
+
+.EXAMPLE
+    powershell.exe -NoProfile -STA -File .\FolderPermissionManager-GUI.ps1 -SmokeTest
+    Checks that the tool starts on this computer (for example after copying it from the bundle):
+    the window opens off-screen, closes by itself and prints a [PASS] or [FAIL] line. No UAC
+    prompt, nothing is read from the drives and no file is written.
 
 .NOTES
     Requires: Windows PowerShell 5.1 (or PowerShell 7 on Windows), run as administrator (the
@@ -97,6 +115,10 @@
       The export CSV where you save it (the Save dialog starts in Documents when that is a local
       fixed disk outside OneDrive, else %LOCALAPPDATA%\FolderPermissionManager\Exports). It
       holds the folder paths, owners and account names of the whole tree.
+
+    Smoke test (-SmokeTest): nothing is written. The Logs folder and its probe file are not
+    created, settings.json is not read or written, gui-errors.log is not trimmed or written
+    (errors are printed as [FAIL] lines), and no change can start.
 
     REFERENCES
     - WPF windows need a single-threaded apartment (STA); powershell.exe -STA starts one:
@@ -302,6 +324,14 @@
       https://learn.microsoft.com/dotnet/api/system.windows.controls.itemscontrol.containerfromelement
       https://learn.microsoft.com/dotnet/api/system.security.principal.windowsidentity.user
       https://learn.microsoft.com/dotnet/api/system.security.principal.windowsidentity.groups
+    - Smoke test: the window is placed beyond the virtual screen (SystemParameters.VirtualScreenLeft
+      / VirtualScreenTop, the bounding box of every monitor) with WindowStartupLocation Manual,
+      ShowInTaskbar and ShowActivated false; Window.ContentRendered (raised after the content has
+      been rendered) is the proof that the window drew itself:
+      https://learn.microsoft.com/dotnet/api/system.windows.systemparameters.virtualscreenleft
+      https://learn.microsoft.com/dotnet/api/system.windows.window.showactivated
+      https://learn.microsoft.com/dotnet/api/system.windows.window.showintaskbar
+      https://learn.microsoft.com/dotnet/api/system.windows.window.contentrendered
     - See FolderPermissions.Core.ps1 for Get-Acl, the permission wording and the log folder.
 #>
 
@@ -312,6 +342,9 @@ param(
 
     [Parameter()]
     [string]$DriveMap,
+
+    [Parameter()]
+    [switch]$SmokeTest,
 
     [Parameter()]
     [switch]$LoadFunctionsOnly
@@ -346,6 +379,9 @@ if (-not (Test-Path -LiteralPath $script:CorePath -PathType Leaf)) {
 # Dot-sourcing the core binds its own -LoadFunctionsOnly in this scope, which would set ours
 # too and make the guard below end every normal start; keep ours across it.
 $loadOnly = $LoadFunctionsOnly.IsPresent
+# Captured here for the same reason; and at script scope $script:SmokeTest would be the
+# parameter itself.
+$script:SmokeMode = $SmokeTest.IsPresent
 . $script:CorePath -LoadFunctionsOnly
 $LoadFunctionsOnly = [switch]$loadOnly
 
@@ -361,6 +397,12 @@ function Write-AppError {
     # Unexpected errors go to a small log for support; the window shows a plain message.
     param([string]$Message)
     Write-Verbose $Message
+    if ($script:SmokeMode) {
+        # The smoke test writes no file: the error goes to the console and fails the run.
+        Write-Host "[FAIL] $Message" -ForegroundColor Red
+        Add-SmokeFailure -Text $Message
+        return
+    }
     try {
         if (-not (Test-Path -LiteralPath $script:AppDataFolder -PathType Container)) {
             New-Item -ItemType Directory -Path $script:AppDataFolder -Force -WhatIf:$false -ErrorAction Stop | Out-Null
@@ -398,6 +440,13 @@ function Show-AppQuestion {
         [Parameter(Mandatory)][string]$Message,
         [string]$Title = $script:AppTitle
     )
+    if ($script:SmokeMode) {
+        # A modal box would block the unattended smoke run: fail it and give the safe answer.
+        $text = "A question would have been shown: $Message"
+        Write-Host "[FAIL] $text" -ForegroundColor Red
+        Add-SmokeFailure -Text $text
+        return $false
+    }
     $answer = [System.Windows.MessageBox]::Show($Message, $Title, 'YesNo', 'Warning', 'No')
     "$answer" -eq 'Yes'
 }
@@ -409,6 +458,13 @@ function Show-AppMessage {
         [string]$Title = $script:AppTitle,
         [ValidateSet('Information', 'Warning', 'Error')][string]$Icon = 'Information'
     )
+    if ($script:SmokeMode) {
+        # A modal box would block the unattended smoke run, whatever its icon.
+        $text = "A message would have been shown ($Icon): $Message"
+        Write-Host "[FAIL] $text" -ForegroundColor Red
+        Add-SmokeFailure -Text $text
+        return
+    }
     try {
         [void][System.Windows.MessageBox]::Show($Message, $Title, 'OK', $Icon)
     }
@@ -423,8 +479,14 @@ function Get-StartupAction {
     # WPF needs STA first; elevation is asked for once the window can show a message.
     param(
         [Parameter(Mandatory)][bool]$IsSta,
-        [Parameter(Mandatory)][bool]$IsAdmin
+        [Parameter(Mandatory)][bool]$IsAdmin,
+        [switch]$SmokeTest
     )
+    # The smoke test never relaunches: no UAC prompt, and without STA it fails instead.
+    if ($SmokeTest) {
+        if ($IsSta) { return 'Continue' }
+        return 'SmokeNeedsSta'
+    }
     if (-not $IsSta) { return 'RelaunchSta' }
     if (-not $IsAdmin) { return 'RelaunchElevated' }
     'Continue'
@@ -3867,6 +3929,9 @@ function Invoke-Tick {
     try { Update-BgTasks } catch { Write-AppError "Tick: $($_.Exception.Message)" }
     try { Update-BusyLine } catch { Write-AppError "Busy line: $($_.Exception.Message)" }
     try { Update-TreeFills } catch { Write-AppError "Folder tree: $($_.Exception.Message)" }
+    if ($script:SmokeMode) {
+        try { Invoke-SmokeTick } catch { Write-AppError "Smoke test: $($_.Exception.Message)" }
+    }
 }
 
 function Hide-OwnConsole {
@@ -3923,7 +3988,14 @@ function Initialize-PermissionWindow {
     if ($win.Height -gt $wa.Height - 20) { $win.Height = [Math]::Max($win.MinHeight, $wa.Height - 20) }
     if ($win.Width -gt $wa.Width - 20) { $win.Width = [Math]::Max($win.MinWidth, $wa.Width - 20) }
 
-    Set-AppTheme -Name (Get-SavedTheme -SettingsPath $script:SettingsPath)
+    if ($script:SmokeMode) {
+        # The smoke test reads no settings, and stays off every monitor and out of the taskbar.
+        Set-AppTheme -Name 'Dark'
+        Set-SmokeWindowMode -Window $win
+    }
+    else {
+        Set-AppTheme -Name (Get-SavedTheme -SettingsPath $script:SettingsPath)
+    }
     try { $script:StatusIsLiveRegion = Enable-LiveRegion -Element $ui.StatusText } catch { $script:StatusIsLiveRegion = $false }
     Show-Banner -Rows (Get-LogFolderBanner -LogFolder $script:ChangeLogFolder -Notice $script:LogFolderNotice -WhatIfMode:$script:WhatIfMode)
     if ($script:WhatIfMode) { $ui.DryRunPill.Visibility = 'Visible' }
@@ -3990,13 +4062,26 @@ function Initialize-PermissionWindow {
             # stopped: stopping takeown or a batch midway would leave it half done.
             foreach ($t in @($script:BgTasks)) { if ($t -and "$($t.Kind)" -ne 'Change') { try { [void]$t.PS.BeginStop($null, $null) } catch { } } }
         })
-    $win.Add_ContentRendered({ Hide-OwnConsole })
+    if ($script:SmokeMode) {
+        # The smoke test's proof that the window drew itself; its console stays visible.
+        $win.Add_ContentRendered({ Start-SmokeProbe })
+    }
+    else {
+        $win.Add_ContentRendered({ Hide-OwnConsole })
+    }
 }
 
 function Start-PermissionWindow {
+    if ($script:SmokeMode) { $script:SmokeState.Started = [System.Diagnostics.Stopwatch]::StartNew() }
     Initialize-PermissionWindow
     $win = $script:Window
-    Update-DriveList
+    if ($script:SmokeMode) {
+        # The smoke test lists no drives.
+        [void]$script:UI.FolderTree.Items.Add((New-TreeInfoItem -Text 'Smoke test: drives are not listed.'))
+    }
+    else {
+        Update-DriveList
+    }
 
     # https://learn.microsoft.com/dotnet/api/system.windows.threading.dispatchertimer
     $timer = [System.Windows.Threading.DispatcherTimer]::new()
@@ -4116,6 +4201,13 @@ function Invoke-UiAction {
     # Runs a button's action; an unexpected error is shown and logged instead of closing the
     # window. A change it began preparing, but had not handed to a background read yet, ends.
     param([Parameter(Mandatory)][scriptblock]$Action)
+    if ($script:SmokeMode) {
+        # Nothing may change during the smoke test, and nobody is there to answer a dialog.
+        $text = 'A change action was triggered during the smoke test; it was not run.'
+        Write-Host "[FAIL] $text" -ForegroundColor Red
+        Add-SmokeFailure -Text $text
+        return
+    }
     $pendingBefore = $script:ChangePending
     try { & $Action }
     catch {
@@ -6895,16 +6987,176 @@ function Invoke-ChangePermission {
 
 #endregion
 
+#region Smoke test (-SmokeTest: start, render off-screen, check the pool, close, report)
+
+# The window must have rendered and the background check come back within this time.
+$script:SmokeDeadline = [TimeSpan]::FromSeconds(30)
+# Everything that would have been a message box, an error-log line or a change action.
+$script:SmokeFailures = [System.Collections.Generic.List[string]]::new()
+# Filled in by the window (ContentRendered, the probe's callback, the timer); read by Main.
+$script:SmokeState = @{
+    Rendered   = $false
+    ProbeOk    = $false
+    ProbeDone  = $false
+    ProbeError = $null
+    TimedOut   = $false
+    RenderMs   = 0
+    ProbeMs    = 0
+    Started    = $null
+    Closing    = $false
+}
+
+# The background check: runs in the real pool and proves the core and the app helpers were
+# copied into it. It reads nothing: no drive, file or registry.
+$script:SmokeProbeWork = {
+    param([int]$ExpectedReparseTagCount = -1)
+    try {
+        $hasOwner = $null -ne (Get-Command -Name Get-ItemOwner -CommandType Function -ErrorAction SilentlyContinue)
+        $hasModel = $null -ne (Get-Command -Name Get-DriveListModel -CommandType Function -ErrorAction SilentlyContinue)
+        $count = if ($RedirectFreeReparseTags) { @($RedirectFreeReparseTags.Keys).Count } else { 0 }
+        $problems = @()
+        if (-not $hasOwner) { $problems += 'the core function Get-ItemOwner is missing in the background workers' }
+        if (-not $hasModel) { $problems += 'the app helper Get-DriveListModel is missing in the background workers' }
+        if ($count -eq 0) { $problems += 'the reparse-tag allowlist is empty in the background workers' }
+        elseif ($ExpectedReparseTagCount -ge 0 -and $count -ne $ExpectedReparseTagCount) {
+            $problems += "the background workers have $count reparse tags, the window has $ExpectedReparseTagCount"
+        }
+        [PSCustomObject]@{
+            Ok                = ($problems.Count -eq 0)
+            HasItemOwner      = $hasOwner
+            HasDriveListModel = $hasModel
+            ReparseTagCount   = $count
+            Error             = if ($problems.Count) { $problems -join '; ' } else { $null }
+        }
+    }
+    catch {
+        [PSCustomObject]@{ Ok = $false; HasItemOwner = $false; HasDriveListModel = $false; ReparseTagCount = 0; Error = "$($_.Exception.Message)" }
+    }
+}
+
+function Add-SmokeFailure {
+    # Records something that fails the smoke run; the verdict lists each one.
+    param([Parameter(Mandatory)][string]$Text)
+    if ($null -eq $script:SmokeFailures) { $script:SmokeFailures = [System.Collections.Generic.List[string]]::new() }
+    $script:SmokeFailures.Add($Text)
+}
+
+function Get-SmokeVerdict {
+    # The smoke run's result: ExitCode 0 and one [PASS] line only with positive proof (the window
+    # rendered and the background check came back OK, in time, with nothing else failing);
+    # otherwise ExitCode 1 and one [FAIL] line per cause.
+    param(
+        [bool]$Rendered,
+        [bool]$ProbeOk,
+        [bool]$TimedOut,
+        [AllowNull()][AllowEmptyCollection()][string[]]$Failures,
+        [int]$RenderMs,
+        [int]$ProbeMs,
+        [string]$ProbeError,
+        [TimeSpan]$Deadline = [TimeSpan]::FromSeconds(30),
+        [string]$Name = 'FolderPermissionManager-GUI.ps1'
+    )
+    $seconds = [int]$Deadline.TotalSeconds
+    $failed = @($Failures | Where-Object { $_ })
+    if ($Rendered -and $ProbeOk -and -not $TimedOut -and $failed.Count -eq 0) {
+        return [PSCustomObject]@{
+            ExitCode = 0
+            Lines    = @("[PASS] ${Name}: the window opened and closed by itself (render $RenderMs ms, background check $ProbeMs ms)")
+        }
+    }
+    $causes = [System.Collections.Generic.List[string]]::new()
+    if (-not $Rendered) {
+        if ($TimedOut) { $causes.Add("the window did not finish rendering within $seconds seconds") }
+        else { $causes.Add('the window was not rendered (the app stopped before it was shown)') }
+    }
+    elseif (-not $ProbeOk) {
+        if ($TimedOut) { $causes.Add("the background check did not come back within $seconds seconds") }
+        elseif ($ProbeError) { $causes.Add("the background check failed: $ProbeError") }
+        else { $causes.Add('the background check failed') }
+    }
+    elseif ($TimedOut) { $causes.Add("the window did not close by itself within $seconds seconds") }
+    foreach ($f in $failed) { $causes.Add("$f") }
+    [PSCustomObject]@{
+        ExitCode = 1
+        Lines    = @($causes | ForEach-Object { "[FAIL] ${Name}: $_" })
+    }
+}
+
+function Get-SmokeTickAction {
+    # What the window's timer does in a smoke run: Close once it rendered and the background
+    # check came back, TimedOut at the deadline, otherwise Wait.
+    param([bool]$Rendered, [bool]$ProbeDone, [TimeSpan]$Elapsed, [TimeSpan]$Deadline)
+    if ($Rendered -and $ProbeDone) { return 'Close' }
+    if ($Elapsed -ge $Deadline) { return 'TimedOut' }
+    'Wait'
+}
+
+function Set-SmokeWindowMode {
+    # Puts the window beyond the top-left corner of the virtual screen (every monitor), so it
+    # renders without being seen, and keeps it out of the taskbar and from taking the focus.
+    # A hidden or minimised window would never render, which is what the smoke test proves.
+    # https://learn.microsoft.com/dotnet/api/system.windows.systemparameters.virtualscreenleft
+    param([Parameter(Mandatory)]$Window)
+    $width = if ([double]::IsNaN($Window.Width)) { $Window.MinWidth } else { $Window.Width }
+    $height = if ([double]::IsNaN($Window.Height)) { $Window.MinHeight } else { $Window.Height }
+    $Window.WindowStartupLocation = [System.Windows.WindowStartupLocation]::Manual
+    $Window.ShowInTaskbar = $false
+    $Window.ShowActivated = $false
+    $Window.Left = [System.Windows.SystemParameters]::VirtualScreenLeft - $width - 100
+    $Window.Top = [System.Windows.SystemParameters]::VirtualScreenTop - $height - 100
+}
+
+function Start-SmokeProbe {
+    # ContentRendered in a smoke run: the window drew itself. The background check then goes
+    # through the same Start-ReadTask path as every read, so the busy line and Update-BgTasks
+    # run for real.
+    $state = $script:SmokeState
+    if ($state.Rendered) { return }
+    $state.Rendered = $true
+    $state.RenderMs = if ($state.Started) { [int]$state.Started.Elapsed.TotalMilliseconds } else { 0 }
+    $expected = @($script:RedirectFreeReparseTags.Keys).Count
+    [void](Start-ReadTask -Action 'Smoke test: checking the background workers' -Work $script:SmokeProbeWork -ArgumentList @($expected) -State $state -OnDone {
+            param($result, $s)
+            $s.ProbeMs = if ($s.Started) { [int]$s.Started.Elapsed.TotalMilliseconds - $s.RenderMs } else { 0 }
+            $s.ProbeOk = [bool]($result -and $result.Ok)
+            if (-not $s.ProbeOk) { $s.ProbeError = if ($result -and $result.Error) { "$($result.Error)" } else { 'it returned nothing' } }
+            $s.ProbeDone = $true
+        })
+}
+
+function Invoke-SmokeTick {
+    # Runs on every timer tick in a smoke run: closes the window (through its Closing handler)
+    # once the smoke run is done or out of time.
+    $state = $script:SmokeState
+    if (-not $state.Started -or $state.Closing) { return }
+    $action = Get-SmokeTickAction -Rendered ([bool]$state.Rendered) -ProbeDone ([bool]$state.ProbeDone) -Elapsed $state.Started.Elapsed -Deadline $script:SmokeDeadline
+    if ($action -eq 'Wait') { return }
+    if ($action -eq 'TimedOut') { $state.TimedOut = $true }
+    $state.Closing = $true
+    $script:Window.Close()
+}
+
+#endregion
+
 if ($LoadFunctionsOnly) { return }
 
 #region Startup
+
+# The smoke test reads no drive mappings and writes no log, so either value would steer it
+# toward real folders or mappings: refused rather than ignored.
+if ($script:SmokeMode -and ($PSBoundParameters.ContainsKey('LogFolder') -or $PSBoundParameters.ContainsKey('DriveMap'))) {
+    Write-Host '[FAIL] The smoke test takes no -LogFolder or -DriveMap: it reads no drive mappings and writes no log. Start it with -SmokeTest alone (-WhatIf is allowed).' -ForegroundColor Red
+    exit 1
+}
 
 # -WhatIf (SupportsShouldProcess) is captured here and passed on explicitly; it must not turn
 # the window's own small writes (settings, error log) into dry runs.
 $script:WhatIfMode = [bool]$WhatIfPreference
 $WhatIfPreference = $false
 
-Limit-AppErrorLog -Path $script:ErrorLogPath
+if (-not $script:SmokeMode) {
+    Limit-AppErrorLog -Path $script:ErrorLogPath
+}
 
 # A relative -LogFolder is made full now, against the location it was typed in: a relaunched
 # copy starts in another folder.
@@ -6917,14 +7169,31 @@ catch {
 # The drives this process sees live win, then the ones the first (non-elevated) window passed
 # on, then the remembered ones (tagged, and shown as "(remembered mapping)").
 # Not $script:DriveMap: at script scope that IS the -DriveMap parameter (a string).
-$script:DriveMapSet = Get-DriveMapSet -DriveMapArgument $DriveMap
+if ($script:SmokeMode) {
+    # The smoke test reads no drive mappings (no CIM, no HKCU:\Network): an empty map.
+    $script:DriveMapSet = [PSCustomObject]@{ Map = @{}; Source = @{} }
+}
+else {
+    $script:DriveMapSet = Get-DriveMapSet -DriveMapArgument $DriveMap
+}
 $script:MappedDrives = $script:DriveMapSet.Map
 $script:MappedDriveSources = $script:DriveMapSet.Source
 
 $isSta = [System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA'
 $principal = [System.Security.Principal.WindowsPrincipal]::new([System.Security.Principal.WindowsIdentity]::GetCurrent())
 $isAdmin = $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
-$action = Get-StartupAction -IsSta $isSta -IsAdmin $isAdmin
+if ($script:SmokeMode) {
+    # Never RelaunchSta or RelaunchElevated: the smoke test runs where it was started.
+    $action = Get-StartupAction -IsSta $isSta -IsAdmin $isAdmin -SmokeTest
+}
+else {
+    $action = Get-StartupAction -IsSta $isSta -IsAdmin $isAdmin
+}
+
+if ($action -eq 'SmokeNeedsSta') {
+    Write-Host '[FAIL] The smoke test needs a single-threaded apartment: start powershell.exe with -STA.' -ForegroundColor Red
+    exit 1
+}
 
 if ($action -eq 'RelaunchSta') {
     # WPF needs a single-threaded apartment; start again in one.
@@ -6955,28 +7224,40 @@ if ($action -eq 'RelaunchElevated') {
 # A -LogFolder on a mapped drive is used by its UNC path: this elevated window may not see the
 # letter, and the path then follows the same live-first map as everything else. A letter only
 # a remembered mapping explains gets a warning in the banner (it may be out of date).
-$mappingNotice = @(Get-LogFolderMappingNotice -LogFolder $LogFolder -DriveMap $script:MappedDrives -DriveMapSource $script:MappedDriveSources)
-$LogFolder = Resolve-MappedDrive -Path $LogFolder -DriveMap $script:MappedDrives
-
-# Not $script:LogFolder: at script scope that IS the -LogFolder parameter.
-# The Logs folder next to the script, unless the script is in a OneDrive or SharePoint sync
-# folder: then %LOCALAPPDATA% (backups and the change log must not be uploaded).
-$script:ScriptLogsFolder = Join-Path $script:ScriptRoot 'Logs'
-$syncRoots = @(Get-OneDriveFolder)
-$script:DefaultLogFolder = Get-AppDefaultLogFolder -ScriptLogsFolder $script:ScriptLogsFolder -LocalAppData (Get-LocalAppDataFolder) -SyncRoot $syncRoots
-try {
-    $script:ChangeLogFolder = Resolve-ChangeLogFolder -LogFolder $LogFolder -DefaultFolder $script:DefaultLogFolder
+if ($script:SmokeMode) {
+    # The smoke test logs nothing: no log folder is worked out, created or probed, and no
+    # OneDrive folder is read. No change can start (Invoke-UiAction refuses them).
+    $script:ChangeLogFolder = '(smoke test: nothing is logged)'
+    $script:LogFolderNotice = @()
 }
-catch {
-    Show-AppMessage -Icon Error -Message $_.Exception.Message
-    return
-}
-# The sync-folder check looks at the folder the change log really goes to, when one was given.
-$explicitLogFolder = if ($LogFolder) { $script:ChangeLogFolder } else { $null }
-$script:LogFolderNotice = @(Get-ChangeLogFolderNotice -LogFolder $LogFolder -ResolvedFolder $script:ChangeLogFolder -DefaultFolder $script:DefaultLogFolder) +
-@(Get-SyncedLogFolderNotice -LogFolder $explicitLogFolder -ScriptLogsFolder $script:ScriptLogsFolder -DefaultFolder $script:DefaultLogFolder -SyncRoot $syncRoots) + $mappingNotice
+else {
+    $mappingNotice = @(Get-LogFolderMappingNotice -LogFolder $LogFolder -DriveMap $script:MappedDrives -DriveMapSource $script:MappedDriveSources)
+    $LogFolder = Resolve-MappedDrive -Path $LogFolder -DriveMap $script:MappedDrives
 
-if (-not (Enter-SingleInstance -LogFolder $script:ChangeLogFolder -DriveMap $script:MappedDrives)) { return }
+    # Not $script:LogFolder: at script scope that IS the -LogFolder parameter.
+    # The Logs folder next to the script, unless the script is in a OneDrive or SharePoint sync
+    # folder: then %LOCALAPPDATA% (backups and the change log must not be uploaded).
+    $script:ScriptLogsFolder = Join-Path $script:ScriptRoot 'Logs'
+    $syncRoots = @(Get-OneDriveFolder)
+    $script:DefaultLogFolder = Get-AppDefaultLogFolder -ScriptLogsFolder $script:ScriptLogsFolder -LocalAppData (Get-LocalAppDataFolder) -SyncRoot $syncRoots
+    try {
+        $script:ChangeLogFolder = Resolve-ChangeLogFolder -LogFolder $LogFolder -DefaultFolder $script:DefaultLogFolder
+    }
+    catch {
+        Show-AppMessage -Icon Error -Message $_.Exception.Message
+        return
+    }
+    # The sync-folder check looks at the folder the change log really goes to, when one was given.
+    $explicitLogFolder = if ($LogFolder) { $script:ChangeLogFolder } else { $null }
+    $script:LogFolderNotice = @(Get-ChangeLogFolderNotice -LogFolder $LogFolder -ResolvedFolder $script:ChangeLogFolder -DefaultFolder $script:DefaultLogFolder) +
+    @(Get-SyncedLogFolderNotice -LogFolder $explicitLogFolder -ScriptLogsFolder $script:ScriptLogsFolder -DefaultFolder $script:DefaultLogFolder -SyncRoot $syncRoots) + $mappingNotice
+}
+
+# The smoke test takes no single-instance lock: an open window must neither fail it nor be
+# locked out by it.
+if (-not $script:SmokeMode) {
+    if (-not (Enter-SingleInstance -LogFolder $script:ChangeLogFolder -DriveMap $script:MappedDrives)) { return }
+}
 
 #endregion
 
@@ -6989,11 +7270,14 @@ try {
 }
 catch {
     $script:FatalError = $true
+    # In a smoke run this is a [FAIL] line and a smoke failure (no file, no box).
     Write-AppError "Fatal: $($_.Exception.Message)`n$($_.ScriptStackTrace)"
-    # Never "Nothing was changed" when a change ran this session or is still running.
-    $changeRunning = @($script:BgTasks | Where-Object { Test-ChangeTaskRunning $_ }).Count -gt 0
-    Show-AppMessage -Icon Error -Message (Get-FatalErrorMessage -ErrorText "$($_.Exception.Message)" -ErrorLogPath "$($script:ErrorLogPath)" `
-            -ChangeLogFolder "$($script:ChangeLogFolder)" -ChangeRunning $changeRunning -ChangeStarted ([bool]$script:ChangeMadeThisSession))
+    if (-not $script:SmokeMode) {
+        # Never "Nothing was changed" when a change ran this session or is still running.
+        $changeRunning = @($script:BgTasks | Where-Object { Test-ChangeTaskRunning $_ }).Count -gt 0
+        Show-AppMessage -Icon Error -Message (Get-FatalErrorMessage -ErrorText "$($_.Exception.Message)" -ErrorLogPath "$($script:ErrorLogPath)" `
+                -ChangeLogFolder "$($script:ChangeLogFolder)" -ChangeRunning $changeRunning -ChangeStarted ([bool]$script:ChangeMadeThisSession))
+    }
 }
 finally {
     # A change still running in the pool (only possible after a fatal error: the window refuses
@@ -7009,10 +7293,23 @@ finally {
     # process instead of keeping it alive. A tech's own console is only closed in that case.
     $ownProcess = Test-OwnProcess -CommandLineArgs ([Environment]::GetCommandLineArgs()) -ScriptPath $script:ScriptPath
     $exitCode = if ($script:FatalError) { 1 } else { 0 }
+    if ($script:SmokeMode) {
+        # The smoke verdict is the exit code, so the Environment.Exit path under -File carries it.
+        $smoke = $script:SmokeState
+        $verdict = Get-SmokeVerdict -Rendered ([bool]$smoke.Rendered) -ProbeOk ([bool]$smoke.ProbeOk) -TimedOut ([bool]$smoke.TimedOut) `
+            -Failures @($script:SmokeFailures) -RenderMs ([int]$smoke.RenderMs) -ProbeMs ([int]$smoke.ProbeMs) -ProbeError "$($smoke.ProbeError)" `
+            -Deadline $script:SmokeDeadline -Name (Split-Path -Leaf $script:ScriptPath)
+        foreach ($line in $verdict.Lines) {
+            $color = if ($verdict.ExitCode -eq 0) { 'Green' } else { 'Red' }
+            Write-Host $line -ForegroundColor $color
+        }
+        $exitCode = $verdict.ExitCode
+    }
     $null = Invoke-AppShutdown -Pool $script:BgPool -Mutex $script:InstanceMutex -Tasks @($script:BgTasks) -ExitWhenDone:$ownProcess -ExitCode $exitCode
 }
 # Reached when the process was not ended above (a tech's own console): the script still ends
-# with a non-zero exit code after a fatal error.
+# with a non-zero exit code after a fatal error, and a smoke run with its verdict.
+if ($script:SmokeMode) { exit $exitCode }
 if ($script:FatalError) { exit 1 }
 
 #endregion
