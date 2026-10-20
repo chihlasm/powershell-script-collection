@@ -2972,7 +2972,7 @@ Describe 'Revision 2026-10-19: Deny, roots, protected Copy targets, server-side 
         $source = New-FakeTarget -Display $script:Current.DisplayPath -Resolved $script:Current.RealPath
         $script:CopyCalls10 = [System.Collections.Generic.List[object]]::new()
         Mock Copy-FolderPermission {
-            $script:CopyCalls10.Add(@{ Keys = @($PSBoundParameters.Keys); AllowDeny = $PSBoundParameters['AllowDeny'] })
+            $script:CopyCalls10.Add(@{ Keys = @($PesterBoundParameters.Keys); AllowDeny = $PesterBoundParameters['AllowDeny'] })
             foreach ($t in $TargetPath) { New-Row -Action 'Copy permissions' -Target $t -Detail "Copied from $($SourcePath): Allow Modify for BUILTIN\Users" }
         }
         Mock Get-Acl { New-FakeAcl }

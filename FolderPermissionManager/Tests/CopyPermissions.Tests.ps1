@@ -336,7 +336,7 @@ Describe 'Copy-FolderPermission (SQ-015, add-only)' {
         $script:Seed[$src] = "O:BAG:SYD:AI$Source"
         $script:Seed[$dst] = "O:BAG:SYD:AI$Child"
 
-        $rows = @(Copy-FolderPermission -SourcePath $src -TargetPath $dst -LogFolder $log)
+        $rows = @(Copy-FolderPermission -SourcePath $src -TargetPath $dst -LogFolder $log -AllowDeny)
 
         Should -Invoke Set-Acl -Times 0 -Exactly -Scope It -Because "the child already inherits the $Name rule"
         $rows[0].Result | Should -Be 'Skipped (nothing to copy)'

@@ -1565,8 +1565,7 @@ $script:WorkHelperFunctions = 'Get-InnermostErrorText', 'Test-AccessDeniedError'
 'Resolve-ChangeTargetSet', 'Get-ChangeTarget', 'New-ChangeTarget', 'Get-StreamRefusal', 'Resolve-MappedDrive',
 'Test-ThisComputerName', 'Get-ThisComputerNames', 'ConvertFrom-Ipv6LiteralName', 'Test-SameIPAddress',
 'Get-LocalSharePath', 'Get-AppDfsTarget', 'Get-DfsClientTarget', 'Find-DfsReparsePoint', 'Get-AppReparseInfo',
-'Get-RemoteShareLocalPath', 'Get-ShareTreeRefusal', 'Get-ServerSideLinkRefusal', 'Get-CopyTargetRefusal', 'Get-TargetRootKind',
-'Get-CopyTargetResolvedRefusal', 'Complete-AppChangeWork'
+'Get-RemoteShareLocalPath', 'Get-ShareTreeRefusal', 'Get-ServerSideLinkRefusal', 'Complete-AppChangeWork'
 
 function Write-ChangeStartedLog {
     # One 'Started' row per item in the change log before the change runs, so a change that is
@@ -2175,9 +2174,11 @@ $script:TakeOwnershipWork = {
 }
 
 # Adds the source folder's own permissions to each target (D-031: adds only, one Set-Acl per
-# target; Windows passes them to the items below that inherit).
+# target; Windows passes them to the items below that inherit). $AllowDeny: the Deny confirm was
+# accepted, so the core copies the source's Deny entries too (D-052). It comes after $CorePath so
+# a caller that passes only the first five arguments copies without it.
 $script:CopyPermissionsWork = {
-    param([string]$SourcePath, [string[]]$TargetPaths, [string]$LogFolder, [bool]$WhatIf, [string]$CorePath)
+    param([string]$SourcePath, [string[]]$TargetPaths, [string]$LogFolder, [bool]$WhatIf, [string]$CorePath, [bool]$AllowDeny)
     try {
         if ($CorePath -and -not (Get-Command -Name Get-ItemOwner -CommandType Function -ErrorAction SilentlyContinue)) { . $CorePath -LoadFunctionsOnly }
         $TargetPaths = @($TargetPaths | Where-Object { "$_".Trim() })
@@ -2185,7 +2186,7 @@ $script:CopyPermissionsWork = {
             return (New-ChangeNotStartedResult -LogFolder $LogFolder)
         }
         $done = Invoke-AppChange -LogFolder $LogFolder -WhatIfMode $WhatIf -Change {
-            Copy-FolderPermission -SourcePath $SourcePath -TargetPath $TargetPaths -LogFolder $LogFolder -Confirm:$false -WhatIf:$WhatIf
+            Copy-FolderPermission -SourcePath $SourcePath -TargetPath $TargetPaths -LogFolder $LogFolder -AllowDeny:$AllowDeny -Confirm:$false -WhatIf:$WhatIf
         }
         Complete-AppChangeWork -Done $done -LogFolder $LogFolder -WhatIfMode $WhatIf -ReadBack @{ Kind = 'Copy'; SourcePath = $SourcePath }
     }
@@ -4441,67 +4442,6 @@ function Get-ServerSideLinkRefusal {
     $null
 }
 
-function Get-CopyTargetRefusal {
-    # D-044 (AC50): why a folder cannot be a Copy permissions target, or $null. -Path is where the
-    # copy really lands (ResolvedPath). Refused: the administrative shares (\\server\X$ itself,
-    # ADMIN$, IPC$, PRINT$), SYSVOL and NETLOGON, the D-036 folders (the root of a drive, the
-    # Windows folders, here and through \\server\X$; Get-TreeOwnershipRefusal) and the high-impact
-    # roots (a Users folder or this computer's profiles folder, System Volume Information,
-    # $Recycle.Bin; Get-HighImpactRootRefusal). A folder inside \\server\X$ and the root of an
-    # ordinary share are allowed (the root gets the destructive confirm, AC49). Text only, apart
-    # from reading this computer's profiles folder.
-    param([Parameter(Mandatory)][AllowEmptyString()][string]$Path)
-    $p = ConvertTo-ComparablePath -Path $Path
-    if (-not $p) { return $null }
-    $what = $null
-    if ($p -match '^\\\\([^\\]+)\\([^\\]+)(?:\\(.*))?$') {
-        $server = $Matches[1]; $share = $Matches[2]; $rest = "$($Matches[3])"
-        if ($share -ieq 'IPC$') {
-            # IPC$ is not a folder at all, so "could let people into it" does not fit.
-            return "Permissions can't be copied to ${Path}: it is the IPC`$ share of $server, which Windows uses for remote administration, and it is not a folder. Choose the folder that needs these permissions instead. Nothing was changed."
-        }
-        if ($share -ieq 'ADMIN$') { $what = "on the ADMIN`$ administrative share of $server, which is used to administer Windows remotely" }
-        elseif ($share -ieq 'PRINT$') { $what = "on the PRINT`$ share of $server, which holds the printer drivers it hands out" }
-        elseif ($share -ieq 'SYSVOL' -or $share -ieq 'NETLOGON') { $what = "on the $($share.ToUpperInvariant()) share of $server, which domain controllers use for Group Policy and logon scripts" }
-        elseif ($share -match '^[A-Za-z]\$$' -and -not $rest) { $what = "the $($share.ToUpperInvariant()) administrative share of $server, the root of a whole drive" }
-    }
-    if (-not $what) {
-        if ((Get-TargetRootKind -Path $p) -eq 'DriveRoot') { $what = 'the root of a whole drive' }
-        elseif (Get-TreeOwnershipRefusal -Path $p) { $what = 'in a Windows system folder' }
-        elseif (Get-HighImpactRootRefusal -Path $p) {
-            $what = if ($p -match '(?i)(^|\\)(System Volume Information|\$Recycle\.Bin)(\\|$)') { 'in System Volume Information or $Recycle.Bin, which Windows keeps for itself' }
-            else { 'a folder that holds every user profile' }
-        }
-    }
-    if (-not $what) { return $null }
-    "Permissions can't be copied to ${Path}: it is $what, and adding permissions there could let people into it who should not have access. Choose the folder that needs these permissions instead. Nothing was changed."
-}
-
-function Get-CopyTargetResolvedRefusal {
-    # Get-CopyTargetRefusal on where Windows really reaches a Copy permissions target (D-044,
-    # AC50): the final path (the core's Get-Win32PathName -Kind Final follows every junction and
-    # symbolic link on the way) and the long-name form (-Kind Long expands 8.3 short names such
-    # as PROGRA~1). A local junction to C:\Users or C:\PROGRA~1 resolves to itself as text, so
-    # only these show it. A final path that cannot be told is refused: "a guard that cannot
-    # resolve the path fails closed" (destructive-operations profile). Reads the disk, so it runs
-    # in the background lookup (Get-ChangeTarget -RefuseProtected). $null when it is allowed.
-    param([Parameter(Mandatory)][string]$Path)
-    $final = Get-Win32PathName -Path $Path -Kind Final
-    if (-not $final) {
-        return "Windows could not tell where $Path really is (it may not exist, or this account cannot open it), so it cannot be checked against the root of a drive, the Windows system folders and the user profiles folder. Check that the folder exists and try again, or ask a senior admin. Nothing was changed."
-    }
-    $long = Get-Win32PathName -Path $Path -Kind Long
-    $given = ConvertTo-ComparablePath -Path $Path
-    foreach ($form in @($final, $long)) {
-        if (-not $form) { continue }
-        $c = ConvertTo-ComparablePath -Path $form
-        if (-not $c -or $c -ieq $given) { continue }
-        $refusal = Get-CopyTargetRefusal -Path $c
-        if ($refusal) { return "$Path leads to $c (through a junction, a symbolic link or a short name). $refusal" }
-    }
-    $null
-}
-
 function Get-ResolvedRootRefusal {
     # A whole-tree change on -Path, checked where Windows really reaches it: the final path (the
     # core's Get-Win32PathName -Kind Final follows every junction and symbolic link on the way,
@@ -4954,21 +4894,6 @@ function Get-ConfirmSpec {
     }
     if ($script:WhatIfMode) { $body += "`n`nDry run (WhatIf): nothing will be changed." }
     [PSCustomObject]@{ Title = $title; Body = $body; ActionLabel = $label; IsDestructive = $destructive }
-}
-function Get-TargetRootKind {
-    # Whether a path is the very top of a drive or a share (D-044, AC49): 'DriveRoot' (X:\, or a
-    # volume GUID path's root), 'AdminShareRoot' (\\server\X$) or 'ShareRoot' (\\server\share),
-    # else $null. A permission set there reaches everything on the drive or share that inherits.
-    # Text only, in the spelling ConvertTo-ComparablePath gives (\\?\ dropped, trailing \ too).
-    param([Parameter(Mandatory)][AllowEmptyString()][string]$Path)
-    $p = ConvertTo-ComparablePath -Path $Path
-    if (-not $p) { return $null }
-    if ($p -match '^[A-Za-z]:\\$' -or $p -match '^Volume\{[^\\]*\}$') { return 'DriveRoot' }
-    if ($p -match '^\\\\[^\\]+\\([^\\]+)$') {
-        if ($Matches[1] -match '^[A-Za-z]\$$') { return 'AdminShareRoot' }
-        return 'ShareRoot'
-    }
-    $null
 }
 
 function Get-ConfirmRootText {
@@ -5716,6 +5641,9 @@ function Invoke-CopyPermissions {
         return
     }
     $deny = Get-CopySourceDenyEntries -Source $Source
+    # The core refuses a source with Deny entries unless told the technician accepted them (D-052):
+    # only when the Deny confirm below is shown and accepted.
+    $denyConfirmed = $false
     $remembered = @(@($Source) + @($Targets) | Where-Object { $_.IsRemembered }).Count -gt 0
     $elsewhere = @($Targets | Where-Object { Test-TargetResolvedElsewhere -Target $_ }).Count -gt 0
     if ($remembered -or $elsewhere -or -not $deny.Checked -or @($deny.Entries).Count -gt 0 -or (Get-ConfirmRootText -Targets $Targets)) {
@@ -5725,10 +5653,11 @@ function Invoke-CopyPermissions {
             Set-Status -Text 'Cancelled: nothing was changed.'
             return
         }
+        $denyConfirmed = (-not $deny.Checked) -or @($deny.Entries).Count -gt 0
     }
     $state = @{ Scope = 'Tree'; Paths = @($Targets | ForEach-Object { $_.DisplayPath }); ChangedFiles = @(); Node = $null }
     $started = Start-ChangeTask -Action 'Copying permissions from' -Path $Source.DisplayPath -Work $script:CopyPermissionsWork `
-        -ArgumentList @($Source.ResolvedPath, [string[]]@($Targets | ForEach-Object { $_.ResolvedPath }), $script:ChangeLogFolder, [bool]$script:WhatIfMode, $script:CorePath) `
+        -ArgumentList @($Source.ResolvedPath, [string[]]@($Targets | ForEach-Object { $_.ResolvedPath }), $script:ChangeLogFolder, [bool]$script:WhatIfMode, $script:CorePath, [bool]$denyConfirmed) `
         -State $state -OnDone { param($result, $state) Complete-ChangeTask -Result $result -State $state }
     if ($started) {
         Set-Status -Text "Backing up and copying the permissions of $(Get-TargetLocationText -Targets @($Source)) to $(Get-TargetLocationText -Targets $Targets)..."
