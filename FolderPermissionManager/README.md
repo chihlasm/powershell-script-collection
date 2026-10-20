@@ -86,6 +86,13 @@ change is refused with "Another change is still running on `<path>`. Wait for it
   checked after the dialog; the status line names their real locations, and a folder that
   cannot be checked is refused before anything starts. When a typed folder is refused, the
   reason is shown and the Copy dialog opens again with your list still in it.
+- **Add Permission** looks the user or group up when you press Add, before the dialog closes.
+  A name Windows cannot find keeps the dialog open with your text and says "Windows could not
+  find the account `<name>`. Check the name, or ask a senior admin."; a lookup that takes more
+  than a few seconds (a domain that cannot be reached) is stopped and says so. `.\name` means an
+  account of this computer: on a folder or files here it is added as `<this computer>\name`; on
+  a share or mapped drive the dialog asks for the server's name instead (`FS01\name`). The name
+  is looked up again when the change runs.
 - **Remove Permission** lists only the entries set on the folder or file itself (an
   inherited entry is removed on the folder above), once per account, with Allow or Deny
   already set to the type it has. Every explicit entry of that type for the account goes,
@@ -194,7 +201,9 @@ change is refused with "Another change is still running on `<path>`. Wait for it
   `%LOCALAPPDATA%\FolderPermissionManager\Logs\Unlogged_<yyyy-MM-dd>.csv` instead and the status
   line names that file.
 - **`-WhatIf`** (dry run): every change reports "WhatIf: nothing was changed (`<n>` items would
-  be)." Nothing is changed, backed up or logged: no `Started` or result rows are written, and a
+  be)." (for example "1 folder", "3 files") on the status line, and a **Dry run** message names
+  what would have changed: the account, level and Allow or Deny for an add or remove, the
+  source for a copy, and every location. Nothing is changed, backed up or logged: no `Started` or result rows are written, and a
   log folder that does not exist yet is not created by a change. (Starting the app still
   creates the `Logs` folder and its probe file, see below.)
 - **Log folder in OneDrive.** When the script itself is in a OneDrive or synced SharePoint

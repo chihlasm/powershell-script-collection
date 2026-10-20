@@ -2947,7 +2947,8 @@ function Get-ChangeResultMessage {
     }
     $upToDate = @($all | Where-Object { $_.Result -eq 'Skipped (nothing to copy)' })
     $types = @($all | ForEach-Object { $_.ItemType } | Where-Object { $_ -ne 'Unknown' } | Sort-Object -Unique)
-    $noun = if ($types.Count -eq 1 -and $types[0] -eq 'File') { 'files' } elseif ($types.Count -eq 1 -and $types[0] -eq 'Folder') { 'folders' } else { 'items' }
+    $noun = if ($types.Count -eq 1 -and $types[0] -eq 'File') { 'file' } elseif ($types.Count -eq 1 -and $types[0] -eq 'Folder') { 'folder' } else { 'item' }
+    $nouns = "$($noun)s"
     $backup = @($all | Where-Object { $_.BackupFile } | ForEach-Object { $_.BackupFile } | Select-Object -First 1)
     $backupPath = if ($backup.Count -gt 0) { $backup[0] } else { '' }
 
@@ -2957,7 +2958,8 @@ function Get-ChangeResultMessage {
         $err = if ((Get-FailedChangeState $f) -eq 'Unchanged') { Get-PlainErrorText $f.Error } else { Format-Sentence $f.Error }
     }
     if ($done.Count -gt 0) {
-        $where = if ($all.Count -eq 1) { $first.Target } else { "$($done.Count) of $($all.Count) $noun" }
+        # Only used for two or more items, so "<n> of <all>" always takes the plural.
+        $where = if ($all.Count -eq 1) { $first.Target } else { "$($done.Count) of $($all.Count) $nouns" }
         $parts.Add("$phrase $preposition $where.")
         if ($first.Action -eq 'Copy permissions' -and -not $NoInheritanceNote) {
             # One Set-Acl on each target: Windows passes the new rules to the items below that
@@ -2966,7 +2968,7 @@ function Get-ChangeResultMessage {
             $parts.Add('That is expected: Windows passes permissions down only to the items that inherit them, as Explorer does.')
         }
     } elseif ($whatIf.Count -eq $all.Count) {
-        $parts.Add("WhatIf: nothing was changed ($($all.Count) $noun would be).")
+        $parts.Add("WhatIf: nothing was changed ($($all.Count) $(if ($all.Count -eq 1) { $noun } else { $nouns }) would be).")
     } elseif ($all.Count -eq 1 -and $failed.Count -eq 1) {
         $state = Get-FailedChangeState $first
         if ($state -eq 'Partly') {

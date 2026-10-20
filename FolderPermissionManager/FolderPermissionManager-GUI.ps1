@@ -66,7 +66,8 @@
 .EXAMPLE
     .\FolderPermissionManager-GUI.ps1 -WhatIf
     Dry run: the window says "Dry run (WhatIf): nothing will be changed", and every change
-    reports "WhatIf: nothing was changed (<n> items would be)." Nothing is backed up or logged:
+    reports "WhatIf: nothing was changed (<n> items would be)." on the status line and ends
+    with a "Dry run" message naming what would have changed and where. Nothing is backed up or logged:
     no Started or result rows are written and the change log is not created.
 
 .NOTES
@@ -4058,6 +4059,14 @@ function Complete-ChangeTask {
         if ($kind -eq 'Success' -or $kind -eq 'Info') { $kind = 'Warning' }
     }
     Set-Status -Kind $kind -Text $text
+    # A dry run (-WhatIf) also says what the change would have done and where, in a message the
+    # tech has to close, so "nothing was changed" is not read as "nothing happened" (AC57).
+    $dryRun = @($entries | Where-Object { $_.Result -eq 'Skipped (WhatIf)' }).Count -gt 0 -and
+        @($entries | Where-Object { "$($_.Result)" -notlike 'Skipped (*' }).Count -eq 0
+    if ($dryRun) {
+        $summary = Get-DryRunSummary -Entries $entries
+        Show-AppMessage -Title $summary.Title -Message $summary.Text
+    }
     if ($State) { Invoke-ChangeRefresh -State $State }
 }
 function Invoke-ChangeRefresh {
@@ -5278,32 +5287,155 @@ function Get-PermissionInputError {
 }
 
 function Resolve-AddIdentity {
-    # NOT IMPLEMENTED (SQ-018 revision 3, AC55). The user or group typed in the Add dialog, ready
-    # to use: a leading dot-backslash name becomes <this computer>\name when every target is on this
-    # computer (IsLocal), and is refused ("Type the server's name instead, for example FS01\name.")
-    # when any target is on a network share or mapped drive. Returns Ok, Identity, Problem.
+    # The user or group typed in the Add dialog, ready to use (trimmed). Returns Ok, Identity,
+    # Problem. ".\name" (this computer's own account, as Windows writes it in some dialogs) is
+    # not a name NTAccount.Translate resolves: the owner's lab test found ".\micha" throws while
+    # "<COMPUTERNAME>\micha" and "micha" resolve.
+    # https://learn.microsoft.com/dotnet/api/system.security.principal.ntaccount.translate
+    # So it becomes <COMPUTERNAME>\name when every target is on this computer (a drive path, or
+    # a share on this computer: IsLocal). On a network share or mapped drive "." would mean the
+    # server, whose name this computer does not know, so it is refused and the tech types it.
+    # Any other text is returned as typed.
     param([AllowNull()][AllowEmptyString()][string]$Identity, [object[]]$Targets)
-    throw 'Resolve-AddIdentity is not implemented yet (SQ-018 AC55).'
+    $id = "$Identity".Trim()
+    if ($id -notmatch '^\.\\(.*)$') { return [PSCustomObject]@{ Ok = $true; Identity = $id; Problem = $null } }
+    $name = $Matches[1].Trim()
+    if (-not $name) { return [PSCustomObject]@{ Ok = $false; Identity = $id; Problem = (Get-PermissionInputError -Identity '') } }
+    $all = @($Targets | Where-Object { $null -ne $_ })
+    $elsewhere = @($all | Where-Object { -not ($_.IsLocal -or "$($_.ResolvedPath)" -match '^[A-Za-z]:\\') })
+    if ($all.Count -eq 0 -or $elsewhere.Count -gt 0) {
+        return [PSCustomObject]@{ Ok = $false; Identity = $id; Problem = "Type the server's name instead, for example FS01\name." }
+    }
+    [PSCustomObject]@{ Ok = $true; Identity = "$env:COMPUTERNAME\$name"; Problem = $null }
 }
 
 function Find-PermissionAccount {
-    # NOT IMPLEMENTED (SQ-018 revision 3, AC56). Looks the account up without freezing the window
-    # (background lookup or a short timeout). -Lookup: { param($identity) } returns the SID text
-    # or $null; the default is the app's own lookup. Returns Found, Sid, TimedOut, Problem.
+    # Looks the account up for the Add dialog before it closes (AC56). Returns Found, Sid,
+    # TimedOut, Problem. The lookup runs in a runspace of its own and is waited for at most
+    # -TimeoutMilliseconds, so a domain that cannot be reached holds the window for a few
+    # seconds at most instead of until Windows gives up. A lookup still running then is asked
+    # to stop and left to finish on its own (NTAccount.Translate cannot be interrupted); it is
+    # disposed by a later call once it has.
+    # -Lookup: { param($identity) } returning the SID text or $null (a test seam); it runs in
+    # that runspace from its text, so it must not rely on variables around it. The default is
+    # the app's own lookup, ConvertTo-IdentitySid.
+    # https://learn.microsoft.com/dotnet/api/system.management.automation.powershell.begininvoke
+    # https://learn.microsoft.com/dotnet/api/system.threading.waithandle.waitone
+    # https://learn.microsoft.com/dotnet/api/system.management.automation.powershell.beginstop
+    # https://learn.microsoft.com/dotnet/api/system.management.automation.runspaces.initialsessionstate.createdefault2
     param(
         [AllowNull()][AllowEmptyString()][string]$Identity,
         [scriptblock]$Lookup,
         [int]$TimeoutMilliseconds = 4000
     )
-    throw 'Find-PermissionAccount is not implemented yet (SQ-018 AC56).'
+    $id = "$Identity".Trim()
+    $notFound = { param($timedOut, $problem) [PSCustomObject]@{ Found = $false; Sid = $null; TimedOut = $timedOut; Problem = $problem } }
+    if (-not $id) { return (& $notFound $false (Get-PermissionInputError -Identity '')) }
+    $missing = "Windows could not find the account $id. Check the name, or ask a senior admin."
+    if (-not $Lookup) { $Lookup = ${function:ConvertTo-IdentitySid} }
+
+    # Lookups left running by earlier calls that have finished since.
+    if ($null -eq $script:AbandonedLookups) { $script:AbandonedLookups = [System.Collections.Generic.List[object]]::new() }
+    foreach ($old in @($script:AbandonedLookups)) {
+        if ($old.Handle.IsCompleted) {
+            try { $old.PS.Dispose() } catch { }
+            [void]$script:AbandonedLookups.Remove($old)
+        }
+    }
+
+    $ps = $null
+    $handle = $null
+    $kept = $false
+    try {
+        $ps = [System.Management.Automation.PowerShell]::Create([System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault2())
+        [void]$ps.AddScript('param($Code, $Name) & ([scriptblock]::Create($Code)) $Name').AddArgument($Lookup.ToString()).AddArgument($id)
+        $handle = $ps.BeginInvoke()
+        if (-not $handle.AsyncWaitHandle.WaitOne([Math]::Max(0, $TimeoutMilliseconds))) {
+            try { [void]$ps.BeginStop($null, $null) } catch { }
+            $script:AbandonedLookups.Add([PSCustomObject]@{ PS = $ps; Handle = $handle })
+            $kept = $true
+            return (& $notFound $true "Windows could not look up the account $id in time (its domain may not be reachable from here), so nothing was changed. Check the name and the network, then try again, or ask a senior admin.")
+        }
+        $sid = @($ps.EndInvoke($handle) | Where-Object { $null -ne $_ -and "$_".Trim() } | Select-Object -Last 1)
+        if ($sid.Count -eq 0) { return (& $notFound $false $missing) }
+        [PSCustomObject]@{ Found = $true; Sid = "$($sid[0])".Trim(); TimedOut = $false; Problem = $null }
+    }
+    catch {
+        # The lookup threw (a broken trust, a malformed name): Windows did not find it.
+        & $notFound $false $missing
+    }
+    finally {
+        if ($ps -and -not $kept) { try { $ps.Dispose() } catch { } }
+    }
 }
 
 function Get-DryRunSummary {
-    # NOT IMPLEMENTED (SQ-018 revision 3, AC57). The dry-run result shown after a -WhatIf change:
-    # Title and Text naming what would have been changed and where, and saying nothing was
-    # changed.
+    # The result shown after a -WhatIf change (AC57): Title and Text naming what the change would
+    # have done (account, level and Allow/Deny for an add or remove; the source for a copy) and
+    # where, saying that nothing was changed, backed up or logged. Rows that were skipped for
+    # another reason (not found, nothing to copy) are named as left out.
     param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Entries)
-    throw 'Get-DryRunSummary is not implemented yet (SQ-018 AC57).'
+    $all = @($Entries | Where-Object { $null -ne $_ })
+    $dry = @($all | Where-Object { $_.Result -eq 'Skipped (WhatIf)' })
+    $other = @($all | Where-Object { $_.Result -ne 'Skipped (WhatIf)' })
+    $max = 20
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add('This was a dry run (WhatIf), so nothing was changed, backed up or logged.')
+    if ($dry.Count -gt 0) {
+        $first = $dry[0]
+        $detail = "$($first.Detail)"
+        $isCopy = $first.Action -eq 'Copy permissions'
+        $suffix = ''
+        $what, $preposition = switch ($first.Action) {
+            'Add permission' {
+                if ($detail -match '^(Allow|Deny) (.+?) for (.+)$') { "add $(if ($Matches[1] -eq 'Allow') { 'an' } else { 'a' }) $($Matches[1]) permission for $($Matches[3]) (level: $($Matches[2]))", 'on' }
+                else { "add the permission $detail", 'on' }
+            }
+            'Remove permission' {
+                # As the real result says: every explicit entry of the type goes, not only the
+                # level that was picked (RemoveAccessRuleAll).
+                if ($detail -match '^(Allow|Deny) (.+?) for (.+)$') { "remove all $($Matches[1]) permissions for $($Matches[3]) (asked: $($Matches[2]))", 'from' }
+                else { "remove the permission $detail", 'from' }
+            }
+            'Take ownership' { 'take ownership', 'of' }
+            'Take ownership (all subfolders and files)' { 'take ownership', 'of'; $suffix = ' and all its subfolders and files' }
+            'Copy permissions' {
+                $source = Get-CopySourceText $first
+                if ($source) { "copy the permissions of $source", 'to' } else { 'copy permissions', 'to' }
+            }
+            default { "$($first.Action)".ToLowerInvariant(), 'on' }
+        }
+        $types = @($dry | ForEach-Object { "$($_.ItemType)" } | Sort-Object -Unique)
+        $places = if ($types.Count -eq 1 -and $types[0] -eq 'File') { Format-ItemCount $dry.Count 'file' 'files' }
+        elseif ($types.Count -eq 1 -and $types[0] -like 'Folder*') { Format-ItemCount $dry.Count 'folder' 'folders' }
+        else { Format-ItemCount $dry.Count 'item' 'items' }
+        $targetLine = {
+            param($e)
+            if (-not $isCopy) { return "  $($e.Target)" }
+            # A copy row's Detail lists the entries that target would get.
+            $rules = "$($e.Detail)" -replace '^Copied from .+?: ', ''
+            if ($rules) { "  $($e.Target): $rules" } else { "  $($e.Target)" }
+        }
+        if ($dry.Count -eq 1 -and -not $isCopy) {
+            $lines.Add("Without -WhatIf, the tool would $what $preposition $($first.Target)$suffix.")
+        }
+        else {
+            $lines.Add("Without -WhatIf, the tool would $what $preposition $(if ($dry.Count -eq 1) { 'this' } else { 'these' }) $($places -replace '^1 ', ''):")
+            foreach ($e in @($dry | Select-Object -First $max)) { $lines.Add((& $targetLine $e)) }
+            if ($dry.Count -gt $max) { $lines.Add("  ... and $($dry.Count - $max) more") }
+        }
+    }
+    foreach ($e in @($other | Select-Object -First $max)) {
+        $why = switch ($e.Result) {
+            'Skipped (not found)' { 'it does not exist' }
+            'Skipped (nothing to copy)' { 'it already has these permissions' }
+            default { "$($e.Result)" }
+        }
+        $lines.Add("Left out: $($e.Target) ($why).")
+    }
+    if ($other.Count -gt $max) { $lines.Add("... and $($other.Count - $max) more left out.") }
+    $lines.Add('To make the change, close the window and start the tool again without -WhatIf.')
+    [PSCustomObject]@{ Title = 'Dry run: nothing was changed'; Text = ($lines -join "`n") }
 }
 
 function Get-ChangeScopeTargets {
@@ -5373,6 +5505,10 @@ function Invoke-AddPermission {
         $Targets = Get-ChangeScopeTargets -Scope $Scope
         if (-not $Targets) { return }
     }
+    # The dialog has already done this; again here so no path starts a change with ".\name".
+    $named = Resolve-AddIdentity -Identity $Identity -Targets $Targets
+    if (-not $named.Ok) { Set-Status -Kind Warning -Text "$($named.Problem) Nothing was changed."; return }
+    $Identity = $named.Identity
     if (-not $Label) { $Label = Get-ChangeLabel -Scope $Scope -Targets $Targets }
     if (-not $RefreshState) { $RefreshState = Get-ScopeRefreshState -Scope $Scope -Targets $Targets }
     $detail = "$Type $Rights for $Identity"
@@ -5683,7 +5819,10 @@ function Set-RemoveTypeCombo {
 
 function Show-PermissionDialog {
     # The add or remove dialog. Returns Identity, Rights (a FileSystemRights name), Type and Sid,
-    # or $null when cancelled. Add: a typed user or group, checked before the dialog closes;
+    # or $null when cancelled. Add: a typed user or group, checked before the dialog closes: not
+    # empty, ".\name" made <this computer>\name or refused for network -Targets
+    # (Resolve-AddIdentity), then looked up (Find-PermissionAccount, a few seconds at most); a
+    # problem is shown in the dialog with the typed text kept, and nothing starts;
     # Enter submits an Allow, never a Deny (Set-PermissionSubmitStyle). Remove: one of -Choices (Get-RemoveIdentityChoices: explicit entries, by
     # SID), with only the types it has offered and the level not asked (every explicit entry of
     # the type goes); Remove is never the default button.
@@ -5691,7 +5830,8 @@ function Show-PermissionDialog {
         [Parameter(Mandatory)][ValidateSet('Add', 'Remove')][string]$Mode,
         [Parameter(Mandatory)][ValidateSet('Folder', 'Files')][string]$Scope,
         [Parameter(Mandatory)][string]$TargetText,
-        [object[]]$Choices
+        [object[]]$Choices,
+        [object[]]$Targets
     )
     $dlg = New-AppDialog -Xaml (Get-PermissionDialogXaml)
     $title = switch ("$Mode$Scope") {
@@ -5701,7 +5841,7 @@ function Show-PermissionDialog {
         default { 'Remove Permission from Selected Files' }
     }
     $dlg.Title = $title
-    $dlg.Tag = @{ Choices = @($Choices); Answer = $null }
+    $dlg.Tag = @{ Choices = @($Choices); Targets = @($Targets); Answer = $null }
     $dlg.FindName('PermDialogTitle').Text = $title
     $dlg.FindName('PermDialogTarget').Text = $TargetText
     try { [void](Enable-LiveRegion -Element $dlg.FindName('PermDialogError') -Setting Assertive) } catch { }
@@ -5747,7 +5887,14 @@ function Show-PermissionDialog {
                 $identity = $box.Text
                 $problem = Get-PermissionInputError -Identity $identity
                 if ($problem) { Show-DialogError -ErrorBlock $err -Text $problem -FocusTarget $box; return }
-                $w.Tag.Answer = [PSCustomObject]@{ Identity = $identity.Trim(); Rights = "$($w.FindName('PermRightsCombo').SelectedItem.Tag)"; Type = $type; Sid = $null }
+                $named = Resolve-AddIdentity -Identity $identity -Targets @($w.Tag.Targets)
+                if (-not $named.Ok) { Show-DialogError -ErrorBlock $err -Text $named.Problem -FocusTarget $box; return }
+                # The window cannot repaint while the lookup is waited for: the wait cursor says so.
+                $w.Cursor = [System.Windows.Input.Cursors]::Wait
+                try { $account = Find-PermissionAccount -Identity $named.Identity }
+                finally { $w.Cursor = $null }
+                if (-not $account.Found) { Show-DialogError -ErrorBlock $err -Text $account.Problem -FocusTarget $box; return }
+                $w.Tag.Answer = [PSCustomObject]@{ Identity = $named.Identity; Rights = "$($w.FindName('PermRightsCombo').SelectedItem.Tag)"; Type = $type; Sid = $account.Sid }
             }
             else {
                 $combo = $w.FindName('PermIdentityCombo')
@@ -5925,7 +6072,7 @@ function Open-AddPermission {
     [void](Start-ChangeLookup -Paths $request.Paths -Label $request.Label -FolderDisplayPath $request.FolderDisplayPath -FolderRealPath $request.FolderRealPath `
             -Request $request -State @{ Scope = $Scope; Request = $request } -OnResolved {
             param($targets, $s)
-            $answer = Show-PermissionDialog -Mode Add -Scope $s.Scope -TargetText (Get-DialogTargetText -Scope $s.Scope -Targets $targets)
+            $answer = Show-PermissionDialog -Mode Add -Scope $s.Scope -TargetText (Get-DialogTargetText -Scope $s.Scope -Targets $targets) -Targets $targets
             if (-not $answer) { Set-Status -Text 'Cancelled: nothing was changed.'; return }
             Invoke-AddPermission -Scope $s.Scope -Identity $answer.Identity -Rights $answer.Rights -Type $answer.Type `
                 -Targets $targets -Label $s.Request.Label -RefreshState $s.Request.RefreshState
