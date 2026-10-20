@@ -677,15 +677,15 @@ function Get-M365OnPremisesAssessment {
             # D-017: removing the marker undoes a deliberate block, so it is escalated first.
             $blockedAction = 'Check with the senior engineer who blocked it whether to remove the marker with M365-SyncedUserFixes: it was blocked on purpose (block marker on the AD account). If they agree, wait for the next sync after it is removed.'
         } elseif ($adEnabled -eq $false) {
-            $blockedAction = 'The on-premises AD account is disabled, and sync carries that to Microsoft 365. If it should be in use, enable it in AD (AD-UserQuickCheck shows its state), then wait for the next sync.'
+            $blockedAction = 'Check with their manager that the account should be back in use, note on the ticket who approved it, then enable it in on-premises AD (AD-UserQuickCheck shows its state) and wait for the next sync: the AD account is disabled, and sync carries that to Microsoft 365.'
         } elseif ($adEnabled -eq $true) {
             Add-Reason 'Probable' 'AdEnabledMismatch' 'On-premises AD has this account enabled, but Microsoft 365 has sign-in blocked: AD and Microsoft 365 disagree.' `
                 ("$lastSyncText If the AD account was enabled after that, wait for the next sync (normally $script:M365SyncIntervalText). If it stays blocked, check the Entra Connect server for a sync rule or an export error for this account.")
-            $blockedAction = 'On-premises AD has the account enabled and without the M365-SyncedUserFixes block marker, so the block has not come from AD this sync: see "AD and Microsoft 365 disagree".'
+            $blockedAction = 'On-premises AD has the account enabled and it was not blocked on purpose with M365-SyncedUserFixes, so the block has not come from AD this sync: see "AD and Microsoft 365 disagree".'
         }
     } elseif ($cloudEnabled -eq $true -and $adEnabled -eq $false) {
         Add-Reason 'Warning' 'AdDisabledCloudEnabled' 'On-premises AD has this account disabled, but Microsoft 365 still allows sign-in: AD and Microsoft 365 disagree, and sync normally carries the AD state across.' `
-            ("$lastSyncText If they should be able to sign in, enable the AD account (AD-UserQuickCheck shows its state).")
+            ("Check with their manager whether they should still be able to sign in. If not (a leaver), Microsoft 365 blocks sign-in at the next sync: $lastSyncText If it stays allowed after that, check the Entra Connect server. If they should, note on the ticket who approved it, then enable the AD account (AD-UserQuickCheck shows its state).")
     }
 
     # --- UPN mismatch (AC25) -----------------------------------------------------------------
@@ -735,8 +735,8 @@ function Get-M365SignInNextStep {
     switch ($Code) {
         50053 { return 'Microsoft gives two causes for this code: the account is locked after too many wrong passwords, or the sign-in came from an IP address with malicious activity. Open the failed sign-in in the Microsoft Entra admin center (Monitoring & health > Sign-in logs) and read its Failure reason to see which. If it is a lockout that keeps coming back, look for a phone or app still trying an old password.' }
         50057 {
-            if ($Synced) { return 'The account is disabled. It syncs from on-premises AD, so check the AD account (AD-UserQuickCheck) and enable it there if it should be in use, then wait for the next sync.' }
-            return 'The account is disabled. Check with their manager that it should be in use, then unblock sign-in for the user in the Microsoft 365 admin center.'
+            if ($Synced) { return 'The account is disabled. It syncs from on-premises AD, so look at the AD account with AD-UserQuickCheck. If it is disabled there, check with their manager that it should be back in use, note on the ticket who approved it, then enable it in AD and wait for the next sync. If AD has it enabled, it may have been blocked on purpose with M365-SyncedUserFixes: check with the senior engineer.' }
+            return 'The account is disabled. Check with their manager that it should be back in use, note on the ticket who approved it, then unblock sign-in for the user in the Microsoft 365 admin center.'
         }
         50055 {
             if ($Synced) { return 'The password has expired. The account syncs from on-premises AD, so check the AD password with AD-UserQuickCheck and have them change it, or reset it, in AD.' }
@@ -826,9 +826,9 @@ function Get-M365UserAssessment {
         if ($synced -and $onPrem.BlockedAction) {
             $action = $onPrem.BlockedAction
         } elseif ($synced) {
-            $action = 'This account syncs from on-premises AD, so the block comes from there: check whether the AD account is disabled (AD-UserQuickCheck), or whether it carries the M365-SyncedUserFixes block marker (msDS-cloudExtensionAttribute10 = BlockCloudSignIn). Change it in on-premises AD if it is wrong, then wait for the next sync.'
+            $action = 'Check with the senior engineer before undoing this block. The account syncs from on-premises AD, so the block comes from there: either the AD account is disabled, or it was blocked on purpose with M365-SyncedUserFixes (block marker msDS-cloudExtensionAttribute10 = BlockCloudSignIn). This check could not compare it with the AD account: run it again where it can read AD (on a client server, or with -Server and -Credential) to see which.'
         } else {
-            $action = 'Check with their manager that the account should be in use, then unblock sign-in for the user in the Microsoft 365 admin center.'
+            $action = 'Check with their manager that the account should be back in use, note on the ticket who approved it, then unblock sign-in for the user in the Microsoft 365 admin center.'
         }
         Add-Reason 'Blocker' 'SignInBlocked' 'Sign-in is blocked for this account in Microsoft 365.' $action
     } elseif (Test-M365Prop -Object $user -Name 'accountEnabled') {
@@ -924,7 +924,11 @@ function Get-M365UserAssessment {
                 if ($null -eq $step) {
                     Add-Reason 'Probable' 'UnmappedSignInFailure' $message ("Look the code up in Microsoft's live lookup: $link")
                 } else {
-                    $action = '{0} ({1}: {2})' -f $step, $script:M365MeaningLabel, $link
+                    # The next step is the mapped step exactly, so the D-017 / D-050 step check
+                    # can pin the password steps by their text; the "meaning per Microsoft"
+                    # caveat and the lookup link go with the reason instead.
+                    $action = $step
+                    $message += ' The next step is based on what Microsoft documents for this code ({0}: {1}).' -f $script:M365MeaningLabel, $link
                     $level = if ($script:M365BlockingCodes -contains $code) { 'Blocker' } else { 'Probable' }
                     $reasonCode = if ($level -eq 'Blocker') { 'BlockingSignInFailure' } else { 'LatestSignInFailed' }
                     # A block from days ago may have cleared on its own (a lockout ends, a CA
