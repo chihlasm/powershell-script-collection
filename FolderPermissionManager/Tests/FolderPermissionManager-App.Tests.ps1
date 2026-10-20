@@ -412,6 +412,20 @@ Describe 'Script shape' {
         $script:InstanceMutex | Should -BeNullOrEmpty
     }
 
+    It 'AC8_StartedWithoutLoadFunctionsOnlyGetsPastTheGuard' {
+        # Regression: dot-sourcing the core with -LoadFunctionsOnly binds the core's param() in the
+        # app's scope, which set the app's own $LoadFunctionsOnly too. The guard then returned on
+        # every normal start: no window, no UAC prompt, exit code 0.
+        # Mocks are aliases, so they win over the functions the app defines when it runs.
+        Mock Get-StartupAction { 'RelaunchSta' }
+        Mock Start-Process { }
+        Mock Get-LocalAppDataFolder { Join-Path $TestDrive 'appdata' }
+        Mock Get-LiveDriveMap { @{} }
+        Mock Get-RememberedDriveMap { @{} }
+        & $script:AppPath -LogFolder (Join-Path $TestDrive 'logs')
+        Should -Invoke Start-Process -Times 1 -Exactly
+    }
+
     It 'AC8b_CloseNeverHangs' {
         $order = [System.Collections.Generic.List[string]]::new()
         $mutex = [PSCustomObject]@{}
@@ -991,6 +1005,65 @@ Describe 'Browsing' {
         $v.Owner | Should -Be 'BUILTIN\Administrators'
         @($v.Rows).Count | Should -Be 1
         @($v.Rows)[0].Identity | Should -Be 'BUILTIN\Users'
+    }
+
+    It 'TreeFill_BigFolderIsCapped' {
+        # A user's Temp folder can hold 36,000 subfolders; building one tree entry each froze the
+        # window for minutes.
+        $children = @(1..36020 | ForEach-Object { [PSCustomObject]@{ Name = "d$_"; Path = "C:\T\d$_" } })
+        $plan = Get-TreeFillPlan -Children $children -Limit 2000
+        @($plan.Shown).Count | Should -Be 2000
+        @($plan.Shown)[0].Name | Should -Be 'd1'
+        $plan.Note | Should -Be ("Showing the first {0:N0} of {1:N0} folders. Type a path above to open one that isn't listed." -f 2000, 36020)
+
+        $small = Get-TreeFillPlan -Children @($children[0..9]) -Limit 2000
+        @($small.Shown).Count | Should -Be 10
+        $small.Note | Should -BeNullOrEmpty
+        @((Get-TreeFillPlan -Children @() -Limit 2000).Shown).Count | Should -Be 0
+    }
+
+    It 'TreeFill_AddedInBatchesPerTick' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $script:TreeFills.Clear()
+        $script:TreeFillLimit = 200
+        $script:TreeFillBatch = 100
+        try {
+            $tree = [System.Windows.Controls.TreeView]::new()
+            $node = New-FolderNode -Parent $tree -Label 'T' -Path 'C:\T'
+            $node.Tag.State = 'Loading'
+            $children = @(1..250 | ForEach-Object { [PSCustomObject]@{ Name = "d$_"; Path = "C:\T\d$_" } })
+            Set-FolderNodeChildren -Node $node -Result ([PSCustomObject]@{ Ok = $true; Path = 'C:\T'; Children = $children })
+
+            # The first batch at once (no empty node in between), the rest on later ticks.
+            $node.Items.Count | Should -Be 100
+            $script:TreeFills.Count | Should -Be 1
+            Update-TreeFills
+            $node.Items.Count | Should -Be 201 -Because 'the last entry says how many folders are not listed'
+            $node.Items[200].IsEnabled | Should -BeFalse
+            $node.Items[199].Tag.Path | Should -Be 'C:\T\d200'
+            $script:TreeFills.Count | Should -Be 0
+        }
+        finally { $script:TreeFills.Clear(); $script:TreeFillLimit = 2000; $script:TreeFillBatch = 100 }
+    }
+
+    It 'TreeFill_RefreshDropsTheOldFill' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        # Refresh reloads the node while the old fill is still going: only the new list is added.
+        $script:TreeFills.Clear()
+        try {
+            $tree = [System.Windows.Controls.TreeView]::new()
+            $node = New-FolderNode -Parent $tree -Label 'T' -Path 'C:\T'
+            $old = @(1..250 | ForEach-Object { [PSCustomObject]@{ Name = "old$_"; Path = "C:\T\old$_" } })
+            Set-FolderNodeChildren -Node $node -Result ([PSCustomObject]@{ Ok = $true; Path = 'C:\T'; Children = $old })
+            $node.Items.Count | Should -Be 100
+
+            $new = @([PSCustomObject]@{ Name = 'new1'; Path = 'C:\T\new1' })
+            Set-FolderNodeChildren -Node $node -Result ([PSCustomObject]@{ Ok = $true; Path = 'C:\T'; Children = $new })
+            Update-TreeFills
+            Update-TreeFills
+            $node.Items.Count | Should -Be 1
+            $node.Items[0].Tag.Path | Should -Be 'C:\T\new1'
+            $script:TreeFills.Count | Should -Be 0
+        }
+        finally { $script:TreeFills.Clear() }
     }
 }
 
