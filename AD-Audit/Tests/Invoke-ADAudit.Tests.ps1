@@ -543,8 +543,10 @@ Describe 'SQ-005 End of support' {
         It 'AC12_CsvExport_ColumnsInOrder' {
             $res = New-EmptyAuditResults
             $res.EndOfSupport = @{ Servers = @((New-EosRow -Name 'SRV01'), (New-EosRow -Name 'SRV02')); PastEndCount = 0; StaleTableWarning = $null; Error = $null }
-            Export-CSVReports -AuditResults $res -BasePath $TestDrive
-            $file = Join-Path $TestDrive 'AD-Audit-test-EndOfSupport.csv'
+            $dir = Join-Path $TestDrive 'csv-two-rows'
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            Export-CSVReports -AuditResults $res -BasePath $dir
+            $file = Join-Path $dir 'AD-Audit-test-EndOfSupport.csv'
             $file | Should -Exist
             $header = (Get-Content -LiteralPath $file -TotalCount 1) -split ',' | ForEach-Object { $_.Trim('"') }
             ($header -join ',') | Should -Be 'Name,OperatingSystem,OperatingSystemVersion,Product,Status,Severity,DaysUntilExtendedEnd,MainstreamEnd,ExtendedEnd,EsuEnd,Note,LastLogonDate,Stale,Source,TableCheckedOn,AuditDate,AuditedDomain,RunBy,RunOn'
@@ -553,8 +555,12 @@ Describe 'SQ-005 End of support' {
 
         It 'AC12_CsvExport_ZeroRowsWritesNoFile' {
             $res = New-EmptyAuditResults
-            Export-CSVReports -AuditResults $res -BasePath $TestDrive
-            (Join-Path $TestDrive 'AD-Audit-test-EndOfSupport.csv') | Should -Not -Exist
+            $dir = Join-Path $TestDrive 'csv-zero-rows'
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            $file = Join-Path $dir 'AD-Audit-test-EndOfSupport.csv'
+            $file | Should -Not -Exist
+            Export-CSVReports -AuditResults $res -BasePath $dir
+            $file | Should -Not -Exist
         }
 
         It 'AC13_HtmlSectionAndSummary' {
