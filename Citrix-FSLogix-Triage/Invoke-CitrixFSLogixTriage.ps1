@@ -814,6 +814,25 @@ function Get-FSLogixStorageSettingEvidence {
     return @($evidence)
 }
 
+# SQ-012 STUBS (replace with the real AVD host checks): test seams for the AVD agent checks.
+function Get-AvdAgentRegistry {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ComputerName,
+        [bool]$IsLocal = $false
+    )
+    throw 'Get-AvdAgentRegistry is not implemented yet (SQ-012).'
+}
+
+function Get-AvdStackListenerOutput {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ComputerName,
+        [bool]$IsLocal = $false
+    )
+    throw 'Get-AvdStackListenerOutput is not implemented yet (SQ-012).'
+}
+
 function New-CitrixFSLogixResult {
     [CmdletBinding()]
     param(
