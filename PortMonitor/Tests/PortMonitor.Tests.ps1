@@ -100,9 +100,9 @@ Describe 'ConvertTo-PortTarget and Test-PortTargetDefinition' {
         $t.Host | Should -Be 'a'
         $t.Enabled | Should -BeFalse
     }
-    It 'keeps the saved field order Label, Host, Port, IntervalSec, TimeoutMs, Enabled' {
+    It 'keeps the saved field order Label, Host, Port, IntervalSec, TimeoutMs, Enabled, FailAfter, RecoverAfter' {
         $names = @((ConvertTo-PortTarget @{ Host = 'a'; Port = 1 }).PSObject.Properties | ForEach-Object Name)
-        $names -join ',' | Should -Be 'Label,Host,Port,IntervalSec,TimeoutMs,Enabled'
+        $names -join ',' | Should -Be 'Label,Host,Port,IntervalSec,TimeoutMs,Enabled,FailAfter,RecoverAfter'
     }
     It 'turns a non-number into 0 so validation reports it (no silent default)' {
         (ConvertTo-PortTarget @{ Host = 'a'; Port = 'https' }).Port | Should -Be 0
@@ -191,7 +191,7 @@ Describe 'Save-PortMonitorConfig' {
         [void](Save-PortMonitorConfig -Path $p -Targets @())
         (Get-Content -LiteralPath $p -Raw).Trim() | Should -Be '[]'
     }
-    It 'writes only the six saved fields, not live monitoring state' {
+    It 'writes only the saved fields, not live monitoring state' {
         $p = Join-Path $TestDrive 'state-save.json'
         $state = New-PortTargetState @{ Host = 'h'; Port = 1 }
         $state.Status = 'Open'
@@ -245,7 +245,7 @@ Describe 'Monitoring state' {
         $s.LatencyMs | Should -Be 2
     }
     It 'records Open -> Timeout, clears latency, and counts failures and uptime' {
-        $s = New-PortTargetState @{ Host = 'h'; Port = 1 }
+        $s = New-PortTargetState @{ Host = 'h'; Port = 1; FailAfter = 1 }   # report on the first failure
         [void](Update-PortTargetState -State $s -Result ([PSCustomObject]@{ Status = 'Open'; LatencyMs = 1 }))
         [void](Update-PortTargetState -State $s -Result ([PSCustomObject]@{ Status = 'Open'; LatencyMs = 1 }))
         [void](Update-PortTargetState -State $s -Result ([PSCustomObject]@{ Status = 'Open'; LatencyMs = 1 }))
@@ -257,7 +257,7 @@ Describe 'Monitoring state' {
         $s.UptimePercent | Should -Be 75
     }
     It 'shows Disabled when turned off, and on re-enable checks at once and still logs a change that happened meanwhile' {
-        $s = New-PortTargetState @{ Host = 'h'; Port = 1 }
+        $s = New-PortTargetState @{ Host = 'h'; Port = 1; FailAfter = 1 }
         [void](Update-PortTargetState -State $s -Result ([PSCustomObject]@{ Status = 'Open'; LatencyMs = 1 }))
         Set-PortTargetEnabled -State $s -Enabled $false
         $s.Status | Should -Be 'Disabled'
@@ -445,6 +445,281 @@ Describe 'Defaults and window layout' {
         $r = Read-PortMonitorConfig -Path (Join-Path (Split-Path -Parent $PSScriptRoot) 'targets.example.json')
         @($r.Warnings).Count | Should -Be 0
         @($r.Targets).Count | Should -Be 3
+    }
+}
+
+Describe 'Ignoring one-off blips (FailAfter / RecoverAfter)' {
+    BeforeAll {
+        function Step { param($State, [string]$Status) Update-PortTargetState -State $State -Result ([PSCustomObject]@{ Status = $Status; LatencyMs = 1; Detail = 'd' }) }
+    }
+    It 'defaults to down after 2 failures and back up after 1 success, and validates 1-10' {
+        $t = ConvertTo-PortTarget @{ Host = 'h'; Port = 1 }
+        $t.FailAfter | Should -Be 2
+        $t.RecoverAfter | Should -Be 1
+        @(Test-PortTargetDefinition @{ Host = 'h'; Port = 1; FailAfter = 0 })[0] | Should -Match 'Down after'
+        @(Test-PortTargetDefinition @{ Host = 'h'; Port = 1; RecoverAfter = 11 })[0] | Should -Match 'Back up after'
+    }
+    It 'loads a version 1.0 list (no FailAfter/RecoverAfter) with the defaults' {
+        $p = Join-Path $TestDrive 'v10.json'
+        Set-Content -LiteralPath $p -Encoding ASCII -Value '[{"Label":"L","Host":"h","Port":1,"IntervalSec":30,"TimeoutMs":3000,"Enabled":true}]'
+        $t = @((Read-PortMonitorConfig -Path $p).Targets)[0]
+        $t.FailAfter | Should -Be 2
+        $t.RecoverAfter | Should -Be 1
+    }
+    It 'a single failure after Open is not reported; the status stays Open and the details say it is being confirmed' {
+        $s = New-PortTargetState @{ Host = 'h'; Port = 1 }
+        [void](Step $s 'Open')
+        Step $s 'Timeout' | Should -BeNullOrEmpty
+        $s.Status | Should -Be 'Open'
+        $s.Detail | Should -Match '^Confirming: Timeout \(1 of 2 in a row\)'
+        $s.FailCount | Should -Be 1 -Because 'raw failures still count toward Fail Count and Uptime %'
+        Step $s 'Open' | Should -BeNullOrEmpty -Because 'the blip ended before it was confirmed'
+        $s.Status | Should -Be 'Open'
+    }
+    It 'the second failure in a row is reported as Open -> the failure' {
+        $s = New-PortTargetState @{ Host = 'h'; Port = 1 }
+        [void](Step $s 'Open')
+        [void](Step $s 'Timeout')
+        $c = Step $s 'Refused'
+        $c.PreviousStatus | Should -Be 'Open'
+        $c.NewStatus | Should -Be 'Refused'
+        $s.Status | Should -Be 'Refused'
+    }
+    It 'reports a failure on the very first check at once (nothing known-good to protect)' {
+        $s = New-PortTargetState @{ Host = 'h'; Port = 1; FailAfter = 3 }
+        (Step $s 'DNS Failure').NewStatus | Should -Be 'DNS Failure'
+    }
+    It 'reports a change between two failure kinds at once (it is down either way)' {
+        $s = New-PortTargetState @{ Host = 'h'; Port = 1; FailAfter = 1 }
+        [void](Step $s 'Open'); [void](Step $s 'Timeout')
+        (Step $s 'Refused').PreviousStatus | Should -Be 'Timeout'
+    }
+    It 'with RecoverAfter 3, it comes back up only after 3 good checks in a row' {
+        $s = New-PortTargetState @{ Host = 'h'; Port = 1; FailAfter = 1; RecoverAfter = 3 }
+        [void](Step $s 'Open'); [void](Step $s 'Timeout')
+        Step $s 'Open' | Should -BeNullOrEmpty
+        Step $s 'Open' | Should -BeNullOrEmpty
+        $s.Status | Should -Be 'Timeout'
+        (Step $s 'Open').NewStatus | Should -Be 'Open'
+    }
+    It 'turning a target off and on clears a half-finished streak' {
+        $s = New-PortTargetState @{ Host = 'h'; Port = 1 }
+        [void](Step $s 'Open'); [void](Step $s 'Timeout')
+        Set-PortTargetEnabled -State $s -Enabled $false
+        Set-PortTargetEnabled -State $s -Enabled $true
+        Step $s 'Timeout' | Should -BeNullOrEmpty -Because 'the earlier failure must not count toward the new streak'
+    }
+}
+
+Describe 'Role presets (port sets)' {
+    It 'has the documented ports for each role' {
+        $sets = @{}
+        foreach ($s in Get-PortMonitorPortSets) { $sets[$s.Name] = @($s.Ports | ForEach-Object { $_.Port }) }
+        # Microsoft Learn: service overview and network port requirements; Exchange network ports;
+        # Standard TCP/IP port monitor (RAW 9100).
+        $sets['Domain controller'] -join ',' | Should -Be '53,88,135,389,445,464,636,3268,3269'
+        $sets['File server'] -join ',' | Should -Be '445'
+        $sets['Remote Desktop server'] -join ',' | Should -Be '3389,443'
+        $sets['SQL Server'] -join ',' | Should -Be '1433'
+        $sets['Exchange server'] -join ',' | Should -Be '443,25,587'
+        $sets['Web server'] -join ',' | Should -Be '80,443'
+        $sets['Network printer'] -join ',' | Should -Be '9100,515'
+        $sets['Remote management (WinRM)'] -join ',' | Should -Be '5985,5986'
+    }
+    It 'every preset port is valid and listed once per role' {
+        foreach ($s in Get-PortMonitorPortSets) {
+            $ports = @($s.Ports | ForEach-Object { $_.Port })
+            @($ports | Select-Object -Unique).Count | Should -Be $ports.Count -Because $s.Name
+            foreach ($p in $s.Ports) { $p.Port | Should -BeGreaterThan 0; $p.Port | Should -BeLessOrEqual 65535; $p.Service | Should -Not -BeNullOrEmpty }
+        }
+    }
+    It 'makes one target per port, labelled "<name> - <service>", with the shared settings' {
+        $dc = Get-PortMonitorPortSets | Where-Object { $_.Name -eq 'Domain controller' }
+        $t = @(New-PortTargetsFromSet -Set $dc -HostName ' dc01.example.local ' -Name 'Contoso DC01' -IntervalSec 60 -FailAfter 3)
+        $t.Count | Should -Be 9
+        $t[0].Label | Should -Be 'Contoso DC01 - DNS'
+        $t[0].Host | Should -Be 'dc01.example.local'
+        ($t | Where-Object { $_.Port -eq 3268 }).Label | Should -Be 'Contoso DC01 - Global Catalog'
+        @($t | Where-Object { $_.IntervalSec -ne 60 -or $_.FailAfter -ne 3 }).Count | Should -Be 0
+        @($t | ForEach-Object { @(Test-PortTargetDefinition $_).Count } | Where-Object { $_ -gt 0 }).Count | Should -Be 0
+    }
+    It 'uses the host as the name when none is given, keeps only ticked ports, and skips ports already monitored' {
+        $web = Get-PortMonitorPortSets | Where-Object { $_.Name -eq 'Web server' }
+        (@(New-PortTargetsFromSet -Set $web -HostName 'web01'))[0].Label | Should -Be 'web01 - HTTP'
+        @(New-PortTargetsFromSet -Set $web -HostName 'web01' -Ports 443).Port | Should -Be 443
+        $existing = @(New-PortTargetState @{ Host = 'WEB01'; Port = 80 })
+        @(New-PortTargetsFromSet -Set $web -HostName 'web01' -ExistingTargets $existing).Port | Should -Be 443
+    }
+}
+
+Describe 'Uptime and outage report' {
+    BeforeAll {
+        function Row { param([string]$When, [string]$Prev, [string]$New, [string]$Label = 'DC01 LDAP', [string]$HostName = 'dc01', [string]$Port = '389')
+            [PSCustomObject]@{ Timestamp = [datetime]::ParseExact($When, 'yyyy-MM-dd HH:mm', $null); Label = $Label; Host = $HostName; Port = $Port; PreviousStatus = $Prev; NewStatus = $New } }
+        $script:From = [datetime]'2026-11-10 00:00'
+        $script:To = [datetime]'2026-11-11 00:00'
+    }
+    It 'finds an outage from going down to coming back, and works out uptime over the monitored time' {
+        $rows = @(
+            Row '2026-11-10 00:00' 'Not checked' 'Open'
+            Row '2026-11-10 06:00' 'Open' 'Timeout'
+            Row '2026-11-10 06:30' 'Timeout' 'Refused'
+            Row '2026-11-10 08:00' 'Refused' 'Open')
+        $r = Get-PortOutageReport -Rows $rows -From $script:From -To $script:To
+        @($r.Outages).Count | Should -Be 1 -Because 'Timeout -> Refused is the same outage'
+        $o = $r.Outages[0]
+        $o.Start | Should -Be ([datetime]'2026-11-10 06:00')
+        $o.End | Should -Be ([datetime]'2026-11-10 08:00')
+        $o.Status | Should -Be 'Refused'
+        $r.Targets[0].Downtime | Should -Be ([TimeSpan]::FromHours(2))
+        $r.Targets[0].UptimePercent | Should -Be 91.67
+    }
+    It 'marks an outage still going at the end as ongoing' {
+        $rows = @((Row '2026-11-10 00:00' 'Not checked' 'Open'), (Row '2026-11-10 23:00' 'Open' 'Timeout'))
+        $r = Get-PortOutageReport -Rows $rows -From $script:From -To $script:To
+        $r.Outages[0].Ongoing | Should -BeTrue
+        $r.Targets[0].Ongoing | Should -BeTrue
+        $r.Targets[0].Downtime | Should -Be ([TimeSpan]::FromHours(1))
+    }
+    It 'closes an outage at a restart ("Not checked" row) and marks its end uncertain' {
+        $rows = @(
+            Row '2026-11-10 00:00' 'Not checked' 'Open'
+            Row '2026-11-10 10:00' 'Open' 'Timeout'
+            Row '2026-11-10 12:00' 'Not checked' 'Open')
+        $o = (Get-PortOutageReport -Rows $rows -From $script:From -To $script:To).Outages[0]
+        $o.End | Should -Be ([datetime]'2026-11-10 12:00')
+        $o.EndUncertain | Should -BeTrue
+    }
+    It 'counts only the part of an outage inside the period, but lists its real start' {
+        $rows = @(
+            Row '2026-11-09 20:00' 'Not checked' 'Open'
+            Row '2026-11-09 22:00' 'Open' 'Timeout'
+            Row '2026-11-10 02:00' 'Timeout' 'Open')
+        $r = Get-PortOutageReport -Rows $rows -From $script:From -To $script:To
+        $r.Outages[0].Start | Should -Be ([datetime]'2026-11-09 22:00')
+        $r.Targets[0].Downtime | Should -Be ([TimeSpan]::FromHours(2))
+        $r.Targets[0].UptimePercent | Should -Be 91.67
+    }
+    It 'leaves out outages wholly outside the period and ignores rows after it' {
+        $rows = @(
+            Row '2026-11-09 00:00' 'Not checked' 'Open'
+            Row '2026-11-09 01:00' 'Open' 'Timeout'
+            Row '2026-11-09 02:00' 'Timeout' 'Open'
+            Row '2026-11-11 05:00' 'Open' 'Timeout')
+        $r = Get-PortOutageReport -Rows $rows -From $script:From -To $script:To
+        @($r.Outages).Count | Should -Be 0
+        $r.Targets[0].UptimePercent | Should -Be 100
+    }
+    It 'keeps targets apart by host and port' {
+        $rows = @(
+            Row '2026-11-10 00:00' 'Not checked' 'Open'
+            Row '2026-11-10 00:00' 'Not checked' 'Open' -Label 'DC01 DNS' -Port '53'
+            Row '2026-11-10 01:00' 'Open' 'Refused' -Label 'DC01 DNS' -Port '53')
+        $r = Get-PortOutageReport -Rows $rows -From $script:From -To $script:To
+        @($r.Targets).Count | Should -Be 2
+        $r.Targets[0].Label | Should -Be 'DC01 DNS' -Because 'the target with the most downtime comes first'
+    }
+    It 'HTML: verdict first, values HTML-encoded, plain-English verdict for a clean period' {
+        $rows = @((Row '2026-11-10 00:00' 'Not checked' 'Open' -Label '<script>x</script>'), (Row '2026-11-10 01:00' 'Open' 'Timeout' -Label '<script>x</script>'))
+        $html = ConvertTo-PortOutageReportHtml -Report (Get-PortOutageReport -Rows $rows -From $script:From -To $script:To)
+        $html | Should -Not -Match '<script>x'
+        $html | Should -Match '&lt;script&gt;x'
+        $html.IndexOf('class="verdict bad"') | Should -BeLessThan $html.IndexOf('<h2>Targets</h2>')
+        $clean = ConvertTo-PortOutageReportHtml -Report (Get-PortOutageReport -Rows @(Row '2026-11-10 00:00' 'Not checked' 'Open') -From $script:From -To $script:To)
+        $clean | Should -Match 'All 1 target\(s\) were up for the whole period'
+        ConvertTo-PortOutageReportHtml -Report (Get-PortOutageReport -Rows @() -From $script:From -To $script:To) | Should -Match 'Was Port Monitor running\?'
+    }
+    It 'reads the daily CSV files written by Write-PortStateChangeLog, up to the end date' {
+        $dir = Join-Path $TestDrive 'report-logs'
+        foreach ($c in @(
+                [PSCustomObject]@{ Timestamp = [datetime]'2026-11-09 10:00:00'; Label = 'L'; Host = 'h'; Port = 1; PreviousStatus = 'Not checked'; NewStatus = 'Open'; LatencyMs = 1 }
+                [PSCustomObject]@{ Timestamp = [datetime]'2026-11-10 10:00:00'; Label = 'L'; Host = 'h'; Port = 1; PreviousStatus = 'Open'; NewStatus = 'Timeout'; LatencyMs = $null }
+                [PSCustomObject]@{ Timestamp = [datetime]'2026-11-12 10:00:00'; Label = 'L'; Host = 'h'; Port = 1; PreviousStatus = 'Timeout'; NewStatus = 'Open'; LatencyMs = 2 })) {
+            [void](Write-PortStateChangeLog -LogDirectory $dir -Change $c)
+        }
+        $log = Read-PortStateLog -LogDirectory $dir -To ([datetime]'2026-11-11 00:00')
+        @($log.Files).Count | Should -Be 2
+        @($log.Rows).Count | Should -Be 2
+        $log.Rows[1].Timestamp | Should -Be ([datetime]'2026-11-10 10:00:00')
+    }
+    It 'Export-PortOutageReport writes PortMonitor_Report_<timestamp>.html to the output folder' {
+        $out = Export-PortOutageReport -LogDirectory (Join-Path $TestDrive 'none') -OutputPath (Join-Path $TestDrive 'reports') -Days 7 -Now ([datetime]'2026-11-16 14:00:00')
+        Split-Path -Leaf $out.Path | Should -Be 'PortMonitor_Report_2026-11-16_140000.html'
+        Get-Content -LiteralPath $out.Path -Raw | Should -Match 'last 7 day'
+    }
+    It 'Format-PortDuration reads naturally' {
+        Format-PortDuration ([TimeSpan]::FromSeconds(45)) | Should -Be '45 s'
+        Format-PortDuration ([TimeSpan]::FromMinutes(12.5)) | Should -Be '12 min'
+        Format-PortDuration ([TimeSpan]::FromMinutes(125)) | Should -Be '2 h 5 min'
+        Format-PortDuration ([TimeSpan]::FromHours(76)) | Should -Be '3 d 4 h'
+    }
+}
+
+Describe 'Look and remembered settings' {
+    It 'every colour key the XAML uses exists in both the dark and light palettes' {
+        $keys = @([regex]::Matches((Get-PortMonitorMainXaml) + (Get-PortTargetDialogXaml), 'DynamicResource (\w+)') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+        $keys.Count | Should -BeGreaterThan 10
+        foreach ($theme in 'Dark', 'Light') {
+            $palette = Get-PortMonitorPalette -Theme $theme
+            foreach ($k in $keys) { $palette.ContainsKey($k) | Should -BeTrue -Because "$theme palette needs '$k'" }
+            foreach ($k in 'Badge', 'BadgeRunning') { $palette.ContainsKey($k) | Should -BeTrue }
+        }
+    }
+    It 'the dark and light palettes have the same keys and valid colours' {
+        $dark = Get-PortMonitorPalette -Theme Dark; $light = Get-PortMonitorPalette -Theme Light
+        (@($dark.Keys | Sort-Object) -join ',') | Should -Be (@($light.Keys | Sort-Object) -join ',')
+        foreach ($v in @($dark.Values) + @($light.Values)) { $v | Should -Match '^#[0-9A-F]{6}$' }
+    }
+    It 'saves and reads back theme, window placement and sort order; ignores unknown values' {
+        $p = Join-Path $TestDrive 'look\settings.json'
+        Save-PortMonitorSettings -Path $p -Settings @{ StartupOffered = $true; Theme = 'Light'; SortColumn = 'Status'; SortDirection = 'Descending'
+            Window = @{ Left = 100; Top = 50; Width = 1200; Height = 700; Maximized = $true } }
+        $s = Read-PortMonitorSettings -Path $p
+        $s.StartupOffered | Should -BeTrue
+        $s.Theme | Should -Be 'Light'
+        $s.SortColumn | Should -Be 'Status'
+        $s.SortDirection | Should -Be 'Descending'
+        $s.Window.Width | Should -Be 1200
+        $s.Window.Maximized | Should -BeTrue
+        Set-Content -LiteralPath $p -Encoding ASCII -Value '{ "Theme": "Purple", "SortDirection": "Sideways" }'
+        $s = Read-PortMonitorSettings -Path $p
+        $s.Theme | Should -Be 'Dark'
+        $s.SortDirection | Should -Be 'Ascending'
+        $s.Window | Should -BeNullOrEmpty
+    }
+    It 'a settings file from version 1.0 (StartupOffered only) still loads' {
+        $p = Join-Path $TestDrive 'v10-settings.json'
+        Set-Content -LiteralPath $p -Encoding ASCII -Value '{ "StartupOffered": true }'
+        $s = Read-PortMonitorSettings -Path $p
+        $s.StartupOffered | Should -BeTrue
+        $s.Theme | Should -Be 'Dark'
+    }
+    It 'window placement: <Case>' -TestCases @(
+        @{ Case = 'on the main screen'; B = @{ Left = 100; Top = 100; Width = 1200; Height = 700 }; Ok = $true }
+        @{ Case = 'on a second monitor to the right'; B = @{ Left = 2100; Top = 100; Width = 1200; Height = 700 }; Ok = $true }
+        @{ Case = 'on a monitor that was unplugged'; B = @{ Left = 4200; Top = 100; Width = 1200; Height = 700 }; Ok = $false }
+        @{ Case = 'title bar above the top of the screen'; B = @{ Left = 100; Top = -500; Width = 1200; Height = 700 }; Ok = $false }
+        @{ Case = 'only a sliver left on screen'; B = @{ Left = 3780; Top = 100; Width = 1200; Height = 700 }; Ok = $false }
+        @{ Case = 'nonsense size'; B = @{ Left = 100; Top = 100; Width = 10; Height = 10 }; Ok = $false }
+    ) {
+        param($Case, $B, $Ok)
+        $screens = @([PSCustomObject]@{ Left = 0; Top = 0; Width = 1920; Height = 1040 }, [PSCustomObject]@{ Left = 1920; Top = 0; Width = 1920; Height = 1040 })
+        Test-PortMonitorWindowBounds -Bounds ([PSCustomObject]$B) -Screens $screens | Should -Be $Ok
+    }
+    It 'regression: the Add dialog hands back its targets one by one, not wrapped in one array' {
+        # A trailing ", @(...)" made a Domain controller preset (8 targets) arrive as ONE item,
+        # which became a single row with port 0.
+        $ast = (Get-Command Show-PortTargetDialog).ScriptBlock.Ast
+        $last = $ast.Body.EndBlock.Statements[-1]
+        $last.Extent.Text | Should -Not -Match '^\s*,'
+        $last.Extent.Text | Should -Match 'foreach'
+    }
+    It 'the Add dialog XAML loads and has the role, port tick-list and blip fields (STA only; nothing is shown)' -Skip:([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') {
+        Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
+        $d = [System.Windows.Markup.XamlReader]::Parse((Get-PortTargetDialogXaml))
+        foreach ($n in 'CmbRole', 'PortChecks', 'PortBox', 'TxtFailAfter', 'TxtRecoverAfter') { $d.FindName($n) | Should -Not -BeNullOrEmpty -Because $n }
+        Set-PortMonitorTheme -Element $d -Palette (Get-PortMonitorPalette -Theme Light)
+        $d.Resources['Text'].Color.ToString() | Should -Be '#FF1B1E22'
     }
 }
 
@@ -646,6 +921,30 @@ Describe 'Real checks and console mode' -Tag 'Integration' {
         $cfg = Join-Path $TestDrive 'none.json'
         Set-Content -LiteralPath $cfg -Value '[]' -Encoding ASCII
         (Invoke-OnceChild -Exe (Get-Process -Id $PID).Path -Config $cfg -Logs (Join-Path $TestDrive 'nl')).ExitCode | Should -Be 2
+    }
+    It '-Report under <Name> writes the HTML report from the logs and says how many outages' -TestCases @(
+        @{ Name = 'Windows PowerShell 5.1' }, @{ Name = 'PowerShell 7' }
+    ) {
+        param($Name)
+        $exe = ($script:Hosts | Where-Object { $_.Name -eq $Name }).Exe
+        $dir = Join-Path $TestDrive ('report-' + ($Name -replace '\W', ''))
+        $logs = Join-Path $dir 'Logs'
+        $now = Get-Date
+        foreach ($c in @(
+                [PSCustomObject]@{ Timestamp = $now.AddHours(-5); Label = 'DC01'; Host = 'dc01'; Port = 389; PreviousStatus = 'Not checked'; NewStatus = 'Open'; LatencyMs = 1 }
+                [PSCustomObject]@{ Timestamp = $now.AddHours(-3); Label = 'DC01'; Host = 'dc01'; Port = 389; PreviousStatus = 'Open'; NewStatus = 'Timeout'; LatencyMs = $null }
+                [PSCustomObject]@{ Timestamp = $now.AddHours(-2); Label = 'DC01'; Host = 'dc01'; Port = 389; PreviousStatus = 'Timeout'; NewStatus = 'Open'; LatencyMs = 2 })) {
+            [void](Write-PortStateChangeLog -LogDirectory $logs -Change $c)
+        }
+        $out = Join-Path $dir 'out.txt'
+        $p = Start-Process -FilePath $exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$script:ScriptPath`"", '-Report', '-Days', '1',
+            '-LogPath', "`"$logs`"", '-OutputPath', "`"$dir`"") -NoNewWindow -Wait -PassThru -RedirectStandardOutput $out
+        $text = Get-Content -LiteralPath $out -Raw
+        $p.ExitCode | Should -Be 0 -Because $text
+        $text | Should -Match '\[WARN\] 1 outage'
+        $html = @(Get-ChildItem -LiteralPath $dir -Filter 'PortMonitor_Report_*.html')
+        $html.Count | Should -Be 1
+        Get-Content -LiteralPath $html[0].FullName -Raw | Should -Match '1 of 1 target\(s\) had outages'
     }
     It '-SmokeTest passes under <Name>' -TestCases @(
         @{ Name = 'Windows PowerShell 5.1' }, @{ Name = 'PowerShell 7' }

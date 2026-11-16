@@ -27,6 +27,22 @@
     result for each target after it starts is also logged (PreviousStatus "Not checked") so the
     log shows what state monitoring started in.
 
+    One-off blips are ignored: a target that was Open is only reported down after FailAfter
+    failed checks in a row (default 2), and back up after RecoverAfter good checks (default 1).
+    Both are set per target (1-10). Until a change is confirmed the target keeps its status and
+    the Details column says "Confirming". Fail Count and Uptime % still count every check.
+
+    Adding a server: the Add window has "What is it?" presets (domain controller, file server,
+    Remote Desktop, SQL Server, Exchange, web server, network printer, WinRM) that add one row
+    per usual port, with the ports from Microsoft's documentation; untick any you don't need.
+
+    Report: the window's Report button (or -Report on the command line) turns the logs into an
+    HTML page with each target's uptime %, every outage with start, end and duration, and a
+    one-line verdict at the top.
+
+    Keyboard: Insert = Add, Delete = Remove, Enter or F2 = Edit, F5 = Start/Stop. The look
+    (dark or light), window size and position, and the grid's sort order are remembered.
+
     Running in the background: -Tray (or the window's Run in Background button) keeps checking
     with the window hidden. An icon in the notification area shows the overall state (green:
     all open, red: something is not answering, blue: checking, grey: stopped) and a Windows
@@ -39,7 +55,8 @@
     Files (defaults; nothing is written anywhere else):
       %APPDATA%\PortMonitor\targets.json                 the target list (auto-saved by the window)
       %APPDATA%\PortMonitor\Logs\PortMonitor_yyyyMMdd.csv state changes, one file per day
-      %APPDATA%\PortMonitor\settings.json                remembers that the Startup offer was shown
+      %APPDATA%\PortMonitor\settings.json                look, window placement, sort order, Startup offer shown
+      %APPDATA%\PortMonitor\Logs\Reports\                reports made from the window's Report button
       <Startup folder>\Port Monitor.lnk                  only if the user chooses "Start when I sign in"
 
     The window auto-saves the target list after every Add, Edit, Remove or Enabled change. If
@@ -70,6 +87,16 @@
     once, and a notification appears for every change. This is what the "Start when I sign in"
     shortcut runs. Cannot be combined with -NoGui or -Once.
 
+.PARAMETER Report
+    Make the uptime and outage report from the logs in -LogPath for the last -Days days, write
+    PortMonitor_Report_yyyy-MM-dd_HHmmss.html to -OutputPath, and exit. Checks nothing.
+
+.PARAMETER Days
+    How many days back the -Report covers (1-366). Default 7.
+
+.PARAMETER OutputPath
+    Where -Report writes the HTML file. Default: the current folder.
+
 .PARAMETER SmokeTest
     Checks that this copy of the tool starts, then closes by itself: the real window is built
     and rendered off-screen (it never takes the focus), a probe runs in the background pool,
@@ -90,6 +117,10 @@
     Opens the window with one client's target list. Changes are auto-saved to that file.
 
 .EXAMPLE
+    .\PortMonitor.ps1 -Report -Days 30 -OutputPath C:\Temp
+    Writes a 30-day uptime and outage report from the default logs to C:\Temp.
+
+.EXAMPLE
     .\PortMonitor.ps1 -Tray
     Starts in the background (notification area icon) and notifies on every change.
 
@@ -102,7 +133,7 @@
     One pass for an RMM check: exit code 0 when everything is Open, 1 when something is not.
 
 .NOTES
-    Version : 1.0.0
+    Version : 1.1.0
     Requires: Windows PowerShell 3.0 or later, or PowerShell 7 on Windows; .NET Framework 4.5
               or later (for TcpClient.ConnectAsync and Dns.GetHostAddressesAsync). No modules,
               no administrator rights.
@@ -167,6 +198,15 @@
       https://learn.microsoft.com/dotnet/api/system.threading.mutex.-ctor
     - Dispatcher.PushFrame (message loop without ShowDialog, so the window can hide and show).
       https://learn.microsoft.com/dotnet/api/system.windows.threading.dispatcher.pushframe
+    - Role preset ports: Service overview and network port requirements for Windows (DNS 53,
+      Kerberos 88, RPC 135, LDAP 389, SMB 445, Kerberos password 464, LDAP SSL 636, Global
+      Catalog 3268/3269, RDS 3389, SQL 1433, HTTP 80, HTTPS 443, WinRM 5985/5986, LPD 515).
+      https://learn.microsoft.com/troubleshoot/windows-server/networking/service-overview-and-network-port-requirements
+    - Exchange client and mail-flow ports (HTTPS 443, SMTP 25, authenticated SMTP 587).
+      https://learn.microsoft.com/exchange/plan-and-deploy/deployment-ref/network-ports
+    - Standard TCP/IP port monitor: RAW printing default port 9100.
+      https://learn.microsoft.com/troubleshoot/windows-server/printing/standard-port-monitor-for-tcpip
+      https://learn.microsoft.com/windows-server/administration/windows-commands/prnport
     - PowerShell support lifecycle (Server 2012 ships 3.0, 2012 R2 ships 4.0).
       https://learn.microsoft.com/powershell/scripting/install/powershell-support-lifecycle
 #>
@@ -189,13 +229,23 @@ param(
     [switch]$Tray,
 
     [Parameter()]
+    [switch]$Report,
+
+    [Parameter()]
+    [ValidateRange(1, 366)]
+    [int]$Days = 7,
+
+    [Parameter()]
+    [string]$OutputPath,
+
+    [Parameter()]
     [switch]$SmokeTest,
 
     [Parameter()]
     [switch]$LoadFunctionsOnly
 )
 
-$script:PortMonitorVersion = '1.0.0'
+$script:PortMonitorVersion = '1.1.0'
 $script:StatusNotChecked = 'Not checked'
 $script:StatusDisabled = 'Disabled'
 $script:FailureStatuses = @('Refused', 'Timeout', 'DNS Failure', 'Error')
@@ -408,11 +458,13 @@ function ConvertTo-PortTarget {
     <#
     .SYNOPSIS
         Normalises anything target-shaped (JSON entry, hashtable, grid row) into the saved schema:
-        Label, Host, Port, IntervalSec, TimeoutMs, Enabled.
+        Label, Host, Port, IntervalSec, TimeoutMs, Enabled, FailAfter, RecoverAfter.
     .DESCRIPTION
-        Blank IntervalSec / TimeoutMs / Enabled get defaults (30 s, 3000 ms, true). A value that
-        is present but not a whole number becomes 0 so validation reports it instead of a
-        default silently replacing it. A blank Label becomes "Host:Port".
+        Blank IntervalSec / TimeoutMs / Enabled / FailAfter / RecoverAfter get defaults
+        (30 s, 3000 ms, true, 2, 1). A value that is present but not a whole number becomes 0
+        so validation reports it instead of a default silently replacing it. A blank Label
+        becomes "Host:Port". Lists saved by version 1.0 (no FailAfter/RecoverAfter) load with
+        the defaults.
     #>
     param([Parameter(Mandatory)][AllowNull()]$InputObject)
 
@@ -427,6 +479,8 @@ function ConvertTo-PortTarget {
     $port = & $toInt (Get-PortTargetField $InputObject 'Port') 0
     $interval = & $toInt (Get-PortTargetField $InputObject 'IntervalSec') 30
     $timeout = & $toInt (Get-PortTargetField $InputObject 'TimeoutMs') 3000
+    $failAfter = & $toInt (Get-PortTargetField $InputObject 'FailAfter') 2
+    $recoverAfter = & $toInt (Get-PortTargetField $InputObject 'RecoverAfter') 1
 
     $enabledRaw = Get-PortTargetField $InputObject 'Enabled'
     $enabled = $true
@@ -443,8 +497,10 @@ function ConvertTo-PortTarget {
         Host        = $hostValue
         Port        = $port
         IntervalSec = $interval
-        TimeoutMs   = $timeout
-        Enabled     = [bool]$enabled
+        TimeoutMs    = $timeout
+        Enabled      = [bool]$enabled
+        FailAfter    = $failAfter
+        RecoverAfter = $recoverAfter
     }
 }
 
@@ -458,8 +514,84 @@ function Test-PortTargetDefinition {
     if ($t.Port -lt 1 -or $t.Port -gt 65535) { [void]$problems.Add('Port must be a whole number from 1 to 65535.') }
     if ($t.IntervalSec -lt 1) { [void]$problems.Add('Check every must be at least 1 second.') }
     if ($t.TimeoutMs -lt 100 -or $t.TimeoutMs -gt 30000) { [void]$problems.Add('Timeout must be from 100 to 30000 ms.') }
+    if ($t.FailAfter -lt 1 -or $t.FailAfter -gt 10) { [void]$problems.Add('Down after must be from 1 to 10 failed checks.') }
+    if ($t.RecoverAfter -lt 1 -or $t.RecoverAfter -gt 10) { [void]$problems.Add('Back up after must be from 1 to 10 good checks.') }
     # Emitted one by one (no leading comma): callers wrap in @() and count.
     foreach ($p in $problems) { [string]$p }
+}
+
+function Get-PortMonitorPortSets {
+    <#
+    .SYNOPSIS
+        Role presets: the TCP ports to watch for common kinds of server, so a technician picks
+        "Domain controller" instead of typing seven ports.
+    .DESCRIPTION
+        Ports and service names are from Microsoft's documentation:
+        - Domain controller, file server, SQL Server, Remote Desktop, web, WinRM, LPD:
+          "Service overview and network port requirements for Windows" - DNS 53, Kerberos 88,
+          RPC 135, LDAP 389, SMB 445, Kerberos Password V5 464, LDAP SSL 636, Global Catalog
+          3268/3269, RDS 3389, SQL over TCP 1433, HTTP 80, HTTPS 443, WinRM 5985/5986, LPD 515.
+          https://learn.microsoft.com/troubleshoot/windows-server/networking/service-overview-and-network-port-requirements
+        - Exchange: HTTPS 443 (Outlook, OWA, ActiveSync, EWS, Autodiscover), SMTP 25 (inbound
+          mail), authenticated SMTP 587 (client submission).
+          https://learn.microsoft.com/exchange/plan-and-deploy/deployment-ref/network-ports
+        - Network printer: RAW 9100 is the Standard TCP/IP port monitor's default.
+          https://learn.microsoft.com/troubleshoot/windows-server/printing/standard-port-monitor-for-tcpip
+        SQL Server 1433 is the default instance; named instances use another (often dynamic)
+        port, which the preset cannot know - the Port field can be changed after adding.
+    #>
+    $set = {
+        param([string]$Name, [string]$Description, [object[]]$Ports)
+        [PSCustomObject]@{
+            Name        = $Name
+            Description = $Description
+            Ports       = @(foreach ($p in $Ports) { [PSCustomObject]@{ Port = [int]$p[0]; Service = [string]$p[1] } })
+        }
+    }
+    @(
+        & $set 'Domain controller' 'Active Directory: DNS, Kerberos, LDAP, Global Catalog, SMB (SYSVOL/logon scripts)' @(
+            @(53, 'DNS'), @(88, 'Kerberos'), @(135, 'RPC'), @(389, 'LDAP'), @(445, 'SMB'),
+            @(464, 'Kerberos password change'), @(636, 'LDAP SSL'), @(3268, 'Global Catalog'), @(3269, 'Global Catalog SSL'))
+        & $set 'File server' 'File shares (SMB)' @(, @(445, 'SMB'))
+        & $set 'Remote Desktop server' 'RDP; RD Gateway and RD Web also answer on HTTPS' @(@(3389, 'RDP'), @(443, 'HTTPS (RD Gateway / RD Web)'))
+        & $set 'SQL Server' 'Default instance' @(, @(1433, 'SQL Server'))
+        & $set 'Exchange server' 'Outlook/OWA/ActiveSync over HTTPS, inbound mail, client SMTP' @(@(443, 'HTTPS'), @(25, 'SMTP'), @(587, 'SMTP submission'))
+        & $set 'Web server' 'HTTP and HTTPS' @(@(80, 'HTTP'), @(443, 'HTTPS'))
+        & $set 'Network printer' 'RAW printing (Standard TCP/IP port) and LPD' @(@(9100, 'RAW printing'), @(515, 'LPD'))
+        & $set 'Remote management (WinRM)' 'PowerShell remoting' @(@(5985, 'WinRM HTTP'), @(5986, 'WinRM HTTPS'))
+    )
+}
+
+function New-PortTargetsFromSet {
+    <#
+    .SYNOPSIS
+        One target per port of a preset, labelled "<name> - <service>". Ports already monitored
+        on that host (ExistingTargets) are left out so nothing is added twice.
+    #>
+    param(
+        [Parameter(Mandatory)]$Set,
+        [Parameter(Mandatory)][string]$HostName,
+        [string]$Name,
+        [int[]]$Ports,
+        [int]$IntervalSec = 30,
+        [int]$TimeoutMs = 3000,
+        [int]$FailAfter = 2,
+        [int]$RecoverAfter = 1,
+        [bool]$Enabled = $true,
+        [AllowNull()][AllowEmptyCollection()][object[]]$ExistingTargets = @()
+    )
+    $hostValue = $HostName.Trim()
+    if (-not $Name) { $Name = $hostValue }
+    $taken = @{}
+    foreach ($e in @($ExistingTargets)) { if ($e) { $taken["$($e.Host)".ToLowerInvariant() + ':' + [int]$e.Port] = $true } }
+    foreach ($p in $Set.Ports) {
+        if ($PSBoundParameters.ContainsKey('Ports') -and $Ports -notcontains $p.Port) { continue }
+        if ($taken.ContainsKey($hostValue.ToLowerInvariant() + ':' + $p.Port)) { continue }
+        ConvertTo-PortTarget ([PSCustomObject]@{
+                Label = "$Name - $($p.Service)"; Host = $hostValue; Port = $p.Port; IntervalSec = $IntervalSec
+                TimeoutMs = $TimeoutMs; Enabled = $Enabled; FailAfter = $FailAfter; RecoverAfter = $RecoverAfter
+            })
+    }
 }
 
 function Read-PortMonitorConfig {
@@ -597,6 +729,10 @@ function New-PortTargetState {
         Port            = $t.Port
         IntervalSec     = $t.IntervalSec
         TimeoutMs       = $t.TimeoutMs
+        FailAfter       = $t.FailAfter
+        RecoverAfter    = $t.RecoverAfter
+        FailStreak      = 0
+        OkStreak        = 0
         Status          = $status
         LatencyMs       = $null
         LastChecked     = $null
@@ -615,33 +751,57 @@ function New-PortTargetState {
 function Update-PortTargetState {
     <#
     .SYNOPSIS
-        Applies one check result to a target's state. Returns a change record when the status
-        differs from the last known one (including the first result), otherwise nothing.
+        Applies one check result to a target's state. Returns a change record when the
+        confirmed status changes (including the first result), otherwise nothing.
     .DESCRIPTION
-        FailCount and UptimePercent count every check since monitoring of this target started
-        (Uptime % = Open checks / all checks).
+        Blip suppression: going from Open to not-open is only reported after FailAfter failed
+        checks in a row, and back to Open after RecoverAfter good checks in a row. Until then
+        Status keeps the confirmed value and Detail says the change is being confirmed. The
+        first result after monitoring starts is accepted at once (there is no known-good state
+        to protect), and a change between two failure kinds (Timeout -> Refused) is reported at
+        once because the target is down either way.
+        FailCount and UptimePercent count every check, confirmed or not (Uptime % = Open checks
+        / all checks).
     #>
     param(
         [Parameter(Mandatory)]$State,
         [Parameter(Mandatory)]$Result,
         [datetime]$Now = (Get-Date)
     )
-    $newStatus = [string]$Result.Status
+    $raw = [string]$Result.Status
+    $isOpen = $raw -eq 'Open'
     $State.Checks = [int]$State.Checks + 1
-    if ($newStatus -eq 'Open') {
+    if ($isOpen) {
         $State.OpenCount = [int]$State.OpenCount + 1
         $State.LatencyMs = $Result.LatencyMs
+        $State.OkStreak = [int]$State.OkStreak + 1
+        $State.FailStreak = 0
     }
     else {
         $State.FailCount = [int]$State.FailCount + 1
         $State.LatencyMs = $null
+        $State.FailStreak = [int]$State.FailStreak + 1
+        $State.OkStreak = 0
     }
     $State.UptimePercent = [math]::Round(100.0 * $State.OpenCount / $State.Checks, 1)
     $State.LastChecked = $Now
     $State.Detail = [string]$Result.Detail
-    $State.Status = $newStatus
 
     $previous = $State.LastKnownStatus
+    if ($previous -and (($previous -eq 'Open') -ne $isOpen)) {
+        # Crossing between up and down: wait for the streak.
+        $needed = [int]$State.FailAfter
+        $streak = [int]$State.FailStreak
+        if ($isOpen) { $needed = [int]$State.RecoverAfter; $streak = [int]$State.OkStreak }
+        if ($needed -lt 1) { $needed = 1 }
+        if ($streak -lt $needed) {
+            $State.Status = $previous
+            $State.Detail = "Confirming: $raw ($streak of $needed in a row). $($Result.Detail)"
+            return
+        }
+    }
+    $newStatus = $raw
+    $State.Status = $newStatus
     if ($previous -eq $newStatus) { return }
     $State.LastKnownStatus = $newStatus
     $State.LastStateChange = $Now
@@ -662,6 +822,8 @@ function Set-PortTargetEnabled {
     # the next tick. The last known status is kept so a change while it was off is still logged.
     param([Parameter(Mandatory)]$State, [Parameter(Mandatory)][bool]$Enabled)
     $State.Enabled = $Enabled
+    $State.FailStreak = 0
+    $State.OkStreak = 0
     if ($Enabled) {
         $State.Status = $script:StatusNotChecked
         $State.NextDue = [datetime]::MinValue
@@ -1027,6 +1189,233 @@ function Invoke-PortMonitorHeadless {
 
 #endregion
 
+#region Uptime and outage report (from the state-change logs)
+
+function Read-PortStateLog {
+    <#
+    .SYNOPSIS
+        Reads every PortMonitor_yyyyMMdd.csv in a folder up to a date, oldest first. Rows with an
+        unreadable timestamp are skipped. Returns Rows and the Files read.
+    #>
+    param([Parameter(Mandatory)][string]$LogDirectory, [datetime]$To = (Get-Date))
+    $rows = New-Object System.Collections.ArrayList
+    $files = @()
+    if (Test-Path -LiteralPath $LogDirectory) {
+        $files = @(Get-ChildItem -LiteralPath $LogDirectory -Filter 'PortMonitor_*.csv' -File | Where-Object {
+                $day = [datetime]::MinValue
+                $_.BaseName -match '^PortMonitor_(\d{8})$' -and
+                [datetime]::TryParseExact($Matches[1], 'yyyyMMdd', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$day) -and
+                $day -le $To.Date
+            } | Sort-Object Name)
+    }
+    foreach ($f in $files) {
+        foreach ($r in @(Import-Csv -LiteralPath $f.FullName)) {
+            $t = [datetime]::MinValue
+            if (-not [datetime]::TryParseExact([string]$r.Timestamp, 'yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$t)) { continue }
+            [void]$rows.Add([PSCustomObject]@{
+                    Timestamp = $t; Label = [string]$r.Label; Host = [string]$r.Host; Port = [string]$r.Port
+                    PreviousStatus = [string]$r.PreviousStatus; NewStatus = [string]$r.NewStatus
+                })
+        }
+    }
+    [PSCustomObject]@{ Rows = @($rows | Sort-Object Timestamp); Files = @($files | ForEach-Object { $_.FullName }) }
+}
+
+function Format-PortDuration {
+    # "45 s", "12 min", "2 h 5 min", "3 d 4 h".
+    param([TimeSpan]$Span)
+    if ($Span.TotalSeconds -lt 60) { return '{0} s' -f [int][math]::Round($Span.TotalSeconds) }
+    if ($Span.TotalMinutes -lt 60) { return '{0} min' -f [int][math]::Floor($Span.TotalMinutes) }
+    if ($Span.TotalHours -lt 24) { return '{0} h {1} min' -f [int][math]::Floor($Span.TotalHours), $Span.Minutes }
+    '{0} d {1} h' -f [int][math]::Floor($Span.TotalDays), $Span.Hours
+}
+
+function Get-PortOutageReport {
+    <#
+    .SYNOPSIS
+        Works out outages and uptime per target for [From, To] from state-change rows.
+    .DESCRIPTION
+        The log holds changes only, so a target's state between two rows is the state of the
+        earlier row. An outage starts when a target becomes not-Open and ends at the next Open
+        row. A "Not checked" row means Port Monitor was (re)started: an outage still open at that
+        point is closed there and marked EndUncertain, because nothing was checked while Port
+        Monitor was not running. Time before a target's first row is not counted. Outages that
+        overlap the range are listed in full; only the part inside the range counts as downtime.
+    #>
+    param(
+        [AllowNull()][AllowEmptyCollection()][object[]]$Rows = @(),
+        [Parameter(Mandatory)][datetime]$From,
+        [Parameter(Mandatory)][datetime]$To
+    )
+    $byTarget = [ordered]@{}
+    foreach ($r in @($Rows | Where-Object { $_ -and $_.Timestamp -le $To } | Sort-Object Timestamp)) {
+        $key = ("{0}:{1}" -f $r.Host, $r.Port).ToLowerInvariant()
+        if (-not $byTarget.Contains($key)) { $byTarget[$key] = New-Object System.Collections.ArrayList }
+        [void]$byTarget[$key].Add($r)
+    }
+
+    $targets = New-Object System.Collections.ArrayList
+    $outages = New-Object System.Collections.ArrayList
+    foreach ($key in $byTarget.Keys) {
+        $list = $byTarget[$key]
+        $label = $list[$list.Count - 1].Label
+        $hostName = $list[0].Host; $port = $list[0].Port
+        $mine = New-Object System.Collections.ArrayList
+        $open = $null      # the outage in progress
+        foreach ($r in $list) {
+            $isRestart = $r.PreviousStatus -eq $script:StatusNotChecked
+            $isDown = $r.NewStatus -ne 'Open'
+            if ($open -and ($isRestart -or -not $isDown)) {
+                $open.End = $r.Timestamp
+                $open.EndUncertain = $isRestart
+                [void]$mine.Add($open); $open = $null
+            }
+            if ($isDown -and -not $open) {
+                $open = [PSCustomObject]@{ Label = $label; Host = $hostName; Port = $port; Start = $r.Timestamp; End = $null; Status = $r.NewStatus; EndUncertain = $false; Ongoing = $false }
+            }
+            elseif ($isDown -and $open) { $open.Status = $r.NewStatus }
+        }
+        if ($open) { $open.End = $To; $open.Ongoing = $true; [void]$mine.Add($open) }
+
+        $monitoredFrom = $list[0].Timestamp
+        if ($monitoredFrom -lt $From) { $monitoredFrom = $From }
+        $monitored = $To - $monitoredFrom
+        $down = [TimeSpan]::Zero
+        $inRange = New-Object System.Collections.ArrayList
+        foreach ($o in $mine) {
+            if ($o.End -le $From -or $o.Start -ge $To) { continue }
+            $s = $o.Start; if ($s -lt $From) { $s = $From }
+            $e = $o.End; if ($e -gt $To) { $e = $To }
+            $o | Add-Member -NotePropertyName DownInRange -NotePropertyValue ($e - $s) -Force
+            $o | Add-Member -NotePropertyName Duration -NotePropertyValue ($o.End - $o.Start) -Force
+            $down += ($e - $s)
+            [void]$inRange.Add($o); [void]$outages.Add($o)
+        }
+        $uptime = $null
+        if ($monitored.TotalSeconds -gt 0) { $uptime = [math]::Round(100.0 * (1 - $down.TotalSeconds / $monitored.TotalSeconds), 2) }
+        $longest = $null
+        if ($inRange.Count -gt 0) { $longest = ($inRange | Sort-Object { $_.DownInRange } -Descending | Select-Object -First 1).DownInRange }
+        [void]$targets.Add([PSCustomObject]@{
+                Label = $label; Host = $hostName; Port = $port
+                UptimePercent = $uptime; Outages = $inRange.Count; Downtime = $down; Longest = $longest
+                Ongoing = [bool](@($inRange | Where-Object { $_.Ongoing }).Count)
+                MonitoredFrom = $monitoredFrom
+            })
+    }
+    [PSCustomObject]@{
+        From    = $From
+        To      = $To
+        Targets = @($targets | Where-Object { $_.MonitoredFrom -lt $To } | Sort-Object @{ Expression = { $_.Downtime }; Descending = $true }, Label)
+        Outages = @($outages | Sort-Object Start)
+    }
+}
+
+function ConvertTo-PortOutageReportHtml {
+    # A self-contained HTML page: verdict first, then a table per target, then every outage.
+    param([Parameter(Mandatory)]$Report, [string]$Title = 'Port Monitor - uptime and outages')
+    $enc = { param($s) [System.Net.WebUtility]::HtmlEncode([string]$s) }
+    $fmt = 'yyyy-MM-dd HH:mm'
+    $targets = @($Report.Targets)
+    $hit = @($targets | Where-Object { $_.Outages -gt 0 })
+    $ongoing = @($targets | Where-Object { $_.Ongoing })
+    if ($targets.Count -eq 0) {
+        $verdict = 'No state changes were logged for this period, so there is nothing to report. Was Port Monitor running?'
+        $verdictClass = 'none'
+    }
+    elseif ($hit.Count -eq 0) {
+        $verdict = "All $($targets.Count) target(s) were up for the whole period."
+        $verdictClass = 'ok'
+    }
+    else {
+        $worst = $hit | Sort-Object @{ Expression = { $_.Longest }; Descending = $true } | Select-Object -First 1
+        $total = [TimeSpan]::Zero; foreach ($t in $hit) { $total += $t.Downtime }
+        $verdict = "$($hit.Count) of $($targets.Count) target(s) had outages: $(@($Report.Outages).Count) in total, $(Format-PortDuration $total) of downtime. Longest: $(Format-PortDuration $worst.Longest) ($($worst.Label))."
+        if ($ongoing.Count -gt 0) { $verdict += " Still down at the end of the period: $((@($ongoing | ForEach-Object { $_.Label })) -join ', ')." }
+        $verdictClass = 'bad'
+    }
+
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append(@"
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>$(& $enc $Title)</title>
+<style>
+body{font-family:'Segoe UI',Arial,sans-serif;margin:0;padding:24px;color:#1b1e22;background:#fff}
+h1{font-size:22px;margin:0 0 4px} h2{font-size:16px;margin:28px 0 8px}
+.meta{color:#5b636e;font-size:13px}
+.verdict{margin:16px 0;padding:12px 16px;border-left:4px solid;font-size:15px;font-weight:600}
+.verdict.ok{border-color:#1d7a45;background:#eaf6ee}.verdict.bad{border-color:#a8322a;background:#fbecea}.verdict.none{border-color:#8a939e;background:#f1f3f5}
+table{border-collapse:collapse;width:100%;font-size:13px} th,td{text-align:left;padding:6px 10px;border-bottom:1px solid #e3e6ea}
+th{background:#f4f6f8;color:#3c434c;font-weight:600} td.num{text-align:right;font-variant-numeric:tabular-nums}
+.mono{font-family:Consolas,'Cascadia Mono',monospace} .down{color:#a8322a;font-weight:600} .up{color:#1d7a45;font-weight:600}
+.note{color:#5b636e;font-size:12px;margin-top:20px;max-width:900px}
+</style></head><body>
+<h1>$(& $enc $Title)</h1>
+<div class="meta">Period: $($Report.From.ToString($fmt)) to $($Report.To.ToString($fmt)) &middot; Created $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') on $(& $enc $env:COMPUTERNAME)</div>
+<div class="verdict $verdictClass">$(& $enc $verdict)</div>
+"@)
+    if ($targets.Count -gt 0) {
+        [void]$sb.Append('<h2>Targets</h2><table><tr><th>Target</th><th>Host</th><th>Port</th><th>Uptime</th><th>Outages</th><th>Downtime</th><th>Longest</th></tr>')
+        foreach ($t in $targets) {
+            $up = 'n/a'; if ($null -ne $t.UptimePercent) { $up = '{0:0.00} %' -f $t.UptimePercent }
+            $cls = 'up'; if ($t.Outages -gt 0) { $cls = 'down' }
+            $longest = ''; if ($t.Longest) { $longest = Format-PortDuration $t.Longest }
+            $downtime = ''; if ($t.Outages -gt 0) { $downtime = Format-PortDuration $t.Downtime }
+            [void]$sb.Append(("<tr><td>{0}</td><td class=""mono"">{1}</td><td class=""num mono"">{2}</td><td class=""num {3}"">{4}</td><td class=""num"">{5}</td><td class=""num"">{6}</td><td class=""num"">{7}</td></tr>" -f
+                    (& $enc $t.Label), (& $enc $t.Host), (& $enc $t.Port), $cls, $up, $t.Outages, $downtime, $longest))
+        }
+        [void]$sb.Append('</table>')
+    }
+    if (@($Report.Outages).Count -gt 0) {
+        [void]$sb.Append('<h2>Outages</h2><table><tr><th>Target</th><th>Went down</th><th>Came back</th><th>Duration</th><th>Last status</th></tr>')
+        foreach ($o in $Report.Outages) {
+            $start = $o.Start.ToString('yyyy-MM-dd HH:mm:ss')
+            if ($o.Start -lt $Report.From) { $start += ' (before this period)' }
+            if ($o.Ongoing) { $end = 'still down' }
+            elseif ($o.EndUncertain) { $end = $o.End.ToString('yyyy-MM-dd HH:mm:ss') + ' or earlier (Port Monitor was restarted)' }
+            else { $end = $o.End.ToString('yyyy-MM-dd HH:mm:ss') }
+            $duration = Format-PortDuration $o.Duration
+            if ($o.Ongoing) { $duration = 'at least ' + $duration }
+            [void]$sb.Append(("<tr><td>{0} <span class=""mono"">({1}:{2})</span></td><td class=""mono"">{3}</td><td class=""mono"">{4}</td><td class=""num"">{5}</td><td class=""down"">{6}</td></tr>" -f
+                    (& $enc $o.Label), (& $enc $o.Host), (& $enc $o.Port), (& $enc $start), (& $enc $end), (& $enc $duration), (& $enc $o.Status)))
+        }
+        [void]$sb.Append('</table>')
+    }
+    [void]$sb.Append(@'
+<p class="note">How to read this: Port Monitor logs only changes. Uptime counts from the first time a target appears in the log
+(or the start of the period). Time when Port Monitor was not running counts as the last state it saw, so a gap in monitoring can hide
+or lengthen an outage; outages cut short by a restart are marked. Short blips are already filtered by each target's "Down after" setting.</p>
+</body></html>
+'@)
+    $sb.ToString()
+}
+
+function Export-PortOutageReport {
+    <#
+    .SYNOPSIS
+        Builds the report for the last N days from a log folder and writes
+        PortMonitor_Report_yyyy-MM-dd_HHmmss.html to OutputPath. Returns the file path and the
+        report data.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$LogDirectory,
+        [Parameter(Mandatory)][string]$OutputPath,
+        [ValidateRange(1, 366)][int]$Days = 7,
+        [datetime]$Now = (Get-Date)
+    )
+    $from = $Now.AddDays(-$Days)
+    $log = Read-PortStateLog -LogDirectory $LogDirectory -To $Now
+    $report = Get-PortOutageReport -Rows $log.Rows -From $from -To $Now
+    $period = "last $Days day(s)"; if ($Days -eq 1) { $period = 'last 24 hours' }
+    $html = ConvertTo-PortOutageReportHtml -Report $report -Title "Port Monitor - uptime and outages, $period"
+    if (-not (Test-Path -LiteralPath $OutputPath)) { New-Item -ItemType Directory -Path $OutputPath -Force -ErrorAction Stop | Out-Null }
+    $file = Join-Path $OutputPath ('PortMonitor_Report_{0}.html' -f $Now.ToString('yyyy-MM-dd_HHmmss'))
+    [System.IO.File]::WriteAllText($file, $html, (New-Object System.Text.UTF8Encoding -ArgumentList $true))
+    [PSCustomObject]@{ Path = $file; Report = $report; LogFiles = $log.Files }
+}
+
+#endregion
+
 #region Tray, notifications, startup shortcut, single instance
 
 function Limit-PortMonitorText {
@@ -1214,13 +1603,31 @@ function Set-PortMonitorStartup {
 }
 
 function Read-PortMonitorSettings {
-    # Small per-user settings (for now only whether the Startup offer was shown). Never throws.
+    <#
+    .SYNOPSIS
+        Per-user settings in settings.json. Never throws: a missing or broken file gives the
+        defaults. Keys: StartupOffered (bool), Theme ('Dark'/'Light'), Window (Left, Top, Width,
+        Height, Maximized - or $null), SortColumn (column header or ''), SortDirection
+        ('Ascending'/'Descending').
+    #>
     param([Parameter(Mandatory)][string]$Path)
-    $settings = @{ StartupOffered = $false }
+    $settings = @{ StartupOffered = $false; Theme = 'Dark'; Window = $null; SortColumn = ''; SortDirection = 'Ascending' }
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $settings }
     try {
         $parsed = ConvertFrom-Json -InputObject ([System.IO.File]::ReadAllText($Path)) -ErrorAction Stop
-        if ($parsed -and $parsed.PSObject.Properties['StartupOffered']) { $settings.StartupOffered = [bool]$parsed.StartupOffered }
+        if ($null -eq $parsed) { return $settings }
+        $p = $parsed.PSObject.Properties
+        if ($p['StartupOffered']) { $settings.StartupOffered = [bool]$parsed.StartupOffered }
+        if ($p['Theme'] -and @('Dark', 'Light') -contains [string]$parsed.Theme) { $settings.Theme = [string]$parsed.Theme }
+        if ($p['SortColumn']) { $settings.SortColumn = [string]$parsed.SortColumn }
+        if ($p['SortDirection'] -and @('Ascending', 'Descending') -contains [string]$parsed.SortDirection) { $settings.SortDirection = [string]$parsed.SortDirection }
+        if ($p['Window'] -and $parsed.Window) {
+            $w = $parsed.Window
+            $settings.Window = @{
+                Left = [double]$w.Left; Top = [double]$w.Top; Width = [double]$w.Width; Height = [double]$w.Height
+                Maximized = [bool]$w.Maximized
+            }
+        }
     }
     catch { }
     $settings
@@ -1230,8 +1637,81 @@ function Save-PortMonitorSettings {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][hashtable]$Settings)
     $dir = Split-Path -Parent $Path
     if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null }
-    $json = ConvertTo-Json -InputObject ([PSCustomObject]@{ StartupOffered = [bool]$Settings.StartupOffered })
+    $theme = 'Dark'; if ($Settings.Theme -eq 'Light') { $theme = 'Light' }
+    $direction = 'Ascending'; if ($Settings.SortDirection -eq 'Descending') { $direction = 'Descending' }
+    $window = $null
+    if ($Settings.Window) {
+        $w = $Settings.Window
+        $window = [PSCustomObject]@{ Left = [double]$w.Left; Top = [double]$w.Top; Width = [double]$w.Width; Height = [double]$w.Height; Maximized = [bool]$w.Maximized }
+    }
+    $json = ConvertTo-Json -Depth 3 -InputObject ([PSCustomObject]@{
+            StartupOffered = [bool]$Settings.StartupOffered
+            Theme          = $theme
+            Window         = $window
+            SortColumn     = [string]$Settings.SortColumn
+            SortDirection  = $direction
+        })
     [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding -ArgumentList $false))
+}
+
+function Test-PortMonitorWindowBounds {
+    <#
+    .SYNOPSIS
+        True when a remembered window position is still usable: at least 120 x 24 px of its top
+        edge (where the title bar is) lies on one of the given screens. A window remembered on
+        a monitor that has since been unplugged would otherwise open out of reach.
+    .PARAMETER Screens
+        Working areas of the connected monitors: objects with Left, Top, Width, Height.
+    #>
+    param([Parameter(Mandatory)]$Bounds, [AllowEmptyCollection()][object[]]$Screens = @())
+    if ($null -eq $Bounds -or [double]$Bounds.Width -lt 200 -or [double]$Bounds.Height -lt 150) { return $false }
+    $l = [double]$Bounds.Left; $t = [double]$Bounds.Top; $r = $l + [double]$Bounds.Width; $b = $t + 24
+    foreach ($s in @($Screens)) {
+        $sl = [double]$s.Left; $st = [double]$s.Top; $sr = $sl + [double]$s.Width; $sb = $st + [double]$s.Height
+        $w = [math]::Min($r, $sr) - [math]::Max($l, $sl)
+        $h = [math]::Min($b, $sb) - [math]::Max($t, $st)
+        if ($w -ge 120 -and $h -ge 24) { return $true }
+    }
+    $false
+}
+
+function Get-PortMonitorPalette {
+    <#
+    .SYNOPSIS
+        The colours for the dark (default) or light look, by resource key. The status colours
+        (green Open, red down, amber Error) are the same in both and live in the XAML.
+    #>
+    param([ValidateSet('Dark', 'Light')][string]$Theme = 'Dark')
+    if ($Theme -eq 'Light') {
+        return @{
+            Bg = '#F3F5F7'; Panel = '#FFFFFF'; Surface = '#FFFFFF'; SurfaceAlt = '#F7F9FB'; ColHeader = '#EEF1F4'
+            Btn = '#FFFFFF'; BtnBorder = '#C3CAD2'; Line = '#DCE1E6'; GridLine = '#E8ECF0'; RowHover = '#EAF2FA'
+            Text = '#1B1E22'; TextMuted = '#5B636E'; TextSoft = '#3C434C'; Hint = '#6B737D'
+            Accent = '#1D6FB0'; Pressed = '#D3E5F5'; Selection = '#CFE3F5'; SelectionText = '#0F2A40'
+            PrimaryBg = '#1D6FB0'; PrimaryBorder = '#165A91'; DangerBg = '#FBECEA'; DangerBorder = '#E0A39D'; DangerText = '#8A2A23'
+            InputBg = '#FFFFFF'; Badge = '#E6EAEE'; BadgeRunning = '#DDF3E4'; PillNeutral = '#E1E5EA'; PillNeutralText = '#3C434C'
+        }
+    }
+    @{
+        Bg = '#17191C'; Panel = '#1D2024'; Surface = '#1B1E22'; SurfaceAlt = '#1F2226'; ColHeader = '#202328'
+        Btn = '#262A30'; BtnBorder = '#3A4048'; Line = '#2C3036'; GridLine = '#262A30'; RowHover = '#262A30'
+        Text = '#E6E8EB'; TextMuted = '#9AA3AE'; TextSoft = '#C5CBD3'; Hint = '#8A939E'
+        Accent = '#4FA3E0'; Pressed = '#16405F'; Selection = '#1C3F5E'; SelectionText = '#FFFFFF'
+        PrimaryBg = '#1D6FB0'; PrimaryBorder = '#2B86D1'; DangerBg = '#3A2224'; DangerBorder = '#6E3236'; DangerText = '#F2B8B5'
+        InputBg = '#15171A'; Badge = '#2A2E34'; BadgeRunning = '#163A24'; PillNeutral = '#30353C'; PillNeutralText = '#C5CBD3'
+    }
+}
+
+function Set-PortMonitorTheme {
+    # Puts the palette's brushes into an element's resources; every {DynamicResource Key} in the
+    # window or dialog then picks up the new colour at once.
+    param([Parameter(Mandatory)]$Element, [Parameter(Mandatory)][hashtable]$Palette)
+    $converter = New-Object System.Windows.Media.BrushConverter
+    foreach ($key in $Palette.Keys) {
+        $brush = $converter.ConvertFromString($Palette[$key])
+        $brush.Freeze()
+        $Element.Resources[$key] = $brush
+    }
 }
 
 function Enter-PortMonitorInstance {
@@ -1277,14 +1757,14 @@ function Get-PortMonitorMainXaml {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Port Monitor" Width="1240" Height="660" MinWidth="940" MinHeight="420"
-        Background="#17191C" Foreground="#E6E8EB" FontFamily="Segoe UI" FontSize="13"
+        Background="{DynamicResource Bg}" Foreground="{DynamicResource Text}" FontFamily="Segoe UI" FontSize="13"
         WindowStartupLocation="CenterScreen" UseLayoutRounding="True" SnapsToDevicePixels="True">
   <Window.Resources>
     <FontFamily x:Key="Sym">Segoe UI Symbol</FontFamily>
     <Style x:Key="Btn" TargetType="Button">
-      <Setter Property="Foreground" Value="#E6E8EB"/>
-      <Setter Property="Background" Value="#262A30"/>
-      <Setter Property="BorderBrush" Value="#3A4048"/>
+      <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+      <Setter Property="Background" Value="{DynamicResource Btn}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource BtnBorder}"/>
       <Setter Property="BorderThickness" Value="1"/>
       <Setter Property="Padding" Value="12,6"/>
       <Setter Property="Margin" Value="0,0,6,0"/>
@@ -1299,13 +1779,13 @@ function Get-PortMonitorMainXaml {
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="Bd" Property="BorderBrush" Value="#4FA3E0"/>
+                <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource Accent}"/>
               </Trigger>
               <Trigger Property="IsPressed" Value="True">
-                <Setter TargetName="Bd" Property="Background" Value="#16405F"/>
+                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Pressed}"/>
               </Trigger>
               <Trigger Property="IsKeyboardFocused" Value="True">
-                <Setter TargetName="Bd" Property="BorderBrush" Value="#4FA3E0"/>
+                <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource Accent}"/>
               </Trigger>
               <Trigger Property="IsEnabled" Value="False">
                 <Setter Property="Opacity" Value="0.4"/>
@@ -1317,13 +1797,14 @@ function Get-PortMonitorMainXaml {
       </Setter>
     </Style>
     <Style x:Key="PrimaryBtn" TargetType="Button" BasedOn="{StaticResource Btn}">
-      <Setter Property="Background" Value="#1D6FB0"/>
-      <Setter Property="BorderBrush" Value="#2B86D1"/>
+      <Setter Property="Background" Value="{DynamicResource PrimaryBg}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource PrimaryBorder}"/>
+      <Setter Property="Foreground" Value="#FFFFFF"/>
       <Setter Property="FontWeight" Value="SemiBold"/>
     </Style>
     <Style x:Key="DangerBtn" TargetType="Button" BasedOn="{StaticResource Btn}">
-      <Setter Property="Background" Value="#3A2224"/>
-      <Setter Property="BorderBrush" Value="#6E3236"/>
+      <Setter Property="Background" Value="{DynamicResource DangerBg}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource DangerBorder}"/>
     </Style>
     <Style x:Key="Icon" TargetType="TextBlock">
       <Setter Property="FontFamily" Value="{StaticResource Sym}"/>
@@ -1331,11 +1812,11 @@ function Get-PortMonitorMainXaml {
       <Setter Property="VerticalAlignment" Value="Center"/>
     </Style>
     <Style TargetType="DataGridColumnHeader">
-      <Setter Property="Background" Value="#202328"/>
-      <Setter Property="Foreground" Value="#9AA3AE"/>
+      <Setter Property="Background" Value="{DynamicResource ColHeader}"/>
+      <Setter Property="Foreground" Value="{DynamicResource TextMuted}"/>
       <Setter Property="FontWeight" Value="SemiBold"/>
       <Setter Property="Padding" Value="8,7"/>
-      <Setter Property="BorderBrush" Value="#30353C"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource Line}"/>
       <Setter Property="BorderThickness" Value="0,0,1,1"/>
     </Style>
     <Style TargetType="DataGridCell">
@@ -1353,8 +1834,8 @@ function Get-PortMonitorMainXaml {
       </Setter>
       <Style.Triggers>
         <Trigger Property="IsSelected" Value="True">
-          <Setter Property="Background" Value="#1C3F5E"/>
-          <Setter Property="Foreground" Value="#FFFFFF"/>
+          <Setter Property="Background" Value="{DynamicResource Selection}"/>
+          <Setter Property="Foreground" Value="{DynamicResource SelectionText}"/>
         </Trigger>
       </Style.Triggers>
     </Style>
@@ -1362,13 +1843,13 @@ function Get-PortMonitorMainXaml {
       <Setter Property="ToolTip" Value="{Binding Detail}"/>
       <Style.Triggers>
         <Trigger Property="IsMouseOver" Value="True">
-          <Setter Property="Background" Value="#262A30"/>
+          <Setter Property="Background" Value="{DynamicResource RowHover}"/>
         </Trigger>
       </Style.Triggers>
     </Style>
   </Window.Resources>
 
-  <Grid Background="#17191C">
+  <Grid Background="{DynamicResource Bg}">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="Auto"/>
@@ -1377,25 +1858,30 @@ function Get-PortMonitorMainXaml {
     </Grid.RowDefinitions>
 
     <!-- Header -->
-    <Border Grid.Row="0" Background="#1D2024" BorderBrush="#2C3036" BorderThickness="0,0,0,1" Padding="18,14,18,12">
+    <Border Grid.Row="0" Background="{DynamicResource Panel}" BorderBrush="{DynamicResource Line}" BorderThickness="0,0,0,1" Padding="18,14,18,12">
       <Grid>
         <Grid.ColumnDefinitions>
           <ColumnDefinition Width="Auto"/>
           <ColumnDefinition Width="*"/>
           <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
-        <Border Width="4" Background="#4FA3E0" Margin="0,2,12,2"/>
+        <Border Width="4" Background="{DynamicResource Accent}" Margin="0,2,12,2"/>
         <StackPanel Grid.Column="1">
           <TextBlock Text="Port Monitor" FontSize="20" FontWeight="Bold"/>
           <TextBlock Text="Is each server answering on its port? Checked continuously; every up/down change is logged."
-                     Foreground="#9AA3AE" Margin="0,2,0,0"/>
+                     Foreground="{DynamicResource TextMuted}" Margin="0,2,0,0"/>
         </StackPanel>
-        <Border Grid.Column="2" x:Name="RunBadge" Background="#2A2E34" CornerRadius="2" Padding="12,6" VerticalAlignment="Center">
-          <StackPanel Orientation="Horizontal">
-            <TextBlock x:Name="RunDot" Text="&#x25CF;" Foreground="#6B737D" Margin="0,0,7,0" VerticalAlignment="Center"/>
-            <TextBlock x:Name="RunText" Text="Stopped" FontWeight="SemiBold" VerticalAlignment="Center"/>
-          </StackPanel>
-        </Border>
+        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+          <Button x:Name="BtnTheme" Style="{StaticResource Btn}" Margin="0,0,10,0" ToolTip="Switch between the dark and light look">
+            <StackPanel Orientation="Horizontal"><TextBlock x:Name="ThemeIcon" Style="{StaticResource Icon}" Text="&#x263C;"/><TextBlock x:Name="ThemeText" Text="Light mode"/></StackPanel>
+          </Button>
+          <Border x:Name="RunBadge" Background="{DynamicResource Badge}" CornerRadius="2" Padding="12,6" VerticalAlignment="Center">
+            <StackPanel Orientation="Horizontal">
+              <TextBlock x:Name="RunDot" Text="&#x25CF;" Foreground="#6B737D" Margin="0,0,7,0" VerticalAlignment="Center"/>
+              <TextBlock x:Name="RunText" Text="Stopped" FontWeight="SemiBold" VerticalAlignment="Center"/>
+            </StackPanel>
+          </Border>
+        </StackPanel>
       </Grid>
     </Border>
 
@@ -1409,7 +1895,7 @@ function Get-PortMonitorMainXaml {
           <Button x:Name="BtnStop" Style="{StaticResource Btn}" ToolTip="Stop checking (the list and log are kept)">
             <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource Icon}" Text="&#x25A0;"/><TextBlock Text="Stop"/></StackPanel>
           </Button>
-          <Border Width="1" Background="#30353C" Margin="6,2,12,2"/>
+          <Border Width="1" Background="{DynamicResource Line}" Margin="6,2,12,2"/>
           <Button x:Name="BtnAdd" Style="{StaticResource Btn}" ToolTip="Add a server and port to monitor">
             <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource Icon}" Text="+" FontWeight="Bold"/><TextBlock Text="Add"/></StackPanel>
           </Button>
@@ -1424,12 +1910,15 @@ function Get-PortMonitorMainXaml {
           <Button x:Name="BtnBackground" Style="{StaticResource Btn}" ToolTip="Hide this window and keep checking in the notification area (near the clock). You get a notification when a server goes down or comes back.">
             <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource Icon}" Text="&#x2198;"/><TextBlock Text="Run in Background"/></StackPanel>
           </Button>
-          <Border Width="1" Background="#30353C" Margin="0,2,12,2"/>
+          <Border Width="1" Background="{DynamicResource Line}" Margin="0,2,12,2"/>
           <Button x:Name="BtnImport" Style="{StaticResource Btn}" ToolTip="Open another target list (for example one client's list); changes are saved to that file">
             <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource Icon}" Text="&#x21E9;"/><TextBlock Text="Import"/></StackPanel>
           </Button>
           <Button x:Name="BtnExport" Style="{StaticResource Btn}" ToolTip="Save a copy of this target list to a file">
             <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource Icon}" Text="&#x21E7;"/><TextBlock Text="Export"/></StackPanel>
+          </Button>
+          <Button x:Name="BtnReport" Style="{StaticResource Btn}" ToolTip="Make an uptime and outage report from the logs (last 24 hours, 7 days or 30 days) and open it">
+            <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource Icon}" Text="&#x2261;"/><TextBlock Text="Report"/><TextBlock Style="{StaticResource Icon}" Text="&#x25BE;" Margin="6,0,0,0"/></StackPanel>
           </Button>
           <Button x:Name="BtnLogs" Style="{StaticResource Btn}" Margin="0" ToolTip="Open the folder with the daily state-change CSV files">
             <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource Icon}" Text="&#x2630;"/><TextBlock Text="Open Log Folder"/></StackPanel>
@@ -1442,8 +1931,8 @@ function Get-PortMonitorMainXaml {
     <Grid Grid.Row="2" Margin="18,0,18,12">
       <DataGrid x:Name="Grid" AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False" CanUserDeleteRows="False"
                 SelectionMode="Single" SelectionUnit="FullRow" HeadersVisibility="Column" GridLinesVisibility="Horizontal"
-                HorizontalGridLinesBrush="#262A30" Background="#1B1E22" RowBackground="#1B1E22" AlternatingRowBackground="#1F2226"
-                Foreground="#E6E8EB" BorderBrush="#2C3036" BorderThickness="1" RowHeight="30" CanUserResizeRows="False">
+                HorizontalGridLinesBrush="{DynamicResource GridLine}" Background="{DynamicResource Surface}" RowBackground="{DynamicResource Surface}" AlternatingRowBackground="{DynamicResource SurfaceAlt}"
+                Foreground="{DynamicResource Text}" BorderBrush="{DynamicResource Line}" BorderThickness="1" RowHeight="30" CanUserResizeRows="False">
         <DataGrid.Columns>
           <DataGridTemplateColumn Header="Enabled" Width="68" SortMemberPath="Enabled">
             <DataGridTemplateColumn.CellTemplate>
@@ -1453,14 +1942,14 @@ function Get-PortMonitorMainXaml {
               </DataTemplate>
             </DataGridTemplateColumn.CellTemplate>
           </DataGridTemplateColumn>
-          <DataGridTextColumn Header="Label" Binding="{Binding Label}" Width="1.2*" FontWeight="SemiBold"/>
+          <DataGridTextColumn Header="Label" Binding="{Binding Label}" Width="1.7*" FontWeight="SemiBold"/>
           <DataGridTextColumn Header="Host" Binding="{Binding Host}" Width="1.3*" FontFamily="Cascadia Mono, Consolas"/>
           <DataGridTextColumn Header="Port" Binding="{Binding Port}" Width="60" FontFamily="Cascadia Mono, Consolas"/>
           <DataGridTemplateColumn Header="Status" Width="112" SortMemberPath="Status">
             <DataGridTemplateColumn.CellTemplate>
               <DataTemplate>
-                <Border x:Name="Pill" Background="#30353C" CornerRadius="2" Padding="8,2" HorizontalAlignment="Left" VerticalAlignment="Center">
-                  <TextBlock x:Name="PillText" Text="{Binding Status}" Foreground="#C5CBD3" FontWeight="SemiBold" FontSize="12"/>
+                <Border x:Name="Pill" Background="{DynamicResource PillNeutral}" CornerRadius="2" Padding="8,2" HorizontalAlignment="Left" VerticalAlignment="Center">
+                  <TextBlock x:Name="PillText" Text="{Binding Status}" Foreground="{DynamicResource PillNeutralText}" FontWeight="SemiBold" FontSize="12"/>
                 </Border>
                 <DataTemplate.Triggers>
                   <DataTrigger Binding="{Binding Status}" Value="Open">
@@ -1492,17 +1981,17 @@ function Get-PortMonitorMainXaml {
           <DataGridTextColumn Header="Last State Change" Binding="{Binding LastStateChange, StringFormat={}{0:yyyy-MM-dd HH:mm:ss}}" Width="142"/>
           <DataGridTextColumn Header="Fail Count" Binding="{Binding FailCount}" Width="78"/>
           <DataGridTextColumn Header="Uptime %" Binding="{Binding UptimePercent, StringFormat={}{0:0.0}}" Width="78"/>
-          <DataGridTextColumn Header="Details" Binding="{Binding Detail}" Width="2*" Foreground="#9AA3AE"/>
+          <DataGridTextColumn Header="Details" Binding="{Binding Detail}" Width="1.6*" Foreground="{DynamicResource TextMuted}"/>
         </DataGrid.Columns>
       </DataGrid>
       <StackPanel x:Name="EmptyState" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False">
         <TextBlock Text="No targets yet" FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Center"/>
-        <TextBlock Text="Click Add to monitor a server and port, or Import a client's target list." Foreground="#9AA3AE" Margin="0,6,0,0"/>
+        <TextBlock Text="Click Add to monitor a server and port, or Import a client's target list." Foreground="{DynamicResource TextMuted}" Margin="0,6,0,0"/>
       </StackPanel>
     </Grid>
 
     <!-- Status bar -->
-    <Border Grid.Row="3" Background="#1D2024" BorderBrush="#2C3036" BorderThickness="0,1,0,0" Padding="18,7">
+    <Border Grid.Row="3" Background="{DynamicResource Panel}" BorderBrush="{DynamicResource Line}" BorderThickness="0,1,0,0" Padding="18,7">
       <Grid>
         <Grid.RowDefinitions>
           <RowDefinition Height="Auto"/>
@@ -1514,13 +2003,13 @@ function Get-PortMonitorMainXaml {
           <ColumnDefinition Width="Auto"/>
           <ColumnDefinition Width="*"/>
         </Grid.ColumnDefinitions>
-        <TextBlock Text="Targets file:" Foreground="#9AA3AE" Margin="0,0,6,0"/>
+        <TextBlock Text="Targets file:" Foreground="{DynamicResource TextMuted}" Margin="0,0,6,0"/>
         <TextBlock x:Name="ConfigText" Grid.Column="1" FontFamily="Cascadia Mono, Consolas" FontSize="12" VerticalAlignment="Center"
                    TextTrimming="CharacterEllipsis" ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
-        <TextBlock Text="Log folder:" Grid.Column="2" Foreground="#9AA3AE" Margin="16,0,6,0"/>
+        <TextBlock Text="Log folder:" Grid.Column="2" Foreground="{DynamicResource TextMuted}" Margin="16,0,6,0"/>
         <TextBlock x:Name="LogText" Grid.Column="3" FontFamily="Cascadia Mono, Consolas" FontSize="12" VerticalAlignment="Center"
                    TextTrimming="CharacterEllipsis" ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
-        <TextBlock x:Name="MessageText" Grid.Row="1" Grid.ColumnSpan="4" Foreground="#C5CBD3" TextTrimming="CharacterEllipsis" Margin="0,4,0,0"
+        <TextBlock x:Name="MessageText" Grid.Row="1" Grid.ColumnSpan="4" Foreground="{DynamicResource TextSoft}" TextTrimming="CharacterEllipsis" Margin="0,4,0,0"
                    ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
       </Grid>
     </Border>
@@ -1533,36 +2022,36 @@ function Get-PortTargetDialogXaml {
     @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Target" Width="460" SizeToContent="Height" ResizeMode="NoResize"
-        Background="#1D2024" Foreground="#E6E8EB" FontFamily="Segoe UI" FontSize="13"
+        Title="Target" Width="520" SizeToContent="Height" ResizeMode="NoResize"
+        Background="{DynamicResource Panel}" Foreground="{DynamicResource Text}" FontFamily="Segoe UI" FontSize="13"
         WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
   <Window.Resources>
     <Style TargetType="TextBox">
-      <Setter Property="Background" Value="#15171A"/>
-      <Setter Property="Foreground" Value="#E6E8EB"/>
-      <Setter Property="BorderBrush" Value="#3A4048"/>
-      <Setter Property="CaretBrush" Value="#E6E8EB"/>
+      <Setter Property="Background" Value="{DynamicResource InputBg}"/>
+      <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource BtnBorder}"/>
+      <Setter Property="CaretBrush" Value="{DynamicResource Text}"/>
       <Setter Property="Padding" Value="6,5"/>
       <Setter Property="Margin" Value="0,4,0,0"/>
       <Style.Triggers>
-        <Trigger Property="IsKeyboardFocused" Value="True"><Setter Property="BorderBrush" Value="#4FA3E0"/></Trigger>
+        <Trigger Property="IsKeyboardFocused" Value="True"><Setter Property="BorderBrush" Value="{DynamicResource Accent}"/></Trigger>
       </Style.Triggers>
     </Style>
     <Style x:Key="Lbl" TargetType="TextBlock">
-      <Setter Property="Foreground" Value="#C5CBD3"/>
+      <Setter Property="Foreground" Value="{DynamicResource TextSoft}"/>
       <Setter Property="FontWeight" Value="SemiBold"/>
       <Setter Property="Margin" Value="0,12,0,0"/>
     </Style>
     <Style x:Key="Hint" TargetType="TextBlock">
-      <Setter Property="Foreground" Value="#8A939E"/>
+      <Setter Property="Foreground" Value="{DynamicResource Hint}"/>
       <Setter Property="FontSize" Value="12"/>
       <Setter Property="Margin" Value="0,3,0,0"/>
       <Setter Property="TextWrapping" Value="Wrap"/>
     </Style>
     <Style x:Key="Btn" TargetType="Button">
-      <Setter Property="Foreground" Value="#E6E8EB"/>
-      <Setter Property="Background" Value="#262A30"/>
-      <Setter Property="BorderBrush" Value="#3A4048"/>
+      <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+      <Setter Property="Background" Value="{DynamicResource Btn}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource BtnBorder}"/>
       <Setter Property="Padding" Value="16,6"/>
       <Setter Property="Margin" Value="8,0,0,0"/>
       <Setter Property="Cursor" Value="Hand"/>
@@ -1573,9 +2062,9 @@ function Get-PortTargetDialogXaml {
               <ContentPresenter HorizontalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Bd" Property="BorderBrush" Value="#4FA3E0"/></Trigger>
-              <Trigger Property="IsPressed" Value="True"><Setter TargetName="Bd" Property="Background" Value="#16405F"/></Trigger>
-              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Bd" Property="BorderBrush" Value="#4FA3E0"/></Trigger>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource Accent}"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="Bd" Property="Background" Value="{DynamicResource Pressed}"/></Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource Accent}"/></Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
         </Setter.Value>
@@ -1590,6 +2079,12 @@ function Get-PortTargetDialogXaml {
     <TextBlock Text="Host" Style="{StaticResource Lbl}"/>
     <TextBox x:Name="TxtHost" FontFamily="Cascadia Mono, Consolas"/>
     <TextBlock Text="Server name or IP address." Style="{StaticResource Hint}"/>
+    <StackPanel x:Name="RolePanel">
+      <TextBlock Text="What is it?" Style="{StaticResource Lbl}"/>
+      <ComboBox x:Name="CmbRole" Margin="0,4,0,0" Padding="6,4" Foreground="#1B1E22"/>
+      <TextBlock x:Name="RoleHint" Text="Pick a kind of server to add all its usual ports at once, or keep &quot;One port&quot;." Style="{StaticResource Hint}"/>
+      <WrapPanel x:Name="PortChecks" Margin="0,6,0,0" Visibility="Collapsed"/>
+    </StackPanel>
     <Grid>
       <Grid.ColumnDefinitions>
         <ColumnDefinition Width="*"/>
@@ -1598,7 +2093,7 @@ function Get-PortTargetDialogXaml {
         <ColumnDefinition Width="12"/>
         <ColumnDefinition Width="*"/>
       </Grid.ColumnDefinitions>
-      <StackPanel Grid.Column="0">
+      <StackPanel x:Name="PortBox" Grid.Column="0">
         <TextBlock Text="Port" Style="{StaticResource Lbl}"/>
         <TextBox x:Name="TxtPort" FontFamily="Cascadia Mono, Consolas"/>
         <TextBlock Text="1 - 65535" Style="{StaticResource Hint}"/>
@@ -1614,13 +2109,30 @@ function Get-PortTargetDialogXaml {
         <TextBlock Text="100 - 30000. Under 2500 a closed port shows as Timeout." Style="{StaticResource Hint}"/>
       </StackPanel>
     </Grid>
-    <CheckBox x:Name="ChkEnabled" Content="Check this target" Foreground="#E6E8EB" Margin="0,14,0,0" IsChecked="True"/>
-    <Border x:Name="ErrorBox" Background="#3A2224" BorderBrush="#6E3236" BorderThickness="1" CornerRadius="2" Padding="10,7" Margin="0,14,0,0" Visibility="Collapsed">
-      <TextBlock x:Name="ErrorText" Foreground="#F2B8B5" TextWrapping="Wrap"/>
+    <Grid>
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="12"/>
+        <ColumnDefinition Width="*"/>
+      </Grid.ColumnDefinitions>
+      <StackPanel Grid.Column="0">
+        <TextBlock Text="Report down after" Style="{StaticResource Lbl}"/>
+        <TextBox x:Name="TxtFailAfter" FontFamily="Cascadia Mono, Consolas"/>
+        <TextBlock Text="failed checks in a row (1 - 10). 2 ignores one-off blips." Style="{StaticResource Hint}"/>
+      </StackPanel>
+      <StackPanel Grid.Column="2">
+        <TextBlock Text="Report back up after" Style="{StaticResource Lbl}"/>
+        <TextBox x:Name="TxtRecoverAfter" FontFamily="Cascadia Mono, Consolas"/>
+        <TextBlock Text="good checks in a row (1 - 10)." Style="{StaticResource Hint}"/>
+      </StackPanel>
+    </Grid>
+    <CheckBox x:Name="ChkEnabled" Content="Check this target" Foreground="{DynamicResource Text}" Margin="0,14,0,0" IsChecked="True"/>
+    <Border x:Name="ErrorBox" Background="{DynamicResource DangerBg}" BorderBrush="{DynamicResource DangerBorder}" BorderThickness="1" CornerRadius="2" Padding="10,7" Margin="0,14,0,0" Visibility="Collapsed">
+      <TextBlock x:Name="ErrorText" Foreground="{DynamicResource DangerText}" TextWrapping="Wrap"/>
     </Border>
     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0">
       <Button x:Name="BtnCancel" Content="Cancel" Style="{StaticResource Btn}" IsCancel="True"/>
-      <Button x:Name="BtnSave" Content="Save" Style="{StaticResource Btn}" Background="#1D6FB0" BorderBrush="#2B86D1" FontWeight="SemiBold" IsDefault="True"/>
+      <Button x:Name="BtnSave" Content="Save" Style="{StaticResource Btn}" Background="{DynamicResource PrimaryBg}" BorderBrush="{DynamicResource PrimaryBorder}" Foreground="#FFFFFF" FontWeight="SemiBold" IsDefault="True"/>
     </StackPanel>
   </StackPanel>
 </Window>
@@ -1628,57 +2140,123 @@ function Get-PortTargetDialogXaml {
 }
 
 function Show-PortTargetDialog {
-    # Add/Edit dialog. Returns the validated target, or $null when cancelled.
-    param($Owner, $Target)
+    <#
+    .SYNOPSIS
+        Add/Edit dialog. Returns the validated targets as an array (empty when cancelled):
+        one target, or one per ticked port when a role preset is chosen in Add mode.
+    .PARAMETER ExistingTargets
+        Targets already in the list: preset ports already monitored on the same host are left
+        out (and the dialog says how many).
+    #>
+    param($Owner, $Target, [hashtable]$Palette, [AllowNull()][AllowEmptyCollection()][object[]]$ExistingTargets = @())
     $dialog = [System.Windows.Markup.XamlReader]::Parse((Get-PortTargetDialogXaml))
+    if ($Palette) { Set-PortMonitorTheme -Element $dialog -Palette $Palette }
     $f = @{}
-    foreach ($n in 'Heading', 'TxtLabel', 'TxtHost', 'TxtPort', 'TxtInterval', 'TxtTimeout', 'ChkEnabled', 'ErrorBox', 'ErrorText', 'BtnSave') {
+    foreach ($n in 'Heading', 'TxtLabel', 'TxtHost', 'TxtPort', 'TxtInterval', 'TxtTimeout', 'TxtFailAfter', 'TxtRecoverAfter', 'ChkEnabled',
+        'ErrorBox', 'ErrorText', 'BtnSave', 'RolePanel', 'CmbRole', 'RoleHint', 'PortChecks', 'PortBox') {
         $f[$n] = $dialog.FindName($n)
     }
+    $sets = @(Get-PortMonitorPortSets)
+    $f.Sets = $sets
     if ($null -ne $Target) {
         $dialog.Title = 'Edit target'
         $f.Heading.Text = 'Edit target'
+        $f.RolePanel.Visibility = 'Collapsed'
         $f.TxtLabel.Text = [string]$Target.Label
         $f.TxtHost.Text = [string]$Target.Host
         $f.TxtPort.Text = [string]$Target.Port
         $f.TxtInterval.Text = [string]$Target.IntervalSec
         $f.TxtTimeout.Text = [string]$Target.TimeoutMs
+        $f.TxtFailAfter.Text = [string]$Target.FailAfter
+        $f.TxtRecoverAfter.Text = [string]$Target.RecoverAfter
         $f.ChkEnabled.IsChecked = [bool]$Target.Enabled
     }
     else {
         $dialog.Title = 'Add target'
         $f.TxtInterval.Text = '30'
         $f.TxtTimeout.Text = '3000'
+        $f.TxtFailAfter.Text = '2'
+        $f.TxtRecoverAfter.Text = '1'
+        [void]$f.CmbRole.Items.Add('One port (type it below)')
+        foreach ($s in $sets) { [void]$f.CmbRole.Items.Add("$($s.Name) - $(@($s.Ports | ForEach-Object { $_.Port }) -join ', ')") }
+        $f.CmbRole.SelectedIndex = 0
     }
     if ($null -ne $Owner) { $dialog.Owner = $Owner }
 
-    $outcome = @{ Value = $null }
-    $f.BtnSave.add_Click({
-            $candidate = [PSCustomObject]@{
-                Label       = $f.TxtLabel.Text
-                Host        = $f.TxtHost.Text
-                Port        = $f.TxtPort.Text
-                IntervalSec = $f.TxtInterval.Text
-                TimeoutMs   = $f.TxtTimeout.Text
-                Enabled     = [bool]$f.ChkEnabled.IsChecked
+    $f.CmbRole.add_SelectionChanged({
+            $f.PortChecks.Children.Clear()
+            $i = $f.CmbRole.SelectedIndex
+            if ($i -le 0) {
+                $f.PortChecks.Visibility = 'Collapsed'
+                $f.PortBox.Visibility = 'Visible'
+                $f.RoleHint.Text = 'Pick a kind of server to add all its usual ports at once, or keep "One port".'
+                return
             }
-            # A blank port must not pass as the default: say so explicitly.
+            $set = $f.Sets[$i - 1]
+            $f.RoleHint.Text = "$($set.Description). Untick any port you don't want; each ticked port becomes its own row."
+            foreach ($p in $set.Ports) {
+                $box = New-Object System.Windows.Controls.CheckBox
+                $box.Content = "$($p.Port) $($p.Service)"
+                $box.Tag = $p.Port
+                $box.IsChecked = $true
+                $box.Margin = '0,2,14,2'
+                $box.SetResourceReference([System.Windows.Controls.Control]::ForegroundProperty, 'Text')
+                [void]$f.PortChecks.Children.Add($box)
+            }
+            $f.PortChecks.Visibility = 'Visible'
+            $f.PortBox.Visibility = 'Collapsed'
+        })
+
+    $outcome = @{ Value = @() }
+    $f.BtnSave.add_Click({
+            $role = $f.CmbRole.SelectedIndex
+            $candidate = [PSCustomObject]@{
+                Label        = $f.TxtLabel.Text
+                Host         = $f.TxtHost.Text
+                Port         = $f.TxtPort.Text
+                IntervalSec  = $f.TxtInterval.Text
+                TimeoutMs    = $f.TxtTimeout.Text
+                FailAfter    = $f.TxtFailAfter.Text
+                RecoverAfter = $f.TxtRecoverAfter.Text
+                Enabled      = [bool]$f.ChkEnabled.IsChecked
+            }
+            if ($null -eq $Target -and $role -gt 0) { $candidate.Port = 1 }   # ports come from the preset
             $normalised = ConvertTo-PortTarget $candidate
             $problems = @(Test-PortTargetDefinition $normalised)
-            if ("$($candidate.Port)".Trim() -eq '') {
+            # A blank port must not pass as the default: say so explicitly.
+            if (($null -ne $Target -or $role -le 0) -and "$($candidate.Port)".Trim() -eq '') {
                 $problems = @('Port is blank: enter a number from 1 to 65535.') + @($problems | Where-Object { $_ -notlike 'Port *' })
+            }
+            $result = @($normalised)
+            if ($null -eq $Target -and $role -gt 0 -and $problems.Count -eq 0) {
+                $ticked = @($f.PortChecks.Children | Where-Object { $_.IsChecked } | ForEach-Object { [int]$_.Tag })
+                if ($ticked.Count -eq 0) { $problems += 'Tick at least one port.' }
+                else {
+                    $name = "$($candidate.Label)".Trim()
+                    $result = @(New-PortTargetsFromSet -Set $f.Sets[$role - 1] -HostName $normalised.Host -Name $name -Ports $ticked `
+                            -IntervalSec $normalised.IntervalSec -TimeoutMs $normalised.TimeoutMs -FailAfter $normalised.FailAfter `
+                            -RecoverAfter $normalised.RecoverAfter -Enabled $normalised.Enabled -ExistingTargets $ExistingTargets)
+                    if ($result.Count -eq 0) { $problems += "Every ticked port on $($normalised.Host) is already in the list." }
+                }
             }
             if (@($problems).Count -gt 0) {
                 $f.ErrorText.Text = ($problems -join [Environment]::NewLine)
                 $f.ErrorBox.Visibility = 'Visible'
                 return
             }
-            $outcome.Value = $normalised
+            $outcome.Value = $result
             $dialog.DialogResult = $true
         })
-    $dialog.add_ContentRendered({ $f.TxtHost.Focus() | Out-Null; if ($f.TxtHost.Text) { $f.TxtLabel.Focus() | Out-Null } })
+    $dialog.add_ContentRendered({
+            # Can arrive after the dialog already closed (then $f is out of scope): guard it.
+            if (-not $f -or -not $f.TxtHost -or -not $dialog.IsVisible) { return }
+            $f.TxtHost.Focus() | Out-Null
+            if ($f.TxtHost.Text) { $f.TxtLabel.Focus() | Out-Null }
+        })
     [void]$dialog.ShowDialog()
-    $outcome.Value
+    # Emitted one by one (no leading comma): callers collect with @(). A wrapped array would
+    # reach the caller as ONE item and every preset target would collapse into a single row.
+    foreach ($t in @($outcome.Value)) { $t }
 }
 
 function Set-SmokeWindowPosition {
@@ -1721,7 +2299,7 @@ function Show-PortMonitorWindow {
     $window = [System.Windows.Markup.XamlReader]::Parse((Get-PortMonitorMainXaml))
     $c = @{}
     foreach ($n in 'Grid', 'EmptyState', 'BtnStart', 'BtnStop', 'BtnAdd', 'BtnEdit', 'BtnRemove', 'BtnImport', 'BtnExport', 'BtnLogs', 'BtnBackground',
-        'RunBadge', 'RunDot', 'RunText', 'ConfigText', 'LogText', 'MessageText') {
+        'BtnReport', 'BtnTheme', 'ThemeIcon', 'ThemeText', 'RunBadge', 'RunDot', 'RunText', 'ConfigText', 'LogText', 'MessageText') {
         $c[$n] = $window.FindName($n)
         if ($null -eq $c[$n]) { throw "The window layout is missing the element '$n'." }
     }
@@ -1761,6 +2339,12 @@ function Show-PortMonitorWindow {
     if ($null -ne $Instance) { $ui.ShowEvent = $Instance.ShowEvent }
     $ui.Window = $window
     $ui.Balloons = New-Object System.Collections.ArrayList
+    $ui.WasShown = $false
+    # Per-user look and window placement (not read or written in a smoke run).
+    $ui.Settings = @{ StartupOffered = $false; Theme = 'Dark'; Window = $null; SortColumn = ''; SortDirection = 'Ascending' }
+    if (-not $ui.Smoke -and $ui.SettingsPath) { $ui.Settings = Read-PortMonitorSettings -Path $ui.SettingsPath }
+    $ui.Palette = Get-PortMonitorPalette -Theme $ui.Settings.Theme
+    Set-PortMonitorTheme -Element $window -Palette $ui.Palette
     # For tests that dot-source the script: lets them see the live state while the app runs.
     $script:PortMonitorUi = $ui
 
@@ -1797,12 +2381,12 @@ function Show-PortMonitorWindow {
             $enabledCount = @($ui.States | Where-Object { $_.Enabled }).Count
             $c.RunText.Text = "Running - $enabledCount target(s)"
             $c.RunDot.Foreground = $converter.ConvertFromString('#3FB950')
-            $c.RunBadge.Background = $converter.ConvertFromString('#163A24')
+            $c.RunBadge.Background = $converter.ConvertFromString($ui.Palette.BadgeRunning)
         }
         else {
             $c.RunText.Text = 'Stopped'
             $c.RunDot.Foreground = $converter.ConvertFromString('#6B737D')
-            $c.RunBadge.Background = $converter.ConvertFromString('#2A2E34')
+            $c.RunBadge.Background = $converter.ConvertFromString($ui.Palette.Badge)
         }
         Update-Tray
     }
@@ -1876,10 +2460,9 @@ function Show-PortMonitorWindow {
         # Asked once per user (remembered in settings.json), and only while it is not set up.
         if ($ui.Smoke -or -not $ui.SettingsPath -or -not $ui.StartupShortcutPath) { return }
         if (Test-StartupEnabled) { return }
-        $settings = Read-PortMonitorSettings -Path $ui.SettingsPath
-        if ($settings.StartupOffered) { return }
-        $settings.StartupOffered = $true
-        try { Save-PortMonitorSettings -Path $ui.SettingsPath -Settings $settings } catch { }
+        if ($ui.Settings.StartupOffered) { return }
+        $ui.Settings.StartupOffered = $true
+        Save-UiSettings
         $answer = Show-Message -Title 'Port Monitor' -Buttons 'YesNo' -Icon 'Question' -Text ("Start Port Monitor in the background every time you sign in?`n`n" +
             "It sits in the notification area (near the clock), keeps checking your list, and shows a notification when a server goes down or comes back.`n`n" +
             "This adds a shortcut to your Startup folder (no admin rights needed). It runs the script from where it is now:`n$($ui.StartupCommand.ScriptPath)`n`n" +
@@ -1889,6 +2472,8 @@ function Show-PortMonitorWindow {
     function Enter-TrayMode {
         $ui.TrayMode = $true
         if (-not $ui.Running) { Start-Monitoring -Quiet }
+        Update-WindowPlacement
+        Save-UiSettings
         $window.Hide()
         if (-not $ui.HideTipShown) {
             $ui.HideTipShown = $true
@@ -1897,6 +2482,43 @@ function Show-PortMonitorWindow {
             Show-Balloon -Title 'Port Monitor is still running' -Text "$what Click the icon to open it; right-click for more."
         }
         Request-StartupOffer
+    }
+    function Save-UiSettings {
+        if ($ui.Smoke -or -not $ui.SettingsPath) { return }
+        try { Save-PortMonitorSettings -Path $ui.SettingsPath -Settings $ui.Settings } catch { }
+    }
+    function Update-WindowPlacement {
+        # Size and position (the normal size even when maximized), and the grid's sort order.
+        if (-not $ui.WasShown) { return }
+        $b = $window.RestoreBounds
+        if (-not $b.IsEmpty -and $b.Width -gt 0) {
+            $ui.Settings.Window = @{ Left = $b.Left; Top = $b.Top; Width = $b.Width; Height = $b.Height
+                Maximized = ($window.WindowState -eq [System.Windows.WindowState]::Maximized) }
+        }
+        $sorted = @($c.Grid.Columns | Where-Object { $null -ne $_.SortDirection }) | Select-Object -First 1
+        if ($sorted) { $ui.Settings.SortColumn = [string]$sorted.Header; $ui.Settings.SortDirection = [string]$sorted.SortDirection }
+        else { $ui.Settings.SortColumn = '' }
+    }
+    function Set-UiTheme {
+        param([string]$Theme)
+        $ui.Settings.Theme = $Theme
+        $ui.Palette = Get-PortMonitorPalette -Theme $Theme
+        Set-PortMonitorTheme -Element $window -Palette $ui.Palette
+        if ($Theme -eq 'Light') { $c.ThemeText.Text = 'Dark mode'; $c.ThemeIcon.Text = [string][char]0x263E }
+        else { $c.ThemeText.Text = 'Light mode'; $c.ThemeIcon.Text = [string][char]0x263C }
+        Update-View
+    }
+    function Invoke-Report {
+        param([int]$Days)
+        if ($ui.Smoke) { [void]$ui.SmokeFailures.Add('a report would have been written'); return }
+        try {
+            $out = Export-PortOutageReport -LogDirectory $ui.LogDirectory -OutputPath (Join-Path $ui.LogDirectory 'Reports') -Days $Days
+            Set-StatusMessage "Report saved: $($out.Path)"
+            Start-Process -FilePath $out.Path
+        }
+        catch {
+            Show-Message -Text "Could not make the report:`n`n$($_.Exception.Message)" -Icon 'Warning' | Out-Null
+        }
     }
     function Exit-App {
         $ui.Exiting = $true
@@ -1962,20 +2584,26 @@ function Show-PortMonitorWindow {
     $c.BtnStop.add_Click({ Stop-Monitoring })
     $c.BtnBackground.add_Click({ Enter-TrayMode })
 
-    $c.BtnAdd.add_Click({
-            $t = Show-PortTargetDialog -Owner $window -Target $null
-            if ($null -eq $t) { return }
+    $addTargets = {
+        $added = @(Show-PortTargetDialog -Owner $window -Target $null -Palette $ui.Palette -ExistingTargets @($ui.States))
+        if ($added.Count -eq 0) { return }
+        $state = $null
+        foreach ($t in $added) {
             $state = New-PortTargetState $t
+            if ($ui.Running) { $state.NextDue = [datetime]::MinValue }
             $ui.States.Add($state)
-            $c.Grid.SelectedItem = $state
-            Save-UiTargets
-            Update-View
-        })
+        }
+        $c.Grid.SelectedItem = $state
+        Save-UiTargets
+        if ($added.Count -gt 1) { Set-StatusMessage "Added $($added.Count) targets for $($added[0].Host)." }
+        Update-View
+    }
+    $c.BtnAdd.add_Click($addTargets)
 
     $editSelected = {
         $state = $c.Grid.SelectedItem
         if ($null -eq $state) { return }
-        $t = Show-PortTargetDialog -Owner $window -Target $state
+        $t = @(Show-PortTargetDialog -Owner $window -Target $state -Palette $ui.Palette) | Select-Object -First 1
         if ($null -eq $t) { return }
         if ($t.Host -ne $state.Host -or [int]$t.Port -ne [int]$state.Port) {
             # A different endpoint is a different target: start its history again.
@@ -1987,6 +2615,8 @@ function Show-PortMonitorWindow {
         else {
             $state.Label = $t.Label
             $state.TimeoutMs = $t.TimeoutMs
+            $state.FailAfter = $t.FailAfter
+            $state.RecoverAfter = $t.RecoverAfter
             if ([int]$t.IntervalSec -ne [int]$state.IntervalSec) {
                 $state.IntervalSec = $t.IntervalSec
                 $sooner = (Get-Date).AddSeconds($t.IntervalSec)
@@ -2083,6 +2713,69 @@ function Show-PortMonitorWindow {
             Update-View
         })
     $c.Grid.add_SelectionChanged({ Update-View })
+
+    # Theme toggle.
+    $c.BtnTheme.add_Click({
+            $next = 'Light'; if ($ui.Settings.Theme -eq 'Light') { $next = 'Dark' }
+            Set-UiTheme -Theme $next
+            Save-UiSettings
+        })
+
+    # Report: a drop-down of periods under the button.
+    $reportMenu = New-Object System.Windows.Controls.ContextMenu
+    foreach ($choice in @(@(1, 'Last 24 hours'), @(7, 'Last 7 days'), @(30, 'Last 30 days'))) {
+        $item = New-Object System.Windows.Controls.MenuItem
+        $item.Header = $choice[1]
+        $item.Tag = $choice[0]
+        $item.add_Click({ param($src, $e) Invoke-Report -Days ([int]$src.Tag) })
+        [void]$reportMenu.Items.Add($item)
+    }
+    $c.BtnReport.ContextMenu = $reportMenu
+    $c.BtnReport.add_Click({
+            $reportMenu.PlacementTarget = $c.BtnReport
+            $reportMenu.Placement = [System.Windows.Controls.Primitives.PlacementMode]::Bottom
+            $reportMenu.IsOpen = $true
+        })
+
+    # Keyboard: Insert = Add, Delete = Remove, Enter/F2 = Edit, F5 = Start/Stop.
+    $window.add_PreviewKeyDown({
+            param($src, $e)
+            if ($e.OriginalSource -is [System.Windows.Controls.TextBox]) { return }
+            $click = { param($b) $b.RaiseEvent((New-Object System.Windows.RoutedEventArgs -ArgumentList ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+            switch ($e.Key) {
+                'Insert' { & $click $c.BtnAdd; $e.Handled = $true }
+                'Delete' { if ($c.Grid.SelectedItem) { & $click $c.BtnRemove; $e.Handled = $true } }
+                'F2' { if ($c.Grid.SelectedItem) { & $editSelected; $e.Handled = $true } }
+                'Return' { if ($c.Grid.SelectedItem -and $c.Grid.IsKeyboardFocusWithin) { & $editSelected; $e.Handled = $true } }
+                'F5' { if ($ui.Running) { Stop-Monitoring } else { Start-Monitoring }; $e.Handled = $true }
+            }
+        })
+
+    # Restore the remembered look, size, position and sort order.
+    Set-UiTheme -Theme $ui.Settings.Theme
+    if ($ui.Settings.Window -and -not $ui.Smoke) {
+        # Screen working areas are in pixels; WPF positions are in 1/96-inch units.
+        $scale = 1.0
+        try { $scale = [System.Windows.SystemParameters]::PrimaryScreenWidth / [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width } catch { }
+        $screens = @([System.Windows.Forms.Screen]::AllScreens | ForEach-Object {
+                [PSCustomObject]@{ Left = $_.WorkingArea.Left * $scale; Top = $_.WorkingArea.Top * $scale; Width = $_.WorkingArea.Width * $scale; Height = $_.WorkingArea.Height * $scale }
+            })
+        $w = $ui.Settings.Window
+        if (Test-PortMonitorWindowBounds -Bounds $w -Screens $screens) {
+            $window.WindowStartupLocation = 'Manual'
+            $window.Left = $w.Left; $window.Top = $w.Top; $window.Width = $w.Width; $window.Height = $w.Height
+            if ($w.Maximized) { $window.WindowState = [System.Windows.WindowState]::Maximized }
+        }
+    }
+    if ($ui.Settings.SortColumn) {
+        $col = @($c.Grid.Columns | Where-Object { [string]$_.Header -eq $ui.Settings.SortColumn }) | Select-Object -First 1
+        if ($col -and $col.SortMemberPath) {
+            $dir = [System.ComponentModel.ListSortDirection]$ui.Settings.SortDirection
+            $col.SortDirection = $dir
+            $c.Grid.Items.SortDescriptions.Add((New-Object System.ComponentModel.SortDescription -ArgumentList $col.SortMemberPath, $dir))
+        }
+    }
+    $window.add_ContentRendered({ $ui.WasShown = $true })
 
     # --- Timer: the only place results reach the UI -----------------------------------------
     $consoleKeys = $false
@@ -2182,6 +2875,8 @@ function Show-PortMonitorWindow {
                 Enter-TrayMode
                 return
             }
+            if ($window.IsVisible) { Update-WindowPlacement }
+            Save-UiSettings
             $timer.Stop()
             Stop-PortMonitorEngine -Engine $ui.Engine
             $ui.Engine = $null
@@ -2255,6 +2950,25 @@ if (-not $ConfigPath) { $ConfigPath = $defaultConfigPath }
 if (-not $LogPath) { $LogPath = $defaultLogPath }
 $ConfigPath = Resolve-PortMonitorPath $ConfigPath
 $LogPath = Resolve-PortMonitorPath $LogPath
+
+if ($Report) {
+    # Uptime and outage report from the logs; no window, no checks.
+    if (-not $OutputPath) { $OutputPath = (Get-Location).ProviderPath }
+    $OutputPath = Resolve-PortMonitorPath $OutputPath
+    try {
+        $made = Export-PortOutageReport -LogDirectory $LogPath -OutputPath $OutputPath -Days $Days
+        $count = @($made.Report.Outages).Count
+        Write-Host "[INFO] Read $(@($made.LogFiles).Count) log file(s) from $LogPath" -ForegroundColor Cyan
+        if ($count -eq 0) { Write-Host "[PASS] No outages in the last $Days day(s)." -ForegroundColor Green }
+        else { Write-Host "[WARN] $count outage(s) in the last $Days day(s)." -ForegroundColor Yellow }
+        Write-Host "[INFO] Report: $($made.Path)" -ForegroundColor Cyan
+        exit 0
+    }
+    catch {
+        Write-Host "[FAIL] Could not make the report: $($_.Exception.Message)" -ForegroundColor Red
+        exit 1
+    }
+}
 
 if ($NoGui) {
     $code = Invoke-PortMonitorHeadless -ConfigPath $ConfigPath -LogDirectory $LogPath -Once:$Once
