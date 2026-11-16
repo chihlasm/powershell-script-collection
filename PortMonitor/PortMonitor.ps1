@@ -143,7 +143,7 @@
     One pass for an RMM check: exit code 0 when everything is Open, 1 when something is not.
 
 .NOTES
-    Version : 1.2.1
+    Version : 1.2.2
     Requires: Windows PowerShell 3.0 or later, or PowerShell 7 on Windows; .NET Framework 4.5
               or later (for TcpClient.ConnectAsync and Dns.GetHostAddressesAsync). No modules,
               no administrator rights.
@@ -272,7 +272,7 @@ param(
     [switch]$LoadFunctionsOnly
 )
 
-$script:PortMonitorVersion = '1.2.1'
+$script:PortMonitorVersion = '1.2.2'
 $script:StatusNotChecked = 'Not checked'
 $script:StatusDisabled = 'Disabled'
 $script:FailureStatuses = @('Refused', 'Timeout', 'DNS Failure', 'Error')
@@ -2375,6 +2375,7 @@ function Get-PortMonitorMainXaml {
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="*"/>
       <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
     </Grid.RowDefinitions>
 
     <!-- Header -->
@@ -2501,7 +2502,7 @@ function Get-PortMonitorMainXaml {
             </DataGridTemplateColumn.CellTemplate>
           </DataGridTemplateColumn>
           <DataGridTextColumn Header="Latency" Binding="{Binding LatencyMs, StringFormat='{}{0:0.0} ms', TargetNullValue=''}" Width="80"/>
-          <DataGridTemplateColumn Header="Loss %" Width="68" SortMemberPath="LossPercent">
+          <DataGridTemplateColumn Header="Loss %" Width="84" SortMemberPath="LossPercent">
             <DataGridTemplateColumn.CellTemplate>
               <DataTemplate>
                 <Border x:Name="LossPill" Background="Transparent" CornerRadius="2" Padding="6,1" HorizontalAlignment="Left" VerticalAlignment="Center">
@@ -2543,8 +2544,25 @@ function Get-PortMonitorMainXaml {
       </StackPanel>
     </Grid>
 
+    <!-- Details of the selected row, in full: the Details column can only show the start of it.
+         A read-only TextBox so the text can be selected and copied into a ticket. -->
+    <Border x:Name="DetailPane" Grid.Row="3" Margin="18,0,18,12" Padding="12,8" Background="{DynamicResource Surface}"
+            BorderBrush="{DynamicResource Line}" BorderThickness="1">
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+        <TextBlock x:Name="DetailTitle" Text="Details" FontWeight="SemiBold" Foreground="{DynamicResource TextSoft}"
+                   VerticalAlignment="Top" Margin="0,1,14,0" MaxWidth="320" TextTrimming="CharacterEllipsis"/>
+        <TextBox x:Name="DetailText" Grid.Column="1" IsReadOnly="True" TextWrapping="Wrap" BorderThickness="0" Padding="0"
+                 Background="Transparent" Foreground="{DynamicResource Text}" CaretBrush="{DynamicResource Text}"
+                 MaxHeight="80" VerticalScrollBarVisibility="Auto" Text="Select a row to see its full details here."/>
+      </Grid>
+    </Border>
+
     <!-- Status bar -->
-    <Border Grid.Row="3" Background="{DynamicResource Panel}" BorderBrush="{DynamicResource Line}" BorderThickness="0,1,0,0" Padding="18,7">
+    <Border Grid.Row="4" Background="{DynamicResource Panel}" BorderBrush="{DynamicResource Line}" BorderThickness="0,1,0,0" Padding="18,7">
       <Grid>
         <Grid.RowDefinitions>
           <RowDefinition Height="Auto"/>
@@ -2885,7 +2903,7 @@ function Show-PortMonitorWindow {
 
     $window = [System.Windows.Markup.XamlReader]::Parse((Get-PortMonitorMainXaml))
     $c = @{}
-    foreach ($n in 'Grid', 'EmptyState', 'BtnStart', 'BtnStop', 'BtnAdd', 'BtnEdit', 'BtnRemove', 'BtnImport', 'BtnExport', 'BtnLogs', 'BtnBackground',
+    foreach ($n in 'Grid', 'EmptyState', 'DetailTitle', 'DetailText', 'BtnStart', 'BtnStop', 'BtnAdd', 'BtnEdit', 'BtnRemove', 'BtnImport', 'BtnExport', 'BtnLogs', 'BtnBackground',
         'BtnReport', 'BtnTheme', 'ThemeIcon', 'ThemeText', 'RunBadge', 'RunDot', 'RunText', 'ConfigText', 'LogText', 'MessageText') {
         $c[$n] = $window.FindName($n)
         if ($null -eq $c[$n]) { throw "The window layout is missing the element '$n'." }
@@ -2959,11 +2977,26 @@ function Show-PortMonitorWindow {
         }
         if ($ui.Notify.Text -ne $summary.Text) { $ui.Notify.Text = $summary.Text }
     }
+    function Update-DetailPane {
+        # Full details of the selected row. Text is only replaced when it changed, so a selection
+        # the user is making in it (to copy) is not wiped by every timer tick.
+        $row = $c.Grid.SelectedItem
+        $title = 'Details'
+        $text = 'Select a row to see its full details here.'
+        if ($null -ne $row) {
+            $title = "$($row.Label) ($($row.Host):$($row.Port))"
+            $text = [string]$row.Detail
+            if (-not $text) { $text = "Not checked yet. Status: $($row.Status)." }
+        }
+        if ($c.DetailTitle.Text -ne $title) { $c.DetailTitle.Text = $title; $c.DetailTitle.ToolTip = $title }
+        if ($c.DetailText.Text -ne $text) { $c.DetailText.Text = $text }
+    }
     function Update-View {
         $c.Grid.Items.Refresh()
         $hasRows = $ui.States.Count -gt 0
         if ($hasRows) { $c.EmptyState.Visibility = 'Collapsed' } else { $c.EmptyState.Visibility = 'Visible' }
         $selected = $null -ne $c.Grid.SelectedItem
+        Update-DetailPane
         $c.BtnEdit.IsEnabled = $selected
         $c.BtnRemove.IsEnabled = $selected
         $c.BtnStart.IsEnabled = -not $ui.Running

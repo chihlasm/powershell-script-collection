@@ -39,7 +39,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\PortMonitor.ps1 -Once 
 ```
 
 In the window: **Add** a target, then click **Start**. Double-click a row to change it.
-Untick **Enabled** on a row to pause that target. Hover over a row to see the full details.
+Untick **Enabled** on a row to pause that target. Click a row to see its full details in the
+panel under the list.
 
 ### Adding a whole server at once
 
@@ -235,7 +236,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\PortMonitor.ps1
 - Fails and Uptime % count every check since the target started being monitored in this
   session. They reset when you restart the tool, or when you change a target's host or port.
 - Every column fits at the default window size. In a narrower window the list scrolls
-  sideways. Text too long for its column ends in "…"; hover over the row to read it all.
+  sideways. Text too long for its column ends in "…".
+- **Click a row to read its full details** in the panel under the list. You can select and
+  copy the text from there, for example into a ticket.
 - Up to 16 checks run at the same time in the background, so the window never freezes.
 - With packet loss on, each check takes longer: the pings are 200 ms apart, and each waits up
   to the timeout (at most 2 s) for an answer. 10 pings take about 2 seconds when all answer.

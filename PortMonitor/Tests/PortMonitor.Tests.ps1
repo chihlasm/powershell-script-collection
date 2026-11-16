@@ -764,6 +764,13 @@ Describe 'Defaults and window layout' {
         [regex]::Matches($xaml, "StringFormat='\{\}\{0:0\.0\} ms'[^}]*\}") | ForEach-Object { $_.Value | Should -Match "TargetNullValue=''" }
         [regex]::Matches($xaml, "StringFormat='\{\}\{0:0\.0\} ms'").Count | Should -Be 2
     }
+    It 'the selected row''s full details are shown in a panel under the list (the column can only show the start)' {
+        $xaml = Get-PortMonitorMainXaml
+        $xaml | Should -Match '<TextBox x:Name="DetailText"[^>]*IsReadOnly="True" TextWrapping="Wrap"'
+        $def = (Get-Command Show-PortMonitorWindow).Definition
+        $def | Should -Match 'function Update-DetailPane'
+        $def | Should -Match 'if \(\$c\.DetailText\.Text -ne \$text\)' -Because 'replacing the text every tick would wipe a selection being copied'
+    }
     It 'the sample targets.example.json loads with 3 valid targets' {
         $r = Read-PortMonitorConfig -Path (Join-Path (Split-Path -Parent $PSScriptRoot) 'targets.example.json')
         @($r.Warnings).Count | Should -Be 0
