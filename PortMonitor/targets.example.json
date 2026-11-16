@@ -1,0 +1,26 @@
+[
+  {
+    "Label": "Public DNS server",
+    "Host": "1.1.1.1",
+    "Port": 53,
+    "IntervalSec": 30,
+    "TimeoutMs": 3000,
+    "Enabled": true
+  },
+  {
+    "Label": "Web host (HTTPS)",
+    "Host": "www.microsoft.com",
+    "Port": 443,
+    "IntervalSec": 60,
+    "TimeoutMs": 3000,
+    "Enabled": true
+  },
+  {
+    "Label": "Closed port (test: should show Refused)",
+    "Host": "127.0.0.1",
+    "Port": 9,
+    "IntervalSec": 30,
+    "TimeoutMs": 3000,
+    "Enabled": true
+  }
+]

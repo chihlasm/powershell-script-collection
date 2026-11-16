@@ -104,6 +104,7 @@ handed out, so it always matches this repository.
 | Folder | What it does |
 |---|---|
 | [Network-QuickCheck](Network-QuickCheck/) | Can this computer reach that server on that port? Plain-English YES / PARTLY / NO |
+| [PortMonitor](PortMonitor/) | Keeps checking a list of servers' TCP ports (window or console/RMM) and logs every up/down change to a daily CSV |
 | [Network-Troubleshooting-Palette](Network-Troubleshooting-Palette/) | Network troubleshooting command palette |
 | [Juniper-ConsoleSetup](Juniper-ConsoleSetup/) | Browser GUI for Juniper console-cable provisioning |
 | [Juniper-DeviceManager](Juniper-DeviceManager/) | Work in progress: Juniper fleet management over NETCONF |
