@@ -62,6 +62,7 @@ handed out, so it always matches this repository.
 | [FSLogix-ProfileDiskRepair](FSLogix-ProfileDiskRepair/) | Scan and repair FSLogix VHDX filesystem errors |
 | [FSLogix-Profile-Backup](FSLogix-Profile-Backup/) | Back up browser saved passwords from profiles |
 | [FSLogix-miExcel-Cleanup](FSLogix-miExcel-Cleanup/) | Remove the miExcel add-in from FSLogix profiles |
+| [Remove-FSLogixProfiles](Remove-FSLogixProfiles/) | Archive or delete leavers' FSLogix profile folders, skipping any in use or with an enabled AD account |
 | [Storage Space Clean-up](Storage%20Space%20Clean-up/) | Disk cleanup for VDAs with FSLogix |
 | [Install-TeamsOnVirtualDesktop](Install-TeamsOnVirtualDesktop/) | Clean Teams install on Citrix / RDS / AVD |
 | [Migrate-AdobeProducts](Migrate-AdobeProducts/) | Replace Adobe Acrobat on Citrix VDAs |
