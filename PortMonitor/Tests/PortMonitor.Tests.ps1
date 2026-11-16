@@ -100,9 +100,9 @@ Describe 'ConvertTo-PortTarget and Test-PortTargetDefinition' {
         $t.Host | Should -Be 'a'
         $t.Enabled | Should -BeFalse
     }
-    It 'keeps the saved field order Label, Host, Port, IntervalSec, TimeoutMs, Enabled, FailAfter, RecoverAfter' {
+    It 'keeps the saved field order (new fields are added at the end)' {
         $names = @((ConvertTo-PortTarget @{ Host = 'a'; Port = 1 }).PSObject.Properties | ForEach-Object Name)
-        $names -join ',' | Should -Be 'Label,Host,Port,IntervalSec,TimeoutMs,Enabled,FailAfter,RecoverAfter'
+        $names -join ',' | Should -Be 'Label,Host,Port,IntervalSec,TimeoutMs,Enabled,FailAfter,RecoverAfter,MeasureLoss,LossPings,LossAlertPercent'
     }
     It 'turns a non-number into 0 so validation reports it (no silent default)' {
         (ConvertTo-PortTarget @{ Host = 'a'; Port = 'https' }).Port | Should -Be 0
@@ -401,6 +401,313 @@ Describe 'Receive-PortCheckResult and Invoke-PortMonitorCycle (fake engine, no n
     }
 }
 
+Describe 'Packet loss and slow answers (no network)' {
+    BeforeAll {
+        function New-LossResult {
+            # A port result as Invoke-PortTargetCheck returns it, with a ping burst of $Sent pings
+            # of which $Received answered.
+            param([string]$Status = 'Open', [int]$Sent = 10, [int]$Received = 10, $Latency = 2)
+            $trips = @(for ($i = 0; $i -lt $Sent; $i++) { if ($i -lt $Received) { 10 + ($i % 2) * 4 } else { $null } })
+            $loss = ConvertTo-PortPingSummary -RoundTrips $trips
+            $loss | Add-Member -NotePropertyName Error -NotePropertyValue $null
+            $lat = $null; if ($Status -eq 'Open') { $lat = $Latency }
+            [PSCustomObject]@{ Status = $Status; LatencyMs = $lat; Detail = 'd'; Address = '10.0.0.1'; Loss = $loss }
+        }
+        function Step {
+            param($State, $Result)
+            [void](Update-PortTargetState -State $State -Result $Result)
+            Update-PortTargetQuality -State $State -Result $Result
+        }
+    }
+
+    It 'loss measuring is off by default, with 10 pings and a 5 % alert level, and validates its ranges' {
+        $t = ConvertTo-PortTarget @{ Host = 'h'; Port = 1 }
+        $t.MeasureLoss | Should -BeFalse
+        $t.LossPings | Should -Be 10
+        $t.LossAlertPercent | Should -Be 5
+        (ConvertTo-PortTarget @{ Host = 'h'; Port = 1; MeasureLoss = 'yes' }).MeasureLoss | Should -BeTrue
+        @(Test-PortTargetDefinition @{ Host = 'h'; Port = 1; LossPings = 0 })[0] | Should -Match 'Pings per check'
+        @(Test-PortTargetDefinition @{ Host = 'h'; Port = 1; LossPings = 51 })[0] | Should -Match 'Pings per check'
+        @(Test-PortTargetDefinition @{ Host = 'h'; Port = 1; LossAlertPercent = 101 })[0] | Should -Match 'Alert above'
+    }
+    It 'a list saved before loss measuring existed loads with it off' {
+        $p = Join-Path $TestDrive 'v11.json'
+        Set-Content -LiteralPath $p -Encoding ASCII -Value '[{"Label":"L","Host":"h","Port":1,"IntervalSec":30,"TimeoutMs":3000,"Enabled":true,"FailAfter":2,"RecoverAfter":1}]'
+        $t = @((Read-PortMonitorConfig -Path $p).Targets)[0]
+        $t.MeasureLoss | Should -BeFalse
+        $t.LossPings | Should -Be 10
+    }
+    It 'the loss settings survive a save and reload' {
+        $p = Join-Path $TestDrive 'loss-save.json'
+        [void](Save-PortMonitorConfig -Path $p -Targets @(@{ Host = 'h'; Port = 1; MeasureLoss = $true; LossPings = 20; LossAlertPercent = 3 }))
+        $t = @((Read-PortMonitorConfig -Path $p).Targets)[0]
+        $t.MeasureLoss | Should -BeTrue
+        $t.LossPings | Should -Be 20
+        $t.LossAlertPercent | Should -Be 3
+    }
+
+    It 'ping summary: <Case>' -TestCases @(
+        @{ Case = 'all answered'; Trips = @(10, 12, 11, 15); Received = 4; Loss = 0; Avg = 12; Jitter = 2.3 }
+        @{ Case = 'one lost of four'; Trips = @(10, $null, 12, 14); Received = 3; Loss = 25; Avg = 12; Jitter = 2 }
+        @{ Case = 'none answered'; Trips = @($null, $null); Received = 0; Loss = 100; Avg = $null; Jitter = $null }
+        @{ Case = 'one reply: no jitter'; Trips = @(10, $null); Received = 1; Loss = 50; Avg = 10; Jitter = $null }
+    ) {
+        param($Case, $Trips, $Received, $Loss, $Avg, $Jitter)
+        $r = ConvertTo-PortPingSummary -RoundTrips $Trips
+        $r.Sent | Should -Be @($Trips).Count
+        $r.Received | Should -Be $Received
+        $r.LossPercent | Should -Be $Loss
+        $r.AvgMs | Should -Be $Avg
+        $r.JitterMs | Should -Be $Jitter
+    }
+    It 'Measure-PingLoss refuses a name (it pings the address the port check used) without sending anything' {
+        $r = Measure-PingLoss -Address 'server01' -Count 1
+        $r.Error | Should -Match 'not an IP address'
+        $r.LossPercent | Should -BeNullOrEmpty
+    }
+    It 'Invoke-PortTargetCheck pings only with -MeasureLoss, only when the port check found an address, and caps each ping at 2000 ms' {
+        Mock Test-TcpPort { [PSCustomObject]@{ Status = 'Open'; LatencyMs = 1; Address = '10.0.0.9'; Detail = '' } }
+        Mock Measure-PingLoss { [PSCustomObject]@{ Sent = $Count; Received = $Count; LossPercent = 0; AvgMs = 1; JitterMs = 0; Error = $null } }
+        (Invoke-PortTargetCheck -HostName 'h' -Port 1).Loss | Should -BeNullOrEmpty
+        Should -Invoke Measure-PingLoss -Times 0 -Exactly
+        $r = Invoke-PortTargetCheck -HostName 'h' -Port 1 -TimeoutMs 9000 -MeasureLoss -LossPings 7
+        $r.Loss.Sent | Should -Be 7
+        Should -Invoke Measure-PingLoss -Times 1 -Exactly -ParameterFilter { $Address -eq '10.0.0.9' -and $TimeoutMs -eq 2000 -and $Count -eq 7 }
+        Mock Test-TcpPort { [PSCustomObject]@{ Status = 'DNS Failure'; LatencyMs = $null; Address = $null; Detail = '' } }
+        (Invoke-PortTargetCheck -HostName 'h' -Port 1 -MeasureLoss).Loss | Should -BeNullOrEmpty
+        Should -Invoke Measure-PingLoss -Times 1 -Exactly
+    }
+    It 'the background pool is given every function the check needs' {
+        $src = Get-Content -LiteralPath $script:ScriptPath -Raw
+        foreach ($name in 'Invoke-PortTargetCheck', 'Test-TcpPort', 'Get-PortCheckFailure', 'Measure-PingLoss', 'ConvertTo-PortPingSummary') {
+            $src | Should -Match "foreach \(\`$name in @\([^)]*'$name'"
+        }
+    }
+
+    It 'a target that does not measure loss gets no loss state, even if a result carries pings' {
+        $s = New-PortTargetState @{ Host = 'h'; Port = 1 }
+        Step $s (New-LossResult -Received 2) | Should -BeNullOrEmpty
+        $s.LossText | Should -Be ''
+        $s.LossStatus | Should -BeNullOrEmpty
+    }
+    It 'the first measurement is logged at once as Not checked -> OK, with the figures' {
+        $s = New-PortTargetState @{ Label = 'DC'; Host = 'h'; Port = 1; MeasureLoss = $true }
+        $c = Step $s (New-LossResult -Received 10)
+        $c.Kind | Should -Be 'Loss'
+        $c.PreviousStatus | Should -Be 'Not checked'
+        $c.NewStatus | Should -Be 'OK'
+        $c.LossPercent | Should -Be 0
+        $s.LossText | Should -Be '0.0'
+        $s.JitterMs | Should -Be 4
+        $s.Detail | Should -Match '10 of 10 pings answered \(0\.0 % lost, jitter 4 ms\)'
+    }
+    It 'high loss is confirmed after FailAfter bursts in a row, and the port status is untouched' {
+        $s = New-PortTargetState @{ Host = 'h'; Port = 1; MeasureLoss = $true; FailAfter = 2 }
+        [void](Step $s (New-LossResult -Received 10))
+        Step $s (New-LossResult -Received 8) | Should -BeNullOrEmpty -Because 'one bad burst is a blip'
+        $s.LossStatus | Should -Be 'OK'
+        $s.Detail | Should -Match 'Confirming High loss \(1 of 2 in a row\)'
+        $c = Step $s (New-LossResult -Received 9)
+        $c.PreviousStatus | Should -Be 'OK'
+        $c.NewStatus | Should -Be 'High loss'
+        $c.LossPercent | Should -Be 10
+        $s.LossStatus | Should -Be 'High loss'
+        $s.Status | Should -Be 'Open'
+    }
+    It 'loss below the alert level is OK (4 % lost with a 5 % alert level)' {
+        $s = New-PortTargetState @{ Host = 'h'; Port = 1; MeasureLoss = $true; LossPings = 25; LossAlertPercent = 5; FailAfter = 1 }
+        (Step $s (New-LossResult -Sent 25 -Received 24)).NewStatus | Should -Be 'OK'
+        (Step $s (New-LossResult -Sent 20 -Received 19)).NewStatus | Should -Be 'High loss' -Because '5 % is at the alert level'
+    }
+    It 'comes back to OK after RecoverAfter good bursts' {
+        $s = New-PortTargetState @{ Host = 'h'; Port = 1; MeasureLoss = $true; FailAfter = 1; RecoverAfter = 2 }
+        [void](Step $s (New-LossResult -Received 10)); [void](Step $s (New-LossResult -Received 5))
+        Step $s (New-LossResult -Received 10) | Should -BeNullOrEmpty
+        (Step $s (New-LossResult -Received 10)).NewStatus | Should -Be 'OK'
+    }
+    It 'no ping answered while the port is open means ping is blocked, not 100 % loss' {
+        $s = New-PortTargetState @{ Host = 'h'; Port = 1; MeasureLoss = $true }
+        $c = Step $s (New-LossResult -Received 0)
+        $c.NewStatus | Should -Be 'No replies'
+        $s.LossText | Should -Be 'no reply'
+        $s.Detail | Should -Match 'firewall probably blocks ping'
+        Get-PortChangeNotification -Changes @($c) | Should -BeNullOrEmpty -Because 'a blocked ping is a setup matter, not news'
+    }
+    It 'while the port is down the loss state is left alone (the outage is already reported)' {
+        $s = New-PortTargetState @{ Host = 'h'; Port = 1; MeasureLoss = $true; FailAfter = 1 }
+        [void](Step $s (New-LossResult -Received 10))
+        Step $s (New-LossResult -Status 'Timeout' -Received 0) | Should -BeNullOrEmpty
+        $s.LossStatus | Should -Be 'OK'
+        $s.LossHighStreak | Should -Be 0
+    }
+    It 'a ping that could not be sent says so and changes nothing' {
+        $s = New-PortTargetState @{ Host = 'h'; Port = 1; MeasureLoss = $true }
+        $r = New-LossResult; $r.Loss = [PSCustomObject]@{ Sent = $null; Received = $null; LossPercent = $null; AvgMs = $null; JitterMs = $null; Error = 'Ping could not be sent to 10.0.0.1: x' }
+        Step $s $r | Should -BeNullOrEmpty
+        $s.LossText | Should -Be 'error'
+        $s.Detail | Should -Match 'Packet loss not measured: Ping could not be sent'
+    }
+    It 'Reset-PortTargetLoss clears what was seen (loss turned on or off in Edit)' {
+        $s = New-PortTargetState @{ Host = 'h'; Port = 1; MeasureLoss = $true }
+        [void](Step $s (New-LossResult -Received 5))
+        Reset-PortTargetLoss -State $s
+        $s.LossStatus | Should -BeNullOrEmpty
+        $s.LastKnownLossStatus | Should -BeNullOrEmpty
+        $s.PingsSent | Should -Be 0
+        $s.LossText | Should -Be ''
+    }
+
+    It 'slow answer: <Case>' -TestCases @(
+        @{ Case = 'too little history'; History = @(1, 1, 1, 1); Latency = 3000; Expect = $null }
+        @{ Case = 'LAN target resent once'; History = @(1, 1, 2, 1, 1); Latency = 1003; Expect = $true }
+        @{ Case = 'LAN target a bit slower'; History = @(1, 1, 2, 1, 1); Latency = 6; Expect = $false }
+        @{ Case = 'WAN target, normal wobble'; History = @(120, 118, 125, 122, 119); Latency = 300; Expect = $false }
+        @{ Case = 'WAN target resent once'; History = @(120, 118, 125, 122, 119); Latency = 1150; Expect = $true }
+    ) {
+        param($Case, $History, $Latency, $Expect)
+        $r = Get-PortLatencySpike -History $History -LatencyMs $Latency
+        if ($null -eq $Expect) { $r | Should -BeNullOrEmpty }
+        else { $r.IsSpike | Should -Be $Expect }
+    }
+    It 'a slow answer counts and is explained in the details, but is not a change or a notification' {
+        $s = New-PortTargetState @{ Host = 'h'; Port = 1 }
+        foreach ($i in 1..6) { [void](Step $s (New-LossResult -Latency 2)) }
+        Step $s (New-LossResult -Latency 1100) | Should -BeNullOrEmpty
+        $s.SlowCount | Should -Be 1
+        $s.Detail | Should -Match '^Slow answer: 1100 ms \(usually 2 ms\), often a lost packet'
+        $s.Status | Should -Be 'Open'
+    }
+    It 'keeps only the last 20 connect times' {
+        $s = New-PortTargetState @{ Host = 'h'; Port = 1 }
+        foreach ($i in 1..30) { [void](Step $s (New-LossResult -Latency $i)) }
+        $s.LatencyHistory.Count | Should -Be 20
+        $s.LatencyHistory[0] | Should -Be 11
+    }
+
+    It 'Receive-PortCheckResult returns both the port change and the loss change' {
+        $engine = New-FakeEngine
+        $s = New-PortTargetState @{ Host = 'h'; Port = 1; MeasureLoss = $true }; $s.InFlight = $true
+        [void]$engine.InFlight.Add((New-FakeJob -State $s -Result (New-LossResult -Received 10)))
+        $r = Receive-PortCheckResult -Engine $engine -States @($s)
+        @($r.Changes | ForEach-Object Kind) -join ',' | Should -Be 'State,Loss'
+    }
+    It 'Invoke-PortMonitorCycle writes loss changes to their own daily file and leaves the status log columns alone' {
+        $engine = New-FakeEngine
+        $logDir = Join-Path $TestDrive 'loss-logs'
+        $s = New-PortTargetState @{ Label = 'DC'; Host = 'h'; Port = 1; MeasureLoss = $true }; $s.InFlight = $true; $s.NextDue = (Get-Date).AddMinutes(5)
+        [void]$engine.InFlight.Add((New-FakeJob -State $s -Result (New-LossResult -Received 7)))
+        [void](Invoke-PortMonitorCycle -Engine $engine -States @($s) -LogDirectory $logDir)
+        $status = @(Get-ChildItem -LiteralPath $logDir -Filter 'PortMonitor_2*.csv')
+        $loss = @(Get-ChildItem -LiteralPath $logDir -Filter 'PortMonitor_Loss_*.csv')
+        $status.Count | Should -Be 1
+        $loss.Count | Should -Be 1
+        (Get-Content -LiteralPath $status[0].FullName -TotalCount 1) | Should -Be '"Timestamp","Label","Host","Port","PreviousStatus","NewStatus","LatencyMs"'
+        $row = @(Import-Csv -LiteralPath $loss[0].FullName)[0]
+        $row.NewStatus | Should -Be 'High loss'
+        $row.LossPercent | Should -Be '30'
+        $row.Sent | Should -Be '10'
+        $row.Received | Should -Be '7'
+    }
+    It 'Start-PortCheck asks the pool for pings only on targets that measure loss' {
+        $src = (Get-Command Start-PortCheck).Definition
+        $src | Should -Match "AddCommand\('Invoke-PortTargetCheck'\)"
+        $src | Should -Match "if \(\`$State\.MeasureLoss\) \{ \[void\]\`$ps\.AddParameter\('MeasureLoss', \`$true\)"
+    }
+    It 'presets ping the host from the first port only (loss is per host)' {
+        $dc = @(Get-PortMonitorPortSets | Where-Object { $_.Name -eq 'Domain controller' })[0]
+        $made = @(New-PortTargetsFromSet -Set $dc -HostName 'dc01' -MeasureLoss $true -LossPings 15 -LossAlertPercent 2)
+        @($made | Where-Object { $_.MeasureLoss }).Count | Should -Be 1
+        $made[0].MeasureLoss | Should -BeTrue
+        $made[0].LossPings | Should -Be 15
+        @($made | ForEach-Object LossAlertPercent | Sort-Object -Unique) | Should -Be @(2)
+    }
+
+    It 'console line for a loss change' {
+        $c = [PSCustomObject]@{ Kind = 'Loss'; Timestamp = (Get-Date '2026-11-16 09:00:00'); Label = 'DC'; Host = 'dc01'; Port = 389; PreviousStatus = 'OK'; NewStatus = 'High loss'; LossPercent = 12.5; JitterMs = 8 }
+        Format-PortStateChangeLine -Change $c | Should -Be '2026-11-16 09:00:00  DC (dc01)  Packet loss: OK -> High loss (12.5 % lost, jitter 8 ms)'
+    }
+    It 'console table shows Loss % (marked ! when high) only for targets that measure it' {
+        $s = New-PortTargetState @{ Label = 'L'; Host = 'h'; Port = 1; MeasureLoss = $true }
+        $s.LossText = '12.0'; $s.LossStatus = 'High loss'
+        (Format-PortMonitorTableRow -State $s).Rest | Should -Match '\s!12\.0\s'
+        $off = New-PortTargetState @{ Label = 'L'; Host = 'h'; Port = 1 }; $off.LossText = '12.0'
+        (Format-PortMonitorTableRow -State $off).Rest | Should -Not -Match '12\.0'
+    }
+    It 'notification: <Case>' -TestCases @(
+        @{ Case = 'starts losing packets'; Prev = 'OK'; New = 'High loss'; Kind = 'Down'; Title = 'DC01 is losing packets'; Text = '^dc01: 12\.5 % of pings lost, jitter 8 ms at 14:35:00\. The port still answers' }
+        @{ Case = 'high on the first check'; Prev = 'Not checked'; New = 'High loss'; Kind = 'Down'; Title = 'DC01 is losing packets'; Text = '^dc01: 12\.5 %' }
+        @{ Case = 'back to normal'; Prev = 'High loss'; New = 'OK'; Kind = 'Up'; Title = 'DC01: packet loss back to normal'; Text = '^dc01: 12\.5 % of pings lost' }
+    ) {
+        param($Case, $Prev, $New, $Kind, $Title, $Text)
+        $c = [PSCustomObject]@{ Kind = 'Loss'; Timestamp = (Get-Date '2026-11-16 14:35:00'); Label = 'DC01'; Host = 'dc01'; Port = 389; PreviousStatus = $Prev; NewStatus = $New; LossPercent = 12.5; JitterMs = 8 }
+        $n = Get-PortChangeNotification -Changes @($c)
+        $n.Kind | Should -Be $Kind
+        $n.Title | Should -Be $Title
+        $n.Text | Should -Match $Text
+    }
+    It 'no notification for a first OK' {
+        $c = [PSCustomObject]@{ Kind = 'Loss'; Timestamp = (Get-Date); Label = 'DC01'; Host = 'dc01'; Port = 389; PreviousStatus = 'Not checked'; NewStatus = 'OK'; LossPercent = 0; JitterMs = 1 }
+        Get-PortChangeNotification -Changes @($c) | Should -BeNullOrEmpty
+    }
+    It 'tray: amber "losing packets" when every port answers but a host is losing packets' {
+        $a = New-PortTargetState @{ Label = 'A'; Host = 'h'; Port = 1 }; $a.Status = 'Open'; $a.LossStatus = 'High loss'
+        $b = New-PortTargetState @{ Label = 'B'; Host = 'h'; Port = 2 }; $b.Status = 'Open'
+        $sum = Get-PortMonitorTraySummary -States @($a, $b) -Running $true
+        $sum.State | Should -Be 'Degraded'
+        $sum.Text | Should -Be 'Port Monitor - A losing packets'
+        $b.Status = 'Timeout'
+        (Get-PortMonitorTraySummary -States @($a, $b) -Running $true).State | Should -Be 'Problem' -Because 'a port that does not answer outranks packet loss'
+    }
+
+    It 'report: periods of high loss per host, closed by OK or by a restart, and an ongoing one' {
+        $t0 = Get-Date '2026-11-16 08:00:00'
+        $row = { param($m, $h, $prev, $new, $loss) [PSCustomObject]@{ Timestamp = $t0.AddMinutes($m); Label = "L-$h"; Host = $h; Port = '1'; PreviousStatus = $prev; NewStatus = $new; LossPercent = $loss } }
+        $rows = @(
+            & $row 0 'a' 'Not checked' 'OK' 0
+            & $row 10 'a' 'OK' 'High loss' 20
+            & $row 40 'a' 'High loss' 'OK' 0
+            & $row 0 'b' 'Not checked' 'High loss' 50
+            & $row 30 'b' 'Not checked' 'OK' 0
+            & $row 50 'c' 'OK' 'High loss' 8
+        )
+        $r = Get-PortLossReport -Rows $rows -From $t0 -To $t0.AddHours(2)
+        @($r.Periods).Count | Should -Be 3
+        $a = @($r.Periods | Where-Object Host -eq 'a')[0]
+        $a.Duration.TotalMinutes | Should -Be 30
+        $a.LossAtStart | Should -Be 20
+        (@($r.Periods | Where-Object Host -eq 'b')[0]).EndUncertain | Should -BeTrue
+        $c = @($r.Periods | Where-Object Host -eq 'c')[0]
+        $c.Ongoing | Should -BeTrue
+        $c.End | Should -Be $t0.AddHours(2)
+    }
+    It 'report HTML: a Packet loss section, and a warning verdict when everything stayed up but loss happened' {
+        $t0 = Get-Date '2026-11-16 08:00:00'
+        $outages = Get-PortOutageReport -Rows @([PSCustomObject]@{ Timestamp = $t0; Label = 'DC'; Host = 'dc01'; Port = '389'; PreviousStatus = 'Not checked'; NewStatus = 'Open' }) -From $t0 -To $t0.AddHours(2)
+        $loss = Get-PortLossReport -Rows @(
+            [PSCustomObject]@{ Timestamp = $t0.AddMinutes(5); Label = 'DC'; Host = 'dc01'; Port = '389'; PreviousStatus = 'OK'; NewStatus = 'High loss'; LossPercent = 15 }
+            [PSCustomObject]@{ Timestamp = $t0.AddMinutes(25); Label = 'DC'; Host = 'dc01'; Port = '389'; PreviousStatus = 'High loss'; NewStatus = 'OK'; LossPercent = 0 }) -From $t0 -To $t0.AddHours(2)
+        $html = ConvertTo-PortOutageReportHtml -Report $outages -LossReport $loss
+        $html | Should -Match 'class="verdict warn">All 1 target\(s\) stayed up, but 1 host\(s\) had periods of high packet loss'
+        $html | Should -Match '<h2>Packet loss</h2>'
+        $html | Should -Match '15\.0 %'
+        (ConvertTo-PortOutageReportHtml -Report $outages) | Should -Not -Match 'Packet loss</h2>'
+    }
+    It 'Export-PortOutageReport reads the loss logs too, and the status log reader ignores them' {
+        $logs = Join-Path $TestDrive 'export-loss'
+        $now = Get-Date
+        [void](Write-PortStateChangeLog -LogDirectory $logs -Change ([PSCustomObject]@{ Timestamp = $now.AddHours(-3); Label = 'DC'; Host = 'dc01'; Port = 389; PreviousStatus = 'Not checked'; NewStatus = 'Open'; LatencyMs = 1 }))
+        foreach ($c in @(
+                [PSCustomObject]@{ Kind = 'Loss'; Timestamp = $now.AddHours(-2); Label = 'DC'; Host = 'dc01'; Port = 389; PreviousStatus = 'OK'; NewStatus = 'High loss'; LossPercent = 20; JitterMs = 3; AvgMs = 9; Sent = 10; Received = 8 }
+                [PSCustomObject]@{ Kind = 'Loss'; Timestamp = $now.AddHours(-1); Label = 'DC'; Host = 'dc01'; Port = 389; PreviousStatus = 'High loss'; NewStatus = 'OK'; LossPercent = 0; JitterMs = 1; AvgMs = 9; Sent = 10; Received = 10 })) {
+            (Write-PortLossChangeLog -LogDirectory $logs -Change $c).Ok | Should -BeTrue
+        }
+        @((Read-PortStateLog -LogDirectory $logs).Rows).Count | Should -Be 1
+        $out = Export-PortOutageReport -LogDirectory $logs -OutputPath (Join-Path $TestDrive 'export-out') -Days 1
+        @($out.LossReport.Periods).Count | Should -Be 1
+        @($out.LogFiles).Count | Should -Be 2
+    }
+}
+
 Describe 'Defaults and window layout' {
     It 'defaults to %APPDATA%\PortMonitor' {
         $old = $env:APPDATA
@@ -437,9 +744,16 @@ Describe 'Defaults and window layout' {
     It 'the window XAML loads in WPF (STA hosts only; nothing is shown)' -Skip:([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') {
         Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
         $w = [System.Windows.Markup.XamlReader]::Parse((Get-PortMonitorMainXaml))
-        $w.FindName('Grid').Columns.Count | Should -Be 11
+        $w.FindName('Grid').Columns.Count | Should -Be 13
+        @($w.FindName('Grid').Columns | ForEach-Object { [string]$_.Header }) | Should -Contain 'Loss %'
         $d = [System.Windows.Markup.XamlReader]::Parse((Get-PortTargetDialogXaml))
         $d.FindName('BtnSave') | Should -Not -BeNullOrEmpty
+    }
+    It 'no grid column takes a theme colour directly (a column is not in the visual tree, so it would never resolve)' {
+        # Regression: Details used Foreground="{DynamicResource TextMuted}" on the column and came
+        # out black, unreadable in dark mode. The colour belongs on the cell (ElementStyle).
+        $xaml = Get-PortMonitorMainXaml
+        [regex]::Matches($xaml, '<DataGrid\w*Column[^>]*>') | ForEach-Object { $_.Value | Should -Not -Match 'DynamicResource' }
     }
     It 'the sample targets.example.json loads with 3 valid targets' {
         $r = Read-PortMonitorConfig -Path (Join-Path (Split-Path -Parent $PSScriptRoot) 'targets.example.json')
@@ -916,6 +1230,35 @@ Describe 'Real checks and console mode' -Tag 'Integration' {
         $csv.Count | Should -Be 1
         $rows = @(Import-Csv -LiteralPath $csv[0].FullName)
         @($rows | Where-Object { $_.NewStatus -eq 'Refused' -and $_.Label -eq 'closed' }).Count | Should -Be 1
+    }
+    It 'Measure-PingLoss: every ping to loopback is answered' {
+        $r = Measure-PingLoss -Address '127.0.0.1' -Count 5 -TimeoutMs 1000 -GapMs 50
+        $r.Error | Should -BeNullOrEmpty
+        $r.Sent | Should -Be 5
+        $r.Received | Should -Be 5
+        $r.LossPercent | Should -Be 0
+    }
+    It 'Invoke-PortTargetCheck on loopback: port Open and loss measured' {
+        $r = Invoke-PortTargetCheck -HostName 'localhost' -Port $script:OpenPort -MeasureLoss -LossPings 3
+        $r.Status | Should -Be 'Open'
+        $r.Loss.Received | Should -Be 3
+    }
+    It '-Once with packet loss measured under <Name>: exit 0, loss logged as OK in its own file' -TestCases @(
+        @{ Name = 'Windows PowerShell 5.1' }, @{ Name = 'PowerShell 7' }
+    ) {
+        param($Name)
+        $exe = ($script:Hosts | Where-Object { $_.Name -eq $Name }).Exe
+        $dir = Join-Path $TestDrive ('loss-' + ($Name -replace '\W', ''))
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $cfg = Join-Path $dir 'loss.json'
+        Set-Content -LiteralPath $cfg -Encoding ASCII -Value "[ { `"Label`": `"open`", `"Host`": `"127.0.0.1`", `"Port`": $script:OpenPort, `"MeasureLoss`": true, `"LossPings`": 3 } ]"
+        $logs = Join-Path $dir 'Logs'
+        $r = Invoke-OnceChild -Exe $exe -Config $cfg -Logs $logs
+        $r.ExitCode | Should -Be 0 -Because $r.Output
+        $r.Output | Should -Match 'Loss %'
+        $loss = @(Get-ChildItem -LiteralPath $logs -Filter 'PortMonitor_Loss_*.csv')
+        $loss.Count | Should -Be 1
+        (@(Import-Csv -LiteralPath $loss[0].FullName)[0]).NewStatus | Should -Be 'OK'
     }
     It '-Once exits 2 when there is nothing to check' {
         $cfg = Join-Path $TestDrive 'none.json'

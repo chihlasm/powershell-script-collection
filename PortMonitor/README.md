@@ -16,6 +16,9 @@ tool.
   | **DNS Failure** | The name could not be resolved. Check the spelling, or the DNS server. |
   | **Error** | Anything else, such as "network unreachable". The **Details** column says what. |
 
+- **Tells you when a connection is bad, not just down:** optional packet-loss measuring (see
+  [below](#packet-loss-up-but-bad)).
+
 ## How to run it
 
 ```powershell
@@ -71,13 +74,45 @@ You can change both numbers per target in **Add**/**Edit** (**Report down after*
 up after**, 1–10). Set **Report down after** to 1 to hear about every single failure. The very
 first check is always reported straight away, and Fail Count / Uptime % still count every check.
 
+### Packet loss: "up, but bad"
+
+A port check only asks "does it answer?". **Lost packets usually stay hidden**: TCP sends a lost
+packet again, so the port still shows **Open**, just a little slower. A line losing 5% of its
+packets makes calls choppy and RDP sluggish while every port stays green.
+
+To measure loss, tick **Measure packet loss** in **Add**/**Edit**. After each port check, Port
+Monitor pings the same address a few times (**Pings per check**, default 10) and shows:
+
+| Column | What it shows |
+|---|---|
+| **Loss %** | Share of this check's pings that got no answer. Turns **amber** when the host is losing packets. Says *no reply* when ping is blocked. |
+| **Jitter (ms)** | How uneven the answers were: the average change between one ping's time and the next. High jitter hurts calls even without loss. |
+
+- **When it warns:** when the loss reaches **Warn when this % is lost** (default 5%) for
+  **Report down after** checks in a row (default 2), and when it's back below the line for
+  **Report back up after** checks. You get a notification, a line in the log, and the tray
+  icon turns **amber**.
+- **Ping blocked?** Many firewalls drop pings. If no ping is answered while the port is open,
+  Port Monitor says *no reply* and reports nothing. That isn't loss, it just can't be measured
+  for that host. In that case, use the slow-answer hint below.
+- **Presets ping once per host:** with **What is it?**, only the first port measures loss.
+  Loss is the same whichever port you look at.
+- **Slow answers, for every target:** a port that normally answers in 2 ms and suddenly takes
+  over a second usually lost a packet that had to be sent again. **Details** says so
+  (`Slow answer: 1100 ms (usually 2 ms), often a lost packet that had to be resent`). It's a
+  hint only, and isn't logged or notified, because a single resend is normal on any network.
+- **Not a full line test:** 10 pings every 30 seconds will spot loss that keeps happening, not
+  a single dropped packet. For a one-off look at *where* packets are lost, run
+  `pathping <host>`.
+
 ### Uptime and outage report
 
 Click **Report** and pick **Last 24 hours**, **Last 7 days** or **Last 30 days**. Port Monitor
 reads its logs, writes an HTML page to `Logs\Reports`, and opens it. The page has a one-line
 verdict at the top ("2 of 14 targets had outages: 3 in total, 47 min of downtime. Longest: …"),
 each target's uptime %, and every outage with when it went down, when it came back, and how long
-it lasted. It's ready to attach to a ticket.
+it lasted. If any host had periods of high packet loss, they get their own table, and the verdict
+mentions them. It's ready to attach to a ticket.
 
 The log only records changes, so the report counts any time Port Monitor wasn't running as the
 last state it saw. Outages that were cut short by a restart are marked as such.
@@ -104,12 +139,13 @@ stand:
 | Icon | Meaning |
 |---|---|
 | Green | Every target is open |
+| Amber | Every port answers, but a host is losing packets |
 | Red | At least one target is not answering. Hover over the icon to see which. |
 | Blue | Checking (results not in yet) |
 | Grey | Stopped, or nothing to check |
 
 - **A Windows notification appears whenever a target changes**: it goes down, comes back up,
-  or fails its very first check. Several changes at once are combined into one notification.
+  fails its very first check, starts losing packets, or stops losing them. Several changes at once are combined into one notification.
   Click the notification to open the window. No notification is shown while you're looking at
   the window, and none is shown for targets that are simply open when monitoring starts.
 - **Click the icon** to open the window. **Closing the window** hides it again, and checking
@@ -140,7 +176,7 @@ host, and a closed local port that should show **Refused**.
 | `-Tray` | Starts in the background: no window, a notification area icon, checking starts at once, and a notification for every change. This is what the "Start when I sign in" shortcut runs. |
 | `-Report` | Writes the uptime and outage report (HTML) from the logs and exits. Checks nothing. Use with `-Days` (1–366, default 7) and `-OutputPath` (default: the current folder). |
 | `-NoGui` | Console mode: the same checks in a loop. You get a coloured table in a console window, or one `[PASS]`/`[FAIL]` line per change when the output is redirected (RMM). Stop with Ctrl+C. |
-| `-Once` | Console, one pass: checks every enabled target once and exits. **Exit code 0** = all open, **1** = at least one is not, **2** = nothing to check. |
+| `-Once` | Console, one pass: checks every enabled target once and exits. **Exit code 0** = all open, **1** = at least one is not open, or is losing packets above its warning level, **2** = nothing to check. |
 | `-SmokeTest` | Opens the window off-screen, checks that it works, closes it, and prints `[PASS]`/`[FAIL]`. Reads and writes nothing. Run it with a time limit: `Tests\Invoke-SmokeTest.ps1 -ScriptPath PortMonitor\PortMonitor.ps1`. |
 
 ## Files
@@ -149,23 +185,24 @@ host, and a closed local port that should show **Refused**.
 |---|---|
 | `%APPDATA%\PortMonitor\targets.json` | The target list. The window saves it after every Add, Edit, Remove or Enabled change. Console mode never writes it. |
 | `%APPDATA%\PortMonitor\Logs\PortMonitor_yyyyMMdd.csv` | One file per day, **state changes only**. Columns: `Timestamp, Label, Host, Port, PreviousStatus, NewStatus, LatencyMs`. |
+| `%APPDATA%\PortMonitor\Logs\PortMonitor_Loss_yyyyMMdd.csv` | Only for targets that measure packet loss: one file per day, **changes only** (`OK`, `High loss`, `No replies`). Columns: `Timestamp, Label, Host, Port, PreviousStatus, NewStatus, LossPercent, JitterMs, AvgMs, Sent, Received`. |
 | `%APPDATA%\PortMonitor\settings.json` | Your look (dark/light), window size and position, sort order, and whether you were already asked about starting at sign-in. |
 | `%APPDATA%\PortMonitor\Logs\Reports\PortMonitor_Report_*.html` | Reports made with the **Report** button. |
 | `<Startup folder>\Port Monitor.lnk` | Only if you choose **Start when I sign in**. Removing the tick deletes it. |
 | `<targets file>.bak-yyyy-MM-dd_HHmmss` | Made only if a target list could not be fully read (bad JSON or invalid entries). The original is kept here before the first save replaces it. |
 
-Each target in the JSON looks like this. `IntervalSec`, `TimeoutMs`, `Enabled`, `FailAfter`
-and `RecoverAfter` are optional (defaults: 30, 3000, true, 2, 1). Lists saved by version 1.0
-load fine.
+Each target in the JSON looks like this. Everything after `Port` is optional (defaults: 30,
+3000, true, 2, 1, false, 10, 5). Lists saved by older versions load fine.
 
 ```json
 [
-  { "Label": "DC01 LDAP", "Host": "dc01.example.local", "Port": 389, "IntervalSec": 30, "TimeoutMs": 3000, "Enabled": true, "FailAfter": 2, "RecoverAfter": 1 }
+  { "Label": "DC01 LDAP", "Host": "dc01.example.local", "Port": 389, "IntervalSec": 30, "TimeoutMs": 3000, "Enabled": true,
+    "FailAfter": 2, "RecoverAfter": 1, "MeasureLoss": true, "LossPings": 10, "LossAlertPercent": 5 }
 ]
 ```
 
 Limits: port 1–65535, interval at least 1 second, timeout 100–30000 ms, FailAfter and
-RecoverAfter 1–10. The host cannot be blank.
+RecoverAfter 1–10, LossPings 1–50, LossAlertPercent 1–100. The host cannot be blank.
 
 The first result for each target is logged too, with `PreviousStatus` set to `Not checked`.
 That way the log shows what state monitoring started in. If the CSV is open in Excel, the
@@ -198,6 +235,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\PortMonitor.ps1
 - Fail Count and Uptime % count every check since the target started being monitored in this
   session. They reset when you restart the tool, or when you change a target's host or port.
 - Up to 16 checks run at the same time in the background, so the window never freezes.
+- With packet loss on, each check takes longer: the pings are 200 ms apart, and each waits up
+  to the timeout (at most 2 s) for an answer. 10 pings take about 2 seconds when all answer.
+  Pings go to the address the port check used, and need no admin rights.
 - The window needs an STA thread (WPF). If it is started from an MTA host, it relaunches
   itself with `-STA` and the same parameters.
 - Pressing Ctrl+C in the console that started the window closes it cleanly, including in
@@ -207,5 +247,5 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\PortMonitor.ps1
 
 ```powershell
 pwsh -File Tests\Invoke-AllTests.ps1 -Path .\PortMonitor\Tests                      # unit tests (no network)
-Invoke-Pester .\PortMonitor\Tests -TagFilter Integration                             # loopback, child 5.1/7 processes, smoke
+Invoke-Pester .\PortMonitor\Tests -TagFilter Integration                             # loopback ports and pings, child 5.1/7 processes, smoke
 ```

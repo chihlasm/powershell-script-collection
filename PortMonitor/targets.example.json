@@ -5,7 +5,10 @@
     "Port": 53,
     "IntervalSec": 30,
     "TimeoutMs": 3000,
-    "Enabled": true
+    "Enabled": true,
+    "MeasureLoss": true,
+    "LossPings": 10,
+    "LossAlertPercent": 5
   },
   {
     "Label": "Web host (HTTPS)",
