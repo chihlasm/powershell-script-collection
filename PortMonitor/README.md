@@ -35,6 +35,39 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\PortMonitor.ps1 -Once 
 In the window: **Add** a target, then click **Start**. Double-click a row to change it.
 Untick **Enabled** on a row to pause that target. Hover over a row to see the full details.
 
+## Running in the background
+
+Click **Run in Background** in the window, or start it with `-Tray`. The window goes away and
+checking carries on. A round icon in the notification area (near the clock) shows how things
+stand:
+
+| Icon | Meaning |
+|---|---|
+| Green | Every target is open |
+| Red | At least one target is not answering. Hover over the icon to see which. |
+| Blue | Checking (results not in yet) |
+| Grey | Stopped, or nothing to check |
+
+- **A Windows notification appears whenever a target changes**: it goes down, comes back up,
+  or fails its very first check. Several changes at once are combined into one notification.
+  Click the notification to open the window. No notification is shown while you're looking at
+  the window, and none is shown for targets that are simply open when monitoring starts.
+- **Click the icon** to open the window. **Closing the window** hides it again, and checking
+  continues. To quit, right-click the icon and choose **Exit Port Monitor**.
+- **Right-click the icon** to: Open, Stop/Start monitoring, Open log folder,
+  **Start when I sign in**, or Exit.
+- **The first time it runs in the background, it offers to start at sign-in.** If you say Yes, it
+  adds `Port Monitor.lnk` to your Startup folder (`shell:startup`). No admin rights are needed.
+  The shortcut runs the script from where it is at that moment, so if you move the script,
+  turn the option off and on again. You're only asked once; after that, use the menu item.
+- **Only one copy runs per user.** Starting Port Monitor again, whether from the shortcut, a
+  double-click or `-Tray`, opens the copy that is already running instead of starting a second
+  one. That way changes are never logged twice. Other users signed in to the same RDS server
+  each get their own copy.
+
+Windows decides how notifications look and whether they appear. Do Not Disturb / Focus can
+hide them, and they show up as coming from "Windows PowerShell".
+
 To try it out, **Import** `targets.example.json`. It has a public DNS server, a public web
 host, and a closed local port that should show **Refused**.
 
@@ -44,6 +77,7 @@ host, and a closed local port that should show **Refused**.
 |---|---|
 | `-ConfigPath <file>` | The target list to load. Default `%APPDATA%\PortMonitor\targets.json`. A missing file means an empty list. |
 | `-LogPath <folder>` | Where the daily CSV logs go. Default `%APPDATA%\PortMonitor\Logs`. |
+| `-Tray` | Starts in the background: no window, a notification area icon, checking starts at once, and a notification for every change. This is what the "Start when I sign in" shortcut runs. |
 | `-NoGui` | Console mode: the same checks in a loop. You get a coloured table in a console window, or one `[PASS]`/`[FAIL]` line per change when the output is redirected (RMM). Stop with Ctrl+C. |
 | `-Once` | Console, one pass: checks every enabled target once and exits. **Exit code 0** = all open, **1** = at least one is not, **2** = nothing to check. |
 | `-SmokeTest` | Opens the window off-screen, checks that it works, closes it, and prints `[PASS]`/`[FAIL]`. Reads and writes nothing. Run it with a time limit: `Tests\Invoke-SmokeTest.ps1 -ScriptPath PortMonitor\PortMonitor.ps1`. |
@@ -54,6 +88,8 @@ host, and a closed local port that should show **Refused**.
 |---|---|
 | `%APPDATA%\PortMonitor\targets.json` | The target list. The window saves it after every Add, Edit, Remove or Enabled change. Console mode never writes it. |
 | `%APPDATA%\PortMonitor\Logs\PortMonitor_yyyyMMdd.csv` | One file per day, **state changes only**. Columns: `Timestamp, Label, Host, Port, PreviousStatus, NewStatus, LatencyMs`. |
+| `%APPDATA%\PortMonitor\settings.json` | Remembers that you were already asked about starting at sign-in. |
+| `<Startup folder>\Port Monitor.lnk` | Only if you choose **Start when I sign in**. Removing the tick deletes it. |
 | `<targets file>.bak-yyyy-MM-dd_HHmmss` | Made only if a target list could not be fully read (bad JSON or invalid entries). The original is kept here before the first save replaces it. |
 
 Each target in the JSON looks like this. `IntervalSec`, `TimeoutMs` and `Enabled` are optional
@@ -100,7 +136,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\PortMonitor.ps1
 - Up to 16 checks run at the same time in the background, so the window never freezes.
 - The window needs an STA thread (WPF). If it is started from an MTA host, it relaunches
   itself with `-STA` and the same parameters.
-- Pressing Ctrl+C in the console that started the window closes the window cleanly.
+- Pressing Ctrl+C in the console that started the window closes it cleanly, including in
+  background mode.
 
 ## Tests
 

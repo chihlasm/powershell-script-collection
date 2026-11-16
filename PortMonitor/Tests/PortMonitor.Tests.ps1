@@ -448,6 +448,136 @@ Describe 'Defaults and window layout' {
     }
 }
 
+Describe 'Tray mode pieces (no tray icon is shown, nothing outside $TestDrive is written)' {
+    BeforeAll {
+        function New-Change {
+            param([string]$Label = 'DC01', [string]$Prev, [string]$New, $Latency = $null)
+            [PSCustomObject]@{ Timestamp = (Get-Date '2026-11-16 14:35:00'); Label = $Label; Host = 'dc01'; Port = 389; PreviousStatus = $Prev; NewStatus = $New; LatencyMs = $Latency }
+        }
+    }
+
+    It 'says nothing when a target is Open on its first check' {
+        Get-PortChangeNotification -Changes @(New-Change -Prev 'Not checked' -New 'Open' -Latency 3) | Should -BeNullOrEmpty
+        Get-PortChangeNotification -Changes @() | Should -BeNullOrEmpty
+    }
+    It 'reports a target that fails its first check' {
+        $n = Get-PortChangeNotification -Changes @(New-Change -Prev 'Not checked' -New 'Timeout')
+        $n.Kind | Should -Be 'Down'
+        $n.Title | Should -Be 'DC01 is not answering'
+        $n.Text | Should -Match 'Timeout on the first check at 14:35:00'
+    }
+    It 'reports going down and coming back' {
+        $down = Get-PortChangeNotification -Changes @(New-Change -Prev 'Open' -New 'Refused')
+        $down.Kind | Should -Be 'Down'
+        $down.Text | Should -Be 'dc01:389: Open -> Refused at 14:35:00.'
+        $up = Get-PortChangeNotification -Changes @(New-Change -Prev 'Timeout' -New 'Open' -Latency 12.5)
+        $up.Kind | Should -Be 'Up'
+        $up.Title | Should -Be 'DC01 is back up'
+        $up.Text | Should -Match 'answered in 12.5 ms at 14:35:00 \(was Timeout\)'
+    }
+    It 'combines several changes in one tick into one notification, down first in the title' {
+        $changes = @(1..6 | ForEach-Object { New-Change -Label "T$_" -Prev 'Open' -New 'Timeout' }) + @(New-Change -Label 'Up1' -Prev 'Refused' -New 'Open')
+        $n = Get-PortChangeNotification -Changes $changes
+        $n.Kind | Should -Be 'Down'
+        $n.Title | Should -Be '7 targets changed (6 down)'
+        @($n.Text -split "`n").Count | Should -Be 5
+        $n.Text | Should -Match 'and 3 more$'
+    }
+    It 'keeps notification title within 63 and text within 255 characters (NOTIFYICONDATA)' {
+        $long = 'L' * 300
+        $n = Get-PortChangeNotification -Changes @(New-Change -Label $long -Prev 'Open' -New 'Timeout')
+        $n.Title.Length | Should -BeLessOrEqual 63
+        $n.Text.Length | Should -BeLessOrEqual 255
+        $many = @(1..4 | ForEach-Object { New-Change -Label ('X' * 120) -Prev 'Open' -New 'Error' })
+        (Get-PortChangeNotification -Changes $many).Text.Length | Should -BeLessOrEqual 255
+    }
+
+    It 'tray summary: <Case>' -TestCases @(
+        @{ Case = 'stopped'; Running = $false; Statuses = @('Open'); State = 'Stopped'; Text = 'Port Monitor - stopped' }
+        @{ Case = 'nothing enabled'; Running = $true; Statuses = @(); State = 'Stopped'; Text = 'Port Monitor - nothing to check' }
+        @{ Case = 'all open'; Running = $true; Statuses = @('Open', 'Open'); State = 'Ok'; Text = 'Port Monitor - all 2 open' }
+        @{ Case = 'still checking'; Running = $true; Statuses = @('Open', 'Not checked'); State = 'Checking'; Text = 'Port Monitor - checking 2 target(s)' }
+        @{ Case = 'one down'; Running = $true; Statuses = @('Open', 'DNS Failure'); State = 'Problem'; Text = 'Port Monitor - T2 not answering' }
+        @{ Case = 'two down'; Running = $true; Statuses = @('Error', 'Timeout', 'Open'); State = 'Problem'; Text = 'Port Monitor - 2 of 3 not answering' }
+    ) {
+        param($Case, $Running, $Statuses, $State, $Text)
+        $i = 0
+        $states = @(foreach ($st in $Statuses) { $i++; $s = New-PortTargetState @{ Label = "T$i"; Host = 'h'; Port = $i }; $s.Status = $st; $s })
+        $summary = Get-PortMonitorTraySummary -States $states -Running $Running
+        $summary.State | Should -Be $State
+        $summary.Text | Should -Be $Text
+    }
+    It 'tray tooltip stays within 63 characters (NotifyIcon.Text limit on Windows PowerShell)' {
+        $s = New-PortTargetState @{ Label = ('Very long label ' * 10); Host = 'h'; Port = 1 }; $s.Status = 'Timeout'
+        (Get-PortMonitorTraySummary -States @($s) -Running $true).Text.Length | Should -BeLessOrEqual 63
+    }
+    It 'draws a 16x16 tray icon' {
+        $icon = New-PortMonitorTrayIcon -Color '#3FB950'
+        try { $icon.Width | Should -Be 16; $icon.Height | Should -Be 16 } finally { $icon.Dispose() }
+    }
+
+    It 'Startup command runs Windows PowerShell hidden with -Tray, and adds paths only when not default' {
+        $cmd = Get-PortMonitorStartupCommand -ScriptPath 'C:\Tools\PortMonitor.ps1' -ConfigPath 'C:\a\targets.json' -LogPath 'C:\a\Logs' -DefaultConfigPath 'C:\a\targets.json' -DefaultLogPath 'C:\a\Logs'
+        $cmd.TargetPath | Should -Match 'System32\\WindowsPowerShell\\v1\.0\\powershell\.exe$'
+        $cmd.Arguments | Should -Be '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -STA -File "C:\Tools\PortMonitor.ps1" -Tray'
+        $cmd.ScriptPath | Should -Be 'C:\Tools\PortMonitor.ps1'
+        $custom = Get-PortMonitorStartupCommand -ScriptPath 'C:\Tools\PortMonitor.ps1' -ConfigPath '\\fs\it\client.json' -LogPath 'C:\a\Logs' -DefaultConfigPath 'C:\a\targets.json' -DefaultLogPath 'C:\a\Logs'
+        $custom.Arguments | Should -Match ' -ConfigPath "\\\\fs\\it\\client\.json"$'
+    }
+    It 'Startup shortcut is named Port Monitor.lnk in the given (or the user''s) Startup folder' {
+        Get-PortMonitorStartupShortcutPath -StartupFolder 'C:\X' | Should -Be 'C:\X\Port Monitor.lnk'
+        Get-PortMonitorStartupShortcutPath | Should -Be (Join-Path ([Environment]::GetFolderPath('Startup')) 'Port Monitor.lnk')
+    }
+    It 'creates the Startup shortcut minimized with the command, and removes only that file' {
+        $folder = Join-Path $TestDrive 'Startup'
+        $lnk = Get-PortMonitorStartupShortcutPath -StartupFolder $folder
+        $cmd = Get-PortMonitorStartupCommand -ScriptPath 'C:\Tools\PortMonitor.ps1' -ConfigPath 'a' -LogPath 'b' -DefaultConfigPath 'a' -DefaultLogPath 'b'
+        Set-PortMonitorStartup -Enabled $true -ShortcutPath $lnk -Command $cmd
+        Test-Path -LiteralPath $lnk | Should -BeTrue
+        $shell = New-Object -ComObject WScript.Shell
+        $read = $shell.CreateShortcut($lnk)
+        $read.TargetPath | Should -Be $cmd.TargetPath
+        $read.Arguments | Should -Be $cmd.Arguments
+        $read.WindowStyle | Should -Be 7
+        $other = Join-Path $folder 'Something else.lnk'
+        Set-Content -LiteralPath $other -Value 'x'
+        Set-PortMonitorStartup -Enabled $false -ShortcutPath $lnk
+        Test-Path -LiteralPath $lnk | Should -BeFalse
+        Test-Path -LiteralPath $other | Should -BeTrue
+        { Set-PortMonitorStartup -Enabled $false -ShortcutPath $lnk } | Should -Not -Throw
+    }
+    It 'remembers that the Startup offer was shown, and reads a missing or broken file as not shown' {
+        $p = Join-Path $TestDrive 'settings\settings.json'
+        (Read-PortMonitorSettings -Path $p).StartupOffered | Should -BeFalse
+        Save-PortMonitorSettings -Path $p -Settings @{ StartupOffered = $true }
+        (Read-PortMonitorSettings -Path $p).StartupOffered | Should -BeTrue
+        Set-Content -LiteralPath $p -Value '{ broken' -Encoding ASCII
+        (Read-PortMonitorSettings -Path $p).StartupOffered | Should -BeFalse
+    }
+    It 'single instance: the first copy owns the lock, a second does not, and the lock frees on exit' {
+        $name = 'PortMonitor.Test.' + [guid]::NewGuid().ToString('N')
+        $first = Enter-PortMonitorInstance -Name $name
+        try {
+            $first.Owned | Should -BeTrue
+            # A second copy runs in another process; a thread stands in for it (a mutex is
+            # re-entrant on the same thread).
+            $job = Start-ThreadJob -ScriptBlock {
+                param($fn, $n)
+                $m = New-Object System.Threading.Mutex -ArgumentList $false, "Local\$n"
+                $got = $m.WaitOne(0); if ($got) { $m.ReleaseMutex() }; $m.Dispose(); $got
+            } -ArgumentList 'x', $name
+            Receive-Job -Job $job -Wait -AutoRemoveJob | Should -BeFalse
+            # The second copy's "show yourself" signal reaches the first.
+            $signal = New-Object System.Threading.EventWaitHandle -ArgumentList $false, ([System.Threading.EventResetMode]::AutoReset), "Local\$name.Show"
+            [void]$signal.Set(); $signal.Dispose()
+            $first.ShowEvent.WaitOne(0) | Should -BeTrue
+        }
+        finally { Exit-PortMonitorInstance -Instance $first }
+        $again = Enter-PortMonitorInstance -Name $name
+        try { $again.Owned | Should -BeTrue } finally { Exit-PortMonitorInstance -Instance $again }
+    }
+}
+
 Describe 'Real checks and console mode' -Tag 'Integration' {
     BeforeAll {
         $script:Listener = New-Object System.Net.Sockets.TcpListener -ArgumentList ([System.Net.IPAddress]::Loopback), 0

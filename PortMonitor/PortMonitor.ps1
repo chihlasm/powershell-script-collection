@@ -27,9 +27,20 @@
     result for each target after it starts is also logged (PreviousStatus "Not checked") so the
     log shows what state monitoring started in.
 
+    Running in the background: -Tray (or the window's Run in Background button) keeps checking
+    with the window hidden. An icon in the notification area shows the overall state (green:
+    all open, red: something is not answering, blue: checking, grey: stopped) and a Windows
+    notification appears when a target goes down or comes back. Click the icon to open the
+    window; closing the window then hides it again; Exit is on the icon's right-click menu,
+    which also has "Start when I sign in". The first time it runs in the background it offers to
+    add that Startup shortcut. Only one window/icon runs per user session: starting the tool
+    again brings the running copy forward.
+
     Files (defaults; nothing is written anywhere else):
       %APPDATA%\PortMonitor\targets.json                 the target list (auto-saved by the window)
       %APPDATA%\PortMonitor\Logs\PortMonitor_yyyyMMdd.csv state changes, one file per day
+      %APPDATA%\PortMonitor\settings.json                remembers that the Startup offer was shown
+      <Startup folder>\Port Monitor.lnk                  only if the user chooses "Start when I sign in"
 
     The window auto-saves the target list after every Add, Edit, Remove or Enabled change. If
     the file could not be read when it was loaded (invalid JSON, or entries that had to be
@@ -54,6 +65,11 @@
     Exit code 0 = every enabled target is Open, 1 = at least one is not, 2 = nothing to check
     (no enabled targets). Implies -NoGui. Meant for RMM checks and scheduled tasks.
 
+.PARAMETER Tray
+    Start in the background: no window, an icon in the notification area, checking starts at
+    once, and a notification appears for every change. This is what the "Start when I sign in"
+    shortcut runs. Cannot be combined with -NoGui or -Once.
+
 .PARAMETER SmokeTest
     Checks that this copy of the tool starts, then closes by itself: the real window is built
     and rendered off-screen (it never takes the focus), a probe runs in the background pool,
@@ -72,6 +88,10 @@
 .EXAMPLE
     .\PortMonitor.ps1 -ConfigPath '\\fileserver\it\clients\contoso-ports.json'
     Opens the window with one client's target list. Changes are auto-saved to that file.
+
+.EXAMPLE
+    .\PortMonitor.ps1 -Tray
+    Starts in the background (notification area icon) and notifies on every change.
 
 .EXAMPLE
     .\PortMonitor.ps1 -NoGui -ConfigPath C:\Temp\targets.json -LogPath C:\Temp\PortLogs
@@ -130,6 +150,23 @@
       FolderPermissionManager): loads the default commands through their modules in Windows
       PowerShell and PowerShell 7 alike.
       https://learn.microsoft.com/dotnet/api/system.management.automation.runspaces.initialsessionstate.createdefault2
+    - NotifyIcon.Text: maximum 63 characters on .NET Framework and .NET 5, 127 on .NET 6+.
+      https://learn.microsoft.com/dotnet/api/system.windows.forms.notifyicon.text
+    - NotifyIcon.ShowBalloonTip: one balloon at a time; a newer one from the same app replaces
+      it; the timeout is ignored (system accessibility settings decide).
+      https://learn.microsoft.com/dotnet/api/system.windows.forms.notifyicon.showballoontip
+    - NOTIFYICONDATA: notification title up to 64 and text up to 256 characters including the
+      terminating null.
+      https://learn.microsoft.com/windows/win32/api/shellapi/ns-shellapi-notifyicondataw
+    - Environment.SpecialFolder.Startup: the user's Startup program group, run at every logon.
+      https://learn.microsoft.com/dotnet/api/system.environment.specialfolder
+    - WshShortcut (CreateShortcut, TargetPath, Arguments, Save) and WindowStyle 7 (minimized).
+      https://learn.microsoft.com/previous-versions/windows/internet-explorer/ie-developer/windows-scripting/xk6kst2k(v=vs.84)
+      https://learn.microsoft.com/previous-versions/windows/internet-explorer/ie-developer/windows-scripting/w88k7fw2(v=vs.84)
+    - Mutex names: "Local\" is shared only within the sign-in session.
+      https://learn.microsoft.com/dotnet/api/system.threading.mutex.-ctor
+    - Dispatcher.PushFrame (message loop without ShowDialog, so the window can hide and show).
+      https://learn.microsoft.com/dotnet/api/system.windows.threading.dispatcher.pushframe
     - PowerShell support lifecycle (Server 2012 ships 3.0, 2012 R2 ships 4.0).
       https://learn.microsoft.com/powershell/scripting/install/powershell-support-lifecycle
 #>
@@ -147,6 +184,9 @@ param(
 
     [Parameter()]
     [switch]$Once,
+
+    [Parameter()]
+    [switch]$Tray,
 
     [Parameter()]
     [switch]$SmokeTest,
@@ -987,6 +1027,249 @@ function Invoke-PortMonitorHeadless {
 
 #endregion
 
+#region Tray, notifications, startup shortcut, single instance
+
+function Limit-PortMonitorText {
+    # Cuts text to a Windows limit, ending with '...' when cut.
+    param([AllowNull()][string]$Text, [Parameter(Mandatory)][int]$Max)
+    if ($null -eq $Text) { return '' }
+    if ($Text.Length -le $Max) { return $Text }
+    $Text.Substring(0, $Max - 3) + '...'
+}
+
+function Get-PortChangeNotification {
+    <#
+    .SYNOPSIS
+        Turns one tick's state changes into one notification (title, text, Down/Up), or nothing.
+    .DESCRIPTION
+        A first result that is Open ("Not checked -> Open") is not news and is left out; a first
+        result that is a failure is reported. Several changes in the same tick become one
+        notification, because Windows shows one balloon at a time and a newer one from the same
+        app replaces the older one (NotifyIcon.ShowBalloonTip docs).
+        Title is cut to 63 characters and text to 255 (NOTIFYICONDATA szInfoTitle[64] /
+        szInfo[256], including the terminating null).
+        https://learn.microsoft.com/windows/win32/api/shellapi/ns-shellapi-notifyicondataw
+    #>
+    param([AllowNull()][AllowEmptyCollection()][object[]]$Changes = @())
+    $news = @($Changes | Where-Object { $_ -and -not ($_.PreviousStatus -eq $script:StatusNotChecked -and $_.NewStatus -eq 'Open') })
+    if ($news.Count -eq 0) { return }
+    $down = @($news | Where-Object { $_.NewStatus -ne 'Open' })
+    $kind = 'Up'
+    if ($down.Count -gt 0) { $kind = 'Down' }
+
+    if ($news.Count -eq 1) {
+        $c = $news[0]
+        $when = $c.Timestamp.ToString('HH:mm:ss')
+        if ($c.NewStatus -eq 'Open') {
+            $title = "$($c.Label) is back up"
+            $latency = ''
+            if ($null -ne $c.LatencyMs) { $latency = " in $($c.LatencyMs) ms" }
+            $text = "$($c.Host):$($c.Port) answered$latency at $when (was $($c.PreviousStatus))."
+        }
+        else {
+            $title = "$($c.Label) is not answering"
+            if ($c.PreviousStatus -eq $script:StatusNotChecked) { $text = "$($c.Host):$($c.Port): $($c.NewStatus) on the first check at $when." }
+            else { $text = "$($c.Host):$($c.Port): $($c.PreviousStatus) -> $($c.NewStatus) at $when." }
+        }
+    }
+    else {
+        if ($down.Count -eq $news.Count) { $title = "$($news.Count) targets are not answering" }
+        elseif ($down.Count -eq 0) { $title = "$($news.Count) targets are back up" }
+        else { $title = "$($news.Count) targets changed ($($down.Count) down)" }
+        $lines = @($news | Select-Object -First 4 | ForEach-Object { "$($_.Label): $($_.PreviousStatus) -> $($_.NewStatus)" })
+        if ($news.Count -gt 4) { $lines += "and $($news.Count - 4) more" }
+        $text = $lines -join "`n"
+    }
+    [PSCustomObject]@{
+        Title = Limit-PortMonitorText -Text $title -Max 63
+        Text  = Limit-PortMonitorText -Text $text -Max 255
+        Kind  = $kind
+    }
+}
+
+function Get-PortMonitorTraySummary {
+    <#
+    .SYNOPSIS
+        What the tray icon shows: State (Stopped, Checking, Ok, Problem) and its tooltip.
+    .DESCRIPTION
+        The tooltip is cut to 63 characters: NotifyIcon.Text throws above 63 on .NET Framework
+        (Windows PowerShell) and .NET 5; .NET 6+ allows 127.
+        https://learn.microsoft.com/dotnet/api/system.windows.forms.notifyicon.text
+    #>
+    param([AllowNull()][AllowEmptyCollection()][object[]]$States = @(), [bool]$Running)
+    $enabled = @($States | Where-Object { $_ -and $_.Enabled })
+    if (-not $Running) {
+        $state = 'Stopped'; $text = 'Port Monitor - stopped'
+    }
+    elseif ($enabled.Count -eq 0) {
+        $state = 'Stopped'; $text = 'Port Monitor - nothing to check'
+    }
+    else {
+        $failing = @($enabled | Where-Object { $script:FailureStatuses -contains $_.Status })
+        $open = @($enabled | Where-Object { $_.Status -eq 'Open' })
+        if ($failing.Count -gt 0) {
+            $state = 'Problem'
+            $text = "Port Monitor - $($failing.Count) of $($enabled.Count) not answering"
+            if ($failing.Count -eq 1) { $text = "Port Monitor - $($failing[0].Label) not answering" }
+        }
+        elseif ($open.Count -eq $enabled.Count) {
+            $state = 'Ok'; $text = "Port Monitor - all $($enabled.Count) open"
+        }
+        else {
+            $state = 'Checking'; $text = "Port Monitor - checking $($enabled.Count) target(s)"
+        }
+    }
+    [PSCustomObject]@{ State = $state; Text = (Limit-PortMonitorText -Text $text -Max 63) }
+}
+
+function New-PortMonitorTrayIcon {
+    # A 16x16 round icon in one colour, drawn at run time so the tool stays one file.
+    param([Parameter(Mandatory)][string]$Color)
+    Add-Type -AssemblyName System.Drawing
+    $bmp = New-Object System.Drawing.Bitmap -ArgumentList 16, 16
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    try {
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $g.Clear([System.Drawing.Color]::Transparent)
+        $fill = New-Object System.Drawing.SolidBrush -ArgumentList ([System.Drawing.ColorTranslator]::FromHtml($Color))
+        $edge = New-Object System.Drawing.Pen -ArgumentList ([System.Drawing.ColorTranslator]::FromHtml('#101214')), 1.5
+        $g.FillEllipse($fill, 1.5, 1.5, 12.5, 12.5)
+        $g.DrawEllipse($edge, 1.5, 1.5, 12.5, 12.5)
+        $fill.Dispose(); $edge.Dispose()
+    }
+    finally { $g.Dispose() }
+    [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
+}
+
+function Get-PortMonitorStartupShortcutPath {
+    # The per-user Startup folder (SpecialFolder.Startup: "The system starts these programs
+    # whenever a user logs on"). No admin rights needed.
+    # https://learn.microsoft.com/dotnet/api/system.environment.specialfolder
+    param([string]$StartupFolder)
+    if (-not $StartupFolder) { $StartupFolder = [Environment]::GetFolderPath([Environment+SpecialFolder]::Startup) }
+    Join-Path $StartupFolder 'Port Monitor.lnk'
+}
+
+function Get-PortMonitorStartupCommand {
+    <#
+    .SYNOPSIS
+        The program and arguments the Startup shortcut runs: Windows PowerShell (always present,
+        unlike pwsh) starting this script hidden in the tray. -ConfigPath / -LogPath are added
+        only when they differ from the defaults.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$ScriptPath,
+        [Parameter(Mandatory)][string]$ConfigPath,
+        [Parameter(Mandatory)][string]$LogPath,
+        [Parameter(Mandatory)][string]$DefaultConfigPath,
+        [Parameter(Mandatory)][string]$DefaultLogPath
+    )
+    $windowsDir = $env:SystemRoot
+    if (-not $windowsDir) { $windowsDir = 'C:\Windows' }
+    $arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -STA -File "{0}" -Tray' -f $ScriptPath
+    if ($ConfigPath -ne $DefaultConfigPath) { $arguments += ' -ConfigPath "{0}"' -f $ConfigPath }
+    if ($LogPath -ne $DefaultLogPath) { $arguments += ' -LogPath "{0}"' -f $LogPath }
+    [PSCustomObject]@{
+        TargetPath = Join-Path $windowsDir 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        Arguments  = $arguments
+        ScriptPath = $ScriptPath
+    }
+}
+
+function Set-PortMonitorStartup {
+    <#
+    .SYNOPSIS
+        Creates or removes the Startup shortcut. Only the file named 'Port Monitor.lnk' is ever
+        removed.
+    .DESCRIPTION
+        The shortcut is made with WScript.Shell CreateShortcut / WshShortcut.Save. WindowStyle 7
+        ("Minimizes the window and activates the next top-level window") plus -WindowStyle Hidden
+        keeps the console from showing in front at sign-in.
+        https://learn.microsoft.com/previous-versions/windows/internet-explorer/ie-developer/windows-scripting/xk6kst2k(v=vs.84)
+        https://learn.microsoft.com/previous-versions/windows/internet-explorer/ie-developer/windows-scripting/w88k7fw2(v=vs.84)
+    #>
+    param(
+        [Parameter(Mandatory)][bool]$Enabled,
+        [Parameter(Mandatory)][string]$ShortcutPath,
+        $Command
+    )
+    if (-not $Enabled) {
+        if (Test-Path -LiteralPath $ShortcutPath -PathType Leaf) { Remove-Item -LiteralPath $ShortcutPath -Force -ErrorAction Stop }
+        return
+    }
+    if ($null -eq $Command) { throw 'A command is needed to create the Startup shortcut.' }
+    $folder = Split-Path -Parent $ShortcutPath
+    if ($folder -and -not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force -ErrorAction Stop | Out-Null }
+    $shell = New-Object -ComObject WScript.Shell
+    try {
+        $link = $shell.CreateShortcut($ShortcutPath)
+        $link.TargetPath = $Command.TargetPath
+        $link.Arguments = $Command.Arguments
+        $link.WindowStyle = 7
+        $link.Description = 'Port Monitor: checks server ports in the background and notifies on changes'
+        $link.WorkingDirectory = Split-Path -Parent $Command.TargetPath
+        $link.Save()
+    }
+    finally { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell) }
+}
+
+function Read-PortMonitorSettings {
+    # Small per-user settings (for now only whether the Startup offer was shown). Never throws.
+    param([Parameter(Mandatory)][string]$Path)
+    $settings = @{ StartupOffered = $false }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $settings }
+    try {
+        $parsed = ConvertFrom-Json -InputObject ([System.IO.File]::ReadAllText($Path)) -ErrorAction Stop
+        if ($parsed -and $parsed.PSObject.Properties['StartupOffered']) { $settings.StartupOffered = [bool]$parsed.StartupOffered }
+    }
+    catch { }
+    $settings
+}
+
+function Save-PortMonitorSettings {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][hashtable]$Settings)
+    $dir = Split-Path -Parent $Path
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null }
+    $json = ConvertTo-Json -InputObject ([PSCustomObject]@{ StartupOffered = [bool]$Settings.StartupOffered })
+    [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding -ArgumentList $false))
+}
+
+function Enter-PortMonitorInstance {
+    <#
+    .SYNOPSIS
+        Takes the one-window-per-user lock. Owned = $false means another Port Monitor window
+        (or tray icon) is already running in this sign-in session; signal its ShowEvent to bring
+        it forward instead of starting a second copy that would log every change twice.
+    .DESCRIPTION
+        "Local\" names are shared only by processes in the same session, so other users on an
+        RDS host get their own copy. An abandoned mutex (the previous copy was killed) counts
+        as acquired; PowerShell wraps the AbandonedMutexException, so the inner exception is
+        checked.
+        https://learn.microsoft.com/dotnet/api/system.threading.mutex.-ctor
+    #>
+    param([string]$Name = 'PortMonitor.Gui')
+    $mutex = New-Object System.Threading.Mutex -ArgumentList $false, "Local\$Name"
+    $owned = $false
+    try { $owned = $mutex.WaitOne(0) }
+    catch {
+        $inner = $_.Exception
+        while ($inner -and -not ($inner -is [System.Threading.AbandonedMutexException])) { $inner = $inner.InnerException }
+        if ($inner) { $owned = $true } else { throw }
+    }
+    $showEvent = New-Object System.Threading.EventWaitHandle -ArgumentList $false, ([System.Threading.EventResetMode]::AutoReset), "Local\$Name.Show"
+    [PSCustomObject]@{ Mutex = $mutex; Owned = $owned; ShowEvent = $showEvent }
+}
+
+function Exit-PortMonitorInstance {
+    param([AllowNull()]$Instance)
+    if ($null -eq $Instance) { return }
+    if ($Instance.Owned) { try { $Instance.Mutex.ReleaseMutex() } catch { } }
+    try { $Instance.Mutex.Dispose() } catch { }
+    try { $Instance.ShowEvent.Dispose() } catch { }
+}
+
+#endregion
+
 #region Window (WPF)
 
 function Get-PortMonitorMainXaml {
@@ -1138,6 +1421,10 @@ function Get-PortMonitorMainXaml {
           </Button>
         </StackPanel>
         <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
+          <Button x:Name="BtnBackground" Style="{StaticResource Btn}" ToolTip="Hide this window and keep checking in the notification area (near the clock). You get a notification when a server goes down or comes back.">
+            <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource Icon}" Text="&#x2198;"/><TextBlock Text="Run in Background"/></StackPanel>
+          </Button>
+          <Border Width="1" Background="#30353C" Margin="0,2,12,2"/>
           <Button x:Name="BtnImport" Style="{StaticResource Btn}" ToolTip="Open another target list (for example one client's list); changes are saved to that file">
             <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource Icon}" Text="&#x21E9;"/><TextBlock Text="Import"/></StackPanel>
           </Button>
@@ -1409,18 +1696,31 @@ function Set-SmokeWindowPosition {
 function Show-PortMonitorWindow {
     <#
     .SYNOPSIS
-        Builds and shows the window. Returns the smoke-test exit code with -SmokeTest, else 0.
+        Builds the window and the tray icon and runs until the user exits. Returns the
+        smoke-test exit code with -SmokeTest, else 0.
+    .DESCRIPTION
+        Window mode: the window opens; closing it exits.
+        Tray mode (-Tray, or "Run in Background"): monitoring runs with the window hidden;
+        closing the window hides it again; only Exit on the tray menu quits.
+        The window is shown with Show() and the thread runs a DispatcherFrame, not ShowDialog(),
+        so the window can be hidden and shown again while the app keeps running.
+        https://learn.microsoft.com/dotnet/api/system.windows.threading.dispatcher.pushframe
     #>
     param(
         [Parameter(Mandatory)][string]$ConfigPath,
         [Parameter(Mandatory)][string]$LogDirectory,
-        [switch]$SmokeTest
+        [switch]$Tray,
+        [switch]$SmokeTest,
+        [string]$SettingsPath,
+        [string]$StartupShortcutPath,
+        $StartupCommand,
+        $Instance
     )
-    Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
+    Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing
 
     $window = [System.Windows.Markup.XamlReader]::Parse((Get-PortMonitorMainXaml))
     $c = @{}
-    foreach ($n in 'Grid', 'EmptyState', 'BtnStart', 'BtnStop', 'BtnAdd', 'BtnEdit', 'BtnRemove', 'BtnImport', 'BtnExport', 'BtnLogs',
+    foreach ($n in 'Grid', 'EmptyState', 'BtnStart', 'BtnStop', 'BtnAdd', 'BtnEdit', 'BtnRemove', 'BtnImport', 'BtnExport', 'BtnLogs', 'BtnBackground',
         'RunBadge', 'RunDot', 'RunText', 'ConfigText', 'LogText', 'MessageText') {
         $c[$n] = $window.FindName($n)
         if ($null -eq $c[$n]) { throw "The window layout is missing the element '$n'." }
@@ -1430,30 +1730,57 @@ function Show-PortMonitorWindow {
     # child scope, so assigning a plain variable there would not change it here.
     $c.MessageText.Text = 'Click Start to begin checking. Double-click a row to change it.'
     $ui = @{
-        States        = New-Object 'System.Collections.ObjectModel.ObservableCollection[object]'
-        Engine        = $null
-        Running       = $false
-        ConfigPath    = $ConfigPath
-        LogDirectory  = $LogDirectory
-        BackupPending = $false
-        StartupNotes  = @()
-        Smoke         = [bool]$SmokeTest
-        SmokeRendered = $false
-        SmokeProbe    = $null
-        SmokeProbeOk  = $false
-        SmokeProbeDone = $false
-        ConsoleKeys   = $false
-        SmokeFailures = New-Object System.Collections.ArrayList
-        SmokeStarted  = Get-Date
-        CtrlC         = $false
+        States              = New-Object 'System.Collections.ObjectModel.ObservableCollection[object]'
+        Engine              = $null
+        Running             = $false
+        ConfigPath          = $ConfigPath
+        LogDirectory        = $LogDirectory
+        BackupPending       = $false
+        StartupNotes        = @()
+        TrayMode            = [bool]$Tray
+        Exiting             = $false
+        Frame               = $null
+        Notify              = $null
+        Icons               = @{}
+        TrayState           = ''
+        HideTipShown        = $false
+        SettingsPath        = $SettingsPath
+        StartupShortcutPath = $StartupShortcutPath
+        StartupCommand      = $StartupCommand
+        ShowEvent           = $null
+        Smoke               = [bool]$SmokeTest
+        SmokeRendered       = $false
+        SmokeProbe          = $null
+        SmokeProbeOk        = $false
+        SmokeProbeDone      = $false
+        SmokeFailures       = New-Object System.Collections.ArrayList
+        SmokeStarted        = Get-Date
+        ConsoleKeys         = $false
+        CtrlC               = $false
     }
+    if ($null -ne $Instance) { $ui.ShowEvent = $Instance.ShowEvent }
+    $ui.Window = $window
+    $ui.Balloons = New-Object System.Collections.ArrayList
+    # For tests that dot-source the script: lets them see the live state while the app runs.
+    $script:PortMonitorUi = $ui
 
     function Show-Message {
         param([string]$Text, [string]$Title = 'Port Monitor', [string]$Buttons = 'OK', [string]$Icon = 'Information')
         if ($ui.Smoke) { [void]$ui.SmokeFailures.Add("a message box would have been shown: $Text"); return 'OK' }
-        [string][System.Windows.MessageBox]::Show($window, $Text, $Title, $Buttons, $Icon)
+        # A hidden owner would hide the message too: own it only while the window is on screen.
+        if ($window.IsVisible) { return [string][System.Windows.MessageBox]::Show($window, $Text, $Title, $Buttons, $Icon) }
+        [string][System.Windows.MessageBox]::Show($Text, $Title, $Buttons, $Icon)
     }
     function Set-StatusMessage { param([string]$Text) $c.MessageText.Text = $Text }
+    function Update-Tray {
+        if ($null -eq $ui.Notify) { return }
+        $summary = Get-PortMonitorTraySummary -States @($ui.States) -Running $ui.Running
+        if ($summary.State -ne $ui.TrayState) {
+            $ui.Notify.Icon = $ui.Icons[$summary.State]
+            $ui.TrayState = $summary.State
+        }
+        if ($ui.Notify.Text -ne $summary.Text) { $ui.Notify.Text = $summary.Text }
+    }
     function Update-View {
         $c.Grid.Items.Refresh()
         $hasRows = $ui.States.Count -gt 0
@@ -1477,6 +1804,7 @@ function Show-PortMonitorWindow {
             $c.RunDot.Foreground = $converter.ConvertFromString('#6B737D')
             $c.RunBadge.Background = $converter.ConvertFromString('#2A2E34')
         }
+        Update-Tray
     }
     function Save-UiTargets {
         if ($ui.Smoke) { [void]$ui.SmokeFailures.Add('the target list would have been saved'); return }
@@ -1495,9 +1823,10 @@ function Show-PortMonitorWindow {
         $ui.Engine
     }
     function Start-Monitoring {
+        param([switch]$Quiet)
         $enabled = @($ui.States | Where-Object { $_.Enabled })
         if ($enabled.Count -eq 0) {
-            Show-Message -Text 'There is nothing to check yet. Add a target, or turn one on with its Enabled box.' | Out-Null
+            if (-not $Quiet) { Show-Message -Text 'There is nothing to check yet. Add a target, or turn one on with its Enabled box.' | Out-Null }
             return
         }
         [void](Get-EngineReady)
@@ -1511,6 +1840,70 @@ function Show-PortMonitorWindow {
         $ui.Running = $false
         Set-StatusMessage 'Monitoring stopped. The list and the log are kept.'
         Update-View
+    }
+    function Show-Balloon {
+        param([string]$Title, [string]$Text, [string]$Icon = 'Info')
+        if ($null -eq $ui.Notify -or -not $ui.Notify.Visible -or -not $Text) { return }
+        [void]$ui.Balloons.Add([PSCustomObject]@{ Time = (Get-Date); Title = $Title; Text = $Text; Icon = $Icon })
+        while ($ui.Balloons.Count -gt 20) { $ui.Balloons.RemoveAt(0) }
+        # The timeout argument is ignored on Vista and later (system accessibility settings).
+        $ui.Notify.ShowBalloonTip(10000, $Title, $Text, [System.Windows.Forms.ToolTipIcon]$Icon)
+    }
+    function Show-MainWindow {
+        if ($ui.Smoke) { return }
+        $window.Show()
+        if ($window.WindowState -eq [System.Windows.WindowState]::Minimized) { $window.WindowState = [System.Windows.WindowState]::Normal }
+        [void]$window.Activate()
+        Update-View
+    }
+    function Test-StartupEnabled {
+        if (-not $ui.StartupShortcutPath) { return $false }
+        Test-Path -LiteralPath $ui.StartupShortcutPath -PathType Leaf
+    }
+    function Set-StartupEnabled {
+        param([bool]$Enabled)
+        if ($ui.Smoke) { [void]$ui.SmokeFailures.Add('the Startup shortcut would have been changed'); return }
+        try {
+            Set-PortMonitorStartup -Enabled $Enabled -ShortcutPath $ui.StartupShortcutPath -Command $ui.StartupCommand
+            if ($Enabled) { Show-Balloon -Title 'Port Monitor will start when you sign in' -Text 'It runs here in the notification area. Right-click the icon to change this.' }
+            else { Set-StatusMessage 'Port Monitor will no longer start when you sign in.' }
+        }
+        catch {
+            Show-Message -Text "Could not change the Startup shortcut $($ui.StartupShortcutPath):`n`n$($_.Exception.Message)" -Icon 'Warning' | Out-Null
+        }
+    }
+    function Request-StartupOffer {
+        # Asked once per user (remembered in settings.json), and only while it is not set up.
+        if ($ui.Smoke -or -not $ui.SettingsPath -or -not $ui.StartupShortcutPath) { return }
+        if (Test-StartupEnabled) { return }
+        $settings = Read-PortMonitorSettings -Path $ui.SettingsPath
+        if ($settings.StartupOffered) { return }
+        $settings.StartupOffered = $true
+        try { Save-PortMonitorSettings -Path $ui.SettingsPath -Settings $settings } catch { }
+        $answer = Show-Message -Title 'Port Monitor' -Buttons 'YesNo' -Icon 'Question' -Text ("Start Port Monitor in the background every time you sign in?`n`n" +
+            "It sits in the notification area (near the clock), keeps checking your list, and shows a notification when a server goes down or comes back.`n`n" +
+            "This adds a shortcut to your Startup folder (no admin rights needed). It runs the script from where it is now:`n$($ui.StartupCommand.ScriptPath)`n`n" +
+            "You can change this any time: right-click the Port Monitor icon and choose 'Start when I sign in'.")
+        if ($answer -eq 'Yes') { Set-StartupEnabled -Enabled $true }
+    }
+    function Enter-TrayMode {
+        $ui.TrayMode = $true
+        if (-not $ui.Running) { Start-Monitoring -Quiet }
+        $window.Hide()
+        if (-not $ui.HideTipShown) {
+            $ui.HideTipShown = $true
+            $what = 'Checking continues here.'
+            if (-not $ui.Running) { $what = 'Nothing is being checked yet: open it to add targets.' }
+            Show-Balloon -Title 'Port Monitor is still running' -Text "$what Click the icon to open it; right-click for more."
+        }
+        Request-StartupOffer
+    }
+    function Exit-App {
+        $ui.Exiting = $true
+        $window.Close()
+        # A window that was never shown (started in the tray) may not raise Closed: end the
+        # message loop here too. Clean-up runs in the finally block below.
+        if ($ui.Frame) { $ui.Frame.Continue = $false }
     }
 
     # Load the target list (not in a smoke run: it reads nothing).
@@ -1526,9 +1919,48 @@ function Show-PortMonitorWindow {
     }
     $c.Grid.ItemsSource = $ui.States
 
+    # --- Tray icon and its menu ---------------------------------------------------------------
+    $ui.Icons = @{
+        Stopped  = New-PortMonitorTrayIcon -Color '#6B737D'
+        Checking = New-PortMonitorTrayIcon -Color '#4FA3E0'
+        Ok       = New-PortMonitorTrayIcon -Color '#3FB950'
+        Problem  = New-PortMonitorTrayIcon -Color '#E5534B'
+    }
+    $notify = New-Object System.Windows.Forms.NotifyIcon
+    $ui.Notify = $notify
+    $menu = New-Object System.Windows.Forms.ContextMenuStrip
+    $miOpen = $menu.Items.Add('Open Port Monitor')
+    $miOpen.Font = New-Object System.Drawing.Font -ArgumentList $miOpen.Font, ([System.Drawing.FontStyle]::Bold)
+    $miToggle = $menu.Items.Add('Stop monitoring')
+    [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+    $miLogs = $menu.Items.Add('Open log folder')
+    $miStartup = $menu.Items.Add('Start when I sign in')
+    [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+    $miExit = $menu.Items.Add('Exit Port Monitor')
+    $notify.ContextMenuStrip = $menu
+    Update-Tray
+    # Smoke runs build the icon but never show it: they must not appear on the user's screen.
+    $notify.Visible = -not $ui.Smoke
+
+    $menu.add_Opening({
+            if ($ui.Running) { $miToggle.Text = 'Stop monitoring' } else { $miToggle.Text = 'Start monitoring' }
+            $miStartup.Checked = Test-StartupEnabled
+        })
+    $miOpen.add_Click({ Show-MainWindow })
+    $miToggle.add_Click({ if ($ui.Running) { Stop-Monitoring } else { Start-Monitoring } })
+    $miLogs.add_Click({ $c.BtnLogs.RaiseEvent((New-Object System.Windows.RoutedEventArgs -ArgumentList ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) })
+    $miStartup.add_Click({ Set-StartupEnabled -Enabled (-not (Test-StartupEnabled)) })
+    $miExit.add_Click({ Exit-App })
+    $notify.add_MouseClick({
+            param($src, $e)
+            if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) { Show-MainWindow }
+        })
+    $notify.add_BalloonTipClicked({ Show-MainWindow })
+
     # --- Buttons ---------------------------------------------------------------------------
     $c.BtnStart.add_Click({ Start-Monitoring })
     $c.BtnStop.add_Click({ Stop-Monitoring })
+    $c.BtnBackground.add_Click({ Enter-TrayMode })
 
     $c.BtnAdd.add_Click({
             $t = Show-PortTargetDialog -Owner $window -Target $null
@@ -1666,7 +2098,7 @@ function Show-PortMonitorWindow {
     $timer.Interval = [TimeSpan]::FromMilliseconds(250)
     $timer.add_Tick({
             try {
-                # Ctrl+C in the console that started the window closes it cleanly.
+                # Ctrl+C in the console that started the app exits it cleanly.
                 if ($ui.ConsoleKeys) {
                     try {
                         while ([Console]::KeyAvailable) {
@@ -1675,8 +2107,10 @@ function Show-PortMonitorWindow {
                         }
                     }
                     catch { $ui.ConsoleKeys = $false }
-                    if ($ui.CtrlC) { $window.Close(); return }
+                    if ($ui.CtrlC) { Exit-App; return }
                 }
+                # A second launch asked this copy to show itself.
+                if ($null -ne $ui.ShowEvent -and $ui.ShowEvent.WaitOne(0)) { Show-MainWindow }
 
                 $now = Get-Date
                 if ($ui.Running) {
@@ -1685,6 +2119,15 @@ function Show-PortMonitorWindow {
                     $last = @($cycle.Changes) | Select-Object -Last 1
                     if ($last) { Set-StatusMessage ('Last change: ' + (Format-PortStateChangeLine -Change $last)) }
                     if (@($cycle.LogErrors).Count -gt 0) { Set-StatusMessage ('[WARN] ' + $cycle.LogErrors[0]) }
+                    # Notify unless the user is looking at the window already.
+                    if (-not $window.IsActive) {
+                        $note = Get-PortChangeNotification -Changes @($cycle.Changes)
+                        if ($note) {
+                            $icon = 'Info'
+                            if ($note.Kind -eq 'Down') { $icon = 'Warning' }
+                            Show-Balloon -Title $note.Title -Text $note.Text -Icon $icon
+                        }
+                    }
                 }
                 elseif ($ui.Engine) {
                     [void](Receive-PortCheckResult -Engine $ui.Engine -States @() -Now $now)
@@ -1700,10 +2143,10 @@ function Show-PortMonitorWindow {
                         catch { [void]$ui.SmokeFailures.Add("the background probe failed: $($_.Exception.Message)") }
                         finally { $ui.SmokeProbe.PowerShell.Dispose(); $ui.SmokeProbe = $null; $ui.SmokeProbeDone = $true }
                     }
-                    if ($ui.SmokeRendered -and $ui.SmokeProbeDone) { $window.Close(); return }
+                    if ($ui.SmokeRendered -and $ui.SmokeProbeDone) { Exit-App; return }
                     if (((Get-Date) - $ui.SmokeStarted).TotalSeconds -ge 30) {
                         [void]$ui.SmokeFailures.Add('the window did not render and finish its background probe within 30 seconds')
-                        $window.Close()
+                        Exit-App
                     }
                 }
             }
@@ -1724,27 +2167,55 @@ function Show-PortMonitorWindow {
                 $ui.SmokeProbe = [PSCustomObject]@{ PowerShell = $ps; Handle = $ps.BeginInvoke() }
             }
             elseif (@($ui.StartupNotes).Count -gt 0) {
+                $notes = $ui.StartupNotes
+                $ui.StartupNotes = @()
                 Set-StatusMessage '[WARN] The target list had problems; see the message.'
-                Show-Message -Text ("The target list {0} had problems:`n`n{1}`n`nIf you save changes, the original file is kept as a .bak copy first." -f $ui.ConfigPath, ($ui.StartupNotes -join "`n")) -Icon 'Warning' | Out-Null
+                Show-Message -Text ("The target list {0} had problems:`n`n{1}`n`nIf you save changes, the original file is kept as a .bak copy first." -f $ui.ConfigPath, ($notes -join "`n")) -Icon 'Warning' | Out-Null
             }
         })
 
     $window.add_Closing({
+            param($src, $e)
+            # In tray mode the close button hides the window; only Exit on the tray menu quits.
+            if ($ui.TrayMode -and -not $ui.Exiting -and -not $ui.Smoke) {
+                $e.Cancel = $true
+                Enter-TrayMode
+                return
+            }
             $timer.Stop()
             Stop-PortMonitorEngine -Engine $ui.Engine
             $ui.Engine = $null
+            if ($ui.Notify) { $ui.Notify.Visible = $false; $ui.Notify.Dispose(); $ui.Notify = $null }
             if ($ui.ConsoleKeys) { try { [Console]::TreatControlCAsInput = $false } catch { } }
         })
+    $window.add_Closed({ if ($ui.Frame) { $ui.Frame.Continue = $false } })
 
     if ($ui.Smoke) { Set-SmokeWindowPosition -Window $window }
     Update-View
     $timer.Start()
     try {
-        [void]$window.ShowDialog()
+        if ($ui.TrayMode -and -not $ui.Smoke) {
+            # Started for the tray (for example at sign-in): check at once, show no window.
+            Start-Monitoring -Quiet
+            if (-not $ui.Running) {
+                Show-Balloon -Title 'Port Monitor has nothing to check' -Text 'Click here to open it and add the servers and ports to watch.'
+            }
+            elseif (@($ui.StartupNotes).Count -gt 0) {
+                Show-Balloon -Title 'Port Monitor: target list problems' -Text 'Some targets could not be read. Click here to see which.' -Icon 'Warning'
+            }
+            Request-StartupOffer
+        }
+        else {
+            $window.Show()
+        }
+        $ui.Frame = New-Object System.Windows.Threading.DispatcherFrame
+        [System.Windows.Threading.Dispatcher]::PushFrame($ui.Frame)
     }
     finally {
         $timer.Stop()
         Stop-PortMonitorEngine -Engine $ui.Engine
+        if ($ui.Notify) { try { $ui.Notify.Visible = $false; $ui.Notify.Dispose() } catch { } }
+        foreach ($i in @($ui.Icons.Values)) { try { $i.Dispose() } catch { } }
         if ($ui.ConsoleKeys) { try { [Console]::TreatControlCAsInput = $false } catch { } }
     }
 
@@ -1772,10 +2243,16 @@ if ($SmokeTest -and $NoGui) {
     Write-Host '[FAIL] -SmokeTest checks the window; it cannot be combined with -NoGui or -Once.' -ForegroundColor Red
     exit 1
 }
+if ($Tray -and $NoGui) {
+    Write-Host '[FAIL] -Tray runs the window in the notification area; it cannot be combined with -NoGui or -Once.' -ForegroundColor Red
+    exit 1
+}
 
 $defaultRoot = Get-PortMonitorDefaultRoot
-if (-not $ConfigPath) { $ConfigPath = Join-Path $defaultRoot 'targets.json' }
-if (-not $LogPath) { $LogPath = Join-Path $defaultRoot 'Logs' }
+$defaultConfigPath = Join-Path $defaultRoot 'targets.json'
+$defaultLogPath = Join-Path $defaultRoot 'Logs'
+if (-not $ConfigPath) { $ConfigPath = $defaultConfigPath }
+if (-not $LogPath) { $LogPath = $defaultLogPath }
 $ConfigPath = Resolve-PortMonitorPath $ConfigPath
 $LogPath = Resolve-PortMonitorPath $LogPath
 
@@ -1799,12 +2276,31 @@ if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Thr
         $child = Start-Process -FilePath $exe -ArgumentList $relaunch -NoNewWindow -Wait -PassThru
         exit $child.ExitCode
     }
+    if ($Tray) { $relaunch += '-Tray' }
     Start-Process -FilePath $exe -ArgumentList $relaunch -WindowStyle Hidden
     return
 }
 
+# One window (or tray icon) per user session: a second launch brings the running one forward
+# instead of starting a copy that would check and log everything twice. Smoke runs skip this
+# so they never disturb a copy the user has open.
+$instance = $null
+if (-not $SmokeTest) {
+    $instance = Enter-PortMonitorInstance
+    if (-not $instance.Owned) {
+        [void]$instance.ShowEvent.Set()
+        Write-Host '[INFO] Port Monitor is already running for this user (window or notification area icon); it has been brought forward.' -ForegroundColor Cyan
+        Exit-PortMonitorInstance -Instance $instance
+        return
+    }
+}
+
 try {
-    $exitCode = Show-PortMonitorWindow -ConfigPath $ConfigPath -LogDirectory $LogPath -SmokeTest:$SmokeTest
+    $startupCommand = Get-PortMonitorStartupCommand -ScriptPath $PSCommandPath -ConfigPath $ConfigPath -LogPath $LogPath `
+        -DefaultConfigPath $defaultConfigPath -DefaultLogPath $defaultLogPath
+    $exitCode = Show-PortMonitorWindow -ConfigPath $ConfigPath -LogDirectory $LogPath -Tray:$Tray -SmokeTest:$SmokeTest `
+        -SettingsPath (Join-Path $defaultRoot 'settings.json') -StartupShortcutPath (Get-PortMonitorStartupShortcutPath) `
+        -StartupCommand $startupCommand -Instance $instance
 }
 catch {
     Write-Host "[FAIL] Port Monitor could not start its window: $($_.Exception.Message)" -ForegroundColor Red
@@ -1815,8 +2311,10 @@ catch {
         }
         catch { }
     }
+    Exit-PortMonitorInstance -Instance $instance
     exit 1
 }
+Exit-PortMonitorInstance -Instance $instance
 if ($SmokeTest) { exit ([int](@($exitCode)[-1])) }
 
 #endregion
