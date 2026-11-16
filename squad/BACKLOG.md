@@ -68,7 +68,6 @@ another object, an enabled mismatch (with the M365-SyncedUserFixes block marker)
 sync, and a UPN mismatch. Says "could not check" when no DC answers (D-014). Builds after SQ-002.
 Split from SQ-002 per D-004.
 
-
 ## SQ-019 · M365 user check: blocked synced user advice must escalate, not "change it" (D-017)
 - status: done
 - priority: P1
@@ -399,6 +398,43 @@ server folder. Move Get-ShareTreeRefusal, Get-ServerSideLinkRefusal, Get-RemoteS
 and Get-AppReparseInfo into the core and call them from Get-TreeOwnershipTargetRefusal.
 (Destructive-operations review of SQ-018 rev2, major.)
 
+## SQ-038 · FolderPermissionManager: Copy's Deny acknowledgement should name the Deny entries the tech saw
+- status: ready
+- priority: P2
+- feature: FolderPermissionManager rewrite
+- type: follow-up
+- found-in: SQ-022
+- branch:
+- spec: squad/specs/SQ-038.md
+- depends-on: SQ-022
+
+Found by the destructive-operations review of SQ-022. `-AllowDeny` on `Copy-FolderPermission` is a
+boolean: once the WPF app's confirm showed any Deny (or the Deny state "could not be checked"), the
+core copies every Deny in its own fresh read of the source, including ones added after the window
+loaded. Example: the tech accepts a warning about "CONTOSO\Temps Deny Write"; meanwhile
+"Everyone Deny FullControl" is added to the source and is copied, inheritable, onto every target
+tree. This is the D-052 design as specified, so it needs an owner decision. Proposed: pass the
+acknowledged Deny set (for example as SDDL ACE strings) and refuse when the core's read holds a Deny
+outside that set; fix the README, AllowDeny help and refusal text, which today promise more than
+the boolean gives.
+
+## SQ-026 · FolderPermissionManager: Copy targets on a remote share get the file-server checks
+- status: ready
+- priority: P2
+- feature: FolderPermissionManager rewrite
+- type: follow-up
+- found-in: SQ-022 (D-053)
+- branch:
+- spec: squad/specs/SQ-026.md
+- depends-on: SQ-022, SQ-023, SQ-038
+
+A Copy Permissions target on a remote share is checked only on the client side: `\\fs01\Win`
+pointing at C:\Windows on the server is not refused. After SQ-023 moves the share helpers
+(Get-ShareTreeRefusal, Get-ServerSideLinkRefusal, Get-RemoteShareLocalPath) into the core, run
+them for every remote Copy target: the share's real server folder against D-036 and the
+high-impact roots, and the D-045 junction walk, failing closed. Same as whole-tree takeown
+(D-045), extended to Copy (D-053).
+
 ## SQ-025 · FolderPermissionManager WPF app: change an existing permission in place
 - status: done
 - priority: P1
@@ -417,23 +453,6 @@ The old entry is replaced by the new one in a single ACL write after the usual b
 so a failure never leaves the account with no entry; read back and report like Add/Remove,
 -WhatIf end to end. Inherited entries cannot be changed here: the dialog says which folder above
 they come from. Destructive-operations checklist applies.
-
-## SQ-026 · FolderPermissionManager: Copy targets on a remote share get the file-server checks
-- status: ready
-- priority: P2
-- feature: FolderPermissionManager rewrite
-- type: follow-up
-- found-in: SQ-022 (D-053)
-- branch:
-- spec: squad/specs/SQ-026.md
-- depends-on: SQ-022, SQ-023
-
-A Copy Permissions target on a remote share is checked only on the client side: `\\fs01\Win`
-pointing at C:\Windows on the server is not refused. After SQ-023 moves the share helpers
-(Get-ShareTreeRefusal, Get-ServerSideLinkRefusal, Get-RemoteShareLocalPath) into the core, run
-them for every remote Copy target: the share's real server folder against D-036 and the
-high-impact roots, and the D-045 junction walk, failing closed. Same as whole-tree takeown
-(D-045), extended to Copy (D-053).
 
 ## SQ-028 · FolderPermissionManager: a bare account name on a network folder must not resolve to this workstation's local account
 - status: ready
@@ -463,6 +482,42 @@ directory symbolic link to `\FS01\Data` (Fixed drive) still rewrites `.\micha` t
 any folder from the target up to its root is a reparse point not known to be local, or cannot be
 read (Get-AppReparseInfo throws, so fail closed); test with a mocked symlink tag 0xA000000C.
 
+## SQ-037 · FolderPermissionManager: guard "adds access" changes on high-impact folders
+- status: ready
+- priority: P2
+- feature: FolderPermissionManager rewrite
+- type: follow-up
+- found-in: SQ-025
+- branch:
+- spec: squad/specs/SQ-037.md
+- depends-on: SQ-028, SQ-038
+
+Found by the destructive-operations review of SQ-025. A change or add that only gives more access
+(for example `BUILTIN\Users` Allow Read raised to Allow Full Control, inheritable) on a high-impact
+folder such as `C:\Users`, a folder under `%SystemRoot%`/`%ProgramFiles%`, or System Volume
+Information runs with one click: no protected-folder check, no high-impact check and no confirm.
+Only drive and share roots get the confirm today, and the core functions have no guard. Add with
+Allow has had the same gap since before SQ-025; D-048 deliberately keeps "adds access" to one click,
+so this needs an owner decision. Proposed: in the core (so CLI and browser front ends inherit it),
+give inheritable Change, Add and Copy the high-impact and protected-folder checks, either refusing or
+using the destructive confirm.
+
+## SQ-042 · FolderPermissionManager: Add and Change on a share whose server folder is a protected place
+- status: new
+- priority: P2
+- feature: FolderPermissionManager rewrite
+- type: follow-up
+- found-in: SQ-037 (planning, Q3)
+- branch:
+- spec:
+- depends-on: SQ-026, SQ-037
+
+SQ-037 (D-063) guards Add and Change by the typed or locally resolved path. A share such as
+`\\fs01\Apps` whose folder on the server is `C:\Program Files` (or C:\Windows) is not caught. Reuse
+SQ-026's server-folder lookup (Get-RemoteShareLocalPath and the D-045 junction walk) for Add and
+Change targets on a remote share and apply D-063's refuse/confirm tiers to the server folder,
+failing closed when it cannot be read.
+
 ## SQ-027 · M365 user check: a blocked risky user must escalate to the security lead, not the manager path
 - status: done
 - priority: P2
@@ -484,6 +539,47 @@ Add a blocked + risky scenario test. Same pass: the synced 50057 step should not
 in AD" when AD was read and the account carries the block marker (conflicts with the :678
 escalation on the same ticket).
 
+## SQ-039 · M365 user check: a cloud block on a synced account (AD enabled, no marker) is framed as a sync fault
+- status: ready
+- priority: P2
+- feature: M365 user check
+- type: follow-up
+- found-in: SQ-027
+- branch:
+- spec: squad/specs/SQ-039.md
+- depends-on: SQ-027
+
+Found by the read-only-advisory review of SQ-027. When a synced user is blocked in Entra while the
+AD account is enabled and has no block marker (the typical incident-response block), the
+AdEnabledMismatch step tells the tech to wait for sync and then check Entra Connect for a sync rule
+or export error. For a risky user the note now carries both that and the security-lead step
+(conflicting next steps); for a non-risky user whose ID Protection could not be checked, the
+`blockedAction` ("see AD and Microsoft 365 disagree") never gets the D-059 caution. A tech who "fixes"
+the sync can undo an incident block. Proposed: when SignInBlocked fires with AD enabled and no
+marker, say the block may be deliberate (incident) and escalate before any sync troubleshooting;
+security-lead step when risky, D-059 sentence when risk was not checked. AdEnabledMismatch was out
+of scope for SQ-027.
+
+## SQ-040 · M365 user check: Conditional Access block steps (53003/530035) for a risky user should escalate first
+- status: ready
+- priority: P2
+- feature: M365 user check
+- type: follow-up
+- found-in: SQ-027
+- branch:
+- spec: squad/specs/SQ-040.md
+- depends-on: SQ-027, SQ-039
+
+Found by the read-only-advisory review of SQ-027. For a user ID Protection flags whose latest
+sign-in failed with 53003/530035, the Blocker step says to check the policy "or ask the client's
+admin whether it should apply to this user". For a risky user that policy is often a user-risk
+Conditional Access policy; excluding them from it effectively unblocks a compromised account, and
+the step reaches the ticket note ahead of the RiskyUser step. Proposed: when risky, use (or put
+first) the security-lead step for 53003/530035, and treat "exclude from / change a Conditional
+Access policy" as a reversal. Verify on Learn which code a user-risk CA block returns. Related
+minor: the NoMfaMethod "help them add Microsoft Authenticator" step is still given to a risky user
+(could bind an attacker's device).
+
 ## SQ-029 · Add a smoke-test start mode
 - status: done
 - priority: P1
@@ -500,28 +596,13 @@ drive or network reads, no log writes and no admin rights needed. Once merged, s
 `smokeCommand` in squad/squad.config.json to it so the gate runs it after every implementer
 (/squad:configure). (From /squad:configure review 2026-10-20.)
 
-## SQ-030 · AD user check: re-enable and expiry steps note who approved it (D-050)
-- status: new
-- priority: P2
-- feature: AD user check
-- type: follow-up
-- found-in: SQ-027 (D-060)
-- branch:
-- spec:
-
-AD-UserQuickCheck (`Get-ADUserQuickCheck.ps1` ~:422 re-enable step and ~:442 "extend or clear the
-account expiry date") still says "Check with their manager ... then ..." without "note on the
-ticket who approved it", so it now differs from M365-UserQuickCheck (SQ-019, D-050). Match the
-wording, keep deliberate blocks on Escalate (P-004), add the D-059 caution only if this tool reads
-ID Protection, update the README row, and add a checker test over every step the tool can produce.
-
 ## SQ-031 · Smoke-test start mode for RobocopyMigration
-- status: new
+- status: ready
 - priority: P2
 - feature: Squad tooling
 - type: feature
 - branch:
-- spec:
+- spec: squad/specs/SQ-031.md
 - depends-on: SQ-029
 
 Give RobocopyMigration/RobocopyMigration-GUI.ps1 a `-SmokeTest` start mode the same way SQ-029 does for FolderPermissionManager: real
@@ -530,13 +611,13 @@ came up, and no elevation, mutex, log, settings, drive, network or directory rea
 `Tests\Invoke-SmokeTest.ps1`'s list. (D-061.)
 
 ## SQ-032 · Smoke-test start mode for CopyFileToServer
-- status: new
+- status: ready
 - priority: P2
 - feature: Squad tooling
 - type: feature
 - branch:
-- spec:
-- depends-on: SQ-029
+- spec: squad/specs/SQ-032.md
+- depends-on: SQ-029, SQ-031
 
 Give CopyFileToServer/CopyFileToServer-GUI.ps1 a `-SmokeTest` start mode the same way SQ-029 does for FolderPermissionManager: real
 startup path, window rendered off-screen, closed on a timer, exit 0 plus a `[PASS]` line only if it
@@ -544,13 +625,13 @@ came up, and no elevation, mutex, log, settings, drive, network or directory rea
 `Tests\Invoke-SmokeTest.ps1`'s list. (D-061.)
 
 ## SQ-033 · Smoke-test start mode for M365-SyncedUserFixes
-- status: new
+- status: ready
 - priority: P2
 - feature: Squad tooling
 - type: feature
 - branch:
-- spec:
-- depends-on: SQ-029
+- spec: squad/specs/SQ-033.md
+- depends-on: SQ-029, SQ-031
 
 Give M365-SyncedUserFixes/Start-M365SyncedUserFixes.ps1 a `-SmokeTest` start mode the same way SQ-029 does for FolderPermissionManager: real
 startup path, window rendered off-screen, closed on a timer, exit 0 plus a `[PASS]` line only if it
@@ -558,13 +639,13 @@ came up, and no elevation, mutex, log, settings, drive, network or directory rea
 `Tests\Invoke-SmokeTest.ps1`'s list. (D-061.)
 
 ## SQ-034 · Smoke-test start mode for Search-DNSRecords
-- status: new
+- status: ready
 - priority: P2
 - feature: Squad tooling
 - type: feature
 - branch:
-- spec:
-- depends-on: SQ-029
+- spec: squad/specs/SQ-034.md
+- depends-on: SQ-029, SQ-031
 
 Give Search-DNSRecords/Search-DNSRecords-GUI.ps1 a `-SmokeTest` start mode the same way SQ-029 does for FolderPermissionManager: real
 startup path, window rendered off-screen, closed on a timer, exit 0 plus a `[PASS]` line only if it
@@ -572,13 +653,13 @@ came up, and no elevation, mutex, log, settings, drive, network or directory rea
 `Tests\Invoke-SmokeTest.ps1`'s list. (D-061.)
 
 ## SQ-035 · Smoke-test start mode for AD-Audit GUI
-- status: new
+- status: ready
 - priority: P2
 - feature: Squad tooling
 - type: feature
 - branch:
-- spec:
-- depends-on: SQ-029
+- spec: squad/specs/SQ-035.md
+- depends-on: SQ-029, SQ-031
 
 Give AD-Audit (Show-ADAuditGUI) a `-SmokeTest` start mode the same way SQ-029 does for FolderPermissionManager: real
 startup path, window rendered off-screen, closed on a timer, exit 0 plus a `[PASS]` line only if it
@@ -586,96 +667,44 @@ came up, and no elevation, mutex, log, settings, drive, network or directory rea
 `Tests\Invoke-SmokeTest.ps1`'s list. (D-061.)
 
 ## SQ-036 · Smoke-test start mode for Juniper console setup
-- status: new
+- status: ready
 - priority: P2
 - feature: Squad tooling
 - type: feature
 - branch:
-- spec:
-- depends-on: SQ-029
+- spec: squad/specs/SQ-036.md
+- depends-on: SQ-029, SQ-031
 
 Give Juniper-ConsoleSetup (Invoke-JuniperConsoleSetup-GUI) a `-SmokeTest` start mode the same way SQ-029 does for FolderPermissionManager: real
 startup path, window rendered off-screen, closed on a timer, exit 0 plus a `[PASS]` line only if it
 came up, and no elevation, mutex, log, settings, drive, network or directory reads. Add it to
 `Tests\Invoke-SmokeTest.ps1`'s list. (D-061.)
 
-## SQ-037 · FolderPermissionManager: guard "adds access" changes on high-impact folders
+## SQ-041 · RobocopyMigration: end-to-end tests start real robocopy inside the gate
 - status: new
 - priority: P2
-- feature: FolderPermissionManager rewrite
+- feature: Squad tooling
 - type: follow-up
-- found-in: SQ-025
+- found-in: SQ-031 (planning)
 - branch:
 - spec:
-- depends-on:
 
-Found by the destructive-operations review of SQ-025. A change or add that only gives more access
-(for example `BUILTIN\Users` Allow Read raised to Allow Full Control, inheritable) on a high-impact
-folder such as `C:\Users`, a folder under `%SystemRoot%`/`%ProgramFiles%`, or System Volume
-Information runs with one click: no protected-folder check, no high-impact check and no confirm.
-Only drive and share roots get the confirm today, and the core functions have no guard. Add with
-Allow has had the same gap since before SQ-025; D-048 deliberately keeps "adds access" to one click,
-so this needs an owner decision. Proposed: in the core (so CLI and browser front ends inherit it),
-give inheritable Change, Add and Copy the high-impact and protected-folder checks, either refusing or
-using the destructive confirm.
+The "End to end with real robocopy" tests in RobocopyMigration/Tests/RobocopyMigration-GUI.Tests.ps1
+are not tagged Integration, so every gate run starts real robocopy and powershell processes
+(SQUAD.md: anything touching the real machine is `-Tag 'Integration'`). Tag them, check they
+still pass under `-Tag Integration`, and make sure nothing else in that file launches a process.
 
-## SQ-038 · FolderPermissionManager: Copy's Deny acknowledgement should name the Deny entries the tech saw
-- status: new
+## SQ-030 · AD user check: re-enable and expiry steps note who approved it (D-050)
+- status: ready
 - priority: P2
-- feature: FolderPermissionManager rewrite
+- feature: AD user check
 - type: follow-up
-- found-in: SQ-022
+- found-in: SQ-027 (D-060)
 - branch:
-- spec:
-- depends-on: SQ-022
+- spec: squad/specs/SQ-030.md
 
-Found by the destructive-operations review of SQ-022. `-AllowDeny` on `Copy-FolderPermission` is a
-boolean: once the WPF app's confirm showed any Deny (or the Deny state "could not be checked"), the
-core copies every Deny in its own fresh read of the source, including ones added after the window
-loaded. Example: the tech accepts a warning about "CONTOSO\Temps Deny Write"; meanwhile
-"Everyone Deny FullControl" is added to the source and is copied, inheritable, onto every target
-tree. This is the D-052 design as specified, so it needs an owner decision. Proposed: pass the
-acknowledged Deny set (for example as SDDL ACE strings) and refuse when the core's read holds a Deny
-outside that set; fix the README, AllowDeny help and refusal text, which today promise more than
-the boolean gives.
-
-## SQ-039 · M365 user check: a cloud block on a synced account (AD enabled, no marker) is framed as a sync fault
-- status: new
-- priority: P2
-- feature: M365 user check
-- type: follow-up
-- found-in: SQ-027
-- branch:
-- spec:
-- depends-on: SQ-027
-
-Found by the read-only-advisory review of SQ-027. When a synced user is blocked in Entra while the
-AD account is enabled and has no block marker (the typical incident-response block), the
-AdEnabledMismatch step tells the tech to wait for sync and then check Entra Connect for a sync rule
-or export error. For a risky user the note now carries both that and the security-lead step
-(conflicting next steps); for a non-risky user whose ID Protection could not be checked, the
-`blockedAction` ("see AD and Microsoft 365 disagree") never gets the D-059 caution. A tech who "fixes"
-the sync can undo an incident block. Proposed: when SignInBlocked fires with AD enabled and no
-marker, say the block may be deliberate (incident) and escalate before any sync troubleshooting;
-security-lead step when risky, D-059 sentence when risk was not checked. AdEnabledMismatch was out
-of scope for SQ-027.
-
-## SQ-040 · M365 user check: Conditional Access block steps (53003/530035) for a risky user should escalate first
-- status: new
-- priority: P2
-- feature: M365 user check
-- type: follow-up
-- found-in: SQ-027
-- branch:
-- spec:
-- depends-on: SQ-027
-
-Found by the read-only-advisory review of SQ-027. For a user ID Protection flags whose latest
-sign-in failed with 53003/530035, the Blocker step says to check the policy "or ask the client's
-admin whether it should apply to this user". For a risky user that policy is often a user-risk
-Conditional Access policy; excluding them from it effectively unblocks a compromised account, and
-the step reaches the ticket note ahead of the RiskyUser step. Proposed: when risky, use (or put
-first) the security-lead step for 53003/530035, and treat "exclude from / change a Conditional
-Access policy" as a reversal. Verify on Learn which code a user-risk CA block returns. Related
-minor: the NoMfaMethod "help them add Microsoft Authenticator" step is still given to a risky user
-(could bind an attacker's device).
+AD-UserQuickCheck (`Get-ADUserQuickCheck.ps1` ~:422 re-enable step and ~:442 "extend or clear the
+account expiry date") still says "Check with their manager ... then ..." without "note on the
+ticket who approved it", so it now differs from M365-UserQuickCheck (SQ-019, D-050). Match the
+wording, keep deliberate blocks on Escalate (P-004), add the D-059 caution only if this tool reads
+ID Protection, update the README row, and add a checker test over every step the tool can produce.
