@@ -72,7 +72,7 @@ change is confirmed.
 
 You can change both numbers per target in **Add**/**Edit** (**Report down after** / **Report back
 up after**, 1–10). Set **Report down after** to 1 to hear about every single failure. The very
-first check is always reported straight away, and Fail Count / Uptime % still count every check.
+first check is always reported straight away, and Fails / Uptime % still count every check.
 
 ### Packet loss: "up, but bad"
 
@@ -86,7 +86,7 @@ Monitor pings the same address a few times (**Pings per check**, default 10) and
 | Column | What it shows |
 |---|---|
 | **Loss %** | Share of this check's pings that got no answer. Turns **amber** when the host is losing packets. Says *no reply* when ping is blocked. |
-| **Jitter (ms)** | How uneven the answers were: the average change between one ping's time and the next. High jitter hurts calls even without loss. |
+| **Jitter** | How uneven the answers were: the average change between one ping's time and the next. High jitter hurts calls even without loss. |
 
 - **When it warns:** when the loss reaches **Warn when this % is lost** (default 5%) for
   **Report down after** checks in a row (default 2), and when it's back below the line for
@@ -232,8 +232,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\PortMonitor.ps1
   up to twice the timeout. Latency is the connection time only.
 - When a name resolves to several addresses, the first IPv4 address is checked. The
   **Details** column shows which address was used.
-- Fail Count and Uptime % count every check since the target started being monitored in this
+- Fails and Uptime % count every check since the target started being monitored in this
   session. They reset when you restart the tool, or when you change a target's host or port.
+- Every column fits at the default window size. In a narrower window the list scrolls
+  sideways. Text too long for its column ends in "…"; hover over the row to read it all.
 - Up to 16 checks run at the same time in the background, so the window never freezes.
 - With packet loss on, each check takes longer: the pings are 200 ms apart, and each waits up
   to the timeout (at most 2 s) for an answer. 10 pings take about 2 seconds when all answer.

@@ -30,7 +30,7 @@
     One-off blips are ignored: a target that was Open is only reported down after FailAfter
     failed checks in a row (default 2), and back up after RecoverAfter good checks (default 1).
     Both are set per target (1-10). Until a change is confirmed the target keeps its status and
-    the Details column says "Confirming". Fail Count and Uptime % still count every check.
+    the Details column says "Confirming". Fails and Uptime % still count every check.
 
     Packet loss ("up, but bad"): a port check cannot see lost packets, because TCP resends
     them and the port still answers. A target with MeasureLoss pings the same address after
@@ -143,7 +143,7 @@
     One pass for an RMM check: exit code 0 when everything is Open, 1 when something is not.
 
 .NOTES
-    Version : 1.2.0
+    Version : 1.2.1
     Requires: Windows PowerShell 3.0 or later, or PowerShell 7 on Windows; .NET Framework 4.5
               or later (for TcpClient.ConnectAsync and Dns.GetHostAddressesAsync). No modules,
               no administrator rights.
@@ -272,7 +272,7 @@ param(
     [switch]$LoadFunctionsOnly
 )
 
-$script:PortMonitorVersion = '1.2.0'
+$script:PortMonitorVersion = '1.2.1'
 $script:StatusNotChecked = 'Not checked'
 $script:StatusDisabled = 'Disabled'
 $script:FailureStatuses = @('Refused', 'Timeout', 'DNS Failure', 'Error')
@@ -2273,7 +2273,7 @@ function Get-PortMonitorMainXaml {
     @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Port Monitor" Width="1360" Height="660" MinWidth="1020" MinHeight="420"
+        Title="Port Monitor" Width="1360" Height="660" MinWidth="1120" MinHeight="420"
         Background="{DynamicResource Bg}" Foreground="{DynamicResource Text}" FontFamily="Segoe UI" FontSize="13"
         WindowStartupLocation="CenterScreen" UseLayoutRounding="True" SnapsToDevicePixels="True">
   <Window.Resources>
@@ -2355,6 +2355,9 @@ function Get-PortMonitorMainXaml {
           <Setter Property="Foreground" Value="{DynamicResource SelectionText}"/>
         </Trigger>
       </Style.Triggers>
+    </Style>
+    <Style x:Key="CellText" TargetType="TextBlock">
+      <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
     </Style>
     <Style TargetType="DataGridRow">
       <Setter Property="ToolTip" Value="{Binding Detail}"/>
@@ -2446,12 +2449,16 @@ function Get-PortMonitorMainXaml {
 
     <!-- Grid -->
     <Grid Grid.Row="2" Margin="18,0,18,12">
+      <!-- Fixed columns are kept narrow (units in the cells, dates without the year) so everything
+           fits at the default size. Label, Host and Details share the rest but never shrink below
+           their MinWidth: in a narrower window the grid scrolls sideways instead of squashing them. -->
       <DataGrid x:Name="Grid" AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False" CanUserDeleteRows="False"
+                HorizontalScrollBarVisibility="Auto"
                 SelectionMode="Single" SelectionUnit="FullRow" HeadersVisibility="Column" GridLinesVisibility="Horizontal"
                 HorizontalGridLinesBrush="{DynamicResource GridLine}" Background="{DynamicResource Surface}" RowBackground="{DynamicResource Surface}" AlternatingRowBackground="{DynamicResource SurfaceAlt}"
                 Foreground="{DynamicResource Text}" BorderBrush="{DynamicResource Line}" BorderThickness="1" RowHeight="30" CanUserResizeRows="False">
         <DataGrid.Columns>
-          <DataGridTemplateColumn Header="Enabled" Width="68" SortMemberPath="Enabled">
+          <DataGridTemplateColumn Header="Enabled" Width="66" SortMemberPath="Enabled">
             <DataGridTemplateColumn.CellTemplate>
               <DataTemplate>
                 <CheckBox IsChecked="{Binding Enabled, Mode=OneWay}" HorizontalAlignment="Center" VerticalAlignment="Center"
@@ -2459,10 +2466,10 @@ function Get-PortMonitorMainXaml {
               </DataTemplate>
             </DataGridTemplateColumn.CellTemplate>
           </DataGridTemplateColumn>
-          <DataGridTextColumn Header="Label" Binding="{Binding Label}" Width="1.7*" FontWeight="SemiBold"/>
-          <DataGridTextColumn Header="Host" Binding="{Binding Host}" Width="1.3*" FontFamily="Cascadia Mono, Consolas"/>
-          <DataGridTextColumn Header="Port" Binding="{Binding Port}" Width="60" FontFamily="Cascadia Mono, Consolas"/>
-          <DataGridTemplateColumn Header="Status" Width="112" SortMemberPath="Status">
+          <DataGridTextColumn Header="Label" Binding="{Binding Label}" Width="1.4*" MinWidth="120" FontWeight="SemiBold" ElementStyle="{StaticResource CellText}"/>
+          <DataGridTextColumn Header="Host" Binding="{Binding Host}" Width="1.3*" MinWidth="120" FontFamily="Cascadia Mono, Consolas" ElementStyle="{StaticResource CellText}"/>
+          <DataGridTextColumn Header="Port" Binding="{Binding Port}" Width="58" FontFamily="Cascadia Mono, Consolas"/>
+          <DataGridTemplateColumn Header="Status" Width="108" SortMemberPath="Status">
             <DataGridTemplateColumn.CellTemplate>
               <DataTemplate>
                 <Border x:Name="Pill" Background="{DynamicResource PillNeutral}" CornerRadius="2" Padding="8,2" HorizontalAlignment="Left" VerticalAlignment="Center">
@@ -2493,8 +2500,8 @@ function Get-PortMonitorMainXaml {
               </DataTemplate>
             </DataGridTemplateColumn.CellTemplate>
           </DataGridTemplateColumn>
-          <DataGridTextColumn Header="Latency (ms)" Binding="{Binding LatencyMs, StringFormat={}{0:0.0}}" Width="96"/>
-          <DataGridTemplateColumn Header="Loss %" Width="80" SortMemberPath="LossPercent">
+          <DataGridTextColumn Header="Latency" Binding="{Binding LatencyMs, StringFormat='{}{0:0.0} ms', TargetNullValue=''}" Width="80"/>
+          <DataGridTemplateColumn Header="Loss %" Width="68" SortMemberPath="LossPercent">
             <DataGridTemplateColumn.CellTemplate>
               <DataTemplate>
                 <Border x:Name="LossPill" Background="Transparent" CornerRadius="2" Padding="6,1" HorizontalAlignment="Left" VerticalAlignment="Center">
@@ -2514,16 +2521,16 @@ function Get-PortMonitorMainXaml {
               </DataTemplate>
             </DataGridTemplateColumn.CellTemplate>
           </DataGridTemplateColumn>
-          <DataGridTextColumn Header="Jitter (ms)" Binding="{Binding JitterMs, StringFormat={}{0:0.0}}" Width="80"/>
-          <DataGridTextColumn Header="Last Checked" Binding="{Binding LastChecked, StringFormat={}{0:yyyy-MM-dd HH:mm:ss}}" Width="142"/>
-          <DataGridTextColumn Header="Last State Change" Binding="{Binding LastStateChange, StringFormat={}{0:yyyy-MM-dd HH:mm:ss}}" Width="142"/>
-          <DataGridTextColumn Header="Fail Count" Binding="{Binding FailCount}" Width="78"/>
-          <DataGridTextColumn Header="Uptime %" Binding="{Binding UptimePercent, StringFormat={}{0:0.0}}" Width="78"/>
+          <DataGridTextColumn Header="Jitter" Binding="{Binding JitterMs, StringFormat='{}{0:0.0} ms', TargetNullValue=''}" Width="72"/>
+          <DataGridTextColumn Header="Last Checked" Binding="{Binding LastChecked, StringFormat={}{0:MM-dd HH:mm:ss}}" Width="110"/>
+          <DataGridTextColumn Header="Last Change" Binding="{Binding LastStateChange, StringFormat={}{0:MM-dd HH:mm:ss}}" Width="110"/>
+          <DataGridTextColumn Header="Fails" Binding="{Binding FailCount}" Width="56"/>
+          <DataGridTextColumn Header="Uptime %" Binding="{Binding UptimePercent, StringFormat={}{0:0.0}}" Width="76"/>
           <!-- The colour is set on the cell's TextBlock, not on the column: a column is not in the
                visual tree, so a theme colour set on it never resolves (the text came out black). -->
-          <DataGridTextColumn Header="Details" Binding="{Binding Detail}" Width="1.6*">
+          <DataGridTextColumn Header="Details" Binding="{Binding Detail}" Width="2*" MinWidth="200">
             <DataGridTextColumn.ElementStyle>
-              <Style TargetType="TextBlock">
+              <Style TargetType="TextBlock" BasedOn="{StaticResource CellText}">
                 <Setter Property="Foreground" Value="{DynamicResource TextMuted}"/>
               </Style>
             </DataGridTextColumn.ElementStyle>
@@ -2882,6 +2889,13 @@ function Show-PortMonitorWindow {
         'BtnReport', 'BtnTheme', 'ThemeIcon', 'ThemeText', 'RunBadge', 'RunDot', 'RunText', 'ConfigText', 'LogText', 'MessageText') {
         $c[$n] = $window.FindName($n)
         if ($null -eq $c[$n]) { throw "The window layout is missing the element '$n'." }
+    }
+
+    # A DataGrid short of space squeezes fixed-width columns down to their MinWidth (20 by
+    # default) before it scrolls, which cut the Enabled and Port columns in half. Pinning
+    # MinWidth to each fixed width makes it scroll sideways instead.
+    foreach ($col in $c.Grid.Columns) {
+        if (-not $col.Width.IsStar -and $col.Width.Value -gt 0) { $col.MinWidth = $col.Width.Value }
     }
 
     # Everything the handlers change lives in this hashtable: handler scriptblocks run in a
@@ -3353,6 +3367,9 @@ function Show-PortMonitorWindow {
         }
     }
     if ($ui.Settings.SortColumn) {
+        # Headers renamed in 1.2.1; a sort saved under the old name is still applied.
+        $renamed = @{ 'Latency (ms)' = 'Latency'; 'Jitter (ms)' = 'Jitter'; 'Last State Change' = 'Last Change'; 'Fail Count' = 'Fails' }
+        if ($renamed.ContainsKey($ui.Settings.SortColumn)) { $ui.Settings.SortColumn = $renamed[$ui.Settings.SortColumn] }
         $col = @($c.Grid.Columns | Where-Object { [string]$_.Header -eq $ui.Settings.SortColumn }) | Select-Object -First 1
         if ($col -and $col.SortMemberPath) {
             $dir = [System.ComponentModel.ListSortDirection]$ui.Settings.SortDirection

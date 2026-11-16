@@ -755,6 +755,15 @@ Describe 'Defaults and window layout' {
         $xaml = Get-PortMonitorMainXaml
         [regex]::Matches($xaml, '<DataGrid\w*Column[^>]*>') | ForEach-Object { $_.Value | Should -Not -Match 'DynamicResource' }
     }
+    It 'the list scrolls sideways instead of squashing columns, and empty values show no unit' {
+        # Regression: with no MinWidth the stretchy columns shrank to nothing (no scroll bar) and,
+        # once they had one, WPF squeezed the fixed columns instead (Enabled and Port cut in half).
+        $xaml = Get-PortMonitorMainXaml
+        foreach ($h in 'Label', 'Host', 'Details') { $xaml | Should -Match "Header=`"$h`"[^>]*Width=`"[\d.]*\*`" MinWidth=`"\d+`"" }
+        (Get-Command Show-PortMonitorWindow).Definition | Should -Match 'if \(-not \$col\.Width\.IsStar -and \$col\.Width\.Value -gt 0\) \{ \$col\.MinWidth = \$col\.Width\.Value \}'
+        [regex]::Matches($xaml, "StringFormat='\{\}\{0:0\.0\} ms'[^}]*\}") | ForEach-Object { $_.Value | Should -Match "TargetNullValue=''" }
+        [regex]::Matches($xaml, "StringFormat='\{\}\{0:0\.0\} ms'").Count | Should -Be 2
+    }
     It 'the sample targets.example.json loads with 3 valid targets' {
         $r = Read-PortMonitorConfig -Path (Join-Path (Split-Path -Parent $PSScriptRoot) 'targets.example.json')
         @($r.Warnings).Count | Should -Be 0
