@@ -1,0 +1,14 @@
+# Real per-client configuration: tenant IDs and client domains. Never commit.
+config/clients.json
+config/*.local.json
+
+# Chain-of-custody logs and anything exported or downloaded. Client data. Never commit.
+logs/
+exports/
+*.jsonl
+*.pst
+*.zip
+
+# Pasted ORR specs saved while testing (requester names, custodians).
+specs/
+*.orr.json

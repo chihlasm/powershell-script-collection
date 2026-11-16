@@ -1,0 +1,22 @@
+{
+  "configVersion": "1",
+  "clients": {
+    "contoso-city": {
+      "TenantId": "11111111-2222-3333-4444-555555555555",
+      "DisplayName": "City of Contoso",
+      "AllowedDomains": ["contoso.gov", "contosopd.gov"],
+      "AllowedSharePointHosts": ["contoso.sharepoint.com", "contoso-my.sharepoint.com"],
+      "CaseNamePrefix": "ORR",
+      "DefaultLocations": ["exchange", "onedrive"],
+      "DatePaddingDays": 1,
+      "Environment": "Global",
+      "PurviewPortalUrl": "https://purview.microsoft.com",
+      "SummaryTemplate": null
+    },
+    "fabrikam-county": {
+      "TenantId": "66666666-7777-8888-9999-000000000000",
+      "DisplayName": "Fabrikam County",
+      "AllowedDomains": ["fabrikamcounty.example.org"]
+    }
+  }
+}

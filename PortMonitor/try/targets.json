@@ -1,0 +1,10 @@
+[
+  {
+    "Label": "VSA54",
+    "Host": "vsa54a.vc3.com",
+    "Port": 5721,
+    "IntervalSec": 10,
+    "TimeoutMs": 3000,
+    "Enabled": true
+  }
+]
