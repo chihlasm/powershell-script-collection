@@ -1,4 +1,5 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
     Server Event Timeline: talking to servers (probe + per-log queries) and the background
@@ -403,7 +404,7 @@ function Complete-TimelineLog {
     $hitTotal = $events.Count -ge $room
     if ($events.Count -gt $room) { $events = @($events | Select-Object -First ([Math]::Max($room, 0))) }
 
-    foreach ($e in $events) { $Rows.Add((ConvertTo-TimelineRow -Server $Task.Server -Event $e -UtcOffsetMinutes $st.UtcOffsetMinutes)) }
+    foreach ($e in $events) { $Rows.Add((ConvertTo-TimelineRow -Server $Task.Server -EventRecord $e -UtcOffsetMinutes $st.UtcOffsetMinutes)) }
     $st.EventCount += $events.Count
     Set-TimelineLogOutcome -Status $st -Log $Task.Log -Outcome $Result.Outcome -Count $events.Count -Reason $Result.Reason
 

@@ -147,27 +147,27 @@ Describe 'ConvertTo-TimelineRow' {
     }
 
     It 'maps numeric levels to names (never the localized display name)' {
-        (ConvertTo-TimelineRow -Server APP01 -Event (New-FakeEvent -Level 1) -UtcOffsetMinutes 0).LevelName | Should -Be 'Critical'
-        (ConvertTo-TimelineRow -Server APP01 -Event (New-FakeEvent -Level 2) -UtcOffsetMinutes 0).LevelName | Should -Be 'Error'
-        (ConvertTo-TimelineRow -Server APP01 -Event (New-FakeEvent -Level 3) -UtcOffsetMinutes 0).LevelName | Should -Be 'Warning'
-        (ConvertTo-TimelineRow -Server APP01 -Event (New-FakeEvent -Level 0) -UtcOffsetMinutes 0).LevelName | Should -Be 'Information'
-        (ConvertTo-TimelineRow -Server APP01 -Event (New-FakeEvent -Level 4) -UtcOffsetMinutes 0).LevelName | Should -Be 'Information'
+        (ConvertTo-TimelineRow -Server APP01 -EventRecord (New-FakeEvent -Level 1) -UtcOffsetMinutes 0).LevelName | Should -Be 'Critical'
+        (ConvertTo-TimelineRow -Server APP01 -EventRecord (New-FakeEvent -Level 2) -UtcOffsetMinutes 0).LevelName | Should -Be 'Error'
+        (ConvertTo-TimelineRow -Server APP01 -EventRecord (New-FakeEvent -Level 3) -UtcOffsetMinutes 0).LevelName | Should -Be 'Warning'
+        (ConvertTo-TimelineRow -Server APP01 -EventRecord (New-FakeEvent -Level 0) -UtcOffsetMinutes 0).LevelName | Should -Be 'Information'
+        (ConvertTo-TimelineRow -Server APP01 -EventRecord (New-FakeEvent -Level 4) -UtcOffsetMinutes 0).LevelName | Should -Be 'Information'
     }
 
     It 'explains a missing message instead of leaving it blank' {
-        $row = ConvertTo-TimelineRow -Server SQL01 -Event (New-FakeEvent -Message $null -Provider MSSQLSERVER -Id 17883 -Log Application) -UtcOffsetMinutes 0
+        $row = ConvertTo-TimelineRow -Server SQL01 -EventRecord (New-FakeEvent -Message $null -Provider MSSQLSERVER -Id 17883 -Log Application) -UtcOffsetMinutes 0
         $expected = "(No message text: the event's provider isn't installed on this workstation. Event 17883 from MSSQLSERVER.)"
         $row.Message | Should -Be $expected
         $row.MessageFirstLine | Should -Be $expected
     }
 
     It 'uses the first non-empty line as the short message' {
-        $row = ConvertTo-TimelineRow -Server APP01 -Event (New-FakeEvent -Message "`r`n  `r`nFirst real line`r`nSecond") -UtcOffsetMinutes 0
+        $row = ConvertTo-TimelineRow -Server APP01 -EventRecord (New-FakeEvent -Message "`r`n  `r`nFirst real line`r`nSecond") -UtcOffsetMinutes 0
         $row.MessageFirstLine | Should -Be 'First real line'
     }
 
     It 'shows server-local time as UTC plus the offset and fills the flag' {
-        $row = ConvertTo-TimelineRow -Server APP01 -Event (New-FakeEvent -Provider User32 -Id 1074) -UtcOffsetMinutes -300
+        $row = ConvertTo-TimelineRow -Server APP01 -EventRecord (New-FakeEvent -Provider User32 -Id 1074) -UtcOffsetMinutes -300
         $row.TimeServerLocal | Should -Be ([datetime]'2026-11-17 03:00:00')
         $row.TimeUtc | Should -Be ([datetime]'2026-11-17 08:00:00')
         $row.FlagCategory | Should -Be 'Restart'
@@ -320,5 +320,108 @@ Describe 'Get-RemoteFailureKind' {
 
     It 'words access denied in plain English with the next step' {
         Get-FailureText -Kind AccessDenied -Server DC01 | Should -Be "Access denied on DC01: check you're an admin there, or use Run as."
+    }
+}
+
+Describe 'Select-TimelineRows' {
+    BeforeAll {
+        $script:Mixed = @(
+            [PSCustomObject]@{ Level = 2; Flag = 'Service crashed'; Server = 'APP01'; Log = 'System'; EventId = 7031; Message = 'The SQL service terminated'; Provider = 'Service Control Manager' }
+            [PSCustomObject]@{ Level = 4; Flag = ''; Server = 'SQL01'; Log = 'Application'; EventId = 100; Message = 'All fine'; Provider = 'MSSQLSERVER' }
+            [PSCustomObject]@{ Level = 3; Flag = ''; Server = 'APP01'; Log = 'Application'; EventId = 200; Message = 'Slow [x] thing'; Provider = 'App' }
+        )
+    }
+
+    It 'gives the same rows as Test-RowMatchesFilter for every filter combination' {
+        $filters = @(
+            @{ MinLevel = 'All'; Server = '*'; Log = '*'; FlaggedOnly = $false; Text = '' }
+            @{ MinLevel = 'Warning'; Server = '*'; Log = '*'; FlaggedOnly = $false; Text = '' }
+            @{ MinLevel = 'All'; Server = 'APP01'; Log = 'Application'; FlaggedOnly = $false; Text = '' }
+            @{ MinLevel = 'All'; Server = '*'; Log = '*'; FlaggedOnly = $true; Text = '' }
+            @{ MinLevel = 'All'; Server = '*'; Log = '*'; FlaggedOnly = $false; Text = '[x' }
+            @{ MinLevel = 'Error'; Server = '*'; Log = '*'; FlaggedOnly = $false; Text = 'sql' }
+        )
+        foreach ($f in $filters) {
+            $expected = @($script:Mixed | Where-Object { Test-RowMatchesFilter -Row $_ -Filter $f } | ForEach-Object EventId)
+            $actual = @(Select-TimelineRows -Rows $script:Mixed -Filter $f | ForEach-Object EventId)
+            ($actual -join ',') | Should -Be ($expected -join ',')
+        }
+    }
+
+    It 'returns an empty array when nothing matches' {
+        @(Select-TimelineRows -Rows $script:Mixed -Filter @{ MinLevel = 'Critical'; Server = '*'; Log = '*'; FlaggedOnly = $false; Text = '' }).Count | Should -Be 0
+    }
+}
+
+Describe 'ConvertFrom-TimelineInputs' {
+    It 'builds the request for an Around search' {
+        $r = ConvertFrom-TimelineInputs -ServersText 'app01, sql01' -Mode Around -AtText '2026-11-17 03:00' -PlusMinusMinutes 15 -CapText '5000' -TimeoutText '60'
+        $r.Ok | Should -BeTrue
+        $r.Servers | Should -Be @('app01', 'sql01')
+        $r.Window.StartLocal | Should -Be ([datetime]'2026-11-17 02:45')
+        $r.Cap | Should -Be 5000
+        $r.TimeoutSec | Should -Be 60
+    }
+
+    It 'asks for at least one server' {
+        $r = ConvertFrom-TimelineInputs -ServersText '  ' -Mode Around -AtText '2026-11-17 03:00' -PlusMinusMinutes 15 -CapText '5000' -TimeoutText '60'
+        $r.Ok | Should -BeFalse
+        $r.Message | Should -Be 'Enter at least one server name.'
+    }
+
+    It 'explains a date it cannot read' {
+        $r = ConvertFrom-TimelineInputs -ServersText 'app01' -Mode Around -AtText 'yesterday-ish' -PlusMinusMinutes 15 -CapText '5000' -TimeoutText '60'
+        $r.Ok | Should -BeFalse
+        $r.Message | Should -BeLike '*yyyy-MM-dd HH:mm*'
+    }
+
+    It 'rejects a From/To range that runs backwards' {
+        $r = ConvertFrom-TimelineInputs -ServersText 'app01' -Mode Range -FromText '2026-11-17 04:00' -ToText '2026-11-17 03:00' -CapText '5000' -TimeoutText '60'
+        $r.Ok | Should -BeFalse
+        $r.Message | Should -BeLike '*From must be before To*'
+    }
+
+    It 'rejects a cap or timeout that is not a positive whole number' {
+        (ConvertFrom-TimelineInputs -ServersText 'app01' -Mode Around -AtText '2026-11-17 03:00' -PlusMinusMinutes 15 -CapText 'lots' -TimeoutText '60').Message | Should -BeLike '*events per log*'
+        (ConvertFrom-TimelineInputs -ServersText 'app01' -Mode Around -AtText '2026-11-17 03:00' -PlusMinusMinutes 15 -CapText '5000' -TimeoutText '0').Message | Should -BeLike '*seconds*'
+    }
+
+    It 'Relative needs no date text' {
+        $r = ConvertFrom-TimelineInputs -ServersText 'app01' -Mode Relative -LastMinutes 60 -CapText '5000' -TimeoutText '60'
+        $r.Ok | Should -BeTrue
+        $r.Window.LastMinutes | Should -Be 60
+    }
+}
+
+Describe 'Status wording' {
+    BeforeAll {
+        $script:Status = [ordered]@{
+            'APP01' = [PSCustomObject]@{ Server = 'APP01'; State = 'DoneWithGaps'; Transport = 'WinRM'; Reason = ''; EventCount = 5200; UtcOffsetMinutes = -300
+                Logs = @([PSCustomObject]@{ Log = 'System'; Outcome = 'Capped'; Count = 5000; Reason = 'stopped at 5,000 events' }
+                         [PSCustomObject]@{ Log = 'Application'; Outcome = 'TimedOut'; Count = 0; Reason = "didn't answer within 60 s" }
+                         [PSCustomObject]@{ Log = 'Microsoft-Windows-TaskScheduler/Operational'; Outcome = 'Skipped'; Count = 0; Reason = 'Task Scheduler log is turned off on APP01' }) }
+            'LON-SQL01' = [PSCustomObject]@{ Server = 'LON-SQL01'; State = 'Done'; Transport = 'RPC'; Reason = ''; EventCount = 12; UtcOffsetMinutes = 0; Logs = @() }
+            'DC01' = [PSCustomObject]@{ Server = 'DC01'; State = 'Unreachable'; Transport = ''; Reason = 'WinRM and remote event log are both unreachable from here.'; EventCount = 0; UtcOffsetMinutes = 0; Logs = @() }
+        }
+    }
+
+    It 'describes each server in one plain line' {
+        $lines = @(Get-TimelineStatusLines -Status $script:Status)
+        $lines[0] | Should -Be 'APP01: done with gaps - 5,200 events (via WinRM)'
+        $lines[1] | Should -Be 'LON-SQL01: done - 12 events (via remote event log)'
+        $lines[2] | Should -Be "DC01: couldn't reach - WinRM and remote event log are both unreachable from here."
+    }
+
+    It 'banners capped and timed-out logs with what to do, but not skipped ones' {
+        $banner = Get-TimelineBannerText -Status $script:Status
+        $banner | Should -BeLike '*APP01 System: stopped at 5,000 events - narrow the window or raise the cap*'
+        $banner | Should -BeLike "*APP01 Application: didn't answer within 60 s*"
+        $banner | Should -Not -BeLike '*Task Scheduler*'
+    }
+
+    It 'notes different time zones only when the reached servers differ' {
+        Get-TimelineTimeZoneNote -Status $script:Status | Should -BeLike '*different time zones*UTC column*'
+        $same = [ordered]@{ 'A' = [PSCustomObject]@{ Server = 'A'; Transport = 'WinRM'; UtcOffsetMinutes = 60 }; 'B' = [PSCustomObject]@{ Server = 'B'; Transport = 'RPC'; UtcOffsetMinutes = 60 } }
+        Get-TimelineTimeZoneNote -Status $same | Should -BeNullOrEmpty
     }
 }

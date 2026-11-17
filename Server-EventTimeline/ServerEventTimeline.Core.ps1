@@ -1,4 +1,5 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
     Pure logic for Server Event Timeline: inputs, time windows, the log list, the flag
@@ -217,40 +218,40 @@ function ConvertTo-TimelineRow {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Server,
-        [Parameter(Mandatory)]$Event,
+        [Parameter(Mandatory)]$EventRecord,
         [int]$UtcOffsetMinutes = 0
     )
 
-    $timeUtc = [datetime]::SpecifyKind([datetime]$Event.TimeCreatedUtc, [DateTimeKind]::Utc)
-    $level = [int]$Event.Level
+    $timeUtc = [datetime]::SpecifyKind([datetime]$EventRecord.TimeCreatedUtc, [DateTimeKind]::Utc)
+    $level = [int]$EventRecord.Level
     $levelName = if ($script:LevelNames.ContainsKey($level)) { $script:LevelNames[$level] } else { "Level $level" }
 
-    $message = [string]$Event.Message
+    $message = [string]$EventRecord.Message
     if ([string]::IsNullOrWhiteSpace($message)) {
         # The remote event log (RPC) path renders text with this workstation's provider files,
         # so events from software not installed here arrive without text.
-        $message = "(No message text: the event's provider isn't installed on this workstation. Event $($Event.Id) from $($Event.ProviderName).)"
+        $message = "(No message text: the event's provider isn't installed on this workstation. Event $($EventRecord.Id) from $($EventRecord.ProviderName).)"
     }
     $firstLine = @($message -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -First 1)[0].Trim()
 
-    $flag = Get-EventFlag -Log $Event.LogName -Provider $Event.ProviderName -Id $Event.Id
+    $flag = Get-EventFlag -Log $EventRecord.LogName -Provider $EventRecord.ProviderName -Id $EventRecord.Id
 
     [PSCustomObject]@{
         Server           = $Server
-        Log              = $Event.LogName
+        Log              = $EventRecord.LogName
         TimeUtc          = $timeUtc
         TimeServerLocal  = [datetime]::SpecifyKind($timeUtc.AddMinutes($UtcOffsetMinutes), [DateTimeKind]::Unspecified)
         Level            = $level
         LevelName        = $levelName
         FlagCategory     = if ($flag) { $flag.Category } else { '' }
         Flag             = if ($flag) { $flag.Label } else { '' }
-        Provider         = $Event.ProviderName
-        EventId          = [int]$Event.Id
+        Provider         = $EventRecord.ProviderName
+        EventId          = [int]$EventRecord.Id
         Message          = $message
         MessageFirstLine = $firstLine
-        RecordId         = $Event.RecordId
-        User             = $Event.UserSid
-        Machine          = $Event.MachineName
+        RecordId         = $EventRecord.RecordId
+        User             = $EventRecord.UserSid
+        Machine          = $EventRecord.MachineName
     }
 }
 
@@ -428,4 +429,138 @@ function Get-FailureText {
         'TimedOut'     { "${Server} didn't answer in time." }
         default        { "Something went wrong reading ${Server}" + $(if ($Detail) { ": $Detail" } else { '.' }) }
     }
+}
+
+function Select-TimelineRows {
+    <#
+        The rows that pass the filter: same rules as Test-RowMatchesFilter, in one inline loop
+        (a function call per row is too slow for 50,000 rows in the window).
+    #>
+    [CmdletBinding()]
+    param([object[]]$Rows, [Parameter(Mandatory)][hashtable]$Filter)
+
+    $levels = $script:MinLevelSets[[string]$Filter.MinLevel]
+    $server = if ($Filter.Server -and $Filter.Server -ne '*') { [string]$Filter.Server } else { $null }
+    $log = if ($Filter.Log -and $Filter.Log -ne '*') { [string]$Filter.Log } else { $null }
+    $flagged = [bool]$Filter.FlaggedOnly
+    $text = [string]$Filter.Text
+    $cmp = [StringComparison]::OrdinalIgnoreCase
+
+    if ($null -eq $levels -and -not $server -and -not $log -and -not $flagged -and -not $text) { return @($Rows) }
+
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $Rows) {
+        if ($null -ne $levels -and $levels -notcontains [int]$r.Level) { continue }
+        if ($server -and $r.Server -ne $server) { continue }
+        if ($log -and $r.Log -ne $log) { continue }
+        if ($flagged -and -not $r.Flag) { continue }
+        if ($text -and ('{0}|{1}|{2}' -f $r.EventId, $r.Provider, $r.Message).IndexOf($text, $cmp) -lt 0) { continue }
+        $out.Add($r)
+    }
+    return $out.ToArray()
+}
+
+function ConvertFrom-TimelineInputs {
+    <#
+        Reads what the tech typed into a search request, or a plain message saying what to fix.
+        Dates are read as yyyy-MM-dd HH:mm (seconds optional), then in the workstation's format.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()][string]$ServersText,
+        [ValidateSet('Around', 'Range', 'Relative')][string]$Mode = 'Around',
+        [string]$AtText, [int]$PlusMinusMinutes = 15,
+        [string]$FromText, [string]$ToText,
+        [int]$LastMinutes = 60,
+        [string]$CapText = '5000', [string]$TimeoutText = '60'
+    )
+
+    $fail = { param($m) [PSCustomObject]@{ Ok = $false; Message = $m; Servers = @(); Window = $null; Cap = 0; TimeoutSec = 0 } }
+    $readDate = {
+        param($text)
+        $d = [datetime]::MinValue
+        $formats = [string[]]@('yyyy-MM-dd HH:mm', 'yyyy-MM-dd HH:mm:ss', 'yyyy-MM-ddTHH:mm', 'yyyy-MM-ddTHH:mm:ss')
+        if ([datetime]::TryParseExact(([string]$text).Trim(), $formats, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$d)) { return $d }
+        if ([datetime]::TryParse(([string]$text).Trim(), [Globalization.CultureInfo]::CurrentCulture, [Globalization.DateTimeStyles]::None, [ref]$d)) { return $d }
+        return $null
+    }
+
+    $servers = @(ConvertTo-ServerList -Text $ServersText)
+    if ($servers.Count -eq 0) { return (& $fail 'Enter at least one server name.') }
+
+    $cap = 0; $timeout = 0
+    if (-not [int]::TryParse($CapText, [ref]$cap) -or $cap -le 0) { return (& $fail 'The number of events per log must be a whole number above 0.') }
+    if (-not [int]::TryParse($TimeoutText, [ref]$timeout) -or $timeout -le 0) { return (& $fail 'The timeout must be a whole number of seconds above 0.') }
+
+    try {
+        switch ($Mode) {
+            'Around' {
+                $at = & $readDate $AtText
+                if ($null -eq $at) { return (& $fail "Couldn't read the time. Type it as yyyy-MM-dd HH:mm, for example 2026-11-17 03:00.") }
+                $window = New-TimelineWindow -Mode Around -At $at -PlusMinusMinutes $PlusMinusMinutes
+            }
+            'Range' {
+                $from = & $readDate $FromText; $to = & $readDate $ToText
+                if ($null -eq $from -or $null -eq $to) { return (& $fail "Couldn't read the From or To time. Type them as yyyy-MM-dd HH:mm.") }
+                $window = New-TimelineWindow -Mode Range -From $from -To $to
+            }
+            'Relative' { $window = New-TimelineWindow -Mode Relative -LastMinutes $LastMinutes }
+        }
+    }
+    catch { return (& $fail $_.Exception.Message) }
+
+    [PSCustomObject]@{ Ok = $true; Message = ''; Servers = $servers; Window = $window; Cap = $cap; TimeoutSec = $timeout }
+}
+
+function Get-TimelineStatusLines {
+    <# One plain line per server for the status list. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Status)
+
+    foreach ($s in $Status.Values) {
+        $via = switch ($s.Transport) { 'WinRM' { ' (via WinRM)' } 'RPC' { ' (via remote event log)' } default { '' } }
+        switch ($s.State) {
+            'Waiting'      { "$($s.Server): waiting" }
+            'Querying'     { "$($s.Server): reading...$via" }
+            'Done'         { '{0}: done - {1:N0} events{2}' -f $s.Server, $s.EventCount, $via }
+            'DoneWithGaps' { '{0}: done with gaps - {1:N0} events{2}' -f $s.Server, $s.EventCount, $via }
+            'Unreachable'  { "$($s.Server): couldn't reach - $($s.Reason)" }
+            'Cancelled'    { '{0}: cancelled - {1:N0} events kept' -f $s.Server, $s.EventCount }
+            default        { "$($s.Server): $($s.State)" }
+        }
+    }
+}
+
+function Get-TimelineBannerText {
+    <#
+        The yellow banner: every log whose events are incomplete (capped, timed out, failed,
+        not read), so a short log is never mistaken for a quiet one. Skipped logs (missing or
+        turned off) are listed in the report, not the banner.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Status)
+
+    $lines = foreach ($s in $Status.Values) {
+        foreach ($l in @($s.Logs)) {
+            switch ($l.Outcome) {
+                'Capped'   { '{0} {1}: {2} - narrow the window or raise the cap' -f $s.Server, $l.Log, $l.Reason }
+                'TimedOut' { '{0} {1}: {2} - try a shorter window or a longer timeout' -f $s.Server, $l.Log, $l.Reason }
+                'Failed'   { '{0} {1}: could not be read - {2}' -f $s.Server, $l.Log, $l.Reason }
+                'NotRead'  { '{0} {1}: not read - {2}' -f $s.Server, $l.Log, $l.Reason }
+            }
+        }
+    }
+    return (@($lines) -join [Environment]::NewLine)
+}
+
+function Get-TimelineTimeZoneNote {
+    <# A note when the reached servers are in different time zones, else $null. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Status)
+
+    $offsets = @($Status.Values | Where-Object { $_.Transport } | ForEach-Object { [int]$_.UtcOffsetMinutes } | Select-Object -Unique)
+    if ($offsets.Count -gt 1) {
+        return 'These servers are in different time zones, so their local times are not directly comparable: compare the UTC column across them.'
+    }
+    return $null
 }
