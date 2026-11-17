@@ -82,3 +82,6 @@ LocalAdminManager/Logs/
 squad/.state/
 squad/logs/
 squad/STOP
+
+# Server-EventTimeline exports and activity logs (event text from client servers).
+Server-EventTimeline/Reports/

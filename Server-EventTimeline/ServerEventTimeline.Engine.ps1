@@ -34,7 +34,10 @@ $script:LogQueryScript = {
     $start = New-Object DateTime ($StartTicks, [DateTimeKind]::Utc)
     $end = New-Object DateTime ($EndTicks, [DateTimeKind]::Utc)
     $params = @{
-        FilterHashtable = @{ LogName = $LogName; StartTime = $start; EndTime = $end }
+        # Local time on the machine running Get-WinEvent: it does value.ToString(), re-parses the
+        # text as local time and then ToUniversalTime(), so a UTC value would shift the window
+        # by the UTC offset (GetEventCommand.cs, HandleStartTimeHashValue / StringToDateTime).
+        FilterHashtable = @{ LogName = $LogName; StartTime = $start.ToLocalTime(); EndTime = $end.ToLocalTime() }
         MaxEvents       = $MaxEvents
         Oldest          = $true
         ErrorAction     = 'Stop'

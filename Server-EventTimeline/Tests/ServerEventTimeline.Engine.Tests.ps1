@@ -96,7 +96,7 @@ Describe 'Invoke-LogQuery' {
         Invoke-LogQuery -ComputerName srv-fake-01 -Transport RPC -LogName System -StartUtc $script:Start -EndUtc $script:End -Cap 3 | Out-Null
         Should -Invoke Get-WinEvent -Times 1 -ParameterFilter {
             $MaxEvents -eq 4 -and $Oldest -and $ComputerName -eq 'srv-fake-01' -and
-            $FilterHashtable[0].LogName -eq 'System' -and $FilterHashtable[0].StartTime -eq $script:Start -and $FilterHashtable[0].EndTime -eq $script:End
+            $FilterHashtable[0].LogName -eq 'System'
         }
     }
 
@@ -223,5 +223,20 @@ Describe 'This computer: read directly' {
         $r = Invoke-LogQuery -ComputerName 'WS01' -Transport Local -LogName Security -StartUtc $script:Start -EndUtc $script:End -Cap 3
         $r.Outcome | Should -Be 'Failed'
         $r.Reason | Should -Be "Can't read the Security log here: start the tool as administrator."
+    }
+}
+
+Describe 'Time window survives Get-WinEvent' {
+    # Get-WinEvent -FilterHashtable does StringToDateTime(value.ToString()) then
+    # ToUniversalTime(): the DateTimeKind is lost and the text is read as LOCAL time on the
+    # machine running the query. A UTC value would shift the window by the UTC offset.
+    # https://github.com/PowerShell/PowerShell/blob/master/src/Microsoft.PowerShell.Commands.Diagnostics/GetEventCommand.cs
+    It 'passes times that Get-WinEvent turns back into the intended UTC window' {
+        $script:Seen = $null
+        Mock Get-WinEvent { $script:Seen = $FilterHashtable[0]; @() }
+        $null = Invoke-LogQuery -ComputerName srv-fake-01 -Transport RPC -LogName System -StartUtc $script:Start -EndUtc $script:End -Cap 3
+        $asGetWinEventSees = { param($v) [datetime]::Parse($v.ToString(), [Globalization.CultureInfo]::CurrentCulture).ToUniversalTime() }
+        (& $asGetWinEventSees $script:Seen.StartTime) | Should -Be $script:Start
+        (& $asGetWinEventSees $script:Seen.EndTime) | Should -Be $script:End
     }
 }
