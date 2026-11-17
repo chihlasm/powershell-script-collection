@@ -1,0 +1,10 @@
+2026-11-17 17:09:14 [INFO] Searching 1 server(s): LOCALHOST. Around 2026-11-17 17:08 +/- 15 min (each server's local time). Logs: System, Application, Microsoft-Windows-TaskScheduler/Operational, Microsoft-Windows-GroupPolicy/Operational, Microsoft-Windows-TerminalServices-LocalSessionManager/Operational, Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational, Microsoft-Windows-SMBClient/Operational, Microsoft-Windows-SMBServer/Operational, Microsoft-Windows-Time-Service/Operational, Microsoft-Windows-FailoverClustering/Operational
+2026-11-17 17:09:19 [PASS] LOCALHOST: 0 events (via RPC)
+2026-11-17 17:09:19 [INFO] LOCALHOST Microsoft-Windows-GroupPolicy/Operational: Skipped Group Policy log doesn't exist on LOCALHOST
+2026-11-17 17:09:19 [INFO] LOCALHOST Microsoft-Windows-SMBClient/Operational: Skipped File share client (SMB) log doesn't exist on LOCALHOST
+2026-11-17 17:09:19 [INFO] LOCALHOST Microsoft-Windows-SMBServer/Operational: Skipped File share server (SMB) log doesn't exist on LOCALHOST
+2026-11-17 17:09:19 [INFO] LOCALHOST Microsoft-Windows-FailoverClustering/Operational: Skipped Failover Clustering log doesn't exist on LOCALHOST
+2026-11-17 17:09:19 [INFO] Search finished: 0 events from 1 server(s).
+2026-11-17 17:09:25 [INFO] Searching 1 server(s): .. Around 2026-11-17 17:08 +/- 15 min (each server's local time). Logs: System, Application, Microsoft-Windows-TaskScheduler/Operational, Microsoft-Windows-GroupPolicy/Operational, Microsoft-Windows-TerminalServices-LocalSessionManager/Operational, Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational, Microsoft-Windows-SMBClient/Operational, Microsoft-Windows-SMBServer/Operational, Microsoft-Windows-Time-Service/Operational, Microsoft-Windows-FailoverClustering/Operational
+2026-11-17 17:09:28 [FAIL] .: couldn't reach - WinRM and remote event log are both unreachable from here.
+2026-11-17 17:09:28 [INFO] Search finished: 0 events from 1 server(s).

@@ -518,3 +518,37 @@ Describe 'Review fixes: wording' {
         @(Get-TimelineStatusLines -Status $status)[0] | Should -Be "APP01: done - 3 events (via remote event log) - Couldn't read the time zone; assumed this workstation's."
     }
 }
+
+Describe 'This computer' {
+    BeforeAll { $script:Names = @('WS01', 'ws01.contoso.local', 'localhost', '.', '127.0.0.1', '::1') }
+
+    It 'recognizes every way of naming this computer' {
+        foreach ($n in 'localhost', '.', '127.0.0.1', '::1', 'WS01', 'ws01', 'WS01.contoso.local') {
+            Test-IsLocalComputer -Name $n -LocalNames $script:Names | Should -BeTrue -Because $n
+        }
+    }
+
+    It 'does not treat other machines as this computer' {
+        Test-IsLocalComputer -Name 'SRV01' -LocalNames $script:Names | Should -BeFalse
+        Test-IsLocalComputer -Name 'ws01.fabrikam.local' -LocalNames $script:Names | Should -BeFalse
+    }
+
+    It 'lists this computer by its own name, the short name first' {
+        Mock Get-LocalComputerIdentity { [PSCustomObject]@{ Name = 'WS01'; DomainName = 'contoso.local' } }
+        $n = @(Get-LocalComputerNames)
+        $n[0] | Should -Be 'WS01'
+        $n | Should -Contain 'ws01.contoso.local'
+        $n | Should -Contain 'localhost'
+    }
+
+    It 'turns localhost and friends into this computer''s name, once' {
+        Mock Get-LocalComputerNames { $script:Names }
+        $r = ConvertFrom-TimelineInputs -ServersText 'localhost, SRV01, ws01, 127.0.0.1' -Mode Relative -LastMinutes 60 -CapText '5000' -TimeoutText '60'
+        $r.Servers | Should -Be @('WS01', 'SRV01')
+    }
+
+    It 'says a directly-read server was read directly' {
+        $status = [ordered]@{ 'WS01' = [PSCustomObject]@{ Server = 'WS01'; State = 'Done'; Transport = 'Local'; Reason = ''; EventCount = 7; UtcOffsetMinutes = 0; Logs = @() } }
+        @(Get-TimelineStatusLines -Status $status)[0] | Should -Be 'WS01: done - 7 events (this computer, read directly)'
+    }
+}

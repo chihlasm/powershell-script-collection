@@ -17,8 +17,10 @@ logs (local admin, or a member of **Event Log Readers**, on each server).
 
 ## How to use it
 
-1. **Which servers?** Type names (commas, spaces or new lines all work), or use **Pick from
-   AD...** to add every domain controller or find servers by part of their name.
+1. **Which servers?** The list starts with **this computer** already filled in. Type more
+   names (commas, spaces or new lines all work), press **This computer** to add it back, or
+   use **Pick from AD...** to add every domain controller or find servers by part of their
+   name. Workstations work too: any Windows machine you can reach.
 2. **When?** "Around 2026-11-17 03:00 +/- 15 min" is the usual start. You can switch to
    **From ... to ...**, or press **Last hour** / **Last 24 hours** to search right away.
    **The time is each server's local time**: "03:00" means 03:00 on each server, which is
@@ -94,6 +96,11 @@ tells you to compare the UTC column.
 
 ## How it reaches servers
 
+0. **This computer** (by its name, its FQDN, `localhost`, `.` or `127.0.0.1`) is read
+   **directly** from its own logs: no WinRM, no firewall rules, no network. Its status line
+   says *(this computer, read directly)*. Run as doesn't apply to it. Reading its
+   **Security** log needs the tool started **as administrator**; without that, the Security
+   log says so and the other logs read normally.
 1. **WinRM** (TCP 5985): the query runs on the server and only matching events come back.
    This is the normal route on Windows Server 2012 and later.
 2. If WinRM can't connect, it uses the **remote event log** over RPC (TCP 135 plus dynamic

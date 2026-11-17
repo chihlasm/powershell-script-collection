@@ -130,6 +130,24 @@ function Invoke-ServerProbe {
         Channels = @(); FailureKind = ''; Reason = ''; Note = ''
     }
 
+    # This computer: read its logs straight from disk. No WinRM, no firewall, no network.
+    if (Test-IsLocalComputer -Name $ComputerName) {
+        $at = if ($WindowStartLocal) { [datetime]$WindowStartLocal } else { Get-Date }
+        $channels = @(Get-WinEvent -ListLog * -ErrorAction SilentlyContinue |
+                ForEach-Object { [PSCustomObject]@{ Name = $_.LogName; IsEnabled = [bool]$_.IsEnabled; RecordCount = $_.RecordCount } })
+        # Without administrator rights the Security log is missing from the list; keep it so a
+        # ticked Security box says "start as administrator" instead of "doesn't exist".
+        if (-not ($channels | Where-Object Name -eq 'Security')) {
+            $channels += [PSCustomObject]@{ Name = 'Security'; IsEnabled = $true; RecordCount = $null }
+        }
+        $result.Reachable = $true
+        $result.Transport = 'Local'
+        $result.UtcOffsetMinutes = [int][TimeZoneInfo]::Local.GetUtcOffset($at).TotalMinutes
+        $result.TimeZoneId = [TimeZoneInfo]::Local.Id
+        $result.Channels = $channels
+        return $result
+    }
+
     $winrmOpen = Test-TcpPortQuick -ComputerName $ComputerName -Port 5985
     if ($winrmOpen) {
         try {
@@ -192,7 +210,7 @@ function Invoke-LogQuery {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$ComputerName,
-        [Parameter(Mandatory)][ValidateSet('WinRM', 'RPC')][string]$Transport,
+        [Parameter(Mandatory)][ValidateSet('WinRM', 'RPC', 'Local')][string]$Transport,
         [Parameter(Mandatory)][string]$LogName,
         [Parameter(Mandatory)][datetime]$StartUtc,
         [Parameter(Mandatory)][datetime]$EndUtc,
@@ -209,13 +227,20 @@ function Invoke-LogQuery {
             if ($Credential) { $params.Credential = $Credential }
             $answer = Invoke-Command @params
         }
+        elseif ($Transport -eq 'Local') {
+            $answer = & $script:LogQueryScript @queryArgs '' $null
+        }
         else {
             $answer = & $script:LogQueryScript @queryArgs $ComputerName $Credential
         }
     }
     catch {
+        $kind = Get-RemoteFailureKind -ErrorRecord $_
         $result.Outcome = 'Failed'
-        $result.Reason = Get-FailureText -Kind (Get-RemoteFailureKind -ErrorRecord $_) -Server $ComputerName -Detail $_.Exception.Message
+        $result.Reason = if ($Transport -eq 'Local' -and $kind -eq 'AccessDenied') {
+            "Can't read the $LogName log here: start the tool as administrator."
+        }
+        else { Get-FailureText -Kind $kind -Server $ComputerName -Detail $_.Exception.Message }
         return $result
     }
 

@@ -190,3 +190,38 @@ Describe 'Invoke-ServerProbe: review fixes' {
         $p.UtcOffsetMinutes | Should -Be ([int][TimeZoneInfo]::Local.GetUtcOffset([datetime]'2026-11-17 03:00').TotalMinutes)
     }
 }
+
+Describe 'This computer: read directly' {
+    BeforeEach {
+        Mock Get-LocalComputerNames { @('WS01', 'ws01.contoso.local', 'localhost', '.', '127.0.0.1', '::1') }
+        Mock Test-TcpPortQuick { $true }
+        Mock Invoke-Command { throw 'must not be called for this computer' }
+        Mock Get-RpcUtcOffsetMinutes { throw 'must not be called for this computer' }
+    }
+
+    It 'probes this computer without the network and always offers Security' {
+        Mock Get-WinEvent { @([PSCustomObject]@{ LogName = 'System'; IsEnabled = $true; RecordCount = 10 }) }
+        $p = Invoke-ServerProbe -ComputerName 'ws01' -WindowStartLocal ([datetime]'2026-11-17 03:00')
+        $p.Reachable | Should -BeTrue
+        $p.Transport | Should -Be 'Local'
+        $p.UtcOffsetMinutes | Should -Be ([int][TimeZoneInfo]::Local.GetUtcOffset([datetime]'2026-11-17 03:00').TotalMinutes)
+        @($p.Channels | ForEach-Object Name) | Should -Contain 'Security'
+        Should -Invoke Test-TcpPortQuick -Times 0
+        Should -Invoke Invoke-Command -Times 0
+        Should -Invoke Get-WinEvent -Times 1 -ParameterFilter { $ListLog -and -not $ComputerName }
+    }
+
+    It 'reads a log on this computer without -ComputerName' {
+        Mock Get-WinEvent { @() }
+        $r = Invoke-LogQuery -ComputerName 'WS01' -Transport Local -LogName System -StartUtc $script:Start -EndUtc $script:End -Cap 3
+        $r.Outcome | Should -Be 'Read'
+        Should -Invoke Get-WinEvent -Times 1 -ParameterFilter { -not $ComputerName -and $FilterHashtable[0].LogName -eq 'System' }
+    }
+
+    It 'says to start as administrator when this computer''s Security log is denied' {
+        Mock Get-WinEvent { throw (New-Err (New-Object UnauthorizedAccessException 'Attempted to perform an unauthorized operation.')) }
+        $r = Invoke-LogQuery -ComputerName 'WS01' -Transport Local -LogName Security -StartUtc $script:Start -EndUtc $script:End -Cap 3
+        $r.Outcome | Should -Be 'Failed'
+        $r.Reason | Should -Be "Can't read the Security log here: start the tool as administrator."
+    }
+}

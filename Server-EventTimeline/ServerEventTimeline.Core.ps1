@@ -496,6 +496,35 @@ function Select-TimelineRows {
     return $out.ToArray()
 }
 
+function Get-LocalComputerIdentity {
+    <# This computer's name and DNS domain (read locally, no network lookup). #>
+    [PSCustomObject]@{
+        Name       = $env:COMPUTERNAME
+        DomainName = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().DomainName
+    }
+}
+
+function Get-LocalComputerNames {
+    <# Every name that means this computer. The first one is the name shown in the list. #>
+    [CmdletBinding()]
+    param()
+    $id = Get-LocalComputerIdentity
+    $names = New-Object System.Collections.Generic.List[string]
+    $names.Add([string]$id.Name)
+    if ($id.DomainName) { $names.Add(('{0}.{1}' -f $id.Name, $id.DomainName).ToLowerInvariant()) }
+    foreach ($n in 'localhost', '.', '127.0.0.1', '::1') { $names.Add($n) }
+    return $names.ToArray()
+}
+
+function Test-IsLocalComputer {
+    <# True when the name means this computer, so its logs can be read directly. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Name, [string[]]$LocalNames)
+    if (-not $LocalNames) { $LocalNames = @(Get-LocalComputerNames) }
+    foreach ($n in $LocalNames) { if ([string]::Equals($Name.Trim(), $n, [StringComparison]::OrdinalIgnoreCase)) { return $true } }
+    return $false
+}
+
 function ConvertFrom-TimelineInputs {
     <#
         Reads what the tech typed into a search request, or a plain message saying what to fix.
@@ -523,6 +552,11 @@ function ConvertFrom-TimelineInputs {
 
     $servers = @(ConvertTo-ServerList -Text $ServersText)
     if ($servers.Count -eq 0) { return (& $fail 'Enter at least one server name.') }
+    # localhost, ., 127.0.0.1 and this computer's FQDN all become its own name, once.
+    $localNames = @(Get-LocalComputerNames)
+    $servers = @(ConvertTo-ServerList -Text ((@($servers | ForEach-Object {
+                        if (Test-IsLocalComputer -Name $_ -LocalNames $localNames) { $localNames[0] } else { $_ }
+                    })) -join ','))
 
     $cap = 0; $timeout = 0
     if (-not [int]::TryParse($CapText, [ref]$cap) -or $cap -le 0) { return (& $fail 'The number of events per log must be a whole number above 0.') }
@@ -554,7 +588,7 @@ function Get-TimelineStatusLines {
     param([Parameter(Mandatory)]$Status)
 
     foreach ($s in $Status.Values) {
-        $via = switch ($s.Transport) { 'WinRM' { ' (via WinRM)' } 'RPC' { ' (via remote event log)' } default { '' } }
+        $via = switch ($s.Transport) { 'WinRM' { ' (via WinRM)' } 'RPC' { ' (via remote event log)' } 'Local' { ' (this computer, read directly)' } default { '' } }
         switch ($s.State) {
             'Waiting'      { "$($s.Server): waiting" }
             'Querying'     { "$($s.Server): reading...$via" }

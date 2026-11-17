@@ -28,7 +28,9 @@
     ticket. Files go to -OutputPath (default: a Reports folder beside this script).
 
 .PARAMETER ComputerName
-    Servers to fill in when the window opens. You can also type them in the window.
+    Servers to fill in when the window opens. You can also type them in the window. Without
+    it, the list starts with this computer. This computer (by its name, FQDN, localhost, . or
+    127.0.0.1) is always read directly from its own logs: no WinRM or network needed.
 
 .PARAMETER OutputPath
     Folder for CSV/HTML exports and the activity log. Default: Reports beside this script.
@@ -201,6 +203,7 @@ function New-TimelineWindowXaml {
           <TextBox x:Name="ServersBox" Height="58" AcceptsReturn="True" TextWrapping="Wrap" VerticalContentAlignment="Top"
                    VerticalScrollBarVisibility="Auto" ToolTip="Server names, separated by commas, spaces or new lines"/>
           <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+            <Button x:Name="ThisComputerButton" Content="This computer" ToolTip="Add this computer: its logs are read directly, no network needed"/>
             <Button x:Name="PickFromAdButton" Content="Pick from AD..." ToolTip="Add domain controllers or search Active Directory for servers"/>
           </StackPanel>
         </StackPanel>
@@ -393,7 +396,7 @@ function Show-ServerEventTimeline {
         OutputPath = $OutputPath; LogFile = $null; Credential = $null; LogChecks = @(); ExitCode = 0
         Request = $null; Selected = @()
     }
-    foreach ($name in 'ServersBox', 'AroundRadio', 'RangeRadio', 'AtBox', 'PlusMinusCombo', 'FromBox', 'ToBox', 'LastHourButton',
+    foreach ($name in 'ThisComputerButton', 'ServersBox', 'AroundRadio', 'RangeRadio', 'AtBox', 'PlusMinusCombo', 'FromBox', 'ToBox', 'LastHourButton',
         'Last24Button', 'LogPanel', 'SecurityCheck', 'AllLogsCheck', 'CapBox', 'TimeoutBox', 'RunAsButton', 'PickFromAdButton',
         'SearchButton', 'CancelButton', 'InputError', 'StatusList', 'BannerText', 'TimeZoneNote', 'LevelFilter', 'ServerFilter',
         'LogFilter', 'FlaggedOnlyCheck', 'FilterText', 'CountText', 'EventGrid', 'DetailText', 'ExportCsvButton', 'ExportHtmlButton',
@@ -421,7 +424,8 @@ function Show-ServerEventTimeline {
 
     # Inputs: defaults
     $now = Get-Date
-    $ui.ServersBox.Text = (@($ComputerName) -join ', ')
+    # Starts with this computer filled in when no servers were given.
+    $ui.ServersBox.Text = if (@($ComputerName).Count -gt 0) { (@($ComputerName) -join ', ') } else { @(Get-LocalComputerNames)[0] }
     $ui.AtBox.Text = $now.ToString('yyyy-MM-dd HH:mm')
     $ui.FromBox.Text = $now.AddHours(-1).ToString('yyyy-MM-dd HH:mm')
     $ui.ToBox.Text = $now.ToString('yyyy-MM-dd HH:mm')
@@ -689,6 +693,10 @@ function Show-ServerEventTimeline {
             Add-Type -AssemblyName Microsoft.VisualBasic
             $text = [Microsoft.VisualBasic.Interaction]::InputBox('Part of the server name (for example SQL or FS):', 'Find servers in Active Directory', '')
             if ($text) { & $addFromAd 'Search' $text }
+        })
+
+    $ui.ThisComputerButton.add_Click({
+            $ui.ServersBox.Text = Add-ServerNames -ExistingText $ui.ServersBox.Text -Names @(@(Get-LocalComputerNames)[0])
         })
 
     $ui.ExportCsvButton.add_Click({ Invoke-Export -Kind Csv })
