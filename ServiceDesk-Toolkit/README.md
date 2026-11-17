@@ -24,6 +24,7 @@ Every tool writes a report (HTML and/or CSV) you can attach to the ticket.
 | "The server's memory is maxed out — who is using it?"               | [Get-RAM-Usage](#server-memory-is-high--who-is-using-it)      | No                |
 | "My profile didn't load" / "temp profile" / "I got logged straight back out" | [Invoke-TempProfileInvestigation](#profile-or-logon-problems-on-citrix-or-rds) (in Citrix-FSLogix-Triage) | No                |
 | "I can't reach the server" / "the app won't connect" / "is port 445 open?" | [Network-QuickCheck](#cant-reach-a-server-or-app)            | No                |
+| "Something happened on these servers around a time - what?" / "why did it reboot at 3am?" | [Server-EventTimeline](#what-happened-on-these-servers) | No                |
 | "Hide this person from the address book (GAL)"                      | [M365-SyncedUserFixes](#hide-someone-from-the-address-book)  | **Yes — AD**      |
 | "Block this user from Microsoft 365 but keep their PC login"        | [M365-SyncedUserFixes](#block-someone-from-microsoft-365)    | **Yes — AD**      |
 | Ran several checks on one ticket and want one note to paste         | [TicketNote](#one-note-for-the-whole-ticket)                 | No                |
@@ -520,6 +521,29 @@ and the default gateway.
 Common ports: **445** file shares, **3389** Remote Desktop, **443** websites and most cloud
 apps, **1494 / 2598** Citrix, **1433** SQL Server. A failed **ping** on its own is usually
 fine, because many servers block it. A failed **port** is what matters.
+
+---
+
+## What happened on these servers
+
+**Folder:** `Server-EventTimeline`  Read-only: it changes nothing on any server.
+
+Run it **on your own workstation**. Type the servers and the time the problem happened
+("around 03:00, plus or minus 15 minutes"), press **Search**, and every event from those
+servers lands on one timeline sorted by time. Restarts, service crashes, disk errors, update
+installs and app crashes are flagged in colour.
+
+```powershell
+.\Start-ServerEventTimeline.ps1 -ComputerName APP01, SQL01
+```
+
+- The time you type is **each server's local time** (what the client says and what Event
+  Viewer on the server shows).
+- A **yellow banner** means a log is incomplete (it hit the limit or was too slow). Narrow
+  the time window and search again.
+- **Flagged only** plus **Errors and worse** gets you to the interesting rows fast.
+- **Copy selected rows** puts them on the clipboard for the ticket. **Export HTML report**
+  saves the whole picture in the `Reports` folder.
 
 ---
 

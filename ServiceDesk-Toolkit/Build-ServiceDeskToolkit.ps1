@@ -80,6 +80,7 @@ $manifest = @(
     @{ Source = 'M365-UserQuickCheck';                                   Destination = 'M365-UserQuickCheck' }
     @{ Source = 'Network-QuickCheck';                                    Destination = 'Network-QuickCheck' }
     @{ Source = 'RDS-FSLogix-EventExport';                               Destination = 'RDS-FSLogix-EventExport' }
+    @{ Source = 'Server-EventTimeline';                                  Destination = 'Server-EventTimeline' }
     @{ Source = 'TicketNote';                                            Destination = 'TicketNote' }
     @{ Source = 'ServiceDesk-Toolkit/README.md';                         Destination = 'README.md' }
 )
