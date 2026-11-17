@@ -228,9 +228,9 @@ function ConvertTo-TimelineRow {
 
     $message = [string]$EventRecord.Message
     if ([string]::IsNullOrWhiteSpace($message)) {
-        # The remote event log (RPC) path renders text with this workstation's provider files,
-        # so events from software not installed here arrive without text.
-        $message = "(No message text: the event's provider isn't installed on this workstation. Event $($EventRecord.Id) from $($EventRecord.ProviderName).)"
+        # Over WinRM the text is rendered on the server; over the remote event log (RPC) it is
+        # rendered with this workstation's provider files. Either side can lack them.
+        $message = "(No message text: Windows couldn't render the message for event $($EventRecord.Id) from $($EventRecord.ProviderName). Over the remote event log route this is normal when that software isn't installed on this workstation.)"
     }
     $firstLine = @($message -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -First 1)[0].Trim()
 
@@ -431,6 +431,42 @@ function Get-FailureText {
     }
 }
 
+$script:SortKeysItems = [Array].GetMethod('Sort', [type[]]@([Array], [Array]))
+
+function New-TimelineRowStore {
+    <# The window's rows, kept in UTC order, with a parallel key list and the log names seen. #>
+    [PSCustomObject]@{
+        # ::new(), not New-Object: a List[object] made with New-Object breaks @() on PS 5.1 and 7.
+        Rows = [System.Collections.Generic.List[object]]::new()
+        Keys = [System.Collections.Generic.List[long]]::new()
+        Logs = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    }
+}
+
+function Add-TimelineRows {
+    <#
+        Adds a batch to the store and keeps it in UTC order. Only the new rows are touched in
+        PowerShell; the re-sort is a native Array.Sort on tick keys, so a 5,000-row batch into
+        100,000 rows takes milliseconds instead of a full Sort-Object on the window thread.
+        Rows with the exact same tick keep no particular order between them.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Store, [object[]]$NewRows)
+    if (-not $NewRows -or $NewRows.Count -eq 0) { return }
+    foreach ($r in $NewRows) {
+        $Store.Rows.Add($r)
+        $Store.Keys.Add(([datetime]$r.TimeUtc).Ticks)
+        [void]$Store.Logs.Add([string]$r.Log)
+    }
+    $keys = $Store.Keys.ToArray()
+    $items = $Store.Rows.ToArray()
+    # Called through reflection: PowerShell binds [Array]::Sort($keys, $items) to the wrong
+    # overload and leaves the rows unsorted.
+    $script:SortKeysItems.Invoke($null, @($keys, $items)) | Out-Null
+    $Store.Keys.Clear(); $Store.Keys.AddRange($keys)
+    $Store.Rows.Clear(); $Store.Rows.AddRange($items)
+}
+
 function Select-TimelineRows {
     <#
         The rows that pass the filter: same rules as Test-RowMatchesFilter, in one inline loop
@@ -522,8 +558,8 @@ function Get-TimelineStatusLines {
         switch ($s.State) {
             'Waiting'      { "$($s.Server): waiting" }
             'Querying'     { "$($s.Server): reading...$via" }
-            'Done'         { '{0}: done - {1:N0} events{2}' -f $s.Server, $s.EventCount, $via }
-            'DoneWithGaps' { '{0}: done with gaps - {1:N0} events{2}' -f $s.Server, $s.EventCount, $via }
+            'Done'         { '{0}: done - {1:N0} events{2}{3}' -f $s.Server, $s.EventCount, $via, $(if ($s.Reason) { " - $($s.Reason)" }) }
+            'DoneWithGaps' { '{0}: done with gaps - {1:N0} events{2}{3}' -f $s.Server, $s.EventCount, $via, $(if ($s.Reason) { " - $($s.Reason)" }) }
             'Unreachable'  { "$($s.Server): couldn't reach - $($s.Reason)" }
             'Cancelled'    { '{0}: cancelled - {1:N0} events kept' -f $s.Server, $s.EventCount }
             default        { "$($s.Server): $($s.State)" }

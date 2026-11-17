@@ -388,7 +388,7 @@ function Show-ServerEventTimeline {
     $window = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
     $ui = @{
         Window = $window; Smoke = [bool]$SmokeTest; SmokeFailures = New-Object System.Collections.ArrayList
-        Engine = $null; Rows = @(); PendingRows = New-Object System.Collections.Generic.List[object]
+        Engine = $null; Store = (New-TimelineRowStore); PendingRows = New-Object System.Collections.Generic.List[object]
         LastRebuild = [Diagnostics.Stopwatch]::StartNew(); Reported = @{}; Finished = $true
         OutputPath = $OutputPath; LogFile = $null; Credential = $null; LogChecks = @(); ExitCode = 0
         Request = $null; Selected = @()
@@ -502,13 +502,13 @@ function Show-ServerEventTimeline {
     function Update-View {
         # Merges rows that arrived, re-applies the filter and refreshes the grid.
         if ($ui.PendingRows.Count -gt 0) {
-            $ui.Rows = @(Merge-TimelineRows -Rows (@($ui.Rows) + $ui.PendingRows.ToArray()))
+            Add-TimelineRows -Store $ui.Store -NewRows $ui.PendingRows.ToArray()
             $ui.PendingRows.Clear()
-            Set-ChoiceItems -Combo $ui.LogFilter -AllLabel 'All logs' -Names @($ui.Rows | ForEach-Object Log | Select-Object -Unique)
+            Set-ChoiceItems -Combo $ui.LogFilter -AllLabel 'All logs' -Names @($ui.Store.Logs)
         }
-        $visible = @(Select-TimelineRows -Rows $ui.Rows -Filter (Get-CurrentFilter))
+        $visible = @(Select-TimelineRows -Rows $ui.Store.Rows.ToArray() -Filter (Get-CurrentFilter))
         $ui.EventGrid.ItemsSource = $visible
-        $ui.CountText.Text = 'Showing {0:N0} of {1:N0} events' -f $visible.Count, @($ui.Rows).Count
+        $ui.CountText.Text = 'Showing {0:N0} of {1:N0} events' -f $visible.Count, $ui.Store.Rows.Count
         $has = $visible.Count -gt 0
         $ui.ExportCsvButton.IsEnabled = $has
         $ui.ExportHtmlButton.IsEnabled = $has
@@ -551,7 +551,7 @@ function Show-ServerEventTimeline {
         if ($ui.SecurityCheck.IsChecked) { $logs += 'Security' }
         if ($logs.Count -eq 0 -and -not $ui.AllLogsCheck.IsChecked) { $ui.InputError.Text = 'Tick at least one log.'; return }
 
-        $ui.Rows = @(); $ui.PendingRows.Clear(); $ui.Reported = @{}; $ui.Request = $req; $ui.Selected = $logs
+        $ui.Store = New-TimelineRowStore; $ui.PendingRows.Clear(); $ui.Reported = @{}; $ui.Request = $req; $ui.Selected = $logs
         $ui.DetailText.Text = 'Select an event to see everything about it here.'
         $ui.Finished = $false
         $ui.Engine = Invoke-TimelineSearch -Request $req -Logs $logs -AllLogs ([bool]$ui.AllLogsCheck.IsChecked) -Credential $ui.Credential
@@ -717,8 +717,8 @@ function Show-ServerEventTimeline {
                     Update-StatusPanel
                     Update-InputState
                     if (-not $ui.Engine.Cancelled) {
-                        Write-TimelineLog INFO ('Search finished: {0:N0} events from {1} server(s).' -f @($ui.Rows).Count, $ui.Engine.Status.Count)
-                        Set-StatusMessage ('Finished: {0:N0} events.' -f @($ui.Rows).Count)
+                        Write-TimelineLog INFO ('Search finished: {0:N0} events from {1} server(s).' -f $ui.Store.Rows.Count, $ui.Engine.Status.Count)
+                        Set-StatusMessage ('Finished: {0:N0} events.' -f $ui.Store.Rows.Count)
                     }
                 }
             }

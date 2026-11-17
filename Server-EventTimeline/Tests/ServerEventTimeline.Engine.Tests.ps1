@@ -177,3 +177,16 @@ Describe 'Real cmdlet parameter names' {
         (Get-Command $Command).Parameters.Keys | Should -Contain $Parameter
     }
 }
+
+Describe 'Invoke-ServerProbe: review fixes' {
+    It 'keeps an RPC server reachable when WMI is blocked, and says the time zone was assumed' {
+        Mock Test-TcpPortQuick { $Port -eq 135 }
+        Mock Get-WinEvent { @([PSCustomObject]@{ LogName = 'System'; IsEnabled = $true; RecordCount = 10 }) }
+        Mock Get-RpcUtcOffsetMinutes { throw 'The RPC server is unavailable.' }
+        $p = Invoke-ServerProbe -ComputerName srv-fake-01 -WindowStartLocal ([datetime]'2026-11-17 03:00')
+        $p.Reachable | Should -BeTrue
+        $p.Transport | Should -Be 'RPC'
+        $p.Note | Should -BeLike "*time zone*this workstation*"
+        $p.UtcOffsetMinutes | Should -Be ([int][TimeZoneInfo]::Local.GetUtcOffset([datetime]'2026-11-17 03:00').TotalMinutes)
+    }
+}

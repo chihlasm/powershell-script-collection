@@ -156,7 +156,7 @@ Describe 'ConvertTo-TimelineRow' {
 
     It 'explains a missing message instead of leaving it blank' {
         $row = ConvertTo-TimelineRow -Server SQL01 -EventRecord (New-FakeEvent -Message $null -Provider MSSQLSERVER -Id 17883 -Log Application) -UtcOffsetMinutes 0
-        $expected = "(No message text: the event's provider isn't installed on this workstation. Event 17883 from MSSQLSERVER.)"
+        $expected = "(No message text: Windows couldn't render the message for event 17883 from MSSQLSERVER. Over the remote event log route this is normal when that software isn't installed on this workstation.)"
         $row.Message | Should -Be $expected
         $row.MessageFirstLine | Should -Be $expected
     }
@@ -474,5 +474,47 @@ Describe 'Get-AdServerCandidates' {
 Describe 'Add-ServerNames' {
     It 'adds new names after the existing ones without duplicates' {
         Add-ServerNames -ExistingText 'app01, SQL01' -Names @('sql01', 'dc01') | Should -Be 'app01, SQL01, dc01'
+    }
+}
+
+Describe 'Add-TimelineRows (incremental merge for the window)' {
+    BeforeAll {
+        function New-R { param($Server, $Min, $Log = 'System')
+            [PSCustomObject]@{ Server = $Server; Log = $Log; TimeUtc = ([datetime]'2026-11-17 08:00').AddMinutes($Min); RecordId = $Min } }
+    }
+
+    It 'keeps every row in UTC order as batches arrive and collects the log names' {
+        $store = New-TimelineRowStore
+        Add-TimelineRows -Store $store -NewRows @((New-R 'APP01' 5), (New-R 'APP01' 1))
+        Add-TimelineRows -Store $store -NewRows @((New-R 'SQL01' 3 'Application'), (New-R 'SQL01' 9 'Application'))
+        (@($store.Rows) | ForEach-Object { $_.TimeUtc.Minute }) | Should -Be @(1, 3, 5, 9)
+        @($store.Logs) | Sort-Object | Should -Be @('Application', 'System')
+    }
+
+    It 'merges a 5,000-row batch into 100,000 rows quickly (window responsiveness guard)' {
+        $base = [datetime]'2026-11-17 00:00'
+        $big = foreach ($i in 0..99999) { [PSCustomObject]@{ Server = 'A'; Log = 'System'; TimeUtc = $base.AddSeconds($i * 2); RecordId = $i } }
+        $batch = foreach ($i in 0..4999) { [PSCustomObject]@{ Server = 'B'; Log = 'Application'; TimeUtc = $base.AddSeconds($i * 40 + 1); RecordId = $i } }
+        $store = New-TimelineRowStore
+        Add-TimelineRows -Store $store -NewRows $big
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        Add-TimelineRows -Store $store -NewRows $batch
+        $sw.Elapsed.TotalMilliseconds | Should -BeLessThan 500
+        $store.Rows.Count | Should -Be 105000
+        $store.Rows[1].Server | Should -Be 'B'
+    }
+}
+
+Describe 'Review fixes: wording' {
+    It 'a blank message names the event without blaming a particular machine' {
+        $e = [PSCustomObject]@{ TimeCreatedUtc = [datetime]::SpecifyKind([datetime]'2026-11-17 08:00', 'Utc'); Id = 17883; ProviderName = 'MSSQLSERVER'
+            Level = 2; LogName = 'Application'; Message = $null; RecordId = 1; UserSid = ''; MachineName = 'sql01' }
+        $row = ConvertTo-TimelineRow -Server SQL01 -EventRecord $e -UtcOffsetMinutes 0
+        $row.Message | Should -Be "(No message text: Windows couldn't render the message for event 17883 from MSSQLSERVER. Over the remote event log route this is normal when that software isn't installed on this workstation.)"
+    }
+
+    It 'a done server shows its note (for example an assumed time zone)' {
+        $status = [ordered]@{ 'APP01' = [PSCustomObject]@{ Server = 'APP01'; State = 'Done'; Transport = 'RPC'; Reason = "Couldn't read the time zone; assumed this workstation's."; EventCount = 3; UtcOffsetMinutes = 0; Logs = @() } }
+        @(Get-TimelineStatusLines -Status $status)[0] | Should -Be "APP01: done - 3 events (via remote event log) - Couldn't read the time zone; assumed this workstation's."
     }
 }

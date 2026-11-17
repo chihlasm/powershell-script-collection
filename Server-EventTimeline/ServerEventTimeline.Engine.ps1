@@ -127,7 +127,7 @@ function Invoke-ServerProbe {
 
     $result = [PSCustomObject]@{
         Server = $ComputerName; Reachable = $false; Transport = ''; UtcOffsetMinutes = 0; TimeZoneId = ''
-        Channels = @(); FailureKind = ''; Reason = ''
+        Channels = @(); FailureKind = ''; Reason = ''; Note = ''
     }
 
     $winrmOpen = Test-TcpPortQuick -ComputerName $ComputerName -Port 5985
@@ -160,10 +160,11 @@ function Invoke-ServerProbe {
     }
 
     try {
-        $params = @{ ListLog = '*'; ComputerName = $ComputerName; ErrorAction = 'SilentlyContinue' }
+        $listErrors = $null
+        $params = @{ ListLog = '*'; ComputerName = $ComputerName; ErrorAction = 'SilentlyContinue'; ErrorVariable = 'listErrors' }
         if ($Credential) { $params.Credential = $Credential }
         $result.Channels = @(Get-WinEvent @params | ForEach-Object { [PSCustomObject]@{ Name = $_.LogName; IsEnabled = [bool]$_.IsEnabled; RecordCount = $_.RecordCount } })
-        $result.UtcOffsetMinutes = Get-RpcUtcOffsetMinutes -ComputerName $ComputerName -Credential $Credential
+        if ($result.Channels.Count -eq 0 -and @($listErrors).Count -gt 0) { throw @($listErrors)[0] }
         $result.Reachable = $true
         $result.Transport = 'RPC'
     }
@@ -172,6 +173,16 @@ function Invoke-ServerProbe {
         $result.Reachable = $false
         $result.FailureKind = $kind
         $result.Reason = Get-FailureText -Kind $kind -Server $ComputerName -Detail $_.Exception.Message
+        return $result
+    }
+
+    # The time zone comes over WMI/DCOM, a separate firewall rule from the remote event log. If
+    # it is blocked the logs are still readable: assume this workstation's offset and say so.
+    try { $result.UtcOffsetMinutes = Get-RpcUtcOffsetMinutes -ComputerName $ComputerName -Credential $Credential }
+    catch {
+        $at = if ($WindowStartLocal) { [datetime]$WindowStartLocal } else { Get-Date }
+        $result.UtcOffsetMinutes = [int][TimeZoneInfo]::Local.GetUtcOffset($at).TotalMinutes
+        $result.Note = "Couldn't read this server's time zone (WMI is blocked); assumed the same time zone as this workstation."
     }
     return $result
 }
@@ -304,7 +315,11 @@ function Start-TimelineEngine {
         [scriptblock]$LogScript = $script:DefaultLogTask
     )
 
-    $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $MaxConcurrency)
+    # The pool is twice the dispatch limit: a stopped task whose RPC call can't be interrupted
+    # keeps its runspace until the call returns, and must not starve the tasks behind it (a
+    # queued task waiting for a runspace would otherwise "time out" without ever running).
+    $poolSize = $MaxConcurrency * 2
+    $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $poolSize)
     $pool.Open()
 
     $status = [ordered]@{}
@@ -319,7 +334,7 @@ function Start-TimelineEngine {
         Pool = $pool; Running = New-Object System.Collections.ArrayList; Pending = New-Object System.Collections.ArrayList
         Draining = New-Object System.Collections.ArrayList; Status = $status; Window = $Window
         SelectedLogs = @($SelectedLogs); AllLogs = [bool]$AllLogs; Cap = $Cap; ServerTotalCap = $ServerTotalCap
-        TimeoutSec = $TimeoutSec; MaxConcurrency = $MaxConcurrency; Credential = $Credential
+        TimeoutSec = $TimeoutSec; MaxConcurrency = $MaxConcurrency; PoolSize = $poolSize; Credential = $Credential
         ProbeScript = $ProbeScript; LogScript = $LogScript; Catalog = @(Get-TimelineLogCatalog); Cancelled = $false
         StatusChanged = $true
     }
@@ -337,7 +352,8 @@ function Start-TimelineEngine {
 function Start-PendingTimelineTasks {
     # Starts queued tasks up to MaxConcurrency. The timeout clock starts here, not at queueing.
     param([Parameter(Mandatory)]$Engine)
-    while ($Engine.Pending.Count -gt 0 -and $Engine.Running.Count -lt $Engine.MaxConcurrency) {
+    while ($Engine.Pending.Count -gt 0 -and $Engine.Running.Count -lt $Engine.MaxConcurrency -and
+        ($Engine.Running.Count + $Engine.Draining.Count) -lt $Engine.PoolSize) {
         $task = $Engine.Pending[0]
         $Engine.Pending.RemoveAt(0)
         $script = if ($task.Kind -eq 'Probe') { $Engine.ProbeScript } else { $Engine.LogScript }
@@ -382,6 +398,7 @@ function Complete-TimelineProbe {
     }
     $st.Transport = $Probe.Transport
     $st.UtcOffsetMinutes = [int]$Probe.UtcOffsetMinutes
+    if ($Probe.PSObject.Properties['Note'] -and $Probe.Note) { $st.Reason = [string]$Probe.Note }
     $plan = Get-LogPlan -Probe $Probe -Catalog $Engine.Catalog -SelectedNames $Engine.SelectedLogs -AllLogs $Engine.AllLogs
     foreach ($skip in @($plan.Skipped)) { Set-TimelineLogOutcome -Status $st -Log $skip.Log -Outcome 'Skipped' -Reason $skip.Reason }
     $utc = ConvertTo-UtcWindow -Window $Engine.Window -UtcOffsetMinutes $st.UtcOffsetMinutes
@@ -400,16 +417,23 @@ function Complete-TimelineLog {
     $st = $Engine.Status[$Task.Server]
     if (-not $Result) { Set-TimelineLogOutcome -Status $st -Log $Task.Log -Outcome 'Failed' -Reason 'No answer from the server.'; return }
     $events = @($Result.Events | Where-Object { $_ })
-    $room = $Engine.ServerTotalCap - $st.EventCount
-    $hitTotal = $events.Count -ge $room
-    if ($events.Count -gt $room) { $events = @($events | Select-Object -First ([Math]::Max($room, 0))) }
+    $room = [Math]::Max($Engine.ServerTotalCap - $st.EventCount, 0)
+    $reason = 'stopped at the {0:N0} event total for this server' -f $Engine.ServerTotalCap
+    $outcome = $Result.Outcome
+    $why = $Result.Reason
+    if ($events.Count -gt $room) {
+        # Cut short by the per-server total: never report this log as fully read.
+        $events = @($events | Select-Object -First $room)
+        $outcome = if ($room -gt 0) { 'Capped' } else { 'NotRead' }
+        $why = $reason
+    }
+    $hitTotal = ($st.EventCount + $events.Count) -ge $Engine.ServerTotalCap
 
     foreach ($e in $events) { $Rows.Add((ConvertTo-TimelineRow -Server $Task.Server -EventRecord $e -UtcOffsetMinutes $st.UtcOffsetMinutes)) }
     $st.EventCount += $events.Count
-    Set-TimelineLogOutcome -Status $st -Log $Task.Log -Outcome $Result.Outcome -Count $events.Count -Reason $Result.Reason
+    Set-TimelineLogOutcome -Status $st -Log $Task.Log -Outcome $outcome -Count $events.Count -Reason $why
 
     if ($hitTotal) {
-        $reason = 'stopped at the {0:N0} event total for this server' -f $Engine.ServerTotalCap
         foreach ($p in @($Engine.Pending | Where-Object { $_.Server -eq $Task.Server -and $_.Kind -eq 'Log' })) {
             [void]$Engine.Pending.Remove($p)
             Set-TimelineLogOutcome -Status $st -Log $p.Log -Outcome 'NotRead' -Reason $reason
@@ -476,7 +500,8 @@ function Update-TimelineEngine {
         if ($st.State -ne 'Querying') { continue }
         $busy = @($Engine.Running + $Engine.Pending | Where-Object { $_.Server -eq $st.Server }).Count
         if ($busy -eq 0) {
-            $gaps = @($st.Logs | Where-Object { $_.Outcome -ne 'Read' }).Count
+            # Skipped = the server doesn't have the log or has it turned off: not missing events.
+            $gaps = @($st.Logs | Where-Object { $_.Outcome -notin @('Read', 'Skipped') }).Count
             $st.State = if ($gaps -gt 0) { 'DoneWithGaps' } else { 'Done' }
             $changed = $true
         }

@@ -137,3 +137,46 @@ Describe 'Timeline engine' {
         $script:Engine.Status['srv-fake-01'].Reason | Should -BeLike 'loaded=True path=*ServerEventTimeline.Engine.ps1'
     }
 }
+
+Describe 'Timeline engine: review fixes' {
+    AfterEach {
+        if ($script:Engine) { Close-TimelineEngine -Engine $script:Engine; $script:Engine = $null }
+    }
+
+    It 'marks a log cut short by the server total cap as Capped, even when it is the last log' {
+        $script:Engine = Start-TimelineEngine -Servers @('srv-fake-01') -Window $script:Window -SelectedLogs @('System', 'Application') -ServerTotalCap 3 -MaxConcurrency 1 -ProbeScript $script:OkProbe -LogScript $script:TwoEventLog
+        $null = Wait-Engine -Engine $script:Engine
+        $s = $script:Engine.Status['srv-fake-01']
+        $app = $s.Logs | Where-Object Log -eq 'Application'
+        $app.Outcome | Should -Be 'Capped'
+        $app.Reason | Should -BeLike '*3 event total*'
+        $s.State | Should -Be 'DoneWithGaps'
+        $s.EventCount | Should -Be 3
+    }
+
+    It 'does not count skipped (missing or turned-off) logs as gaps' {
+        $probe = {
+            param($EnginePath, $Server, $Credential, $WindowStartLocal)
+            [PSCustomObject]@{ Server = $Server; Reachable = $true; Transport = 'WinRM'; UtcOffsetMinutes = 0; TimeZoneId = ''; FailureKind = ''; Reason = ''
+                Channels = @([PSCustomObject]@{ Name = 'System'; IsEnabled = $true; RecordCount = 10 }) }
+        }
+        $script:Engine = Start-TimelineEngine -Servers @('srv-fake-01') -Window $script:Window -SelectedLogs @('System', 'Microsoft-Windows-FailoverClustering/Operational') -ProbeScript $probe -LogScript $script:TwoEventLog
+        $null = Wait-Engine -Engine $script:Engine
+        $s = $script:Engine.Status['srv-fake-01']
+        ($s.Logs | Where-Object Log -eq 'Microsoft-Windows-FailoverClustering/Operational').Outcome | Should -Be 'Skipped'
+        $s.State | Should -Be 'Done'
+    }
+
+    It 'a stopped task that is still running does not make queued logs time out' {
+        $log = {
+            param($EnginePath, $Server, $Transport, $LogName, $StartUtc, $EndUtc, $Cap, $Credential)
+            if ($LogName -eq 'System') { [System.Threading.Thread]::Sleep(6000) }
+            [PSCustomObject]@{ Server = $Server; Log = $LogName; Outcome = 'Read'; Count = 0; Events = @(); Reason = '' }
+        }
+        $script:Engine = Start-TimelineEngine -Servers @('srv-fake-01') -Window $script:Window -SelectedLogs @('System', 'Application') -TimeoutSec 2 -MaxConcurrency 1 -ProbeScript $script:OkProbe -LogScript $log
+        $null = Wait-Engine -Engine $script:Engine
+        $s = $script:Engine.Status['srv-fake-01']
+        ($s.Logs | Where-Object Log -eq 'System').Outcome | Should -Be 'TimedOut'
+        ($s.Logs | Where-Object Log -eq 'Application').Outcome | Should -Be 'Read'
+    }
+}
