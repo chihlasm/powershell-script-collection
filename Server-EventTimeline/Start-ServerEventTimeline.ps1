@@ -360,6 +360,14 @@ function Get-TimelineWindowText {
     }
 }
 
+function Invoke-TimelineSearch {
+    <# Starts the background engine for one search request (Run as credential included). #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Request, [string[]]$Logs, [bool]$AllLogs, [pscredential]$Credential)
+    Start-TimelineEngine -Servers $Request.Servers -Window $Request.Window -SelectedLogs $Logs -AllLogs:$AllLogs `
+        -Cap $Request.Cap -TimeoutSec $Request.TimeoutSec -Credential $Credential
+}
+
 function Set-SmokeWindowPosition {
     # Beyond the top-left of the virtual screen, so it renders without being seen or taking focus.
     param([Parameter(Mandatory)]$Window)
@@ -546,8 +554,7 @@ function Show-ServerEventTimeline {
         $ui.Rows = @(); $ui.PendingRows.Clear(); $ui.Reported = @{}; $ui.Request = $req; $ui.Selected = $logs
         $ui.DetailText.Text = 'Select an event to see everything about it here.'
         $ui.Finished = $false
-        $ui.Engine = Start-TimelineEngine -Servers $req.Servers -Window $req.Window -SelectedLogs $logs -AllLogs:([bool]$ui.AllLogsCheck.IsChecked) `
-            -Cap $req.Cap -TimeoutSec $req.TimeoutSec -Credential $ui.Credential
+        $ui.Engine = Invoke-TimelineSearch -Request $req -Logs $logs -AllLogs ([bool]$ui.AllLogsCheck.IsChecked) -Credential $ui.Credential
         Write-TimelineLog INFO ('Searching {0} server(s): {1}. {2}. Logs: {3}{4}' -f $req.Servers.Count, ($req.Servers -join ', '),
             (Get-TimelineWindowText -Window $req.Window), ($logs -join ', '), $(if ($ui.AllLogsCheck.IsChecked) { ' + all logs with events' } else { '' }))
         Set-StatusMessage 'Reading the servers in the background - you can filter and scroll while it works.'
@@ -625,6 +632,65 @@ function Show-ServerEventTimeline {
                     $r.Message
                 ) | Where-Object { $null -ne $_ }) -join [Environment]::NewLine
         })
+    # Run as: prompt for an account; cancelling the prompt goes back to the signed-in account.
+    $ui.RunAsButton.add_Click({
+            if ($ui.Smoke) { return }
+            $cred = $null
+            try { $cred = Get-Credential -Message 'Account to read the servers with (for example DOMAIN\admin). Cancel to use your own account.' }
+            catch { $cred = $null }
+            $ui.Credential = $cred
+            if ($cred) {
+                $ui.RunAsButton.Content = "Run as: $($cred.UserName) (click to change)"
+                Write-TimelineLog INFO "Reading servers as $($cred.UserName)."
+            }
+            else {
+                $ui.RunAsButton.Content = 'Run as another account...'
+                Write-TimelineLog INFO 'Reading servers as the signed-in account.'
+            }
+        })
+
+    # Pick from AD: needs the RSAT ActiveDirectory module (checked without loading it).
+    $adAvailable = [bool](Get-Module -ListAvailable -Name ActiveDirectory -ErrorAction SilentlyContinue)
+    if (-not $adAvailable) {
+        $ui.PickFromAdButton.IsEnabled = $false
+        $ui.PickFromAdButton.ToolTip = 'Needs the RSAT Active Directory tools on this workstation. You can still type server names.'
+        [System.Windows.Controls.ToolTipService]::SetShowOnDisabled($ui.PickFromAdButton, $true)
+    }
+    $adMenu = New-Object System.Windows.Controls.ContextMenu
+    $miDcs = New-Object System.Windows.Controls.MenuItem
+    $miDcs.Header = 'Add all domain controllers'
+    $miFind = New-Object System.Windows.Controls.MenuItem
+    $miFind.Header = 'Find servers by name...'
+    [void]$adMenu.Items.Add($miDcs); [void]$adMenu.Items.Add($miFind)
+    $ui.PickFromAdButton.ContextMenu = $adMenu
+    $ui.PickFromAdButton.add_Click({
+            $adMenu.PlacementTarget = $ui.PickFromAdButton
+            $adMenu.Placement = 'Bottom'
+            $adMenu.IsOpen = $true
+        })
+    $addFromAd = {
+        param([string]$Kind, [string]$Text)
+        $window.Cursor = [System.Windows.Input.Cursors]::Wait
+        try {
+            $names = @(Get-AdServerCandidates -Kind $Kind -SearchText $Text)
+            if ($names.Count -eq 0) { Set-StatusMessage 'Active Directory returned no matching servers.'; return }
+            if ($names.Count -gt 25) {
+                $answer = [System.Windows.MessageBox]::Show("Add $($names.Count) servers to the list?", 'Server Event Timeline', 'YesNo', 'Question')
+                if ($answer -ne 'Yes') { return }
+            }
+            $ui.ServersBox.Text = Add-ServerNames -ExistingText $ui.ServersBox.Text -Names $names
+            Set-StatusMessage "Added $($names.Count) server(s) from Active Directory."
+        }
+        catch { Set-StatusMessage $_.Exception.Message; Write-TimelineLog WARN $_.Exception.Message }
+        finally { $window.Cursor = $null }
+    }
+    $miDcs.add_Click({ & $addFromAd 'DomainControllers' '' })
+    $miFind.add_Click({
+            Add-Type -AssemblyName Microsoft.VisualBasic
+            $text = [Microsoft.VisualBasic.Interaction]::InputBox('Part of the server name (for example SQL or FS):', 'Find servers in Active Directory', '')
+            if ($text) { & $addFromAd 'Search' $text }
+        })
+
     $ui.ExportCsvButton.add_Click({ Invoke-Export -Kind Csv })
     $ui.ExportHtmlButton.add_Click({ Invoke-Export -Kind Html })
     $ui.CopyButton.add_Click({

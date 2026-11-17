@@ -65,3 +65,24 @@ Describe 'Window layout' {
         $headers | Should -Contain 'UTC'
     }
 }
+
+Describe 'Invoke-TimelineSearch' {
+    It 'passes the Run as credential, the window, the logs and the limits to the engine' {
+        Mock Start-TimelineEngine { 'fake-engine' }
+        $cred = New-Object System.Management.Automation.PSCredential ('CONTOSO\admin', (New-Object System.Security.SecureString))
+        $req = [PSCustomObject]@{ Servers = @('srv-fake-01'); Window = (New-TimelineWindow -Mode Relative -LastMinutes 60); Cap = 1234; TimeoutSec = 45 }
+        $engine = Invoke-TimelineSearch -Request $req -Logs @('System', 'Security') -AllLogs $true -Credential $cred
+        $engine | Should -Be 'fake-engine'
+        Should -Invoke Start-TimelineEngine -Times 1 -ParameterFilter {
+            $Credential.UserName -eq 'CONTOSO\admin' -and $Cap -eq 1234 -and $TimeoutSec -eq 45 -and $AllLogs -and
+            ($SelectedLogs -join ',') -eq 'System,Security' -and ($Servers -join ',') -eq 'srv-fake-01'
+        }
+    }
+
+    It 'passes no credential when Run as is not set' {
+        Mock Start-TimelineEngine { 'fake-engine' }
+        $req = [PSCustomObject]@{ Servers = @('srv-fake-01'); Window = (New-TimelineWindow -Mode Relative -LastMinutes 60); Cap = 5000; TimeoutSec = 60 }
+        $null = Invoke-TimelineSearch -Request $req -Logs @('System') -AllLogs $false -Credential $null
+        Should -Invoke Start-TimelineEngine -Times 1 -ParameterFilter { $null -eq $Credential -and -not $AllLogs }
+    }
+}

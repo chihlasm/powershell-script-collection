@@ -425,3 +425,54 @@ Describe 'Status wording' {
         Get-TimelineTimeZoneNote -Status $same | Should -BeNullOrEmpty
     }
 }
+
+Describe 'Get-AdServerCandidates' {
+    BeforeAll {
+        $env:ADPS_LoadDefaultDrive = '0'
+        # Stubs with the real parameter names (verified on Microsoft Learn); functions win over
+        # the real module's cmdlets, so the RSAT module is never loaded and no DC is contacted.
+        function global:Get-ADDomainController { param($Filter, $Server, $Credential) throw 'stub: mock me' }
+        function global:Get-ADComputer { param($Filter, $Properties, $ResultSetSize, $Server, $Credential) throw 'stub: mock me' }
+    }
+    AfterAll {
+        Remove-Item -Path Function:\global:Get-ADDomainController, Function:\global:Get-ADComputer -ErrorAction SilentlyContinue
+    }
+    BeforeEach {
+        Mock Import-Module { } -ParameterFilter { $Name -eq 'ActiveDirectory' }
+    }
+
+    It 'explains when the ActiveDirectory module is missing' {
+        Mock Import-Module { throw 'not found' } -ParameterFilter { $Name -eq 'ActiveDirectory' }
+        { Get-AdServerCandidates -Kind DomainControllers } | Should -Throw -ExpectedMessage '*ActiveDirectory module*'
+    }
+
+    It 'returns every domain controller host name, falling back to the name' {
+        Mock Get-ADDomainController { @([PSCustomObject]@{ HostName = 'dc01.contoso.local'; Name = 'DC01' }, [PSCustomObject]@{ HostName = $null; Name = 'DC02' }) }
+        @(Get-AdServerCandidates -Kind DomainControllers) | Should -Be @('dc01.contoso.local', 'DC02')
+        Should -Invoke Get-ADDomainController -Times 1 -ParameterFilter { $Filter -eq '*' }
+    }
+
+    It 'finds servers whose name contains the text, at most 200' {
+        Mock Get-ADComputer { @([PSCustomObject]@{ DNSHostName = 'sql01.contoso.local'; Name = 'SQL01' }, [PSCustomObject]@{ DNSHostName = $null; Name = 'SQL02' }) }
+        @(Get-AdServerCandidates -Kind Search -SearchText 'sql') | Should -Be @('sql01.contoso.local', 'SQL02')
+        Should -Invoke Get-ADComputer -Times 1 -ParameterFilter {
+            $Filter -like "*Name -like '*sql*'*" -and $Filter -like "*OperatingSystem -like '*Server*'*" -and $ResultSetSize -eq 200 -and $Properties -contains 'DNSHostName'
+        }
+    }
+
+    It 'escapes a quote in the search text' {
+        Mock Get-ADComputer { @() }
+        $null = Get-AdServerCandidates -Kind Search -SearchText "o'brien"
+        Should -Invoke Get-ADComputer -Times 1 -ParameterFilter { $Filter -like "*o''brien*" }
+    }
+
+    It 'needs search text for a search' {
+        { Get-AdServerCandidates -Kind Search -SearchText '  ' } | Should -Throw -ExpectedMessage '*part of the server name*'
+    }
+}
+
+Describe 'Add-ServerNames' {
+    It 'adds new names after the existing ones without duplicates' {
+        Add-ServerNames -ExistingText 'app01, SQL01' -Names @('sql01', 'dc01') | Should -Be 'app01, SQL01, dc01'
+    }
+}
