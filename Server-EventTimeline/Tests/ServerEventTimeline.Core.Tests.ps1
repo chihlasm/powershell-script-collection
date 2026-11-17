@@ -552,3 +552,54 @@ Describe 'This computer' {
         @(Get-TimelineStatusLines -Status $status)[0] | Should -Be 'WS01: done - 7 events (this computer, read directly)'
     }
 }
+
+Describe 'Get-LogSelectionSummary' {
+    It 'lists two logs by name' {
+        Get-LogSelectionSummary -Labels @('System', 'Application') | Should -Be 'System, Application'
+    }
+    It 'shortens a long selection' {
+        $labels = @('System', 'Application') + @(1..8 | ForEach-Object { "Log $_" })
+        Get-LogSelectionSummary -Labels $labels | Should -Be 'System, Application + 8 more'
+    }
+    It 'says when nothing is selected' {
+        Get-LogSelectionSummary -Labels @() | Should -Be 'No logs selected'
+    }
+    It 'mentions all logs' {
+        Get-LogSelectionSummary -Labels @() -AllLogs | Should -Be 'All logs with events'
+        Get-LogSelectionSummary -Labels @('System') -AllLogs | Should -Be 'System + all logs with events'
+    }
+}
+
+Describe 'Save folder settings' {
+    It 'reads nothing from a missing settings file' {
+        (Read-TimelineSettings -Path (Join-Path $TestDrive 'none\settings.json')).SaveFolder | Should -BeNullOrEmpty
+    }
+
+    It 'reads nothing from a damaged settings file' {
+        $p = Join-Path $TestDrive 'bad.json'
+        Set-Content -LiteralPath $p -Value '{ not json'
+        (Read-TimelineSettings -Path $p).SaveFolder | Should -BeNullOrEmpty
+    }
+
+    It 'remembers the save folder' {
+        $p = Join-Path $TestDrive 'cfg\settings.json'
+        Save-TimelineSettings -Path $p -SaveFolder 'D:\Tickets\INC1'
+        (Read-TimelineSettings -Path $p).SaveFolder | Should -Be 'D:\Tickets\INC1'
+    }
+
+    It 'uses -OutputPath first, then the remembered folder, then the default' {
+        $remembered = Join-Path $TestDrive 'remembered'
+        New-Item -ItemType Directory -Path $remembered | Out-Null
+        Resolve-TimelineOutputFolder -OutputPath 'E:\Given' -Remembered $remembered -Default 'C:\Default' | Should -Be 'E:\Given'
+        Resolve-TimelineOutputFolder -OutputPath '' -Remembered $remembered -Default 'C:\Default' | Should -Be $remembered
+        Resolve-TimelineOutputFolder -OutputPath '' -Remembered '' -Default 'C:\Default' | Should -Be 'C:\Default'
+    }
+
+    It 'falls back to the default when the remembered folder is gone' {
+        Resolve-TimelineOutputFolder -OutputPath '' -Remembered (Join-Path $TestDrive 'gone') -Default 'C:\Default' | Should -Be 'C:\Default'
+    }
+
+    It 'keeps the settings under the user profile application data' {
+        Get-TimelineSettingsPath | Should -BeLike '*ServerEventTimeline*settings.json'
+    }
+}

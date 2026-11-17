@@ -673,3 +673,51 @@ function Add-ServerNames {
     $all = @(ConvertTo-ServerList -Text (($ExistingText, ($Names -join ',')) -join ','))
     return ($all -join ', ')
 }
+
+function Get-LogSelectionSummary {
+    <# The text on the closed logs dropdown, e.g. "System, Application + 8 more". #>
+    [CmdletBinding()]
+    param([string[]]$Labels, [switch]$AllLogs)
+    $picked = @($Labels | Where-Object { $_ })
+    if ($picked.Count -eq 0) { if ($AllLogs) { return 'All logs with events' }; return 'No logs selected' }
+    $text = if ($picked.Count -le 2) { $picked -join ', ' } else { '{0}, {1} + {2} more' -f $picked[0], $picked[1], ($picked.Count - 2) }
+    if ($AllLogs) { $text += ' + all logs with events' }
+    return $text
+}
+
+function Get-TimelineSettingsPath {
+    <# Per-user settings (the remembered save folder). Nothing is stored beside the script. #>
+    $root = if ($env:APPDATA) { $env:APPDATA } else { $env:LOCALAPPDATA }
+    Join-Path $root 'ServerEventTimeline\settings.json'
+}
+
+function Read-TimelineSettings {
+    <# The remembered settings; empty when the file is missing or damaged. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+    $empty = [PSCustomObject]@{ SaveFolder = $null }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $empty }
+    try {
+        $data = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        return [PSCustomObject]@{ SaveFolder = [string]$data.SaveFolder }
+    }
+    catch { return $empty }
+}
+
+function Save-TimelineSettings {
+    <# Remembers the save folder for next time. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path, [string]$SaveFolder)
+    $dir = Split-Path -Parent $Path
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    @{ SaveFolder = $SaveFolder } | ConvertTo-Json | Set-Content -LiteralPath $Path -Encoding UTF8
+}
+
+function Resolve-TimelineOutputFolder {
+    <# Where exports go: -OutputPath if given, else the remembered folder if it still exists, else the default. #>
+    [CmdletBinding()]
+    param([string]$OutputPath, [string]$Remembered, [Parameter(Mandatory)][string]$Default)
+    if ($OutputPath) { return $OutputPath }
+    if ($Remembered -and (Test-Path -LiteralPath $Remembered -PathType Container)) { return $Remembered }
+    return $Default
+}

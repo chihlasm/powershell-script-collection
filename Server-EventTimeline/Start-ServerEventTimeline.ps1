@@ -33,7 +33,9 @@
     127.0.0.1) is always read directly from its own logs: no WinRM or network needed.
 
 .PARAMETER OutputPath
-    Folder for CSV/HTML exports and the activity log. Default: Reports beside this script.
+    Folder for CSV/HTML exports and the activity log. Without it, the folder chosen last time
+    with Browse... (remembered per user in %APPDATA%\ServerEventTimeline\settings.json) is
+    used, else a Reports folder beside this script. You can also change it in the window.
 
 .PARAMETER SmokeTest
     Opens the window off-screen, checks it built correctly, prints a [PASS] or [FAIL] line,
@@ -228,11 +230,43 @@ function New-TimelineWindowXaml {
         </StackPanel>
         <StackPanel Grid.Column="2">
           <TextBlock Style="{StaticResource Label}" Text="WHICH LOGS?"/>
-          <WrapPanel x:Name="LogPanel"/>
-          <WrapPanel>
-            <CheckBox x:Name="SecurityCheck" Content="Security (slow on DCs and file servers)"/>
-            <CheckBox x:Name="AllLogsCheck" Content="All logs with events (slow)"/>
-          </WrapPanel>
+          <ToggleButton x:Name="LogsButton" HorizontalAlignment="Left" MinWidth="340" Foreground="{StaticResource Text}" Cursor="Hand" ToolTip="Choose which logs to read">
+            <ToggleButton.Template>
+              <ControlTemplate TargetType="ToggleButton">
+                <Border x:Name="b" Background="{StaticResource Input}" BorderBrush="{StaticResource LineStrong}" BorderThickness="1" CornerRadius="3" Padding="8,5">
+                  <DockPanel>
+                    <TextBlock DockPanel.Dock="Right" Text="v" Foreground="{StaticResource Muted}" Margin="12,0,0,0" VerticalAlignment="Center"/>
+                    <ContentPresenter VerticalAlignment="Center"/>
+                  </DockPanel>
+                </Border>
+                <ControlTemplate.Triggers>
+                  <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="{StaticResource Accent}"/></Trigger>
+                  <Trigger Property="IsChecked" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="{StaticResource Accent}"/></Trigger>
+                </ControlTemplate.Triggers>
+              </ControlTemplate>
+            </ToggleButton.Template>
+          </ToggleButton>
+          <Popup x:Name="LogsPopup" PlacementTarget="{Binding ElementName=LogsButton}" Placement="Bottom" StaysOpen="False"
+                 AllowsTransparency="True" IsOpen="{Binding IsChecked, ElementName=LogsButton, Mode=TwoWay}">
+            <Border Background="{StaticResource Card}" BorderBrush="{StaticResource LineStrong}" BorderThickness="1" CornerRadius="3" Padding="14,12" Width="480" Margin="0,4,0,0">
+              <StackPanel>
+                <TextBlock Style="{StaticResource Label}" Text="EVERYDAY"/>
+                <UniformGrid x:Name="CoreLogPanel" Columns="2" Margin="0,0,0,8"/>
+                <TextBlock Style="{StaticResource Label}" Text="EXTRA DETAIL"/>
+                <UniformGrid x:Name="LogPanel" Columns="2" Margin="0,0,0,8"/>
+                <TextBlock Style="{StaticResource Label}" Text="SLOW - TICK WHEN YOU NEED THEM"/>
+                <UniformGrid Columns="2" Margin="0,0,0,10">
+                  <CheckBox x:Name="SecurityCheck" Content="Security" ToolTip="Slow on domain controllers and file servers"/>
+                  <CheckBox x:Name="AllLogsCheck" Content="All logs with events" ToolTip="Every log on the server that has events (can be 100+ logs)"/>
+                </UniformGrid>
+                <StackPanel Orientation="Horizontal">
+                  <Button x:Name="LogsAllButton" Content="All" ToolTip="Tick every log listed here (not 'All logs with events')"/>
+                  <Button x:Name="LogsNoneButton" Content="None"/>
+                  <Button x:Name="LogsDefaultButton" Content="Default" ToolTip="Everyday and extra detail logs; Security off"/>
+                </StackPanel>
+              </StackPanel>
+            </Border>
+          </Popup>
           <Expander Header="More options" Foreground="{StaticResource Muted}" Margin="0,4,0,0">
             <WrapPanel Margin="0,8,0,0">
               <TextBlock Text="Stop each log at" VerticalAlignment="Center" Margin="0,0,6,0"/>
@@ -337,14 +371,22 @@ function New-TimelineWindowXaml {
              Text="Select an event to see everything about it here."/>
 
     <!-- Get it into the ticket -->
-    <DockPanel Grid.Row="6" Margin="0,10,0,0" LastChildFill="True">
-      <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
-        <Button x:Name="ExportCsvButton" Content="Export CSV" IsEnabled="False" ToolTip="Save the rows you can see as a CSV file"/>
-        <Button x:Name="ExportHtmlButton" Content="Export HTML report" IsEnabled="False" ToolTip="Save a report with the rows you can see and how each server went"/>
-        <Button x:Name="CopyButton" Content="Copy selected rows" IsEnabled="False" ToolTip="Copy the selected rows as text for a ticket note"/>
-      </StackPanel>
-      <TextBlock x:Name="StatusMessage" VerticalAlignment="Center" Margin="8,0,0,0" Foreground="{StaticResource Muted}" TextTrimming="CharacterEllipsis"/>
-    </DockPanel>
+    <StackPanel Grid.Row="6" Margin="0,10,0,0">
+      <DockPanel LastChildFill="True" Margin="0,0,0,8">
+        <TextBlock DockPanel.Dock="Left" Text="Save reports to:" VerticalAlignment="Center" Margin="0,0,8,0" Foreground="{StaticResource Muted}"/>
+        <Button x:Name="OpenFolderButton" DockPanel.Dock="Right" Content="Open folder" Margin="8,0,0,0" ToolTip="Open this folder in File Explorer"/>
+        <Button x:Name="BrowseFolderButton" DockPanel.Dock="Right" Content="Browse..." Margin="8,0,0,0" ToolTip="Pick the folder for exports (remembered for next time)"/>
+        <TextBox x:Name="SaveFolderBox" ToolTip="Folder for CSV and HTML exports and the activity log. Created on the first export if it doesn't exist."/>
+      </DockPanel>
+      <DockPanel LastChildFill="True">
+        <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
+          <Button x:Name="ExportCsvButton" Content="Export CSV" IsEnabled="False" ToolTip="Save the rows you can see as a CSV file"/>
+          <Button x:Name="ExportHtmlButton" Content="Export HTML report" IsEnabled="False" ToolTip="Save a report with the rows you can see and how each server went"/>
+          <Button x:Name="CopyButton" Content="Copy selected rows" IsEnabled="False" ToolTip="Copy the selected rows as text for a ticket note"/>
+        </StackPanel>
+        <TextBlock x:Name="StatusMessage" VerticalAlignment="Center" Margin="8,0,0,0" Foreground="{StaticResource Muted}" TextTrimming="CharacterEllipsis"/>
+      </DockPanel>
+    </StackPanel>
   </Grid>
 </Window>
 '@
@@ -384,7 +426,13 @@ function Set-SmokeWindowPosition {
 function Show-ServerEventTimeline {
     <# Opens the window. Returns the exit code (smoke test: 0 pass, 1 fail; otherwise 0). #>
     [CmdletBinding()]
-    param([string[]]$ComputerName, [Parameter(Mandatory)][string]$OutputPath, [switch]$SmokeTest)
+    param(
+        [string[]]$ComputerName,
+        [string]$OutputPath,
+        [Parameter(Mandatory)][string]$DefaultOutputPath,
+        [string]$SettingsPath = (Get-TimelineSettingsPath),
+        [switch]$SmokeTest
+    )
 
     Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
@@ -396,7 +444,8 @@ function Show-ServerEventTimeline {
         OutputPath = $OutputPath; LogFile = $null; Credential = $null; LogChecks = @(); ExitCode = 0
         Request = $null; Selected = @()
     }
-    foreach ($name in 'ThisComputerButton', 'ServersBox', 'AroundRadio', 'RangeRadio', 'AtBox', 'PlusMinusCombo', 'FromBox', 'ToBox', 'LastHourButton',
+    foreach ($name in 'LogsButton', 'LogsPopup', 'CoreLogPanel', 'LogsAllButton', 'LogsNoneButton', 'LogsDefaultButton',
+        'SaveFolderBox', 'BrowseFolderButton', 'OpenFolderButton', 'ThisComputerButton', 'ServersBox', 'AroundRadio', 'RangeRadio', 'AtBox', 'PlusMinusCombo', 'FromBox', 'ToBox', 'LastHourButton',
         'Last24Button', 'LogPanel', 'SecurityCheck', 'AllLogsCheck', 'CapBox', 'TimeoutBox', 'RunAsButton', 'PickFromAdButton',
         'SearchButton', 'CancelButton', 'InputError', 'StatusList', 'BannerText', 'TimeZoneNote', 'LevelFilter', 'ServerFilter',
         'LogFilter', 'FlaggedOnlyCheck', 'FilterText', 'CountText', 'EventGrid', 'DetailText', 'ExportCsvButton', 'ExportHtmlButton',
@@ -440,10 +489,75 @@ function Show-ServerEventTimeline {
     foreach ($log in @(Get-TimelineLogCatalog | Where-Object { $_.Group -ne 'Security' })) {
         $cb = New-Object System.Windows.Controls.CheckBox
         $cb.Content = $log.Label; $cb.Tag = $log.Name; $cb.IsChecked = [bool]$log.Default; $cb.ToolTip = $log.Name
-        [void]$ui.LogPanel.Children.Add($cb)
+        if ($log.Group -eq 'Core') { [void]$ui.CoreLogPanel.Children.Add($cb) } else { [void]$ui.LogPanel.Children.Add($cb) }
         [void]$checks.Add($cb)
     }
     $ui.LogChecks = $checks.ToArray()
+    $ui.LogDefaults = @{}
+    foreach ($log in @(Get-TimelineLogCatalog)) { $ui.LogDefaults[$log.Name] = [bool]$log.Default }
+
+    function Update-LogsSummary {
+        $labels = @($ui.LogChecks | Where-Object { $_.IsChecked } | ForEach-Object { [string]$_.Content })
+        if ($ui.SecurityCheck.IsChecked) { $labels += 'Security' }
+        $ui.LogsButton.Content = Get-LogSelectionSummary -Labels $labels -AllLogs:([bool]$ui.AllLogsCheck.IsChecked)
+    }
+    foreach ($cb in @($ui.LogChecks) + @($ui.SecurityCheck, $ui.AllLogsCheck)) { $cb.add_Click({ Update-LogsSummary }) }
+    $ui.LogsAllButton.add_Click({
+            foreach ($cb in $ui.LogChecks) { $cb.IsChecked = $true }
+            $ui.SecurityCheck.IsChecked = $true
+            Update-LogsSummary
+        })
+    $ui.LogsNoneButton.add_Click({
+            foreach ($cb in $ui.LogChecks) { $cb.IsChecked = $false }
+            $ui.SecurityCheck.IsChecked = $false; $ui.AllLogsCheck.IsChecked = $false
+            Update-LogsSummary
+        })
+    $ui.LogsDefaultButton.add_Click({
+            foreach ($cb in $ui.LogChecks) { $cb.IsChecked = [bool]$ui.LogDefaults[[string]$cb.Tag] }
+            $ui.SecurityCheck.IsChecked = $false; $ui.AllLogsCheck.IsChecked = $false
+            Update-LogsSummary
+        })
+    # Clicking the dropdown button while the list is open: the list closes on mouse-down,
+    # so ignore the click that would immediately reopen it.
+    $ui.LogsClosedAt = [datetime]::MinValue
+    $ui.LogsPopup.add_Closed({ $ui.LogsClosedAt = Get-Date })
+    $ui.LogsButton.add_PreviewMouseLeftButtonDown({
+            if (((Get-Date) - $ui.LogsClosedAt).TotalMilliseconds -lt 250) { $_.Handled = $true }
+        })
+    Update-LogsSummary
+
+    # Where exports go: -OutputPath, else the folder remembered from last time, else Reports.
+    $remembered = if ($ui.Smoke) { '' } else { (Read-TimelineSettings -Path $SettingsPath).SaveFolder }
+    $ui.OutputPath = Resolve-TimelineOutputFolder -OutputPath $OutputPath -Remembered $remembered -Default $DefaultOutputPath
+    $ui.SaveFolderBox.Text = $ui.OutputPath
+    function Sync-SaveFolder {
+        $typed = $ui.SaveFolderBox.Text.Trim()
+        $folder = if ($typed) { $typed } else { $DefaultOutputPath }
+        if ($folder -ne $ui.OutputPath) { $ui.OutputPath = $folder; $ui.LogFile = $null }
+        if (-not $typed) { $ui.SaveFolderBox.Text = $folder }
+    }
+    $ui.SaveFolderBox.add_LostFocus({ Sync-SaveFolder })
+    $ui.BrowseFolderButton.add_Click({
+            if ($ui.Smoke) { return }
+            Add-Type -AssemblyName System.Windows.Forms
+            $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+            $dialog.Description = 'Folder for Server Event Timeline exports'
+            $dialog.ShowNewFolderButton = $true
+            if (Test-Path -LiteralPath $ui.OutputPath -PathType Container) { $dialog.SelectedPath = $ui.OutputPath }
+            if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+                $ui.SaveFolderBox.Text = $dialog.SelectedPath
+                Sync-SaveFolder
+                try { Save-TimelineSettings -Path $SettingsPath -SaveFolder $ui.OutputPath } catch { }
+                Set-StatusMessage "Exports will be saved to $($ui.OutputPath)"
+            }
+            $dialog.Dispose()
+        })
+    $ui.OpenFolderButton.add_Click({
+            if ($ui.Smoke) { return }
+            Sync-SaveFolder
+            if (Test-Path -LiteralPath $ui.OutputPath -PathType Container) { Start-Process -FilePath explorer.exe -ArgumentList "`"$($ui.OutputPath)`"" }
+            else { Set-StatusMessage "That folder doesn't exist yet. It's created on the first export." }
+        })
 
     foreach ($lv in @(@('All levels', 'All'), @('Warnings and worse', 'Warning'), @('Errors and worse', 'Error'), @('Critical only', 'Critical'))) {
         $item = New-Object System.Windows.Controls.ComboBoxItem
@@ -581,6 +695,7 @@ function Show-ServerEventTimeline {
     function Invoke-Export {
         param([ValidateSet('Csv', 'Html')][string]$Kind)
         if ($ui.Smoke) { [void]$ui.SmokeFailures.Add('an export would have been written'); return }
+        Sync-SaveFolder
         $rows = @($ui.EventGrid.ItemsSource)
         try {
             if (-not (Test-Path -LiteralPath $ui.OutputPath)) { New-Item -ItemType Directory -Path $ui.OutputPath -Force | Out-Null }
@@ -595,6 +710,7 @@ function Show-ServerEventTimeline {
             }
             Write-TimelineLog PASS "Saved $($rows.Count) rows to $path"
             Set-StatusMessage "Saved: $path"
+            try { Save-TimelineSettings -Path $SettingsPath -SaveFolder $ui.OutputPath } catch { }
         }
         catch {
             Write-TimelineLog FAIL "Couldn't save the $Kind file: $($_.Exception.Message)"
@@ -774,13 +890,15 @@ function Show-ServerEventTimeline {
 
 if ($LoadFunctionsOnly) { return }
 
-if (-not $OutputPath) { $OutputPath = Join-Path $PSScriptRoot 'Reports' }
+$defaultOutputPath = Join-Path $PSScriptRoot 'Reports'
 
 # WPF needs an STA thread. Windows PowerShell and pwsh start STA by default, but a host can be
 # MTA: relaunch in an STA process with the same parameters.
 if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Threading.ApartmentState]::STA) {
     $exe = (Get-Process -Id $PID).Path
-    $relaunch = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', "`"$PSCommandPath`"", '-OutputPath', "`"$OutputPath`"")
+    $relaunch = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', "`"$PSCommandPath`"")
+    # A trailing backslash would escape the closing quote on the command line.
+    if ($OutputPath) { $relaunch += @('-OutputPath', "`"$($OutputPath.TrimEnd('\'))`"") }
     if ($ComputerName) { $relaunch += @('-ComputerName', ($ComputerName -join ',')) }
     if ($SmokeTest) {
         $relaunch += '-SmokeTest'
@@ -792,7 +910,7 @@ if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Thr
 }
 
 try {
-    $code = Show-ServerEventTimeline -ComputerName $ComputerName -OutputPath $OutputPath -SmokeTest:$SmokeTest
+    $code = Show-ServerEventTimeline -ComputerName $ComputerName -OutputPath $OutputPath -DefaultOutputPath $defaultOutputPath -SmokeTest:$SmokeTest
     exit ([int](@($code)[-1]))
 }
 catch {

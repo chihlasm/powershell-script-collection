@@ -25,8 +25,11 @@ logs (local admin, or a member of **Event Log Readers**, on each server).
    **From ... to ...**, or press **Last hour** / **Last 24 hours** to search right away.
    **The time is each server's local time**: "03:00" means 03:00 on each server, which is
    what the client says and what Event Viewer on the server shows.
-3. **Which logs?** System, Application and a set of useful extra logs are ticked by default
-   (below). **Security** and **All logs** are off by default because they are slow.
+3. **Which logs?** Click the logs box to open the list. It's grouped as **Everyday**
+   (System, Application), **Extra detail** (the useful extra logs below) and **Slow**
+   (Security, All logs with events). Everyday and extra detail are ticked by default;
+   **All**, **None** and **Default** buttons reset the list quickly. The closed box sums
+   up the choice, e.g. *System, Application + 8 more*.
 4. Press **Search**. Each server is read in the background. Rows appear as servers finish,
    and you can scroll and filter while it works. **Cancel** stops at once and keeps what was
    read.
@@ -34,6 +37,10 @@ logs (local admin, or a member of **Event Log Readers**, on each server).
    only**, or search the message, source or event ID.
 6. Click a row to see everything about the event. Then **Export CSV**, **Export HTML report**,
    or **Copy selected rows** to paste into the ticket.
+7. **Save reports to:** shows where exports go. Type a folder or press **Browse...** (for
+   example the ticket's folder). The folder is remembered for next time, per user, in
+   `%APPDATA%\ServerEventTimeline\settings.json`. **Open folder** shows it in File Explorer.
+   `-OutputPath` on the command line overrides it for that run.
 
 ## The logs
 
@@ -132,7 +139,7 @@ own account.
 - `Start-ServerEventTimeline.ps1`: the window (run this)
 - `ServerEventTimeline.Core.ps1`: logic: times, logs, flags, filters, exports
 - `ServerEventTimeline.Engine.ps1`: reading servers in the background
-- `Reports\` (beside the script, or `-OutputPath`): exports and an activity log,
+- The save folder (default `Reports\` beside the script; see step 7): exports and an activity log,
   `ServerEventTimeline_yyyy-MM-dd_HHmmss.*`. These contain client data: don't commit or
   sync them.
 
