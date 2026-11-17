@@ -260,3 +260,172 @@ function Merge-TimelineRows {
     param([object[]]$Rows)
     @($Rows | Sort-Object -Property TimeUtc, Server, RecordId)
 }
+
+$script:MinLevelSets = @{
+    All      = $null
+    Warning  = @(1, 2, 3)
+    Error    = @(1, 2)
+    Critical = @(1)
+}
+
+function Test-RowMatchesFilter {
+    <#
+        True when the row passes the grid's filters. Filter keys: MinLevel (All | Warning |
+        Error | Critical), Server ('*' or a name), Log ('*' or a name), FlaggedOnly, Text
+        (literal, case-insensitive, matched against message, provider and event ID).
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Row, [Parameter(Mandatory)][hashtable]$Filter)
+
+    $levels = $script:MinLevelSets[[string]$Filter.MinLevel]
+    if ($null -ne $levels -and $levels -notcontains [int]$Row.Level) { return $false }
+    if ($Filter.Server -and $Filter.Server -ne '*' -and $Row.Server -ne $Filter.Server) { return $false }
+    if ($Filter.Log -and $Filter.Log -ne '*' -and $Row.Log -ne $Filter.Log) { return $false }
+    if ($Filter.FlaggedOnly -and -not $Row.Flag) { return $false }
+
+    $text = [string]$Filter.Text
+    if ($text) {
+        $hay = '{0}|{1}|{2}' -f $Row.EventId, $Row.Provider, $Row.Message
+        if ($hay.IndexOf($text, [StringComparison]::OrdinalIgnoreCase) -lt 0) { return $false }
+    }
+    return $true
+}
+
+function ConvertTo-TimelineText {
+    <# Plain text lines for pasting into a ticket note. #>
+    [CmdletBinding()]
+    param([object[]]$Rows)
+
+    $lines = foreach ($r in $Rows) {
+        '{0} (server local) | {1} | {2} | {3} | {4} | {5}' -f $r.TimeServerLocal.ToString('yyyy-MM-dd HH:mm:ss'),
+            $r.Server, $r.LevelName, $r.Provider, $r.EventId, $r.MessageFirstLine
+    }
+    return ($lines -join [Environment]::NewLine)
+}
+
+function Export-TimelineCsv {
+    <# The visible rows as CSV, with both the server-local and UTC times. #>
+    [CmdletBinding()]
+    param([object[]]$Rows, [Parameter(Mandatory)][string]$Path)
+
+    $Rows | ForEach-Object {
+        [PSCustomObject]@{
+            TimeServerLocal = $_.TimeServerLocal.ToString('yyyy-MM-dd HH:mm:ss')
+            TimeUtc         = $_.TimeUtc.ToString('yyyy-MM-dd HH:mm:ss')
+            Server          = $_.Server
+            Log             = $_.Log
+            Level           = $_.LevelName
+            Flag            = $_.Flag
+            Provider        = $_.Provider
+            EventId         = $_.EventId
+            Message         = $_.Message
+            RecordId        = $_.RecordId
+            User            = $_.User
+            Machine         = $_.Machine
+        }
+    } | Export-Csv -Path $Path -NoTypeInformation -Encoding UTF8
+}
+
+function ConvertTo-TimelineHtml {
+    <#
+        A self-contained HTML report: what was asked, how each server went (failures, caps,
+        timeouts, skipped logs), then the rows. Every piece of text is HTML-encoded.
+    #>
+    [CmdletBinding()]
+    param([object[]]$Rows, [Parameter(Mandatory)][hashtable]$Context)
+
+    $e = { param($s) [System.Net.WebUtility]::HtmlEncode([string]$s) }
+    $sb = New-Object System.Text.StringBuilder
+
+    [void]$sb.Append(@'
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Server Event Timeline</title>
+<style>
+:root{--bg:#14171c;--panel:#1c2027;--text:#e6e8eb;--muted:#9aa3ad;--line:#2c323b;--accent:#5dade2;--err:#e5534b;--warn:#d4a72c}
+@media (prefers-color-scheme: light){:root{--bg:#f6f7f9;--panel:#fff;--text:#1d232b;--muted:#5c6773;--line:#dde1e6;--accent:#1f78b4;--err:#c8312b;--warn:#9a6b00}}
+body{margin:0;padding:24px;background:var(--bg);color:var(--text);font:14px/1.45 "Segoe UI",system-ui,sans-serif}
+h1{font-size:22px;margin:0 0 4px}h2{font-size:16px;margin:24px 0 8px;color:var(--accent)}
+.meta{color:var(--muted)}table{border-collapse:collapse;width:100%;background:var(--panel)}
+th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
+th{color:var(--muted);font-weight:600}.l1,.l2{color:var(--err)}.l3{color:var(--warn)}
+.flag{color:var(--accent);font-weight:600}td.msg{white-space:pre-wrap;word-break:break-word}
+</style></head><body>
+<h1>Server Event Timeline</h1>
+'@)
+    [void]$sb.AppendFormat('<p class="meta">{0}<br>Servers: {1}<br>Logs: {2}<br>Filters: {3}<br>Made {4}</p>',
+        (& $e $Context.WindowText), (& $e (@($Context.Servers) -join ', ')), (& $e (@($Context.Logs) -join ', ')),
+        (& $e $Context.FiltersText), (& $e ([datetime]$Context.GeneratedAt).ToString('yyyy-MM-dd HH:mm:ss')))
+
+    [void]$sb.Append('<h2>How each server went</h2><table><tr><th>Server</th><th>Result</th><th>Details</th></tr>')
+    foreach ($o in @($Context.ServerOutcomes)) {
+        $details = New-Object System.Collections.Generic.List[string]
+        if ($o.Reason) { $details.Add([string]$o.Reason) }
+        if ($o.Transport) { $details.Add("Read via $($o.Transport)") }
+        foreach ($l in @($o.Logs | Where-Object { $_.Outcome -ne 'Read' })) {
+            $details.Add(('{0}: {1} {2}' -f $l.Log, $l.Outcome, $l.Reason).Trim())
+        }
+        [void]$sb.AppendFormat('<tr><td>{0}</td><td>{1} ({2} events)</td><td>{3}</td></tr>',
+            (& $e $o.Server), (& $e $o.State), (& $e $o.EventCount), ((@($details) | ForEach-Object { & $e $_ }) -join '<br>'))
+    }
+    [void]$sb.Append('</table>')
+
+    [void]$sb.AppendFormat('<h2>Events ({0})</h2><table><tr><th>Time (server local)</th><th>UTC</th><th>Server</th><th>Log</th><th>Level</th><th>Flag</th><th>Source</th><th>ID</th><th>Message</th></tr>', @($Rows).Count)
+    foreach ($r in $Rows) {
+        [void]$sb.AppendFormat('<tr><td>{0}</td><td>{1}</td><td>{2}</td><td>{3}</td><td class="l{4}">{5}</td><td class="flag">{6}</td><td>{7}</td><td>{8}</td><td class="msg">{9}</td></tr>',
+            $r.TimeServerLocal.ToString('yyyy-MM-dd HH:mm:ss'), $r.TimeUtc.ToString('yyyy-MM-dd HH:mm:ss'), (& $e $r.Server), (& $e $r.Log),
+            [int]$r.Level, (& $e $r.LevelName), (& $e $r.Flag), (& $e $r.Provider), (& $e $r.EventId), (& $e $r.Message))
+    }
+    [void]$sb.Append('</table></body></html>')
+    return $sb.ToString()
+}
+
+function Get-RemoteFailureKind {
+    <#
+        AccessDenied, Connection or Other. Connection failures are the only ones worth retrying
+        over the remote event log (RPC); access denied would be denied there too.
+        Codes: ERROR_ACCESS_DENIED = 5, RPC_S_SERVER_UNAVAILABLE = 1722 (0x6BA),
+        RPC_S_CALL_FAILED_DNE = 1727 (0x6BF).
+        https://learn.microsoft.com/troubleshoot/entra/entra-id/user-prov-sync/rpc-errors-affecting-aadconnect
+        https://learn.microsoft.com/troubleshoot/windows-server/active-directory/status-code-0x6ba-rpc-server-unavailable
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord)
+
+    $ex = $ErrorRecord.Exception
+    $chain = @()
+    while ($ex) { $chain += $ex; $ex = $ex.InnerException }
+
+    $accessHResult = [int]0x80070005
+    $rpcHResults = @([int]0x800706BA, [int]0x800706BF)
+
+    foreach ($x in $chain) {
+        if ($x -is [UnauthorizedAccessException] -or $x.HResult -eq $accessHResult) { return 'AccessDenied' }
+        if ($x -is [System.Management.Automation.Remoting.PSRemotingTransportException] -and $x.ErrorCode -eq 5) { return 'AccessDenied' }
+    }
+    if ($ErrorRecord.FullyQualifiedErrorId -like '*AccessDenied*') { return 'AccessDenied' }
+
+    foreach ($x in $chain) {
+        if ($x -is [System.Management.Automation.Remoting.PSRemotingTransportException]) { return 'Connection' }
+        if ($rpcHResults -contains $x.HResult) { return 'Connection' }
+        if ($x -is [System.Net.Sockets.SocketException]) { return 'Connection' }
+    }
+    return 'Other'
+}
+
+function Get-FailureText {
+    <# Plain-English failure wording with the next step. #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('AccessDenied', 'Connection', 'Other', 'Unreachable', 'TimedOut')][string]$Kind,
+        [Parameter(Mandatory)][string]$Server,
+        [string]$Detail
+    )
+
+    switch ($Kind) {
+        'AccessDenied' { "Access denied on ${Server}: check you're an admin there, or use Run as." }
+        'Connection'   { "Couldn't connect to ${Server}" + $(if ($Detail) { ": $Detail" } else { '.' }) }
+        'Unreachable'  { 'WinRM and remote event log are both unreachable from here.' }
+        'TimedOut'     { "${Server} didn't answer in time." }
+        default        { "Something went wrong reading ${Server}" + $(if ($Detail) { ": $Detail" } else { '.' }) }
+    }
+}
