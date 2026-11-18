@@ -78,7 +78,7 @@ function Find-ServerSuggestions {
     $ci = [StringComparison]::OrdinalIgnoreCase
     $starts = New-Object System.Collections.Generic.List[object]
     $contains = New-Object System.Collections.Generic.List[object]
-    foreach ($e in @($Directory | Where-Object { $_ -and $_.Enabled -and $_.IsServer } | Sort-Object DnsName)) {
+    foreach ($e in (Get-DirectoryCache -Directory $Directory).Servers) {
         if ($e.Name.StartsWith($t, $ci) -or $e.DnsName.StartsWith($t, $ci)) { $starts.Add($e) }
         elseif ($e.DnsName.IndexOf($t, $ci) -ge 0) { $contains.Add($e) }
     }
@@ -158,18 +158,40 @@ function Add-ServerListItems {
     return $added.ToArray()
 }
 
+# One index per loaded directory (the same array is passed around until the next load), so a
+# lookup is a dictionary hit, not a pass over thousands of accounts on the UI thread.
+$script:DirectoryCache = $null
+
+function Get-DirectoryCache {
+    <# DNS-name and short-name indexes, and the enabled servers sorted by name, for a directory. #>
+    param([object[]]$Directory)
+    if ($null -eq $Directory) { $Directory = [object[]]@() }
+    if ($script:DirectoryCache -and [object]::ReferenceEquals($script:DirectoryCache.Directory, $Directory)) { return $script:DirectoryCache }
+    $byDns = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::OrdinalIgnoreCase)
+    $byShort = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::OrdinalIgnoreCase)
+    $servers = New-Object System.Collections.Generic.List[object]
+    foreach ($e in $Directory) {
+        if ($null -eq $e) { continue }
+        if ($e.DnsName -and -not $byDns.ContainsKey($e.DnsName)) { $byDns[$e.DnsName] = $e }
+        if ($e.Name -and -not $byShort.ContainsKey($e.Name)) { $byShort[$e.Name] = $e }
+        if ($e.Enabled -and $e.IsServer) { $servers.Add($e) }
+    }
+    $script:DirectoryCache = [PSCustomObject]@{
+        Directory = $Directory; ByDns = $byDns; ByShort = $byShort
+        Servers = [object[]](Get-SortedByName -Items $servers.ToArray() -Property 'DnsName'); Count = $byShort.Count
+    }
+    return $script:DirectoryCache
+}
+
 function Find-DirectoryEntry {
     <# The AD entry for a name (short or DNS name, any case), or $null. #>
     [CmdletBinding()]
     param([object[]]$Directory, [string]$Name)
-    foreach ($e in @($Directory | Where-Object { $_ })) {
-        if ([string]::Equals($e.DnsName, $Name, 'OrdinalIgnoreCase')) { return $e }
-    }
-    if ($Name.IndexOf('.') -lt 0) {
-        foreach ($e in @($Directory | Where-Object { $_ })) {
-            if ([string]::Equals($e.Name, $Name, 'OrdinalIgnoreCase')) { return $e }
-        }
-    }
+    if (-not $Name) { return $null }
+    $cache = Get-DirectoryCache -Directory $Directory
+    $hit = $null
+    if ($cache.ByDns.TryGetValue($Name, [ref]$hit)) { return $hit }
+    if ($Name.IndexOf('.') -lt 0 -and $cache.ByShort.TryGetValue($Name, [ref]$hit)) { return $hit }
     return $null
 }
 
@@ -189,6 +211,7 @@ function Update-ServerListNote {
         $Item.Display = $Item.Name; $Item.SearchName = $Item.Name
         if ($null -eq $Lookup) { & $set '' 'Info'; $Item.Lookup = 'Pending'; return }
         $Item.Lookup = 'Done'
+        if ($Lookup.TimedOut) { & $set "IP · DNS didn't answer" 'Info'; return }
         if (-not [string]$Lookup.PtrName) { & $set 'IP · no name found' 'Info'; return }
         if (-not $Lookup.ForwardMatches) { & $set "IP · name doesn't match" 'Warn'; return }
         $Item.Display = '{0} → {1}' -f $Item.Name, $Lookup.PtrName
@@ -199,7 +222,7 @@ function Update-ServerListNote {
     }
 
     if ($null -ne $Lookup) { $Item.Lookup = 'Done' }
-    $loaded = @($Directory | Where-Object { $_ }).Count -gt 0
+    $loaded = (Get-DirectoryCache -Directory $Directory).Count -gt 0
     $entry = Find-DirectoryEntry -Directory $Directory -Name $Item.Name
     if ($entry) {
         if ($entry.IsDC) { & $set 'domain controller' 'Info' }
@@ -271,6 +294,9 @@ function Read-ServerListFile {
 $script:DefaultDirectoryLoader = {
     param($ListPath, $Server, $Credential)
     . $ListPath
+    # Without this the module first mounts an AD: drive against this computer's own domain,
+    # which off that network waits for a timeout before the chosen domain is even asked.
+    $env:ADPS_LoadDefaultDrive = '0'
     Import-Module ActiveDirectory -ErrorAction Stop
     $common = @{ ErrorAction = 'Stop' }
     if ($Server) { $common.Server = $Server }
@@ -285,28 +311,63 @@ $script:DefaultDirectoryLoader = {
 
 # Reverse lookup for an IP, then a forward lookup of that name: the name is only trusted when
 # it gives back the same IP (a stale PTR record must never search the wrong server). For a
-# name, just whether DNS knows it.
+# name, just whether DNS knows it. Every name is looked up at once, and each stage gives up
+# after -TimeoutMs: a VPN that drops DNS answers must not leave rows at "checking..." for
+# minutes. -Resolver (Kind 'Entry' or 'Addresses', Value) returns a Task; the default is the
+# async System.Net.Dns calls. Unanswered names come back with TimedOut.
 $script:DefaultNameLookup = {
-    param($Names)
-    foreach ($n in @($Names)) {
+    param($Names, $Resolver, [int]$TimeoutMs = 3000)
+    if (-not $Resolver) {
+        $Resolver = {
+            param($Kind, $Value)
+            if ($Kind -eq 'Entry') { [System.Net.Dns]::GetHostEntryAsync([string]$Value) } else { [System.Net.Dns]::GetHostAddressesAsync([string]$Value) }
+        }
+    }
+    $start = {
+        param($Kind, $Value)
+        # A resolver that throws becomes a failed task (TaskCompletionSource: 5.1 can't call generic Task.FromException).
+        try { & $Resolver $Kind $Value } catch { $tcs = New-Object 'System.Threading.Tasks.TaskCompletionSource[object]'; [void]$tcs.TrySetException($_.Exception); $tcs.Task }
+    }
+    $waitAll = {
+        param($Tasks)
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        foreach ($task in $Tasks) {
+            if ($null -eq $task) { continue }
+            $left = [math]::Max(0, $TimeoutMs - [int]$sw.ElapsedMilliseconds)
+            try { [void]$task.Wait($left) } catch { }
+        }
+    }
+    $ok = { param($task) $task -and $task.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion }
+
+    $rows = foreach ($n in @($Names | Where-Object { $_ })) {
         $ip = $null
-        if ([System.Net.IPAddress]::TryParse($n, [ref]$ip) -and ($n -match '^\d{1,3}(\.\d{1,3}){3}$' -or $n -match ':')) {
-            $ptr = ''; $match = $false
-            try { $ptr = [string][System.Net.Dns]::GetHostEntry($ip).HostName } catch { $ptr = '' }
-            if ($ptr -and $ptr -ne $n) {
-                try { $match = @([System.Net.Dns]::GetHostAddresses($ptr) | Where-Object { $_.Equals($ip) }).Count -gt 0 } catch { $match = $false }
-            }
-            else { $ptr = '' }
-            @{ Name = $n; IsIp = $true; PtrName = $ptr; ForwardMatches = $match }
+        $isIp = [System.Net.IPAddress]::TryParse($n, [ref]$ip) -and ($n -match '^\d{1,3}(\.\d{1,3}){3}$' -or $n -match ':')
+        [PSCustomObject]@{ Name = $n; IsIp = $isIp; Ip = $ip; First = (& $start $(if ($isIp) { 'Entry' } else { 'Addresses' }) $n); Second = $null; Ptr = '' }
+    }
+    $rows = @($rows)
+    & $waitAll @($rows | ForEach-Object First)
+
+    foreach ($r in $rows) {
+        if ($r.IsIp -and (& $ok $r.First)) {
+            $ptr = [string]$r.First.Result.HostName
+            if ($ptr -and $ptr -ne $r.Name) { $r.Ptr = $ptr; $r.Second = & $start 'Addresses' $ptr }
+        }
+    }
+    & $waitAll @($rows | Where-Object { $_.Second } | ForEach-Object Second)
+
+    foreach ($r in $rows) {
+        if ($r.IsIp) {
+            $timedOut = -not $r.First.IsCompleted -or ($r.Second -and -not $r.Second.IsCompleted)
+            $match = $false
+            if (& $ok $r.Second) { $match = @($r.Second.Result | Where-Object { $_.Equals($r.Ip) }).Count -gt 0 }
+            @{ Name = $r.Name; IsIp = $true; PtrName = $(if ($timedOut) { '' } else { $r.Ptr }); ForwardMatches = $match -and -not $timedOut; TimedOut = [bool]$timedOut }
         }
         else {
-            $ok = $false
-            try { $ok = @([System.Net.Dns]::GetHostAddresses($n)).Count -gt 0 } catch { $ok = $false }
-            @{ Name = $n; IsIp = $false; Resolves = $ok }
+            $resolves = (& $ok $r.First) -and @($r.First.Result).Count -gt 0
+            @{ Name = $r.Name; IsIp = $false; Resolves = [bool]$resolves; TimedOut = -not $r.First.IsCompleted }
         }
     }
 }
-
 function Start-BackgroundScript {
     # One script in a runspace of its own; the window's heartbeat collects it, never waits.
     param([Parameter(Mandatory)][scriptblock]$Script, [hashtable]$Parameters)
@@ -336,6 +397,26 @@ function Receive-BackgroundScript {
     finally { $ps.Dispose() }
 }
 
+function Stop-BackgroundJob {
+    <# Asks a background job to stop, without waiting (a blocked AD or DNS call may not stop at once). #>
+    param($Job)
+    if ($null -eq $Job -or $Job.PSObject.Properties['Disposed']) { return }
+    try { [void]$Job.PowerShell.BeginStop($null, $null) } catch { }
+}
+
+function Clear-FinishedJobs {
+    <# Disposes the jobs in the list that have ended (finished, failed or stopped) and removes them. #>
+    param([Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[object]]$Jobs)
+    for ($i = $Jobs.Count - 1; $i -ge 0; $i--) {
+        $job = $Jobs[$i]
+        $state = [string]$job.PowerShell.InvocationStateInfo.State
+        if ($job.Handle.IsCompleted -or $state -in @('Completed', 'Failed', 'Stopped')) {
+            try { $job.PowerShell.Dispose() } catch { }
+            $job | Add-Member -NotePropertyName Disposed -NotePropertyValue $true -Force
+            $Jobs.RemoveAt($i)
+        }
+    }
+}
 function Start-DirectoryLoad {
     <#
         Starts reading the computer accounts of a domain in the background. -Server is a domain
@@ -383,7 +464,7 @@ function Get-DirectoryServerCount {
     <# How many enabled servers the loaded directory holds (what suggestions draw from). #>
     [CmdletBinding()]
     param([object[]]$Directory)
-    return @($Directory | Where-Object { $_ -and $_.Enabled -and $_.IsServer }).Count
+    return @((Get-DirectoryCache -Directory $Directory).Servers).Count
 }
 
 function Get-DomainLineText {
@@ -435,13 +516,14 @@ function Find-DirectoryServers {
     param([object[]]$Directory, [AllowEmptyString()][string]$Text, [ValidateSet('All', 'DomainControllers', 'OU')][string]$Scope = 'All', [string]$OU)
     $t = ([string]$Text).Trim()
     $ci = [StringComparison]::OrdinalIgnoreCase
-    $hits = @($Directory | Where-Object {
-            $_ -and $_.Enabled -and $_.IsServer -and
-            (-not $t -or $_.DnsName.IndexOf($t, $ci) -ge 0 -or $_.Name.IndexOf($t, $ci) -ge 0) -and
-            ($Scope -ne 'DomainControllers' -or $_.IsDC) -and
-            ($Scope -ne 'OU' -or ($OU -and ([string]::Equals($_.OU, $OU, $ci) -or $_.OU.EndsWith(",$OU", $ci))))
-        })
-    return Get-SortedByName -Items $hits
+    $hits = New-Object System.Collections.Generic.List[object]
+    foreach ($e in (Get-DirectoryCache -Directory $Directory).Servers) {
+        if ($t -and $e.DnsName.IndexOf($t, $ci) -lt 0 -and $e.Name.IndexOf($t, $ci) -lt 0) { continue }
+        if ($Scope -eq 'DomainControllers' -and -not $e.IsDC) { continue }
+        if ($Scope -eq 'OU' -and -not ($OU -and ([string]::Equals($e.OU, $OU, $ci) -or $e.OU.EndsWith(",$OU", $ci)))) { continue }
+        $hits.Add($e)
+    }
+    return Get-SortedByName -Items $hits.ToArray()
 }
 
 function New-AddCandidate {
@@ -457,6 +539,7 @@ function New-AddCandidate {
 
     if (Test-IpAddress -Text $Name) {
         if ($null -eq $Lookup) { return (& $row 'checking...' 'Info' $true) }
+        if ($Lookup.TimedOut) { return (& $row "IP · DNS didn't answer" 'Info' $true) }
         if (-not [string]$Lookup.PtrName) { return (& $row 'IP · no name found' 'Info' $true) }
         if (-not $Lookup.ForwardMatches) { return (& $row "IP · name doesn't match" 'Warn' $true) }
         return (& $row ('IP · is {0}' -f $Lookup.PtrName) 'Info' $true)
@@ -469,5 +552,6 @@ function New-AddCandidate {
     }
     if ($null -eq $Lookup) { return (& $row 'checking...' 'Info' $true) }
     if ($Lookup.Resolves) { return (& $row 'found in DNS' 'Info' $true) }
+    if ($Lookup.TimedOut) { return (& $row 'no answer from DNS' 'Info' $true) }
     return (& $row 'not found in AD or DNS' 'Warn' $false)
 }

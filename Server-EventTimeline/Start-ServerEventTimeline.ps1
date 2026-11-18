@@ -783,6 +783,24 @@ function Set-SmokeWindowPosition {
     $Window.Top = [System.Windows.SystemParameters]::VirtualScreenTop - $Window.Height - 200
 }
 
+function Register-ServerInputPaste {
+    <#
+        A one-line TextBox keeps only the first line of a paste, so a column of servers pasted
+        from Excel or a ticket would silently become one. A paste with line breaks is taken
+        over here and handed to -OnNames whole; a one-line paste is left to the box.
+          https://learn.microsoft.com/dotnet/api/system.windows.dataobject.addpastinghandler
+    #>
+    param([Parameter(Mandatory)][System.Windows.Controls.TextBox]$TextBox, [Parameter(Mandatory)][scriptblock]$OnNames)
+    $handler = [System.Windows.DataObjectPastingEventHandler] {
+        param($source, $e)
+        if (-not $e.DataObject.GetDataPresent([System.Windows.DataFormats]::UnicodeText)) { return }
+        $text = [string]$e.DataObject.GetData([System.Windows.DataFormats]::UnicodeText)
+        if ($text.IndexOf("`n") -lt 0 -and $text.IndexOf("`r") -lt 0) { return }
+        $e.CancelCommand()
+        & $OnNames $text
+    }.GetNewClosure()
+    [System.Windows.DataObject]::AddPastingHandler($TextBox, $handler)
+}
 function Copy-TimelineRows {
     <#
         Puts the rows on the clipboard as text and returns the status line to show. Never
@@ -1464,6 +1482,11 @@ function Show-ServerEventTimeline {
     $ui.ServerInput.add_TextChanged({ $ui.ServerInputHint.Visibility = if ($ui.ServerInput.Text) { 'Collapsed' } else { 'Visible' } })
     $ui.ServerInput.add_KeyDown({ param($s, $e) if ($e.Key -eq 'Return') { $e.Handled = $true; & $addTyped } })
     $ui.AddServerButton.add_Click({ & $addTyped })
+    Register-ServerInputPaste -TextBox $ui.ServerInput -OnNames {
+        param($Text)
+        $added = @(Add-ServersToList -Names @($Text))
+        Set-StatusMessage ('Added {0} pasted server(s) to the list.' -f $added.Count)
+    }
 
     # The x on a row removes that server.
     $ui.ServerList.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, [System.Windows.RoutedEventHandler] {
@@ -1491,11 +1514,14 @@ function Show-ServerEventTimeline {
     # collects the load and the DNS lookups. A load started before the domain or Run as account
     # changed is thrown away (its generation is old).
     $ui.DirectoryGeneration = 0; $ui.DirectoryJob = $null; $ui.DirectoryState = 'NoDomain'
+    $ui.RetiredJobs = New-Object System.Collections.Generic.List[object]
     $ui.Lookups = @{}; $ui.LookupJob = $null; $ui.LookupQueue = New-Object System.Collections.Generic.List[string]
     $ui.AdTarget = if ($ui.Smoke) { '' } else { [string](Read-TimelineSettings -Path $SettingsPath).AdTarget }
     $ui.AdAvailable = [bool](Get-Module -ListAvailable -Name ActiveDirectory -ErrorAction SilentlyContinue)
     function Start-WindowDirectoryLoad {
         $ui.DirectoryGeneration++
+        # A load for the old domain or account: stop it and let the heartbeat dispose of it.
+        if ($ui.DirectoryJob) { Stop-BackgroundJob -Job $ui.DirectoryJob; $ui.RetiredJobs.Add($ui.DirectoryJob); $ui.DirectoryJob = $null }
         $ui.Directory = @(); $ui.LoadedDomain = ''
         if ($ui.Smoke -or -not $ui.AdAvailable) {
             $ui.DirectoryState = 'NoDomain'; $ui.DomainText.Text = Get-DomainLineText -State NoDomain
@@ -1565,11 +1591,9 @@ function Show-ServerEventTimeline {
     }
     $ui.ChangeDomainButton.add_Click({
             if ($ui.Smoke) { return }
-            Add-Type -AssemblyName Microsoft.VisualBasic
-            $text = [Microsoft.VisualBasic.Interaction]::InputBox("Domain or domain controller to read servers from (leave empty for this computer's domain):",
-                'Suggestions from', $ui.AdTarget)
-            # InputBox returns '' for Cancel as well as for an empty answer; only a change reloads.
-            $text = $text.Trim()
+            # $null = Cancel (nothing changes); '' = this computer's domain.
+            $text = Show-DomainPrompt -Owner $window -Current $ui.AdTarget
+            if ($null -eq $text) { return }
             if ($text -eq $ui.AdTarget) { return }
             $ui.AdTarget = $text
             try { Save-TimelineSettings -Path $SettingsPath -AdTarget $text } catch { }
@@ -1640,6 +1664,7 @@ function Show-ServerEventTimeline {
                 # The server list's background work runs whether or not a search is.
                 Receive-WindowDirectoryLoad
                 Receive-WindowLookups
+                if ($ui.RetiredJobs.Count -gt 0) { Clear-FinishedJobs -Jobs $ui.RetiredJobs }
                 if (-not $ui.Engine -or $ui.Finished) { return }
                 $u = Update-TimelineEngine -Engine $ui.Engine
                 foreach ($r in @($u.NewRows)) { $ui.PendingRows.Add($r) }
@@ -1666,7 +1691,9 @@ function Show-ServerEventTimeline {
             $timer.Stop()
             if ($ui.Engine) { Close-TimelineEngine -Engine $ui.Engine }
             # A slow AD or DNS call must not hold the window open: ask it to stop, don't wait.
-            foreach ($job in @($ui.DirectoryJob, $ui.LookupJob)) { if ($job) { try { [void]$job.PowerShell.BeginStop($null, $null) } catch { } } }
+            # (The process then exits with [Environment]::Exit, which doesn't wait for it either.)
+            foreach ($job in @($ui.DirectoryJob, $ui.LookupJob)) { Stop-BackgroundJob -Job $job }
+            foreach ($job in $ui.RetiredJobs.ToArray()) { Stop-BackgroundJob -Job $job }
         })
 
     if ($ui.Smoke) {
@@ -1750,7 +1777,10 @@ if (-not $ownProcess -or [System.Threading.Thread]::CurrentThread.GetApartmentSt
 
 try {
     $code = Show-ServerEventTimeline -ComputerName $ComputerName -OutputPath $OutputPath -DefaultOutputPath $defaultOutputPath -SmokeTest:$SmokeTest
-    exit ([int](@($code)[-1]))
+    # This process exists only for the window (see the relaunch above). A background AD or DNS
+    # call blocked in .NET keeps a foreground thread alive, so a plain exit would leave the
+    # hidden process running until that call times out; Environment.Exit ends it now.
+    [Environment]::Exit([int](@($code)[-1]))
 }
 catch {
     Write-Host "[FAIL] Server Event Timeline could not start its window: $($_.Exception.Message)" -ForegroundColor Red

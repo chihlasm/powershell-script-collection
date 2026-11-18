@@ -191,7 +191,7 @@ function Show-AddServersDialog {
     $d = @{
         Rows = New-Object 'System.Collections.ObjectModel.ObservableCollection[object]'
         Lookups = @{}; Job = $null; Queue = New-Object System.Collections.Generic.List[string]
-        ShowOS = $false; PasteDirty = $false; LastKey = [Diagnostics.Stopwatch]::StartNew()
+        ShowOS = $false; PasteDirty = $false; FindDirty = $false; LastKey = [Diagnostics.Stopwatch]::StartNew()
         FilePath = ''; Result = @()
         Loaded = $DirectoryState -eq 'Loaded'
     }
@@ -277,7 +277,7 @@ function Show-AddServersDialog {
         foreach ($x in 'FindBox', 'ScopeAll', 'ScopeDcs', 'ScopeOu') { $c[$x].IsEnabled = $false }
     }
     else { $c.OuCombo.ItemsSource = @(Get-DirectoryOUs -Directory $Directory) }
-    $c.FindBox.add_TextChanged({ & $runFind })
+    # Search once typing pauses, like Paste: a big domain shouldn't redraw on every key.
     foreach ($rb in @($c.ScopeAll, $c.ScopeDcs, $c.ScopeOu)) { $rb.add_Checked({ $c.OuCombo.IsEnabled = [bool]$c.ScopeOu.IsChecked; & $runFind }) }
     $c.OuCombo.add_SelectionChanged({ & $runFind })
 
@@ -321,6 +321,10 @@ function Show-AddServersDialog {
                 $d.PasteDirty = $false
                 & $setResults (& $pasteNames) $false
             }
+            if ($d.FindDirty -and $d.LastKey.ElapsedMilliseconds -ge 300 -and $c.Tabs.SelectedItem -eq $c.FindTab) {
+                $d.FindDirty = $false
+                & $runFind
+            }
             if ($d.Job) {
                 $r = Receive-NameLookups -Job $d.Job
                 if ($null -ne $r) {
@@ -333,10 +337,74 @@ function Show-AddServersDialog {
     $tick.Start()
     $dlg.add_Closing({
             $tick.Stop()
-            if ($d.Job) { try { [void]$d.Job.PowerShell.BeginStop($null, $null) } catch { } }
+            # Stop the DNS job; dispose of it now if it has already ended.
+            if ($d.Job) {
+                Stop-BackgroundJob -Job $d.Job
+                $left = New-Object System.Collections.Generic.List[object]; $left.Add($d.Job)
+                Clear-FinishedJobs -Jobs $left
+            }
         })
     $dlg.add_ContentRendered({ $c.PasteBox.Focus() })
 
     [void]$dlg.ShowDialog()
     return @($d.Result)
+}
+
+function Show-DomainPrompt {
+    <#
+        Asks which domain (or domain controller) suggestions come from. Returns the name typed
+        on OK, '' for "Use this computer's domain", and $null for Cancel - which must change
+        nothing (the old InputBox returned '' for Cancel and lost the client domain).
+    #>
+    param($Owner, [string]$Current)
+    Add-Type -AssemblyName PresentationFramework
+    $xaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Suggestions from" Width="440" SizeToContent="Height" ResizeMode="NoResize"
+        Background="#16181D" Foreground="#D7DCE3" FontFamily="Segoe UI" FontSize="13"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+  <Window.Resources>
+    <Style TargetType="Button">
+      <Setter Property="Background" Value="#232731"/><Setter Property="Foreground" Value="#D7DCE3"/>
+      <Setter Property="BorderBrush" Value="#343A46"/><Setter Property="Padding" Value="12,6"/>
+      <Setter Property="Margin" Value="8,0,0,0"/><Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="b" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1" CornerRadius="3" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="#2C313D"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="b" Property="Background" Value="#1B1F27"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Window.Resources>
+  <StackPanel Margin="16">
+    <TextBlock TextWrapping="Wrap" Margin="0,0,0,8"
+               Text="Which domain should server names be suggested from? Type a domain (for example client.local) or one of its domain controllers."/>
+    <TextBox x:Name="DomainBox" Background="#0F1115" Foreground="#D7DCE3" BorderBrush="#5DADE2" CaretBrush="#D7DCE3" Padding="6,4"/>
+    <DockPanel Margin="0,14,0,0" LastChildFill="False">
+      <Button x:Name="ThisDomainButton" DockPanel.Dock="Left" Margin="0" Content="Use this computer's domain"/>
+      <Button x:Name="CancelButton" DockPanel.Dock="Right" Content="Cancel" IsCancel="True"/>
+      <Button x:Name="OkButton" DockPanel.Dock="Right" Content="OK" IsDefault="True" Background="#2A7AB0" BorderBrush="#2A7AB0" Foreground="White" FontWeight="SemiBold"/>
+    </DockPanel>
+  </StackPanel>
+</Window>
+'@
+    $w = [System.Windows.Markup.XamlReader]::Parse($xaml)
+    if ($Owner) { $w.Owner = $Owner }
+    $box = $w.FindName('DomainBox')
+    $box.Text = $Current
+    $answer = @{ Value = $null }
+    $w.FindName('OkButton').add_Click({ $answer.Value = $box.Text.Trim(); $w.DialogResult = $true })
+    $w.FindName('ThisDomainButton').add_Click({ $answer.Value = ''; $w.DialogResult = $true })
+    $w.FindName('CancelButton').add_Click({ $w.DialogResult = $false })
+    $w.add_ContentRendered({ $box.Focus(); $box.SelectAll() })
+    [void]$w.ShowDialog()
+    return $answer.Value
 }

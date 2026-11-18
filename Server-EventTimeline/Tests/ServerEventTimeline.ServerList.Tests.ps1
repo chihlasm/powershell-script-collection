@@ -371,3 +371,94 @@ Describe 'Add several servers: finding and checking' {
         (New-AddCandidate -Name 'PRNT-01' -Directory $script:Big -Lookup $null).Note | Should -Be 'checking...'
     }
 }
+
+Describe 'Speed on a real-sized domain (review finding: the dialog froze for 30-45 s)' {
+    BeforeAll {
+        $script:Huge = [object[]]@(for ($i = 0; $i -lt 5000; $i++) {
+                [PSCustomObject]@{ Name = "SRV$i"; DnsName = "SRV$i.contoso.local"; OS = $(if ($i % 10) { 'Windows 11 Pro' } else { 'Windows Server 2022' })
+                    Enabled = $true; IsServer = -not ($i % 10); IsDC = $false; DaysSinceLogon = 3; DistinguishedName = "CN=SRV$i,OU=A,DC=c"; OU = 'OU=A,DC=c' }
+            })
+    }
+
+    It 'checks 500 names against 5,000 accounts in under 3 seconds' {
+        $names = @(for ($i = 0; $i -lt 5000; $i += 10) { "SRV$i.contoso.local" })
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        foreach ($n in $names) { $null = New-AddCandidate -Name $n -Directory $script:Huge -Lookup $null }
+        $sw.Elapsed.TotalSeconds | Should -BeLessThan 3
+    }
+
+    It 'suggests from 5,000 accounts 20 times in under 2 seconds (one keystroke each)' {
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        for ($k = 0; $k -lt 20; $k++) { $null = Find-ServerSuggestions -Directory $script:Huge -Recent @() -Text "srv$k" -Max 8 }
+        $sw.Elapsed.TotalSeconds | Should -BeLessThan 2
+    }
+
+    It 'notes 50 rows against 5,000 accounts in under 1 second' {
+        $items = @(for ($i = 0; $i -lt 50; $i++) { New-ServerListItem -Name "SRV$($i * 10)" -LocalNames @('X') })
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        foreach ($it in $items) { Update-ServerListNote -Item $it -Directory $script:Huge -LoadedDomain 'contoso.local' -Lookup $null }
+        $sw.Elapsed.TotalSeconds | Should -BeLessThan 1
+        $items[0].Note | Should -Be 'Windows Server 2022'
+    }
+}
+
+Describe 'DNS lookups give up after a few seconds (review finding: no timeout)' {
+    BeforeAll {
+        # A fake resolver: answers at once for known names, never for SLOW* (like a VPN that drops DNS).
+        $script:FakeResolver = {
+            param($Kind, $Value)
+            if ($Value -like 'SLOW*' -or $Value -eq '10.9.9.9') { return (New-Object 'System.Threading.Tasks.TaskCompletionSource[object]').Task }
+            if ($Kind -eq 'Entry') { $h = New-Object System.Net.IPHostEntry; $h.HostName = 'SQL01.contoso.local'; return [System.Threading.Tasks.Task]::FromResult([object]$h) }
+            if ($Value -eq 'SQL01.contoso.local') { return [System.Threading.Tasks.Task]::FromResult([object][System.Net.IPAddress[]]@([System.Net.IPAddress]::Parse('10.0.4.21'))) }
+            if ($Value -eq 'NAS01') { return [System.Threading.Tasks.Task]::FromResult([object][System.Net.IPAddress[]]@([System.Net.IPAddress]::Parse('10.0.5.5'))) }
+            throw (New-Object System.Net.Sockets.SocketException 11001)
+        }
+    }
+
+    It 'answers the quick names and marks the slow ones as timed out, without waiting for them' {
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $r = @(& $script:DefaultNameLookup -Names @('10.0.4.21', 'NAS01', 'NOPE', 'SLOW01', '10.9.9.9') -Resolver $script:FakeResolver -TimeoutMs 300)
+        $sw.Elapsed.TotalSeconds | Should -BeLessThan 2
+        $map = @{}; foreach ($x in $r) { $map[$x.Name] = $x }
+        $map['10.0.4.21'].PtrName | Should -Be 'SQL01.contoso.local'
+        $map['10.0.4.21'].ForwardMatches | Should -BeTrue
+        $map['NAS01'].Resolves | Should -BeTrue
+        $map['NOPE'].Resolves | Should -BeFalse
+        $map['NOPE'].TimedOut | Should -BeFalse
+        $map['SLOW01'].TimedOut | Should -BeTrue
+        $map['10.9.9.9'].TimedOut | Should -BeTrue
+    }
+
+    It 'says DNS did not answer, rather than "not found", and keeps the server ticked' {
+        $c = New-AddCandidate -Name 'SLOW01' -Directory @() -Lookup ([PSCustomObject]@{ IsIp = $false; Resolves = $false; TimedOut = $true })
+        $c.Note | Should -Be 'no answer from DNS'; $c.Ticked | Should -BeTrue
+        $i = New-AddCandidate -Name '10.9.9.9' -Directory @() -Lookup ([PSCustomObject]@{ IsIp = $true; PtrName = ''; ForwardMatches = $false; TimedOut = $true })
+        $i.Note | Should -Be "IP · DNS didn't answer"; $i.Ticked | Should -BeTrue
+        $row = New-ServerListItem -Name '10.9.9.9' -LocalNames @('X')
+        Update-ServerListNote -Item $row -Directory @() -LoadedDomain '' -Lookup ([PSCustomObject]@{ IsIp = $true; PtrName = ''; ForwardMatches = $false; TimedOut = $true })
+        $row.Note | Should -Be "IP · DNS didn't answer"
+        $row.SearchName | Should -Be '10.9.9.9'
+    }
+}
+
+Describe 'Background jobs are stopped and cleaned up (review finding: leaked runspaces)' {
+    It 'stops a running job and disposes it once it has ended' {
+        $job = Start-BackgroundScript -Script { Start-Sleep -Seconds 30 } -Parameters @{}
+        $retired = New-Object System.Collections.Generic.List[object]
+        Stop-BackgroundJob -Job $job
+        $retired.Add($job)
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        while ($retired.Count -gt 0 -and $sw.Elapsed.TotalSeconds -lt 10) { Clear-FinishedJobs -Jobs $retired; Start-Sleep -Milliseconds 50 }
+        $retired.Count | Should -Be 0
+        $job.Disposed | Should -BeTrue
+    }
+
+    It 'keeps a job that is still running' {
+        $job = Start-BackgroundScript -Script { Start-Sleep -Seconds 30 } -Parameters @{}
+        $list = New-Object System.Collections.Generic.List[object]
+        $list.Add($job)
+        Clear-FinishedJobs -Jobs $list
+        $list.Count | Should -Be 1
+        Stop-BackgroundJob -Job $job
+    }
+}

@@ -407,3 +407,72 @@ Describe 'Add several servers dialog, driven end to end (off-screen, fake DNS)' 
         $result -join ',' | Should -Be 'FS01,10.0.4.21'
     }
 }
+
+Describe 'Pasting several servers into the one-line server box' {
+    # Review finding: a one-line TextBox drops everything after the first line break of a paste,
+    # so 10 servers pasted from a column became 1. The paste is taken over when it has lines.
+    BeforeAll {
+        function Invoke-FakePaste {
+            param($Box, [string]$Text)
+            $data = New-Object System.Windows.DataObject ([System.Windows.DataFormats]::UnicodeText, $Text)
+            $e = New-Object System.Windows.DataObjectPastingEventArgs ($data, $false, [System.Windows.DataFormats]::UnicodeText)
+            $Box.RaiseEvent($e)
+            $e
+        }
+    }
+
+    It 'hands every pasted line to the list and cancels the one-line paste' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        Add-Type -AssemblyName PresentationFramework
+        $box = New-Object System.Windows.Controls.TextBox
+        $got = New-Object System.Collections.ArrayList
+        Register-ServerInputPaste -TextBox $box -OnNames { param($Text) [void]$got.Add($Text) }.GetNewClosure()
+        $e = Invoke-FakePaste -Box $box -Text "FS01, FS02`r`nFS03`nFS04"
+        $got.Count | Should -Be 1
+        $got[0] | Should -Be "FS01, FS02`r`nFS03`nFS04"
+        $e.CommandCancelled | Should -BeTrue
+    }
+
+    It 'leaves a one-line paste to the box as usual' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        Add-Type -AssemblyName PresentationFramework
+        $box = New-Object System.Windows.Controls.TextBox
+        $got = New-Object System.Collections.ArrayList
+        Register-ServerInputPaste -TextBox $box -OnNames { param($Text) [void]$got.Add($Text) }.GetNewClosure()
+        $e = Invoke-FakePaste -Box $box -Text 'FS01'
+        $got.Count | Should -Be 0
+        $e.CommandCancelled | Should -BeFalse
+    }
+}
+
+Describe 'Choosing the domain for suggestions' {
+    # Review finding: Cancel on the old InputBox returned '' - the same as "this computer's
+    # domain" - so cancelling silently dropped the client domain. The prompt now has a Cancel
+    # that changes nothing and its own button for this computer's domain.
+    BeforeAll {
+        function Invoke-DomainPrompt {
+            param([string]$Current, [string]$Press, [string]$Type)
+            $state = @{ Press = $Press; Type = $Type; Done = $false }
+            $h = [System.Windows.RoutedEventHandler] {
+                param($w, $e)
+                if ($w.Title -ne 'Suggestions from' -or $state.Done) { return }
+                $state.Done = $true
+                $w.Left = -20000; $w.Top = -20000
+                if ($null -ne $state.Type) { $w.FindName('DomainBox').Text = $state.Type }
+                $w.FindName($state.Press).RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+            }.GetNewClosure()
+            [System.Windows.EventManager]::RegisterClassHandler([System.Windows.Window], [System.Windows.FrameworkElement]::LoadedEvent, $h)
+            Show-DomainPrompt -Owner $null -Current $Current
+        }
+    }
+
+    It 'changes nothing on Cancel' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        Add-Type -AssemblyName PresentationFramework
+        Invoke-DomainPrompt -Current 'client.local' -Press 'CancelButton' -Type $null | Should -BeNullOrEmpty
+        (Invoke-DomainPrompt -Current 'client.local' -Press 'CancelButton' -Type $null) -eq '' | Should -BeFalse
+    }
+
+    It "returns '' for this computer's domain, and the typed name on OK" -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        Add-Type -AssemblyName PresentationFramework
+        Invoke-DomainPrompt -Current 'client.local' -Press 'ThisDomainButton' -Type $null | Should -Be ''
+        Invoke-DomainPrompt -Current '' -Press 'OkButton' -Type '  dc01.client.local ' | Should -Be 'dc01.client.local'
+    }
+}

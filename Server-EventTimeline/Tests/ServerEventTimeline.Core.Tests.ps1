@@ -437,6 +437,7 @@ Describe 'The old Pick from AD functions are gone' {
 
 Describe 'The default AD loader (stubbed AD cmdlets, run in this process)' {
     BeforeAll {
+        $script:SavedAdpsDrive = $env:ADPS_LoadDefaultDrive
         $env:ADPS_LoadDefaultDrive = '0'
         # Stubs with the real parameter names (checked with Get-Command against RSAT);
         # functions win over the module's cmdlets, so no DC is ever contacted.
@@ -446,6 +447,7 @@ Describe 'The default AD loader (stubbed AD cmdlets, run in this process)' {
     }
     AfterAll {
         Remove-Item -Path Function:\global:Get-ADDomain, Function:\global:Get-ADDomainController, Function:\global:Get-ADComputer -ErrorAction SilentlyContinue
+        if ($null -eq $script:SavedAdpsDrive) { Remove-Item Env:\ADPS_LoadDefaultDrive -ErrorAction SilentlyContinue } else { $env:ADPS_LoadDefaultDrive = $script:SavedAdpsDrive }
     }
     BeforeEach {
         Mock Import-Module { } -ParameterFilter { $Name -eq 'ActiveDirectory' }
@@ -465,6 +467,12 @@ Describe 'The default AD loader (stubbed AD cmdlets, run in this process)' {
         Should -Invoke Get-ADComputer -Times 1 -ParameterFilter {
             $Filter -eq '*' -and $Properties -contains 'lastLogonTimestamp' -and $Properties -contains 'OperatingSystem' -and $Properties -contains 'Enabled' -and -not $Server
         }
+    }
+
+    It 'does not mount the AD: drive (it would first try this computer''s own domain)' {
+        Remove-Item Env:\ADPS_LoadDefaultDrive -ErrorAction SilentlyContinue
+        $null = & $script:DefaultDirectoryLoader -ListPath $script:ServerListFilePath -Server '' -Credential $null
+        $env:ADPS_LoadDefaultDrive | Should -Be '0'
     }
 
     It 'reads the chosen domain or DC, as the Run as account' {
