@@ -263,3 +263,118 @@ function Read-ServerListFile {
     $names = @($rows | ForEach-Object { & $clean $_.$col } | Where-Object { $_ })
     return [PSCustomObject]@{ Names = $names; Column = $col; Headers = $headers; NeedsColumn = $false }
 }
+
+# Reads every computer account from AD in a background runspace (see REFERENCES for the
+# cmdlets). -Server and -Credential are passed only when given: no -Server means the domain
+# this computer is joined to. Every account is read, not only servers, so "not in AD" means
+# the account really doesn't exist; suggestions show only enabled servers.
+$script:DefaultDirectoryLoader = {
+    param($ListPath, $Server, $Credential)
+    . $ListPath
+    Import-Module ActiveDirectory -ErrorAction Stop
+    $common = @{ ErrorAction = 'Stop' }
+    if ($Server) { $common.Server = $Server }
+    if ($Credential) { $common.Credential = $Credential }
+    $domain = Get-ADDomain @common
+    $dcs = @(Get-ADDomainController -Filter * @common | ForEach-Object { if ($_.HostName) { $_.HostName } else { $_.Name } })
+    $now = [datetime]::UtcNow
+    $entries = @(Get-ADComputer -Filter * -Properties DNSHostName, OperatingSystem, lastLogonTimestamp, DistinguishedName, Enabled @common |
+            ForEach-Object { ConvertTo-DirectoryEntry -Computer $_ -DomainControllers $dcs -Now $now })
+    @{ Domain = [string]$domain.DNSRoot; Entries = $entries }
+}
+
+# Reverse lookup for an IP, then a forward lookup of that name: the name is only trusted when
+# it gives back the same IP (a stale PTR record must never search the wrong server). For a
+# name, just whether DNS knows it.
+$script:DefaultNameLookup = {
+    param($Names)
+    foreach ($n in @($Names)) {
+        $ip = $null
+        if ([System.Net.IPAddress]::TryParse($n, [ref]$ip) -and ($n -match '^\d{1,3}(\.\d{1,3}){3}$' -or $n -match ':')) {
+            $ptr = ''; $match = $false
+            try { $ptr = [string][System.Net.Dns]::GetHostEntry($ip).HostName } catch { $ptr = '' }
+            if ($ptr -and $ptr -ne $n) {
+                try { $match = @([System.Net.Dns]::GetHostAddresses($ptr) | Where-Object { $_.Equals($ip) }).Count -gt 0 } catch { $match = $false }
+            }
+            else { $ptr = '' }
+            @{ Name = $n; IsIp = $true; PtrName = $ptr; ForwardMatches = $match }
+        }
+        else {
+            $ok = $false
+            try { $ok = @([System.Net.Dns]::GetHostAddresses($n)).Count -gt 0 } catch { $ok = $false }
+            @{ Name = $n; IsIp = $false; Resolves = $ok }
+        }
+    }
+}
+
+function Start-BackgroundScript {
+    # One script in a runspace of its own; the window's heartbeat collects it, never waits.
+    param([Parameter(Mandatory)][scriptblock]$Script, [hashtable]$Parameters)
+    $ps = [System.Management.Automation.PowerShell]::Create()
+    [void]$ps.AddScript($Script.ToString())
+    foreach ($k in $Parameters.Keys) { [void]$ps.AddParameter($k, $Parameters[$k]) }
+    [PSCustomObject]@{ PowerShell = $ps; Handle = $ps.BeginInvoke() }
+}
+
+function Receive-BackgroundScript {
+    # $null while running; otherwise Ok, Output (the script's last output) and Error.
+    param([Parameter(Mandatory)]$Job)
+    if (-not $Job.Handle.IsCompleted) { return $null }
+    $ps = $Job.PowerShell
+    try {
+        $out = @($ps.EndInvoke($Job.Handle))
+        if ($ps.Streams.Error.Count -gt 0 -and $out.Count -eq 0) {
+            return [PSCustomObject]@{ Ok = $false; Output = $null; All = @(); Error = [string]$ps.Streams.Error[0].Exception.Message }
+        }
+        return [PSCustomObject]@{ Ok = $true; Output = $(if ($out.Count) { $out[-1] } else { $null }); All = $out; Error = '' }
+    }
+    catch {
+        $ex = $_.Exception
+        while ($ex.InnerException) { $ex = $ex.InnerException }
+        return [PSCustomObject]@{ Ok = $false; Output = $null; All = @(); Error = [string]$ex.Message }
+    }
+    finally { $ps.Dispose() }
+}
+
+function Start-DirectoryLoad {
+    <#
+        Starts reading the computer accounts of a domain in the background. -Server is a domain
+        or DC name ('' = this computer's domain). -Generation comes back with the result, so a
+        load started before the domain or account changed can be thrown away.
+    #>
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Server, [pscredential]$Credential, [int]$Generation, [scriptblock]$Loader = $script:DefaultDirectoryLoader)
+    $job = Start-BackgroundScript -Script $Loader -Parameters @{ ListPath = $script:ServerListFilePath; Server = $Server; Credential = $Credential }
+    $job | Add-Member -NotePropertyName Generation -NotePropertyValue $Generation
+    $job | Add-Member -NotePropertyName Target -NotePropertyValue $Server
+    $job
+}
+
+function Receive-DirectoryLoad {
+    <# $null while still loading; then Generation, Ok, Domain, Entries and Error. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Job)
+    $r = Receive-BackgroundScript -Job $Job
+    if ($null -eq $r) { return $null }
+    $domain = ''; $entries = @()
+    if ($r.Ok -and $r.Output) { $domain = [string]$r.Output.Domain; $entries = @($r.Output.Entries | Where-Object { $_ }) }
+    [PSCustomObject]@{ Generation = $Job.Generation; Ok = $r.Ok; Domain = $domain; Entries = $entries; Error = $r.Error }
+}
+
+function Start-NameLookups {
+    <# Starts DNS lookups for some names and IPs in the background. #>
+    [CmdletBinding()]
+    param([string[]]$Names, [scriptblock]$Lookup = $script:DefaultNameLookup)
+    Start-BackgroundScript -Script $Lookup -Parameters @{ Names = @($Names) }
+}
+
+function Receive-NameLookups {
+    <# $null while still looking up; then a hashtable of results keyed by name. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Job)
+    $r = Receive-BackgroundScript -Job $Job
+    if ($null -eq $r) { return $null }
+    $map = @{}
+    foreach ($o in @($r.All | Where-Object { $_ })) { $map[[string]$o.Name] = [PSCustomObject]$o }
+    return $map
+}

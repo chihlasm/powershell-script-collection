@@ -239,3 +239,53 @@ Describe 'Reading a server list file' {
         { Read-ServerListFile -Path $p } | Should -Throw '*.txt or .csv*'
     }
 }
+
+Describe 'Background AD load and DNS lookups' {
+    BeforeAll {
+        function Wait-Job2 {
+            param([scriptblock]$Receive)
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            while ($sw.Elapsed.TotalSeconds -lt 10) {
+                $r = & $Receive
+                if ($null -ne $r) { return $r }
+                Start-Sleep -Milliseconds 50
+            }
+            throw 'the background job did not finish within 10 seconds'
+        }
+    }
+
+    It 'returns the loaded servers and the generation it was started with' {
+        $loader = { param($ListPath, $Server, $Credential) @{ Domain = 'contoso.local'; Entries = @([PSCustomObject]@{ Name = 'FS01' }) } }
+        $job = Start-DirectoryLoad -Server '' -Credential $null -Generation 7 -Loader $loader
+        $r = Wait-Job2 { Receive-DirectoryLoad -Job $job }
+        $r.Ok | Should -BeTrue
+        $r.Domain | Should -Be 'contoso.local'
+        $r.Generation | Should -Be 7
+        @($r.Entries)[0].Name | Should -Be 'FS01'
+    }
+
+    It 'reports why the load failed' {
+        $job = Start-DirectoryLoad -Server '' -Credential $null -Generation 1 -Loader { param($ListPath, $Server, $Credential) throw 'The server is not operational' }
+        $r = Wait-Job2 { Receive-DirectoryLoad -Job $job }
+        $r.Ok | Should -BeFalse
+        $r.Error | Should -BeLike '*not operational*'
+    }
+
+    It 'passes the chosen domain or DC to the loader' {
+        $job = Start-DirectoryLoad -Server 'dc01.contoso.local' -Credential $null -Generation 1 -Loader { param($ListPath, $Server, $Credential) @{ Domain = $Server; Entries = @() } }
+        (Wait-Job2 { Receive-DirectoryLoad -Job $job }).Domain | Should -Be 'dc01.contoso.local'
+    }
+
+    It 'gives the loader the path of this file, so it can build directory entries' {
+        $job = Start-DirectoryLoad -Server '' -Credential $null -Generation 1 -Loader { param($ListPath, $Server, $Credential) @{ Domain = $ListPath; Entries = @() } }
+        (Wait-Job2 { Receive-DirectoryLoad -Job $job }).Domain | Should -BeLike '*ServerEventTimeline.ServerList.ps1'
+    }
+
+    It 'returns DNS results keyed by name' {
+        $lookup = { param($Names) foreach ($n in $Names) { @{ Name = $n; IsIp = $false; Resolves = ($n -eq 'FS01') } } }
+        $job = Start-NameLookups -Names @('FS01', 'NOPE') -Lookup $lookup
+        $r = Wait-Job2 { Receive-NameLookups -Job $job }
+        $r['FS01'].Resolves | Should -BeTrue
+        $r['NOPE'].Resolves | Should -BeFalse
+    }
+}

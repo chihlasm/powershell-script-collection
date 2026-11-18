@@ -587,6 +587,18 @@ Describe 'Save folder settings' {
         (Read-TimelineSettings -Path $p).SaveFolder | Should -Be 'D:\Tickets\INC1'
     }
 
+    It 'remembers the domain to read servers from, and keeps it when the save folder changes' {
+        $p = Join-Path $TestDrive 'cfg-ad\settings.json'
+        (Read-TimelineSettings -Path $p).AdTarget | Should -Be ''
+        Save-TimelineSettings -Path $p -AdTarget 'contoso.local'
+        (Read-TimelineSettings -Path $p).AdTarget | Should -Be 'contoso.local'
+        Save-TimelineSettings -Path $p -SaveFolder 'D:\X'
+        (Read-TimelineSettings -Path $p).AdTarget | Should -Be 'contoso.local'
+        Save-TimelineSettings -Path $p -AdTarget ''
+        (Read-TimelineSettings -Path $p).AdTarget | Should -Be ''
+        (Read-TimelineSettings -Path $p).SaveFolder | Should -Be 'D:\X'
+    }
+
     It 'uses -OutputPath first, then the remembered folder, then the default' {
         $remembered = Join-Path $TestDrive 'remembered'
         New-Item -ItemType Directory -Path $remembered | Out-Null

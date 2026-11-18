@@ -761,24 +761,29 @@ function Read-TimelineSettings {
     <# The remembered settings; empty when the file is missing or damaged. #>
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Path)
-    $empty = [PSCustomObject]@{ SaveFolder = $null; RecentServerLists = @() }
+    $empty = [PSCustomObject]@{ SaveFolder = $null; RecentServerLists = @(); AdTarget = '' }
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $empty }
     try {
         $data = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
         return [PSCustomObject]@{
             SaveFolder        = [string]$data.SaveFolder
             RecentServerLists = @($data.RecentServerLists | Where-Object { $_ } | ForEach-Object { [string]$_ })
+            AdTarget          = [string]$data.AdTarget
         }
     }
     catch { return $empty }
 }
 
 function Save-TimelineSettings {
-    <# Remembers the save folder and/or the recent server lists; whatever isn't given is kept. #>
+    <#
+        Remembers the save folder, the recent server lists and/or the domain (or DC) to read
+        servers from (AdTarget, '' = this computer's domain); whatever isn't given is kept.
+    #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$Path, [string]$SaveFolder, [string[]]$RecentServerLists)
+    param([Parameter(Mandatory)][string]$Path, [string]$SaveFolder, [string[]]$RecentServerLists, [AllowEmptyString()][string]$AdTarget)
     $current = Read-TimelineSettings -Path $Path
-    $data = [ordered]@{ SaveFolder = $current.SaveFolder; RecentServerLists = @($current.RecentServerLists) }
+    $data = [ordered]@{ SaveFolder = $current.SaveFolder; RecentServerLists = @($current.RecentServerLists); AdTarget = $current.AdTarget }
+    if ($PSBoundParameters.ContainsKey('AdTarget')) { $data.AdTarget = $AdTarget }
     if ($PSBoundParameters.ContainsKey('SaveFolder')) { $data.SaveFolder = $SaveFolder }
     if ($PSBoundParameters.ContainsKey('RecentServerLists')) { $data.RecentServerLists = @($RecentServerLists) }
     $dir = Split-Path -Parent $Path
