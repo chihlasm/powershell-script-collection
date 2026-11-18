@@ -309,3 +309,65 @@ Describe 'The "Suggestions from" line' {
         Get-DirectoryServerCount -Directory @(New-FakeDirectory) | Should -Be 4
     }
 }
+
+Describe 'Add several servers: finding and checking' {
+    BeforeAll {
+        $script:Big = @(
+            (New-FakeComputer -Name 'SQL01' -Dns 'SQL01.c' -DN 'CN=SQL01,OU=SQL,OU=Servers,DC=c'),
+            (New-FakeComputer -Name 'SQL-REPORT' -Dns 'SQL-REPORT.c' -DN 'CN=SQL-REPORT,OU=Servers,DC=c'),
+            (New-FakeComputer -Name 'SQLOLD' -Dns 'SQLOLD.c' -Enabled $false -DN 'CN=SQLOLD,OU=Servers,DC=c'),
+            (New-FakeComputer -Name 'DC01' -Dns 'DC01.c' -DN 'CN=DC01,OU=Domain Controllers,DC=c'),
+            (New-FakeComputer -Name 'PC01' -Dns 'PC01.c' -OS 'Windows 11 Pro' -DN 'CN=PC01,OU=Desks,DC=c'),
+            (New-FakeComputer -Name 'IDLE01' -Dns 'IDLE01.c' -LastLogon ($script:Now.AddDays(-94).ToFileTimeUtc()) -DN 'CN=IDLE01,OU=Servers,DC=c')
+        ) | ForEach-Object { ConvertTo-DirectoryEntry -Computer $_ -DomainControllers @('DC01.c') -Now $script:Now }
+    }
+
+    It 'lists the OUs that hold enabled servers, once each, sorted' {
+        (Get-DirectoryOUs -Directory $script:Big) -join '|' | Should -Be 'OU=Domain Controllers,DC=c|OU=Servers,DC=c|OU=SQL,OU=Servers,DC=c'
+    }
+
+    It 'finds enabled servers by part of the name' {
+        (Find-DirectoryServers -Directory $script:Big -Text 'sql' -Scope All | ForEach-Object Name) -join ',' | Should -Be 'SQL-REPORT,SQL01'
+    }
+
+    It 'finds only domain controllers in that scope' {
+        (Find-DirectoryServers -Directory $script:Big -Text '' -Scope DomainControllers | ForEach-Object Name) -join ',' | Should -Be 'DC01'
+    }
+
+    It 'finds servers in an OU and the OUs beneath it' {
+        (Find-DirectoryServers -Directory $script:Big -Text '' -Scope OU -OU 'OU=Servers,DC=c' | ForEach-Object Name) -join ',' | Should -Be 'IDLE01,SQL-REPORT,SQL01'
+    }
+
+    It 'ticks a server found in AD' {
+        $c = New-AddCandidate -Name 'SQL01' -Directory $script:Big -Lookup $null
+        $c.Note | Should -Be 'in AD'; $c.Ticked | Should -BeTrue; $c.NoteKind | Should -Be 'Info'
+        (New-AddCandidate -Name 'SQL01' -Directory $script:Big -Lookup $null -ShowOS).Note | Should -Be 'Windows Server 2019 Standard'
+    }
+
+    It 'leaves a server unticked when it has not signed in for over 30 days' {
+        $c = New-AddCandidate -Name 'IDLE01' -Directory $script:Big -Lookup $null
+        $c.Note | Should -Be 'no sign-in for 94 days'; $c.Ticked | Should -BeFalse; $c.NoteKind | Should -Be 'Warn'
+    }
+
+    It 'leaves a disabled account unticked' {
+        $c = New-AddCandidate -Name 'SQLOLD' -Directory $script:Big -Lookup $null
+        $c.Note | Should -Be 'disabled in AD'; $c.Ticked | Should -BeFalse; $c.NoteKind | Should -Be 'Warn'
+    }
+
+    It 'checks IP addresses with DNS and ticks them' {
+        (New-AddCandidate -Name '10.0.4.21' -Directory $script:Big -Lookup $null).Note | Should -Be 'checking...'
+        $c = New-AddCandidate -Name '10.0.4.21' -Directory $script:Big -Lookup ([PSCustomObject]@{ IsIp = $true; PtrName = 'SQL01.c'; ForwardMatches = $true })
+        $c.Note | Should -Be 'IP · is SQL01.c'; $c.Ticked | Should -BeTrue
+        $m = New-AddCandidate -Name '10.0.4.22' -Directory $script:Big -Lookup ([PSCustomObject]@{ IsIp = $true; PtrName = 'X.c'; ForwardMatches = $false })
+        $m.Note | Should -Be "IP · name doesn't match"; $m.NoteKind | Should -Be 'Warn'; $m.Ticked | Should -BeTrue
+        (New-AddCandidate -Name '10.0.4.23' -Directory $script:Big -Lookup ([PSCustomObject]@{ IsIp = $true; PtrName = ''; ForwardMatches = $false })).Note | Should -Be 'IP · no name found'
+    }
+
+    It 'ticks a name DNS knows, and leaves one nobody knows unticked' {
+        $dns = New-AddCandidate -Name 'NAS01' -Directory $script:Big -Lookup ([PSCustomObject]@{ IsIp = $false; Resolves = $true })
+        $dns.Note | Should -Be 'found in DNS'; $dns.Ticked | Should -BeTrue
+        $none = New-AddCandidate -Name 'PRNT-01' -Directory $script:Big -Lookup ([PSCustomObject]@{ IsIp = $false; Resolves = $false })
+        $none.Note | Should -Be 'not found in AD or DNS'; $none.Ticked | Should -BeFalse; $none.NoteKind | Should -Be 'Warn'
+        (New-AddCandidate -Name 'PRNT-01' -Directory $script:Big -Lookup $null).Note | Should -Be 'checking...'
+    }
+}

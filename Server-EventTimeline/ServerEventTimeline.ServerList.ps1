@@ -406,3 +406,68 @@ function Test-StaleDirectoryResult {
     param([Parameter(Mandatory)]$Result, [int]$CurrentGeneration)
     return [int]$Result.Generation -ne $CurrentGeneration
 }
+
+function Get-SortedByName {
+    # Ordinal, case-insensitive: the same order on every PC, whatever its culture.
+    param([object[]]$Items, [string]$Property = 'Name')
+    # [Array]::Sort(keys, items, comparer) sorted only the keys when called from PowerShell.
+    $list = New-Object System.Collections.Generic.List[object]
+    foreach ($i in @($Items | Where-Object { $_ })) { $list.Add($i) }
+    $list.Sort([Comparison[object]] { param($a, $b) [StringComparer]::OrdinalIgnoreCase.Compare([string]$a.$Property, [string]$b.$Property) }.GetNewClosure())
+    return $list.ToArray()
+}
+
+function Get-DirectoryOUs {
+    <# The OUs that hold enabled servers, once each - the choices for "In an OU...". #>
+    [CmdletBinding()]
+    param([object[]]$Directory)
+    $set = New-Object 'System.Collections.Generic.SortedSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($e in @($Directory | Where-Object { $_ -and $_.Enabled -and $_.IsServer -and $_.OU })) { [void]$set.Add($e.OU) }
+    return [string[]]@($set)
+}
+
+function Find-DirectoryServers {
+    <#
+        Enabled servers from the loaded directory: all, only domain controllers, or those in an
+        OU (and the OUs beneath it), whose name contains -Text. No new AD query.
+    #>
+    [CmdletBinding()]
+    param([object[]]$Directory, [AllowEmptyString()][string]$Text, [ValidateSet('All', 'DomainControllers', 'OU')][string]$Scope = 'All', [string]$OU)
+    $t = ([string]$Text).Trim()
+    $ci = [StringComparison]::OrdinalIgnoreCase
+    $hits = @($Directory | Where-Object {
+            $_ -and $_.Enabled -and $_.IsServer -and
+            (-not $t -or $_.DnsName.IndexOf($t, $ci) -ge 0 -or $_.Name.IndexOf($t, $ci) -ge 0) -and
+            ($Scope -ne 'DomainControllers' -or $_.IsDC) -and
+            ($Scope -ne 'OU' -or ($OU -and ([string]::Equals($_.OU, $OU, $ci) -or $_.OU.EndsWith(",$OU", $ci))))
+        })
+    return Get-SortedByName -Items $hits
+}
+
+function New-AddCandidate {
+    <#
+        One row of the "Add several servers" results: the name, what was found about it, and
+        whether it starts ticked. Servers that look unused (disabled, or no sign-in for more
+        than -StaleDays - see REFERENCES on how coarse lastLogonTimestamp is) and names nobody
+        knows start unticked; they can still be ticked. -ShowOS shows the OS instead of "in AD".
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Name, [object[]]$Directory, $Lookup, [int]$StaleDays = 30, [switch]$ShowOS)
+    $row = { param($note, $kind, $ticked) [PSCustomObject]@{ Name = $Name; Note = $note; NoteKind = $kind; Ticked = [bool]$ticked } }
+
+    if (Test-IpAddress -Text $Name) {
+        if ($null -eq $Lookup) { return (& $row 'checking...' 'Info' $true) }
+        if (-not [string]$Lookup.PtrName) { return (& $row 'IP · no name found' 'Info' $true) }
+        if (-not $Lookup.ForwardMatches) { return (& $row "IP · name doesn't match" 'Warn' $true) }
+        return (& $row ('IP · is {0}' -f $Lookup.PtrName) 'Info' $true)
+    }
+    $e = Find-DirectoryEntry -Directory $Directory -Name $Name
+    if ($e) {
+        if (-not $e.Enabled) { return (& $row 'disabled in AD' 'Warn' $false) }
+        if ($null -ne $e.DaysSinceLogon -and $e.DaysSinceLogon -gt $StaleDays) { return (& $row ('no sign-in for {0} days' -f $e.DaysSinceLogon) 'Warn' $false) }
+        return (& $row $(if ($ShowOS -and $e.OS) { $e.OS } else { 'in AD' }) 'Info' $true)
+    }
+    if ($null -eq $Lookup) { return (& $row 'checking...' 'Info' $true) }
+    if ($Lookup.Resolves) { return (& $row 'found in DNS' 'Info' $true) }
+    return (& $row 'not found in AD or DNS' 'Warn' $false)
+}

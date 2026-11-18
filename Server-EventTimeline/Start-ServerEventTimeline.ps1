@@ -173,6 +173,7 @@ param(
 )
 
 . (Join-Path $PSScriptRoot 'ServerEventTimeline.Engine.ps1')
+. (Join-Path $PSScriptRoot 'ServerEventTimeline.AddServersDialog.ps1')
 
 function New-TimelineWindowXaml {
     <# The window's XAML (dark, blue accent). #>
@@ -1553,6 +1554,17 @@ function Show-ServerEventTimeline {
             Start-WindowDirectoryLoad
         })
 
+    # "Add several...": paste, find in the loaded AD, or read a file; adds the ticked servers.
+    $ui.AddSeveralButton.add_Click({
+            if ($ui.Smoke) { return }
+            $ui.SuggestPopup.IsOpen = $false
+            $names = @(Show-AddServersDialog -Owner $window -Directory $ui.Directory -DirectoryState $ui.DirectoryState -DomainText $ui.DomainText.Text)
+            if ($names.Count -gt 0) {
+                $added = @(Add-ServersToList -Names $names)
+                Set-StatusMessage ('Added {0} server(s) to the list.' -f $added.Count)
+            }
+        })
+
     # Autocomplete under the server box: Down/Up choose, Enter adds, Esc closes.
     $ui.ServerInput.add_TextChanged({
             $s = @(Find-ServerSuggestions -Directory $ui.Directory -Recent $(if ($ui.Smoke) { @() } else { @((Read-TimelineSettings -Path $SettingsPath).RecentServerLists) }) -Text $ui.ServerInput.Text -Max 8)
@@ -1648,6 +1660,8 @@ function Show-ServerEventTimeline {
         $window.add_ContentRendered({
                 if ($ui.LogPanel.Children.Count -eq 0) { [void]$ui.SmokeFailures.Add('the log checkboxes were not built') }
                 if ($ui.ServerItems.Count -lt 1) { [void]$ui.SmokeFailures.Add('the server list was not filled') }
+                try { $null = [System.Windows.Markup.XamlReader]::Parse((New-AddServersDialogXaml)) }
+                catch { [void]$ui.SmokeFailures.Add("the Add several servers dialog would not load: $($_.Exception.Message)") }
                 if (-not $ui.EventGrid.EnableRowVirtualization) { [void]$ui.SmokeFailures.Add('the event grid is not virtualized') }
                 if ($ui.PlusMinusCombo.Items.Count -eq 0 -or $ui.LevelFilter.Items.Count -eq 0) { [void]$ui.SmokeFailures.Add('the choice lists are empty') }
                 if (-not $ui.EventGrid.ContextMenu -or $ui.EventGrid.ContextMenu.Items.Count -lt 4) { [void]$ui.SmokeFailures.Add('the right-click menu was not built') }

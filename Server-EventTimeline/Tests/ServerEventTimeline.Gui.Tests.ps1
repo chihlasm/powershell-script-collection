@@ -344,3 +344,66 @@ Describe 'Console mode (-NoGui)' {
         ($script:Help.Examples.Example.Code -join "`n") | Should -BeLike '*-NoGui*'
     }
 }
+
+Describe 'Add several servers dialog' {
+    It 'loads in WPF with every named control' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        Add-Type -AssemblyName PresentationFramework
+        $dlg = [System.Windows.Markup.XamlReader]::Parse((New-AddServersDialogXaml))
+        foreach ($n in 'Tabs', 'PasteTab', 'FindTab', 'FileTab', 'PasteBox', 'CheckNamesButton', 'FindBox', 'ScopeAll', 'ScopeDcs', 'ScopeOu', 'OuCombo', 'FindNote',
+            'FileButton', 'FilePathText', 'ColumnPanel', 'ColumnCombo', 'ResultList', 'TickAllButton', 'TickNoneButton', 'TickedText', 'AddButton', 'CancelButton') {
+            $dlg.FindName($n) | Should -Not -BeNullOrEmpty -Because "control $n"
+        }
+        $dlg.Title | Should -Be 'Add several servers'
+    }
+
+    It 'says how many servers the Add button adds' {
+        Get-AddButtonText -Count 0 | Should -Be 'Add servers'
+        Get-AddButtonText -Count 1 | Should -Be 'Add 1 server'
+        Get-AddButtonText -Count 4 | Should -Be 'Add 4 servers'
+    }
+}
+
+Describe 'Add several servers dialog, driven end to end (off-screen, fake DNS)' {
+    It 'adds the pasted servers that were found, and leaves out one nobody knows' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        Add-Type -AssemblyName PresentationFramework
+        $dir = @([PSCustomObject]@{ Name = 'FS01'; DnsName = 'FS01.contoso.local'; OS = 'Windows Server 2019'; Enabled = $true; IsServer = $true; IsDC = $false
+                DaysSinceLogon = 3; DistinguishedName = 'CN=FS01,OU=Servers,DC=contoso,DC=local'; OU = 'OU=Servers,DC=contoso,DC=local' })
+        $fakeDns = {
+            param($Names)
+            foreach ($n in $Names) {
+                if ($n -eq '10.0.4.21') { @{ Name = $n; IsIp = $true; PtrName = 'SQL01.contoso.local'; ForwardMatches = $true } }
+                else { @{ Name = $n; IsIp = $false; Resolves = $false } }
+            }
+        }
+        # Every Window that loads from here on is this dialog: move it off-screen and drive it.
+        $drive = @{ Steps = 0; Seen = '' }
+        $handler = [System.Windows.RoutedEventHandler] {
+            param($w, $e)
+            if ($w.Title -ne 'Add several servers' -or $drive.Started) { return }
+            $drive.Started = $true
+            # GetNewClosure captures this scope's own variables only: copy the state in.
+            $drv = $drive
+            $w.Left = -20000; $w.Top = -20000
+            $w.FindName('PasteBox').Text = "FS01, 10.0.4.21`nCONTOSO\NOPE"
+            $click = [System.Windows.Controls.Primitives.ButtonBase]::ClickEvent
+            $w.FindName('CheckNamesButton').RaiseEvent((New-Object System.Windows.RoutedEventArgs $click))
+            $t = New-Object System.Windows.Threading.DispatcherTimer
+            $t.Interval = [TimeSpan]::FromMilliseconds(100)
+            $t.add_Tick({
+                    $drv.Steps++
+                    $rows = @($w.FindName('ResultList').ItemsSource)
+                    $pending = @($rows | Where-Object { $_.Note -eq 'checking...' }).Count
+                    if (($rows.Count -eq 3 -and $pending -eq 0) -or $drv.Steps -gt 100) {
+                        $t.Stop()
+                        $drv.Seen = (@($rows | ForEach-Object { '{0}={1}' -f $_.Name, $_.Note }) -join '; ')
+                        $w.FindName('AddButton').RaiseEvent((New-Object System.Windows.RoutedEventArgs $click))
+                    }
+                }.GetNewClosure())
+            $t.Start()
+        }.GetNewClosure()
+        [System.Windows.EventManager]::RegisterClassHandler([System.Windows.Window], [System.Windows.FrameworkElement]::LoadedEvent, $handler)
+        $result = @(Show-AddServersDialog -Owner $null -Directory $dir -DirectoryState 'Loaded' -DomainText 'Suggestions from: contoso.local (1 server)' -Lookup $fakeDns)
+        $drive.Seen | Should -Be "FS01=in AD; 10.0.4.21=IP · is SQL01.contoso.local; NOPE=not found in AD or DNS"
+        $result -join ',' | Should -Be 'FS01,10.0.4.21'
+    }
+}
