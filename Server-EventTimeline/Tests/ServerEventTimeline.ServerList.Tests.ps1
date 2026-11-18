@@ -200,3 +200,42 @@ Describe 'Server list' {
         Test-IpAddress -Text 'FS01' | Should -BeFalse
     }
 }
+
+Describe 'Reading a server list file' {
+    It 'reads a .txt, one name per line, skipping blank lines and # comments' {
+        $p = Join-Path $TestDrive 'servers.txt'
+        Set-Content -LiteralPath $p -Value @('# Contoso servers', 'FS01', '', '  10.0.4.21  ', '#old', 'CONTOSO\APP02') -Encoding UTF8
+        $r = Read-ServerListFile -Path $p
+        $r.Names -join ',' | Should -Be 'FS01,10.0.4.21,APP02'
+        $r.NeedsColumn | Should -BeFalse
+    }
+
+    It 'reads a UTF-8 CSV with a BOM and quoted values from the Name column' {
+        $p = Join-Path $TestDrive 'servers.csv'
+        [System.IO.File]::WriteAllText($p, "`"Name`",`"OperatingSystem`"`r`n`"CONTOSO\FS01`",`"Windows Server 2019`"`r`n`"FS02`",`"Windows Server 2022`"`r`n", (New-Object System.Text.UTF8Encoding $true))
+        $r = Read-ServerListFile -Path $p
+        $r.Column | Should -Be 'Name'
+        $r.Names -join ',' | Should -Be 'FS01,FS02'
+    }
+
+    It 'asks for the column when no header is a known one, then reads the one chosen' {
+        $p = Join-Path $TestDrive 'hosts.csv'
+        Set-Content -LiteralPath $p -Value @('Host,Site', 'SRV-A,London', 'SRV-B,Leeds') -Encoding UTF8
+        $r = Read-ServerListFile -Path $p
+        $r.NeedsColumn | Should -BeTrue
+        $r.Headers -join ',' | Should -Be 'Host,Site'
+        @($r.Names).Count | Should -Be 0
+        (Read-ServerListFile -Path $p -Column 'Host').Names -join ',' | Should -Be 'SRV-A,SRV-B'
+    }
+
+    It 'picks the names column in a fixed order, ignoring case' {
+        Select-ServerNameColumn -Headers @('ipaddress', 'dnshostname') | Should -Be 'dnshostname'
+        Select-ServerNameColumn -Headers @('Site', 'Owner') | Should -Be ''
+    }
+
+    It 'refuses other kinds of file with a plain message' {
+        $p = Join-Path $TestDrive 'servers.xlsx'
+        Set-Content -LiteralPath $p -Value 'x'
+        { Read-ServerListFile -Path $p } | Should -Throw '*.txt or .csv*'
+    }
+}

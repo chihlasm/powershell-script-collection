@@ -218,3 +218,48 @@ function Get-ServerSearchText {
     param([object[]]$Items)
     return (@($Items | Where-Object { $_ } | ForEach-Object { $_.SearchName }) -join ', ')
 }
+
+$script:ServerNameColumns = @('Name', 'ComputerName', 'DNSHostName', 'HostName', 'Server', 'IPAddress')
+
+function Select-ServerNameColumn {
+    <# The CSV column that holds server names: the first known header, in a fixed order; '' if none. #>
+    [CmdletBinding()]
+    param([string[]]$Headers)
+    foreach ($want in $script:ServerNameColumns) {
+        foreach ($h in @($Headers)) { if ([string]::Equals($h, $want, 'OrdinalIgnoreCase')) { return $h } }
+    }
+    return ''
+}
+
+function Read-ServerListFile {
+    <#
+        Server names from a .txt (one per line; blank lines and lines starting with # are
+        skipped) or a .csv (the -Column given, else a known header such as Name or DNSHostName).
+        When no column can be chosen, NeedsColumn is set and Headers lists the choices.
+        A DOMAIN\ prefix is dropped.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path, [string]$Column)
+
+    $clean = {
+        param($v)
+        $t = ([string]$v).Trim()
+        $slash = $t.LastIndexOf('\')
+        if ($slash -ge 0) { $t = $t.Substring($slash + 1) }
+        $t
+    }
+    $ext = [System.IO.Path]::GetExtension($Path).ToLowerInvariant()
+    if ($ext -eq '.txt') {
+        $names = @(Get-Content -LiteralPath $Path -ErrorAction Stop | ForEach-Object { & $clean $_ } |
+                Where-Object { $_ -and -not $_.StartsWith('#') })
+        return [PSCustomObject]@{ Names = $names; Column = ''; Headers = @(); NeedsColumn = $false }
+    }
+    if ($ext -ne '.csv') { throw "Choose a .txt or .csv file (one server per line, or a CSV with a column of names)." }
+
+    $rows = @(Import-Csv -LiteralPath $Path -ErrorAction Stop)
+    $headers = if ($rows.Count -gt 0) { @($rows[0].PSObject.Properties.Name) } else { @() }
+    $col = if ($Column) { $Column } else { Select-ServerNameColumn -Headers $headers }
+    if (-not $col) { return [PSCustomObject]@{ Names = @(); Column = ''; Headers = $headers; NeedsColumn = $true } }
+    $names = @($rows | ForEach-Object { & $clean $_.$col } | Where-Object { $_ })
+    return [PSCustomObject]@{ Names = $names; Column = $col; Headers = $headers; NeedsColumn = $false }
+}
