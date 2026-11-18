@@ -898,6 +898,26 @@ function Start-RoboPreview {
     }
 }
 
+function Test-OwnProcess {
+    # True when this PowerShell process was started just to run this script (-File <script>, as
+    # the relaunch below does). The window always runs in such a process: a WPF window opened
+    # inside a PowerShell session that has been open for hours (the VS Code PowerShell
+    # extension, a Windows Terminal tab) can crash with Win32Exception 1816
+    # (ERROR_NOT_ENOUGH_QUOTA) in HwndTarget and take the whole session with it. Not with
+    # -NoExit before -File: then the console is meant to stay open after the script.
+    # https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_powershell_exe
+    param([AllowEmptyCollection()][string[]]$CommandLineArgs, [Parameter(Mandatory)][string]$ScriptPath)
+    $fileArg = $null
+    for ($i = 0; $i -lt $CommandLineArgs.Count; $i++) {
+        $a = $CommandLineArgs[$i]
+        if ($a -match '^[-/]noe(x|xi|xit)?$') { return $false }
+        if (($a -eq '-File' -or $a -eq '-f') -and $i + 1 -lt $CommandLineArgs.Count) { $fileArg = $CommandLineArgs[$i + 1]; break }
+    }
+    if (-not $fileArg) { return $false }
+    try { $full = [System.IO.Path]::GetFullPath($fileArg.Trim('"')) } catch { return $false }
+    [string]::Equals($full, [System.IO.Path]::GetFullPath($ScriptPath), [StringComparison]::OrdinalIgnoreCase)
+}
+
 #endregion
 
 if ($LoadFunctionsOnly) { return }
@@ -905,10 +925,17 @@ if ($LoadFunctionsOnly) { return }
 #region Startup checks
 
 # WPF needs a single-threaded apartment. Windows PowerShell is STA by default; relaunch in it
-# if this host isn't.
-if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') {
+# if this host isn't, and also when this is a PowerShell session someone is working in (see
+# Test-OwnProcess). The relaunched copy hides its own console once the window shows. Not an
+# administrator: the elevated relaunch below starts a process of its own anyway, so this
+# extra step is skipped.
+$identity = [System.Security.Principal.WindowsPrincipal][System.Security.Principal.WindowsIdentity]::GetCurrent()
+$isAdmin = $identity.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+$ownProcess = Test-OwnProcess -CommandLineArgs ([Environment]::GetCommandLineArgs()) -ScriptPath $PSCommandPath
+if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA' -or ($isAdmin -and -not $ownProcess)) {
     $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     Start-Process -FilePath $ps -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', "`"$PSCommandPath`"")
+    Write-Host '[INFO] Robocopy Migration is opening in its own window. This PowerShell stays free to use.' -ForegroundColor Cyan
     return
 }
 
@@ -916,11 +943,11 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 
 # Elevation is checked here rather than with #Requires so the tests can load the functions.
 # Relaunching elevated means "Run with PowerShell" from Explorer just works after a UAC prompt.
-$identity = [System.Security.Principal.WindowsPrincipal][System.Security.Principal.WindowsIdentity]::GetCurrent()
-if (-not $identity.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
+if (-not $isAdmin) {
     $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     try {
         Start-Process -FilePath $ps -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', "`"$PSCommandPath`"") -ErrorAction Stop
+        Write-Host '[INFO] Robocopy Migration is opening as administrator in its own window. This PowerShell stays free to use.' -ForegroundColor Cyan
     }
     catch {
         [System.Windows.MessageBox]::Show('Robocopy Migration needs to run as administrator to copy permissions and owners. Right-click PowerShell, choose "Run as administrator", and start the script again.', 'Robocopy Migration', 'OK', 'Warning') | Out-Null

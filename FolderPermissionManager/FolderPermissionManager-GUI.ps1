@@ -477,9 +477,15 @@ function Show-AppMessage {
 
 function Get-StartupAction {
     # WPF needs STA first; elevation is asked for once the window can show a message.
+    # The window also never opens inside a PowerShell session someone is working in
+    # (-IsOwnProcess false, see Test-OwnProcess): a WPF window in a session that has been open for
+    # hours, such as the VS Code PowerShell extension or a Windows Terminal tab, can crash with
+    # Win32Exception 1816 (ERROR_NOT_ENOUGH_QUOTA) in HwndTarget and take the session with it.
+    # 'RelaunchSta' starts a new STA process for this script, so it covers that case too.
     param(
         [Parameter(Mandatory)][bool]$IsSta,
         [Parameter(Mandatory)][bool]$IsAdmin,
+        [bool]$IsOwnProcess = $true,
         [switch]$SmokeTest
     )
     # The smoke test never relaunches: no UAC prompt, and without STA it fails instead.
@@ -488,7 +494,9 @@ function Get-StartupAction {
         return 'SmokeNeedsSta'
     }
     if (-not $IsSta) { return 'RelaunchSta' }
+    # The elevated copy is started with -File, so it is a process of its own as well.
     if (-not $IsAdmin) { return 'RelaunchElevated' }
+    if (-not $IsOwnProcess) { return 'RelaunchSta' }
     'Continue'
 }
 
@@ -7193,7 +7201,8 @@ if ($script:SmokeMode) {
     $action = Get-StartupAction -IsSta $isSta -IsAdmin $isAdmin -SmokeTest
 }
 else {
-    $action = Get-StartupAction -IsSta $isSta -IsAdmin $isAdmin
+    $isOwnProcess = Test-OwnProcess -CommandLineArgs ([Environment]::GetCommandLineArgs()) -ScriptPath $script:ScriptPath
+    $action = Get-StartupAction -IsSta $isSta -IsAdmin $isAdmin -IsOwnProcess $isOwnProcess
 }
 
 if ($action -eq 'SmokeNeedsSta') {
@@ -7213,6 +7222,7 @@ if ($action -eq 'RelaunchSta') {
             return
         }
         Start-Process -FilePath (Get-WindowsPowerShellPath) -ArgumentList $relaunch -ErrorAction Stop
+        Write-Host '[INFO] Folder Permission Manager is opening in its own window. This PowerShell stays free to use.' -ForegroundColor Cyan
     }
     catch { Show-AppMessage -Icon Error -Message "Folder Permission Manager could not start a window: $($_.Exception.Message)" }
     return

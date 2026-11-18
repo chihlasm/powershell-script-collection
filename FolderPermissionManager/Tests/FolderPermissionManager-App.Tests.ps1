@@ -559,6 +559,17 @@ Describe 'Startup' {
         Get-StartupAction -IsSta:$true  -IsAdmin:$true  | Should -Be 'Continue'
     }
 
+    It 'opens the window in its own process when started from a PowerShell session' {
+        # A WPF window in a long-lived session (VS Code, Windows Terminal) can crash that whole
+        # session (Win32Exception 1816 in HwndTarget), so a session never hosts the window.
+        Get-StartupAction -IsSta:$true -IsAdmin:$true -IsOwnProcess:$false | Should -Be 'RelaunchSta'
+        Get-StartupAction -IsSta:$true -IsAdmin:$true -IsOwnProcess:$true | Should -Be 'Continue'
+        # Not an administrator: the elevated relaunch is a process of its own already.
+        Get-StartupAction -IsSta:$true -IsAdmin:$false -IsOwnProcess:$false | Should -Be 'RelaunchElevated'
+        # The smoke test runs where it was started.
+        Get-StartupAction -IsSta:$true -IsAdmin:$true -IsOwnProcess:$false -SmokeTest | Should -Be 'Continue'
+    }
+
     It 'AC10_RelaunchArguments' {
         $script = 'C:\Tools\FPM\FolderPermissionManager-GUI.ps1'
         $a = @(Get-RelaunchArgumentList -ScriptPath $script -LogFolder 'D:\Tickets\1 2' -WhatIfMode -DriveMap @{ H = '\\fs01\home' })

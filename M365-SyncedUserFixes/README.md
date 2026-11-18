@@ -25,6 +25,12 @@ Double-click **`Start M365 Synced User Fixes.cmd`**.
 `Launch-CloudSignInMgr.cmd` and `Launch-HideFromGAL.cmd` open the same window straight on
 the Block or Hide page, for anyone used to the old tools.
 
+Started from a PowerShell prompt instead, the window opens in a PowerShell process of its own
+and the prompt is free again straight away: a window opened inside a PowerShell session that
+had been open for hours (VS Code, Windows Terminal) could crash that whole session. The one
+exception is `-Credential`, which can't be handed to a new process; with it, the window opens
+in the current session and a warning says so.
+
 ## What the card at the top means
 
 | Card | Meaning | What happens |

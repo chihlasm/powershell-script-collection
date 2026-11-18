@@ -27,6 +27,10 @@ PowerShell**, or run it from a PowerShell window:
 .\FolderPermissionManager-GUI.ps1 -WhatIf
 ```
 
+Started from a PowerShell prompt, the window opens in a PowerShell process of its own and the
+prompt is free again straight away. A window opened inside a PowerShell session that had been
+open for hours (VS Code, Windows Terminal) could crash that whole session.
+
 - **Administrator rights.** Started without them, it asks Windows for them (the UAC prompt)
   and opens again elevated. If you choose No, it says why it needs them and closes. Mapped
   drives are passed on to the elevated window, because an elevated window usually cannot see

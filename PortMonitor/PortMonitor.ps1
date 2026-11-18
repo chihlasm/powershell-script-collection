@@ -3562,6 +3562,26 @@ function Show-PortMonitorWindow {
     1
 }
 
+function Test-OwnProcess {
+    # True when this PowerShell process was started just to run this script (-File <script>, as
+    # the relaunch below does). The window always runs in such a process: a WPF window opened
+    # inside a PowerShell session that has been open for hours (the VS Code PowerShell
+    # extension, a Windows Terminal tab) can crash with Win32Exception 1816
+    # (ERROR_NOT_ENOUGH_QUOTA) in HwndTarget and take the whole session with it. Not with
+    # -NoExit before -File: then the console is meant to stay open after the script.
+    # https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_powershell_exe
+    param([AllowEmptyCollection()][string[]]$CommandLineArgs, [Parameter(Mandatory)][string]$ScriptPath)
+    $fileArg = $null
+    for ($i = 0; $i -lt $CommandLineArgs.Count; $i++) {
+        $a = $CommandLineArgs[$i]
+        if ($a -match '^[-/]noe(x|xi|xit)?$') { return $false }
+        if (($a -eq '-File' -or $a -eq '-f') -and $i + 1 -lt $CommandLineArgs.Count) { $fileArg = $CommandLineArgs[$i + 1]; break }
+    }
+    if (-not $fileArg) { return $false }
+    try { $full = [System.IO.Path]::GetFullPath($fileArg.Trim('"')) } catch { return $false }
+    [string]::Equals($full, [System.IO.Path]::GetFullPath($ScriptPath), [StringComparison]::OrdinalIgnoreCase)
+}
+
 #endregion
 
 if ($LoadFunctionsOnly) { return }
@@ -3616,8 +3636,10 @@ if ($NoGui) {
 # WPF needs a single-threaded apartment (STA). Windows PowerShell and pwsh both start STA by
 # default, but a host can be MTA (for example powershell.exe -MTA, or some RMM agents): relaunch
 # this script in an STA process with the same parameters. GetApartmentState() is the
-# non-obsolete form of Thread.ApartmentState.
-if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Threading.ApartmentState]::STA) {
+# non-obsolete form of Thread.ApartmentState. The same relaunch keeps the window out of a
+# PowerShell session someone is working in (see Test-OwnProcess).
+$ownProcess = Test-OwnProcess -CommandLineArgs ([Environment]::GetCommandLineArgs()) -ScriptPath $PSCommandPath
+if (-not $ownProcess -or [System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Threading.ApartmentState]::STA) {
     $exe = (Get-Process -Id $PID).Path
     $relaunch = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', "`"$PSCommandPath`"",
         '-ConfigPath', "`"$ConfigPath`"", '-LogPath', "`"$LogPath`"")
@@ -3629,6 +3651,7 @@ if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Thr
     }
     if ($Tray) { $relaunch += '-Tray' }
     Start-Process -FilePath $exe -ArgumentList $relaunch -WindowStyle Hidden
+    Write-Host '[INFO] Port Monitor is opening in its own window. This PowerShell stays free to use.' -ForegroundColor Cyan
     return
 }
 

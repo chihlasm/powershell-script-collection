@@ -21,6 +21,8 @@ Nothing to install. It's a single `.ps1` file.
 
 You can also right-click the file and choose **Run with PowerShell**. The tool asks for elevation, opens its window and hides its own console. Close the window to exit.
 
+Started from a PowerShell prompt, the window opens in a PowerShell process of its own and the prompt is free again straight away. A window opened inside a PowerShell session that had been open for hours (VS Code, Windows Terminal) could crash that whole session.
+
 1. Click **+ New Job** (or press Ctrl+N).
 2. Pick **Copy from** and **Copy to**. **Browse** loads folders in the background, so a slow server won't freeze the window. When browsing for the destination, **New folder** creates a folder inside the selected one and selects it.
 3. Choose a **Type of copy** (see below). Open **Advanced options** if you need them.

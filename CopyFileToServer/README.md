@@ -25,6 +25,8 @@ Nothing to install. It's a single `.ps1` file.
 
 You can also right-click the file and choose **Run with PowerShell**.
 
+Started from a PowerShell prompt, the window opens in a PowerShell process of its own and the prompt is free again straight away. A window opened inside a PowerShell session that had been open for hours (VS Code, Windows Terminal) could crash that whole session.
+
 1. **What to copy**: drop files or folders onto the box, or use **Add files** / **Add folder**. A folder is copied with everything in it, so `C:\Tools` lands as `<destination>\Tools`.
 2. **Where to put it on each server**: a share and folder, such as `C$\Temp` or `Software\Installers`. Typing `C:\Temp` is changed to `C$\Temp` for you. The box below shows the exact path the files will go to. Missing folders are created.
 3. **Options**:

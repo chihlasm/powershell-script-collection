@@ -38,6 +38,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\PortMonitor.ps1 -Once 
 .\PortMonitor.ps1 -Report -Days 30 -OutputPath C:\Temp
 ```
 
+Started from a PowerShell prompt, the window opens in a PowerShell process of its own and the
+prompt is free again straight away. A window opened inside a PowerShell session that had been
+open for hours (VS Code, Windows Terminal) could crash that whole session.
+
 In the window: **Add** a target, then click **Start**. Double-click a row to change it.
 Untick **Enabled** on a row to pause that target. Click a row to see its full details in the
 panel under the list.

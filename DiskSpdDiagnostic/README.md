@@ -12,6 +12,11 @@ GUI:
 .\Invoke-DiskSpdDiagnostic.ps1
 ```
 
+Started from a PowerShell prompt, the window opens in a PowerShell process of its own (with its
+own console, which shows any error) and the prompt is free again straight away. A window opened
+inside a PowerShell session that had been open for hours (VS Code, Windows Terminal) could crash
+that whole session.
+
 Headless (schedulable, no window):
 
 ```powershell

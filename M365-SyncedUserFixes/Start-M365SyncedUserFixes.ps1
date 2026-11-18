@@ -1376,6 +1376,26 @@ function Save-RuleScript {
     Show-RuleResult -Text "[PASS] Saved $($dialog.FileName).`r`n`r`nCopy it to the Entra Connect server and run it in an elevated PowerShell window:`r`n    .\$([System.IO.Path]::GetFileName($dialog.FileName)) -WhatIf    (preview)`r`n    .\$([System.IO.Path]::GetFileName($dialog.FileName))            (create)"
 }
 
+function Test-OwnProcess {
+    # True when this PowerShell process was started just to run this script (-File <script>, as
+    # the launchers and the relaunch below do). The window always runs in such a process: a WPF
+    # window opened inside a PowerShell session that has been open for hours (the VS Code
+    # PowerShell extension, a Windows Terminal tab) can crash with Win32Exception 1816
+    # (ERROR_NOT_ENOUGH_QUOTA) in HwndTarget and take the whole session with it. Not with
+    # -NoExit before -File: then the console is meant to stay open after the script.
+    # https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_powershell_exe
+    param([AllowEmptyCollection()][string[]]$CommandLineArgs, [Parameter(Mandatory)][string]$ScriptPath)
+    $fileArg = $null
+    for ($i = 0; $i -lt $CommandLineArgs.Count; $i++) {
+        $a = $CommandLineArgs[$i]
+        if ($a -match '^[-/]noe(x|xi|xit)?$') { return $false }
+        if (($a -eq '-File' -or $a -eq '-f') -and $i + 1 -lt $CommandLineArgs.Count) { $fileArg = $CommandLineArgs[$i + 1]; break }
+    }
+    if (-not $fileArg) { return $false }
+    try { $full = [System.IO.Path]::GetFullPath($fileArg.Trim('"')) } catch { return $false }
+    [string]::Equals($full, [System.IO.Path]::GetFullPath($ScriptPath), [StringComparison]::OrdinalIgnoreCase)
+}
+
 #endregion
 
 if ($LoadFunctionsOnly) {
@@ -1385,14 +1405,31 @@ if ($LoadFunctionsOnly) {
 
 #region Start
 
-# WPF needs STA. powershell.exe 3.0+ is STA by default; relaunch if started some other way.
-if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') {
+# WPF needs STA. powershell.exe 3.0+ is STA by default; relaunch if started some other way, and
+# also when this is a PowerShell session someone is working in (see Test-OwnProcess). A
+# -Credential cannot travel on a command line, so with one the window stays in this session
+# (a warning says so) unless STA forces the relaunch.
+$ownProcess = Test-OwnProcess -CommandLineArgs ([Environment]::GetCommandLineArgs()) -ScriptPath $PSCommandPath
+$isSta = [System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA'
+if (-not $isSta -or (-not $ownProcess -and -not $Credential)) {
     $relaunch = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', "`"$PSCommandPath`"", '-Tab', $Tab)
     if ($EntraConnectServer) { $relaunch += @('-EntraConnectServer', $EntraConnectServer) }
     if ($SearchBase) { $relaunch += @('-SearchBase', "`"$SearchBase`"") }
     if ($SkipRuleCheck) { $relaunch += '-SkipRuleCheck' }
-    Start-Process -FilePath 'powershell.exe' -ArgumentList $relaunch
+    # Full path: the new process starts in another folder. Trailing \ doubled so it is not read
+    # as an escaped quote.
+    if ($PSBoundParameters.ContainsKey('LogFolder')) {
+        $full = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LogFolder)
+        $relaunch += @('-LogFolder', ('"' + $full + [regex]::Match($full, '\\+$').Value + '"'))
+    }
+    # Hidden: like the .cmd launchers, no console next to the window (startup errors show in boxes).
+    Start-Process -FilePath 'powershell.exe' -ArgumentList $relaunch -WindowStyle Hidden
+    if ($Credential) { Write-Host '[WARN] -Credential cannot be passed to the new window; it connects to the Entra Connect server as you.' -ForegroundColor Yellow }
+    Write-Host '[INFO] M365 Synced User Fixes is opening in its own window. This PowerShell stays free to use.' -ForegroundColor Cyan
     return
+}
+if (-not $ownProcess) {
+    Write-Host '[WARN] The window opens in this PowerShell because -Credential cannot be passed to a new one. If this session has been open a long time, start the tool from a new PowerShell window.' -ForegroundColor Yellow
 }
 
 try {

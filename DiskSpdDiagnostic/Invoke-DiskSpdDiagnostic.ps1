@@ -1401,6 +1401,26 @@ function Show-DiskSpdGui {
     $window.ShowDialog() | Out-Null
 }
 
+function Test-OwnProcess {
+    # True when this PowerShell process was started just to run this script (-File <script>, as
+    # the relaunch below does). The window always runs in such a process: a WPF window opened
+    # inside a PowerShell session that has been open for hours (the VS Code PowerShell
+    # extension, a Windows Terminal tab) can crash with Win32Exception 1816
+    # (ERROR_NOT_ENOUGH_QUOTA) in HwndTarget and take the whole session with it. Not with
+    # -NoExit before -File: then the console is meant to stay open after the script.
+    # https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_powershell_exe
+    param([AllowEmptyCollection()][string[]]$CommandLineArgs, [Parameter(Mandatory)][string]$ScriptPath)
+    $fileArg = $null
+    for ($i = 0; $i -lt $CommandLineArgs.Count; $i++) {
+        $a = $CommandLineArgs[$i]
+        if ($a -match '^[-/]noe(x|xi|xit)?$') { return $false }
+        if (($a -eq '-File' -or $a -eq '-f') -and $i + 1 -lt $CommandLineArgs.Count) { $fileArg = $CommandLineArgs[$i + 1]; break }
+    }
+    if (-not $fileArg) { return $false }
+    try { $full = [System.IO.Path]::GetFullPath($fileArg.Trim('"')) } catch { return $false }
+    [string]::Equals($full, [System.IO.Path]::GetFullPath($ScriptPath), [StringComparison]::OrdinalIgnoreCase)
+}
+
 # --- Entry point ---
 
 # Guard against dot-sourcing (e.g., from Pester tests that load the engine
@@ -1450,6 +1470,24 @@ if ($NoUI) {
         -ComputerName $ComputerName `
         -OutputPath $OutputPath `
         -Force:$Force
+    return
+}
+
+# The window runs in a PowerShell process of its own (see Test-OwnProcess), in STA as WPF needs.
+# The new process keeps its console, so an error that ends it is still visible. Started from
+# this elevated session, it is elevated too.
+$ownProcess = Test-OwnProcess -CommandLineArgs ([Environment]::GetCommandLineArgs()) -ScriptPath $PSCommandPath
+if (-not $ownProcess -or [System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Threading.ApartmentState]::STA) {
+    $relaunch = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', "`"$PSCommandPath`"")
+    if ($PSBoundParameters.ContainsKey('OutputPath')) {
+        # Full path: the new process starts in another folder. Trailing \ doubled so it is not
+        # read as an escaped quote.
+        $full = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputPath)
+        $relaunch += @('-OutputPath', ('"' + $full + [regex]::Match($full, '\\+$').Value + '"'))
+    }
+    if ($Force) { $relaunch += '-Force' }
+    Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList $relaunch
+    Write-Host '[INFO] DiskSpd Diagnostic is opening in its own window. This PowerShell stays free to use.' -ForegroundColor Cyan
     return
 }
 
