@@ -57,6 +57,8 @@
 #>
 
 . (Join-Path $PSScriptRoot 'CaseKit.ps1')
+# The server list (AD entries, suggestions, notes, file import, background lookups).
+. (Join-Path $PSScriptRoot 'ServerEventTimeline.ServerList.ps1')
 
 function ConvertTo-ServerList {
     <# Turns whatever a tech pasted into a clean list of server names. #>
