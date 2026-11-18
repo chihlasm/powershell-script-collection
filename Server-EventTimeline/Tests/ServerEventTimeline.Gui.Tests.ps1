@@ -125,6 +125,20 @@ Describe 'Set-GridItemsPreservingState (rows arriving while you work)' {
         @($grid.SelectedItems).Count | Should -Be 1
     }
 
+    It 'does not try to restore a huge selection (Ctrl+A on thousands of rows would freeze the window)' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $grid = New-Object System.Windows.Controls.DataGrid
+        $rows = @(1..300 | ForEach-Object { New-GridRow 'APP01' $_ })
+        Set-GridItemsPreservingState -Grid $grid -Items $rows
+        foreach ($r in $rows) { [void]$grid.SelectedItems.Add($r) }
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        # A new array, as Update-View always passes (the same array would not reset the grid).
+        Set-GridItemsPreservingState -Grid $grid -Items $rows.Clone()
+        # Before the fix this re-added every row one by one (44 s for 1,000 rows). WPF itself
+        # keeps rows that are still in the new list selected, so nothing is lost.
+        $sw.Elapsed.TotalSeconds | Should -BeLessThan 2
+        $grid.SelectedItems.Count | Should -BeGreaterThan 0
+    }
+
     It 'keeps a collapsed row selected even though it is rebuilt as a new object' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
         $grid = New-Object System.Windows.Controls.DataGrid
         $old = New-GridRow 'APP01' 7
@@ -187,6 +201,18 @@ Describe 'Console mode (-NoGui)' {
         $note.Count | Should -Be 1
         (Get-Content -LiteralPath $note[0].FullName -Raw) | Should -BeLike '*PROBLEM: srv-fake-01: 1 unexpected restart*'
         @(Get-ChildItem -LiteralPath $folder -Filter 'ServerEventTimeline_*.html').Count | Should -Be 1
+    }
+
+    It 'exits 1 when no chosen log could be read on a server (for example a mistyped log name)' {
+        $probe = {
+            param($EnginePath, $Server, $Credential, $WindowStartLocal)
+            [PSCustomObject]@{ Server = $Server; Reachable = $true; Transport = 'WinRM'; UtcOffsetMinutes = 0; TimeZoneId = 'X'; FailureKind = ''; Reason = ''
+                Channels = @([PSCustomObject]@{ Name = 'System'; IsEnabled = $true; RecordCount = 10 }) }
+        }
+        $out = Join-Path $TestDrive 'typo'
+        $code = Invoke-TimelineConsole -ComputerName 'srv-fake-01' -LastMinutes 60 -LogName 'Sytem' -OutputPath $out `
+            -DefaultOutputPath $out -EngineOptions @{ ProbeScript = $probe; LogScript = $script:TwoEventLog } -PollMs 20 6>$null
+        $code | Should -Be 1
     }
 
     It 'refuses an unusable ticket number or time with exit code 2, reading nothing' {

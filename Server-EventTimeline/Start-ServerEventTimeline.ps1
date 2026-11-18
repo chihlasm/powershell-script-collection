@@ -535,11 +535,19 @@ function Set-GridItemsPreservingState {
         SortDescriptions, and the header arrow (DataGridColumn.SortDirection) is only a display.
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)]$Grid, [object[]]$Items)
+    param([Parameter(Mandatory)]$Grid, [object[]]$Items, [int]$MaxRestore = 200)
     $sorts = @($Grid.Items.SortDescriptions | ForEach-Object { $_ })
     $arrows = @($Grid.Columns | Where-Object { $null -ne $_.SortDirection } | ForEach-Object { [PSCustomObject]@{ Column = $_; Direction = $_.SortDirection } })
+    # Each SelectedItems.Add raises SelectionChanged, so restoring thousands of rows (Ctrl+A)
+    # would freeze the window: above MaxRestore only the row with focus is kept.
     $selected = New-Object 'System.Collections.Generic.HashSet[string]'
-    foreach ($s in @($Grid.SelectedItems)) { [void]$selected.Add((Get-GridRowKey $s)) }
+    $selectedCount = $Grid.SelectedItems.Count
+    if ($selectedCount -gt $MaxRestore) {
+        if ($Grid.SelectedItem) { [void]$selected.Add((Get-GridRowKey $Grid.SelectedItem)) }
+    }
+    else {
+        foreach ($s in @($Grid.SelectedItems)) { [void]$selected.Add((Get-GridRowKey $s)) }
+    }
 
     $Grid.ItemsSource = $Items
 
@@ -549,8 +557,13 @@ function Set-GridItemsPreservingState {
     }
     foreach ($a in $arrows) { $a.Column.SortDirection = $a.Direction }
     if ($selected.Count -gt 0) {
+        $left = $selected.Count
         foreach ($r in @($Items)) {
-            if ($selected.Contains((Get-GridRowKey $r))) { [void]$Grid.SelectedItems.Add($r) }
+            # Key built inline: a function call per row is too slow for 50,000 rows.
+            if ($selected.Contains(('{0}|{1}|{2}' -f $r.Server, $r.Log, $r.RecordId))) {
+                [void]$Grid.SelectedItems.Add($r)
+                if (--$left -le 0) { break }
+            }
         }
     }
 }
@@ -665,7 +678,11 @@ function Invoke-TimelineConsole {
 
     try { [System.IO.File]::WriteAllLines((Join-Path $folder "ServerEventTimeline_$stamp.log"), $lines.ToArray(), (New-Object System.Text.UTF8Encoding $true)) } catch { }
 
-    $incomplete = @($engine.Status.Values | Where-Object { $_.State -ne 'Done' }).Count
+    # Exit 0 only when every server is Done and had at least one log read, so a mistyped
+    # -LogName (skipped as "doesn't exist") can't pass as success.
+    $incomplete = @($engine.Status.Values | Where-Object {
+            $_.State -ne 'Done' -or @($_.Logs | Where-Object Outcome -eq 'Read').Count -eq 0
+        }).Count
     if ($incomplete -gt 0) { return 1 }
     return 0
 }
@@ -701,6 +718,7 @@ function Show-ServerEventTimeline {
         OutputPath = $OutputPath; LogFile = $null; Credential = $null; LogChecks = @(); ExitCode = 0
         Request = $null; Selected = @()
         Hidden = New-Object System.Collections.Generic.List[string]; EventKey = ''; VisibleRows = @(); InUpdate = $false
+        Restoring = $false; SummaryKey = ''
     }
     foreach ($name in 'SummaryBorder', 'SummaryList', 'CollapseCheck', 'HiddenNote', 'ShowAllButton', 'TotalCapBox', 'RecentButton', 'TicketNoteButton', 'LogsButton','LogsPopup', 'CoreLogPanel', 'LogsAllButton', 'LogsNoneButton', 'LogsDefaultButton',
         'SaveFolderBox', 'BrowseFolderButton', 'OpenFolderButton', 'ThisComputerButton', 'ServersBox', 'AroundRadio', 'RangeRadio', 'AtBox', 'PlusMinusCombo', 'FromBox', 'ToBox', 'LastHourButton',
@@ -881,6 +899,10 @@ function Show-ServerEventTimeline {
     function Update-Summary {
         # The strip above the grid: what was found on each server, from every event read.
         if (-not $ui.Engine) { $ui.SummaryBorder.Visibility = 'Collapsed'; return }
+        # Recounted only when rows arrived or a server's state changed (not on every filter change).
+        $key = '{0}|{1}' -f $ui.Store.Rows.Count, (@($ui.Engine.Status.Values | ForEach-Object { "$($_.Server)=$($_.State)" }) -join ',')
+        if ($key -eq $ui.SummaryKey) { return }
+        $ui.SummaryKey = $key
         $ui.SummaryList.ItemsSource = @(Get-TimelineSummaryLines -Rows $ui.Store.Rows.ToArray() -Status $ui.Engine.Status)
         $ui.SummaryBorder.Visibility = 'Visible'
     }
@@ -909,8 +931,13 @@ function Show-ServerEventTimeline {
             }
             $visible = @(Select-TimelineRows -Rows $ui.Store.Rows.ToArray() -Filter (Get-CurrentFilter))
             $ui.VisibleRows = $visible
-            $shown = if ($ui.CollapseCheck.IsChecked) { @(Group-TimelineRepeats -Rows $visible) } else { $visible }
-            Set-GridItemsPreservingState -Grid $ui.EventGrid -Items $shown
+            # @() around the whole if: assigning an if unrolls a one-row array, and a single
+            # PSCustomObject has no .Count on Windows PowerShell.
+            $shown = @(if ($ui.CollapseCheck.IsChecked) { Group-TimelineRepeats -Rows $visible } else { $visible })
+            $ui.Restoring = $true
+            try { Set-GridItemsPreservingState -Grid $ui.EventGrid -Items $shown }
+            finally { $ui.Restoring = $false }
+            $ui.CopyButton.IsEnabled = $ui.EventGrid.SelectedItems.Count -gt 0
             $ui.CountText.Text = if ($shown.Count -ne $visible.Count) {
                 'Showing {0:N0} of {1:N0} events ({2:N0} rows after collapsing repeats)' -f $visible.Count, $ui.Store.Rows.Count, $shown.Count
             }
@@ -962,7 +989,7 @@ function Show-ServerEventTimeline {
         if ($ui.SecurityCheck.IsChecked) { $logs += 'Security' }
         if ($logs.Count -eq 0 -and -not $ui.AllLogsCheck.IsChecked) { $ui.InputError.Text = 'Tick at least one log.'; return }
 
-        $ui.Store = New-TimelineRowStore; $ui.PendingRows.Clear(); $ui.Reported = @{}; $ui.Request = $req; $ui.Selected = $logs
+        $ui.Store = New-TimelineRowStore; $ui.PendingRows.Clear(); $ui.Reported = @{}; $ui.Request = $req; $ui.Selected = $logs; $ui.SummaryKey = ''
         $ui.DetailText.Text = 'Select an event to see everything about it here.'
         $ui.Finished = $false
         $ui.Engine = Invoke-TimelineSearch -Request $req -Logs $logs -AllLogs ([bool]$ui.AllLogsCheck.IsChecked) -Credential $ui.Credential
@@ -1048,7 +1075,9 @@ function Show-ServerEventTimeline {
     $ui.FilterText.add_TextChanged({ $filterDelay.Stop(); $filterDelay.Start() })
 
     $ui.EventGrid.add_SelectionChanged({
-            $count = @($ui.EventGrid.SelectedItems).Count
+            # Muted while Update-View puts the selection back (one event per restored row).
+            if ($ui.Restoring) { return }
+            $count = $ui.EventGrid.SelectedItems.Count
             $ui.CopyButton.IsEnabled = $count -gt 0
             $r = $ui.EventGrid.SelectedItem
             if (-not $r) { return }
@@ -1114,7 +1143,12 @@ function Show-ServerEventTimeline {
     $rowMenu.add_Opened({
             $has = [bool]$ui.EventGrid.SelectedItem
             foreach ($mi in @($miOnly, $miHide, $miServer)) { $mi.IsEnabled = $has }
-            $miAround.IsEnabled = $has -and -not ($ui.Engine -and -not $ui.Finished)
+            # The row's time is one server's local time; "around" reads it as each server's local
+            # time, so with mixed time zones it would search the wrong moment elsewhere.
+            $mixedZones = $ui.Engine -and [bool](Get-TimelineTimeZoneNote -Status $ui.Engine.Status)
+            $miAround.IsEnabled = $has -and -not ($ui.Engine -and -not $ui.Finished) -and -not $mixedZones
+            $miAround.Header = if ($mixedZones) { 'Search around this event: not available, these servers are in different time zones (use From/To)' }
+            else { 'Search all servers around this event (+/- 5 min)' }
             $miShowAll.IsEnabled = ($ui.Hidden.Count -gt 0) -or [bool]$ui.EventKey
         })
     $ui.EventGrid.ContextMenu = $rowMenu

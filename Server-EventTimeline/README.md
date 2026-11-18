@@ -160,9 +160,11 @@ own account.
   remote-event-log route it is the offset **now**. So a window that crosses a daylight-saving
   change, or a remote-event-log search on the other side of one, can be up to an hour out for
   part of the window. The UTC column is always right: compare that when in doubt.
-- **Search around this event** uses that row's server-local time on every server. If the
-  servers are in different time zones (the blue note says so), search by a From/To range
-  instead.
+- **Search around this event** uses that row's server-local time on every server, so it is
+  greyed out when the servers are in different time zones (the blue note says so): search by
+  a From/To range instead.
+- **Selecting many rows:** after a refresh, up to 200 selected rows are put back exactly;
+  with more (Ctrl+A), the rows still listed stay selected but nothing new is re-added.
 - **Big windows:** 50,000 rows are fine, but filtering then takes about a second.
 
 ## Without the window (-NoGui)

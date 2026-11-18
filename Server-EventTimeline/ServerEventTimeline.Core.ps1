@@ -964,6 +964,20 @@ function Resolve-TimelineLogNames {
     }
 }
 
+function Test-TimelineServerComplete {
+    <#
+        True only when a server was read in full: Done, at least one log actually read, no log
+        skipped (missing, turned off, or a mistyped name), and no warning such as a guessed
+        time zone. Only then may the ticket note rule it out, or the console exit 0.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Status)
+    if ($Status.State -ne 'Done' -or $Status.Reason) { return $false }
+    $logs = @($Status.Logs)
+    if (@($logs | Where-Object Outcome -eq 'Read').Count -eq 0) { return $false }
+    return (@($logs | Where-Object Outcome -ne 'Read').Count -eq 0)
+}
+
 function New-TimelineTicketNote {
     <#
         The four-part ticket note (CaseKit) for a search: what was found per server, which
@@ -1008,8 +1022,12 @@ function New-TimelineTicketNote {
         foreach ($skip in @($st.Logs | Where-Object Outcome -eq 'Skipped')) {
             $items.Add((New-TicketNoteItem -Kind NotChecked -Text $skip.Reason))
         }
-        $complete = ($st.State -eq 'Done') -and $gaps.Count -eq 0
-        if (-not $complete) { $incomplete = $true }
+        if ($st.Reason -and $st.State -ne 'Cancelled') {
+            # For example a time zone that had to be guessed: the window may be shifted.
+            $items.Add((New-TicketNoteItem -Kind NotChecked -Text ('{0}: {1}' -f $s, $st.Reason)))
+        }
+        $complete = Test-TimelineServerComplete -Status $st
+        if ($gaps.Count -gt 0 -or $st.State -ne 'Done') { $incomplete = $true }
         if ($st.State -eq 'Cancelled' -and $gaps.Count -eq 0) {
             $items.Add((New-TicketNoteItem -Kind NotChecked -Text "${s}: the search was cancelled before it finished"))
         }

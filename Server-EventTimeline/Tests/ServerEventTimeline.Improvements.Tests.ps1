@@ -296,3 +296,39 @@ Describe 'HTML report verdict' {
         $html | Should -BeLike '*<h2>What was found</h2>*APP01: 1 unexpected restart &lt;script&gt;*How each server went*'
     }
 }
+
+Describe 'Ticket note honesty (review fixes)' {
+    It 'does not rule out a server when none of the chosen logs were read (all skipped)' {
+        $logs = @([PSCustomObject]@{ Log = 'Sytem'; Outcome = 'Skipped'; Count = 0; Reason = "Sytem log doesn't exist on APP01" })
+        $status = [ordered]@{ APP01 = (New-TestStatus -Server APP01 -State Done -EventCount 0 -Logs $logs) }
+        $note = New-TimelineTicketNote -Status $status -Rows @() -WindowText 'w'
+        @($note.RuledOut).Count | Should -Be 0
+        ($note.CouldNotCheck -join "`n") | Should -BeLike "*Sytem log doesn't exist on APP01*"
+    }
+
+    It 'does not rule out a server when one of the chosen logs was skipped' {
+        $logs = @(
+            [PSCustomObject]@{ Log = 'System'; Outcome = 'Read'; Count = 5; Reason = '' }
+            [PSCustomObject]@{ Log = 'Microsoft-Windows-TaskScheduler/Operational'; Outcome = 'Skipped'; Count = 0; Reason = 'Task Scheduler log is turned off on APP01' })
+        $status = [ordered]@{ APP01 = (New-TestStatus -Server APP01 -State Done -EventCount 5 -Logs $logs) }
+        $note = New-TimelineTicketNote -Status $status -Rows @() -WindowText 'w'
+        @($note.RuledOut).Count | Should -Be 0
+        ($note.Checked -join "`n") | Should -BeLike '*APP01: nothing flagged in the logs that were read*'
+    }
+
+    It 'does not rule out a server whose time zone had to be guessed, and says why' {
+        $logs = @([PSCustomObject]@{ Log = 'System'; Outcome = 'Read'; Count = 5; Reason = '' })
+        $status = [ordered]@{ APP01 = (New-TestStatus -Server APP01 -State Done -EventCount 5 -Logs $logs -Reason "Couldn't read this server's time zone; assumed this workstation's") }
+        $note = New-TimelineTicketNote -Status $status -Rows @() -WindowText 'w'
+        @($note.RuledOut).Count | Should -Be 0
+        ($note.CouldNotCheck -join "`n") | Should -BeLike "*APP01: Couldn't read this server's time zone*"
+    }
+
+    It 'treats a server as read in full only when a log was read and nothing was skipped or guessed' {
+        $read = @([PSCustomObject]@{ Log = 'System'; Outcome = 'Read'; Count = 5; Reason = '' })
+        Test-TimelineServerComplete -Status (New-TestStatus -Server A -State Done -Logs $read) | Should -BeTrue
+        Test-TimelineServerComplete -Status (New-TestStatus -Server A -State Done -Logs @()) | Should -BeFalse
+        Test-TimelineServerComplete -Status (New-TestStatus -Server A -State Done -Logs $read -Reason 'guessed') | Should -BeFalse
+        Test-TimelineServerComplete -Status (New-TestStatus -Server A -State DoneWithGaps -Logs $read) | Should -BeFalse
+    }
+}
