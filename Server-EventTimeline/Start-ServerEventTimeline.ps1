@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 
 <#
 .SYNOPSIS
@@ -286,19 +286,78 @@ function New-TimelineWindowXaml {
     <Border Grid.Row="0" Background="{StaticResource Card}" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="4" Padding="14,12">
       <Grid>
         <Grid.ColumnDefinitions>
-          <!-- Wide enough for the three server buttons in one row (the smoke test checks nothing is cut off). -->
-          <ColumnDefinition Width="340"/>
+          <!-- Wide enough for the four server buttons in one row (the smoke test checks nothing is cut off). -->
+          <ColumnDefinition Width="380"/>
           <ColumnDefinition Width="Auto"/>
           <ColumnDefinition Width="*"/>
         </Grid.ColumnDefinitions>
         <StackPanel Grid.Column="0" Margin="0,0,20,0">
-          <TextBlock Style="{StaticResource Label}" Text="WHICH SERVERS?"/>
-          <TextBox x:Name="ServersBox" Height="58" AcceptsReturn="True" TextWrapping="Wrap" VerticalContentAlignment="Top"
-                   VerticalScrollBarVisibility="Auto" ToolTip="Server names, separated by commas, spaces or new lines"/>
+          <DockPanel LastChildFill="False">
+            <TextBlock DockPanel.Dock="Left" Style="{StaticResource Label}" Text="WHICH SERVERS?"/>
+            <TextBlock x:Name="ServerCountText" DockPanel.Dock="Right" Foreground="{StaticResource Accent}" FontSize="11" FontWeight="SemiBold" Text="0 servers"/>
+          </DockPanel>
+          <DockPanel LastChildFill="True" Margin="0,0,0,4">
+            <Button x:Name="ChangeDomainButton" DockPanel.Dock="Right" Content="Change..." Padding="8,1" Margin="6,0,0,0" FontSize="11"
+                    ToolTip="Choose the domain (or a domain controller) whose servers are suggested"/>
+            <TextBlock x:Name="DomainText" Foreground="{StaticResource Muted}" FontSize="11" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                       Text="Suggestions from: ..."/>
+          </DockPanel>
+          <DockPanel LastChildFill="True">
+            <Button x:Name="AddServerButton" DockPanel.Dock="Right" Content="Add" Style="{StaticResource Primary}" Margin="6,0,0,0" Padding="14,4"
+                    ToolTip="Add the server typed on the left (Enter does the same)"/>
+            <Grid>
+              <TextBox x:Name="ServerInput" ToolTip="A server name or IP address. Paste several, separated by commas, spaces or new lines, to add them all."/>
+              <TextBlock x:Name="ServerInputHint" Text="Type a server name or IP address" Foreground="{StaticResource Muted}" Margin="9,0,0,0"
+                         VerticalAlignment="Center" IsHitTestVisible="False"/>
+            </Grid>
+          </DockPanel>
+          <Popup x:Name="SuggestPopup" Placement="Bottom" StaysOpen="True" AllowsTransparency="True" Focusable="False">
+            <Border Background="{StaticResource Card}" BorderBrush="{StaticResource LineStrong}" BorderThickness="1" MinWidth="300">
+              <ListBox x:Name="SuggestList" Background="Transparent" BorderThickness="0" Foreground="{StaticResource Text}" MaxHeight="240"
+                       ScrollViewer.HorizontalScrollBarVisibility="Disabled" Focusable="False">
+                <ListBox.ItemTemplate>
+                  <DataTemplate>
+                    <DockPanel Width="280">
+                      <TextBlock DockPanel.Dock="Right" Text="{Binding Detail}" Foreground="{StaticResource Muted}" FontSize="11" Margin="12,0,0,0" VerticalAlignment="Center"/>
+                      <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis"/>
+                    </DockPanel>
+                  </DataTemplate>
+                </ListBox.ItemTemplate>
+              </ListBox>
+            </Border>
+          </Popup>
+          <ListBox x:Name="ServerList" Margin="0,6,0,0" MinHeight="30" MaxHeight="112" Background="{StaticResource Panel}" BorderBrush="{StaticResource Line}"
+                   Foreground="{StaticResource Text}" ScrollViewer.HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
+            <ListBox.ItemTemplate>
+              <DataTemplate>
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="22"/>
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Grid.Column="0" Text="{Binding Display}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" ToolTip="{Binding Display}"/>
+                  <TextBlock Grid.Column="1" Text="{Binding Note}" FontSize="11" Margin="10,0,6,0" VerticalAlignment="Center" MaxWidth="170" TextTrimming="CharacterEllipsis">
+                    <TextBlock.Style>
+                      <Style TargetType="TextBlock">
+                        <Setter Property="Foreground" Value="{StaticResource Muted}"/>
+                        <Style.Triggers>
+                          <DataTrigger Binding="{Binding NoteKind}" Value="Warn"><Setter Property="Foreground" Value="{StaticResource Warn}"/></DataTrigger>
+                        </Style.Triggers>
+                      </Style>
+                    </TextBlock.Style>
+                  </TextBlock>
+                  <Button Grid.Column="2" Content="×" Tag="{Binding}" Padding="0" Margin="0" Width="20" Height="20" Background="Transparent"
+                          BorderBrush="Transparent" Foreground="{StaticResource Muted}" ToolTip="Remove this server from the list"/>
+                </Grid>
+              </DataTemplate>
+            </ListBox.ItemTemplate>
+          </ListBox>
           <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
-            <Button x:Name="ThisComputerButton" Content="This computer" ToolTip="Add this computer: its logs are read directly, no network needed"/>
-            <Button x:Name="PickFromAdButton" Content="Pick from AD..." ToolTip="Add domain controllers or search Active Directory for servers"/>
-            <Button x:Name="RecentButton" Content="Recent" ToolTip="Server lists you searched before (remembered per user)"/>
+            <Button x:Name="AddSeveralButton" Content="Add several..." Padding="10,6" ToolTip="Paste a list, find servers in Active Directory, or read them from a file"/>
+            <Button x:Name="ThisComputerButton" Content="This computer" Padding="10,6" ToolTip="Add this computer: its logs are read directly, no network needed"/>
+            <Button x:Name="RecentButton" Content="Recent" Padding="10,6" ToolTip="Server lists you searched before (remembered per user). Picking one replaces the list."/>
+            <Button x:Name="ClearServersButton" Content="Clear" Padding="10,6" Margin="0" ToolTip="Remove every server from the list"/>
           </StackPanel>
         </StackPanel>
         <StackPanel Grid.Column="1" Margin="0,0,20,0">
@@ -817,8 +876,9 @@ function Show-ServerEventTimeline {
         Restoring = $false; SummaryKey = ''
     }
     foreach ($name in 'SummaryBorder', 'SummaryList', 'CollapseCheck', 'HiddenNote', 'ShowAllButton', 'TotalCapBox', 'RecentButton', 'TicketNoteButton', 'LogsButton','LogsPopup', 'CoreLogPanel', 'LogsAllButton', 'LogsNoneButton', 'LogsDefaultButton',
-        'SaveFolderBox', 'BrowseFolderButton', 'OpenFolderButton', 'ThisComputerButton', 'ServersBox', 'AroundRadio', 'RangeRadio', 'AtBox', 'PlusMinusCombo', 'FromBox', 'ToBox', 'LastHourButton',
-        'Last24Button', 'LogPanel', 'SecurityCheck', 'AllLogsCheck', 'CapBox', 'TimeoutBox', 'RunAsButton', 'PickFromAdButton',
+        'SaveFolderBox', 'BrowseFolderButton', 'OpenFolderButton', 'ThisComputerButton', 'ServerInput', 'ServerInputHint', 'AddServerButton', 'ServerCountText', 'DomainText', 'ChangeDomainButton',
+        'ServerList', 'SuggestPopup', 'SuggestList', 'AddSeveralButton', 'ClearServersButton', 'AroundRadio', 'RangeRadio', 'AtBox', 'PlusMinusCombo', 'FromBox', 'ToBox', 'LastHourButton',
+        'Last24Button', 'LogPanel', 'SecurityCheck', 'AllLogsCheck', 'CapBox', 'TimeoutBox', 'RunAsButton',
         'SearchButton', 'CancelButton', 'InputError', 'StatusList', 'BannerText', 'TimeZoneNote', 'LevelFilter', 'ServerFilter',
         'LogFilter', 'FlaggedOnlyCheck', 'FilterText', 'CountText', 'EventGrid', 'DetailText', 'ExportCsvButton', 'ExportHtmlButton',
         'CopyButton', 'StatusMessage') {
@@ -854,7 +914,38 @@ function Show-ServerEventTimeline {
     # Inputs: defaults
     $now = Get-Date
     # Starts with this computer filled in when no servers were given.
-    $ui.ServersBox.Text = if (@($ComputerName).Count -gt 0) { (@($ComputerName) -join ', ') } else { @(Get-LocalComputerNames)[0] }
+    # The server list: one row per server (ServerList.ps1 builds the rows and their notes).
+    $ui.LocalNames = @(Get-LocalComputerNames)
+    $ui.ServerItems = New-Object 'System.Collections.ObjectModel.ObservableCollection[object]'
+    $ui.ServerList.ItemsSource = $ui.ServerItems
+    $ui.Directory = @(); $ui.LoadedDomain = ''
+    function Update-ServerCount {
+        $n = $ui.ServerItems.Count
+        $ui.ServerCountText.Text = if ($n -eq 1) { '1 server' } else { "$n servers" }
+        $ui.ClearServersButton.IsEnabled = $n -gt 0
+    }
+    function Update-ServerNotes {
+        foreach ($item in @($ui.ServerItems)) {
+            $lookup = if ($ui.Lookups) { $ui.Lookups[[string]$item.Name] } else { $null }
+            Update-ServerListNote -Item $item -Directory $ui.Directory -LoadedDomain $ui.LoadedDomain -Lookup $lookup
+        }
+        # The rows are plain objects: redraw them so new notes show.
+        $ui.ServerList.Items.Refresh()
+    }
+    function Add-ServersToList {
+        param([string[]]$Names)
+        $added = @(Add-ServerListItems -Items $ui.ServerItems -Names $Names -LocalNames $ui.LocalNames)
+        Update-ServerNotes
+        Update-ServerCount
+        Update-InputState
+        if (Get-Command Request-ServerLookups -ErrorAction SilentlyContinue) { Request-ServerLookups -Names $added }
+        $added
+    }
+    # Starts with this computer filled in when no servers were given.
+    $given = @($ComputerName | Where-Object { $_ })
+    $startNames = if ($given.Count -gt 0) { $given } else { @($ui.LocalNames[0]) }
+    $null = Add-ServerListItems -Items $ui.ServerItems -Names $startNames -LocalNames $ui.LocalNames
+    Update-ServerCount
     $ui.AtBox.Text = $now.ToString('yyyy-MM-dd HH:mm')
     $ui.FromBox.Text = $now.AddHours(-1).ToString('yyyy-MM-dd HH:mm')
     $ui.ToBox.Text = $now.ToString('yyyy-MM-dd HH:mm')
@@ -968,7 +1059,7 @@ function Show-ServerEventTimeline {
     function Get-InputRequest {
         param([string]$Mode, [int]$LastMinutes = 60)
         if (-not $Mode) { $Mode = if ($ui.RangeRadio.IsChecked) { 'Range' } else { 'Around' } }
-        ConvertFrom-TimelineInputs -ServersText $ui.ServersBox.Text -Mode $Mode -AtText $ui.AtBox.Text `
+        ConvertFrom-TimelineInputs -ServersText (Get-ServerSearchText -Items @($ui.ServerItems)) -Mode $Mode -AtText $ui.AtBox.Text `
             -PlusMinusMinutes ([int]$ui.PlusMinusCombo.SelectedItem.Tag) -FromText $ui.FromBox.Text -ToText $ui.ToBox.Text `
             -LastMinutes $LastMinutes -CapText $ui.CapBox.Text -TimeoutText $ui.TimeoutBox.Text -TotalCapText $ui.TotalCapBox.Text
     }
@@ -981,7 +1072,7 @@ function Show-ServerEventTimeline {
         $req = Get-InputRequest
         $ui.InputError.Text = if ($req.Ok) { '' } else { $req.Message }
         $ui.SearchButton.IsEnabled = $req.Ok -and -not $running
-        $serversOk = @(ConvertTo-ServerList -Text $ui.ServersBox.Text).Count -gt 0
+        $serversOk = $ui.ServerItems.Count -gt 0
         $ui.LastHourButton.IsEnabled = $serversOk -and -not $running
         $ui.Last24Button.IsEnabled = $serversOk -and -not $running
         $ui.CancelButton.IsEnabled = [bool]$running
@@ -1158,7 +1249,7 @@ function Show-ServerEventTimeline {
     # Events
     $ui.AroundRadio.add_Checked({ Update-InputState })
     $ui.RangeRadio.add_Checked({ Update-InputState })
-    foreach ($box in @($ui.ServersBox, $ui.AtBox, $ui.FromBox, $ui.ToBox, $ui.CapBox, $ui.TimeoutBox, $ui.TotalCapBox)) { $box.add_TextChanged({ Update-InputState }) }
+    foreach ($box in @($ui.AtBox, $ui.FromBox, $ui.ToBox, $ui.CapBox, $ui.TimeoutBox, $ui.TotalCapBox)) { $box.add_TextChanged({ Update-InputState }) }
     $ui.CollapseCheck.add_Click({ Update-View })
     $ui.ShowAllButton.add_Click({
             $ui.Hidden.Clear(); $ui.EventKey = ''
@@ -1274,7 +1365,8 @@ function Show-ServerEventTimeline {
                 $mi = New-Object System.Windows.Controls.MenuItem
                 $mi.Header = if ($l.Length -gt 90) { $l.Substring(0, 87) + '...' } else { $l }
                 $mi.Tag = $l; $mi.ToolTip = $l
-                $mi.add_Click({ param($clicked) $ui.ServersBox.Text = [string]$clicked.Tag })
+                # A remembered list replaces the current one.
+                $mi.add_Click({ param($clicked) $ui.ServerItems.Clear(); $null = Add-ServersToList -Names @([string]$clicked.Tag) })
                 [void]$recentMenu.Items.Add($mi)
             }
             $recentMenu.PlacementTarget = $ui.RecentButton
@@ -1331,50 +1423,42 @@ function Show-ServerEventTimeline {
             }
         })
 
-    # Pick from AD: needs the RSAT ActiveDirectory module (checked without loading it).
-    $adAvailable = [bool](Get-Module -ListAvailable -Name ActiveDirectory -ErrorAction SilentlyContinue)
-    if (-not $adAvailable) {
-        $ui.PickFromAdButton.IsEnabled = $false
-        $ui.PickFromAdButton.ToolTip = 'Needs the RSAT Active Directory tools on this workstation. You can still type server names.'
-        [System.Windows.Controls.ToolTipService]::SetShowOnDisabled($ui.PickFromAdButton, $true)
-    }
-    $adMenu = New-Object System.Windows.Controls.ContextMenu
-    $miDcs = New-Object System.Windows.Controls.MenuItem
-    $miDcs.Header = 'Add all domain controllers'
-    $miFind = New-Object System.Windows.Controls.MenuItem
-    $miFind.Header = 'Find servers by name...'
-    [void]$adMenu.Items.Add($miDcs); [void]$adMenu.Items.Add($miFind)
-    $ui.PickFromAdButton.ContextMenu = $adMenu
-    $ui.PickFromAdButton.add_Click({
-            $adMenu.PlacementTarget = $ui.PickFromAdButton
-            $adMenu.Placement = 'Bottom'
-            $adMenu.IsOpen = $true
-        })
-    $addFromAd = {
-        param([string]$Kind, [string]$Text)
-        $window.Cursor = [System.Windows.Input.Cursors]::Wait
-        try {
-            $names = @(Get-AdServerCandidates -Kind $Kind -SearchText $Text)
-            if ($names.Count -eq 0) { Set-StatusMessage 'Active Directory returned no matching servers.'; return }
-            if ($names.Count -gt 25) {
-                $answer = [System.Windows.MessageBox]::Show("Add $($names.Count) servers to the list?", 'Server Event Timeline', 'YesNo', 'Question')
-                if ($answer -ne 'Yes') { return }
-            }
-            $ui.ServersBox.Text = Add-ServerNames -ExistingText $ui.ServersBox.Text -Names $names
-            Set-StatusMessage "Added $($names.Count) server(s) from Active Directory."
-        }
-        catch { Set-StatusMessage $_.Exception.Message; Write-TimelineLog WARN $_.Exception.Message }
-        finally { $window.Cursor = $null }
-    }
-    $miDcs.add_Click({ & $addFromAd 'DomainControllers' '' })
-    $miFind.add_Click({
-            Add-Type -AssemblyName Microsoft.VisualBasic
-            $text = [Microsoft.VisualBasic.Interaction]::InputBox('Part of the server name (for example SQL or FS):', 'Find servers in Active Directory', '')
-            if ($text) { & $addFromAd 'Search' $text }
+    $ui.ThisComputerButton.add_Click({
+            $null = Add-ServersToList -Names @($ui.LocalNames[0])
         })
 
-    $ui.ThisComputerButton.add_Click({
-            $ui.ServersBox.Text = Add-ServerNames -ExistingText $ui.ServersBox.Text -Names @(@(Get-LocalComputerNames)[0])
+    # Typing a server: Enter or Add puts it in the list (pasted text with commas, spaces or new
+    # lines becomes several rows).
+    $addTyped = {
+        $text = $ui.ServerInput.Text
+        if (-not $text.Trim()) { return }
+        $null = Add-ServersToList -Names @($text)
+        $ui.ServerInput.Text = ''
+        $ui.SuggestPopup.IsOpen = $false
+    }
+    $ui.ServerInput.add_TextChanged({ $ui.ServerInputHint.Visibility = if ($ui.ServerInput.Text) { 'Collapsed' } else { 'Visible' } })
+    $ui.ServerInput.add_KeyDown({ param($s, $e) if ($e.Key -eq 'Return') { $e.Handled = $true; & $addTyped } })
+    $ui.AddServerButton.add_Click({ & $addTyped })
+
+    # The x on a row removes that server.
+    $ui.ServerList.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, [System.Windows.RoutedEventHandler] {
+            param($s, $e)
+            $item = $e.OriginalSource.Tag
+            if ($null -eq $item) { return }
+            [void]$ui.ServerItems.Remove($item)
+            Update-ServerCount
+            Update-InputState
+        })
+    $ui.ClearServersButton.add_Click({
+            $n = $ui.ServerItems.Count
+            if ($n -eq 0) { return }
+            if ($n -gt 3 -and -not $ui.Smoke) {
+                $answer = [System.Windows.MessageBox]::Show("Remove all $n servers from the list?", 'Server Event Timeline', 'YesNo', 'Question')
+                if ($answer -ne 'Yes') { return }
+            }
+            $ui.ServerItems.Clear()
+            Update-ServerCount
+            Update-InputState
         })
 
     $ui.ExportCsvButton.add_Click({ Invoke-Export -Kind Csv })
@@ -1426,6 +1510,7 @@ function Show-ServerEventTimeline {
         $deadline.Start()
         $window.add_ContentRendered({
                 if ($ui.LogPanel.Children.Count -eq 0) { [void]$ui.SmokeFailures.Add('the log checkboxes were not built') }
+                if ($ui.ServerItems.Count -lt 1) { [void]$ui.SmokeFailures.Add('the server list was not filled') }
                 if (-not $ui.EventGrid.EnableRowVirtualization) { [void]$ui.SmokeFailures.Add('the event grid is not virtualized') }
                 if ($ui.PlusMinusCombo.Items.Count -eq 0 -or $ui.LevelFilter.Items.Count -eq 0) { [void]$ui.SmokeFailures.Add('the choice lists are empty') }
                 if (-not $ui.EventGrid.ContextMenu -or $ui.EventGrid.ContextMenu.Items.Count -lt 4) { [void]$ui.SmokeFailures.Add('the right-click menu was not built') }

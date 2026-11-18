@@ -1,4 +1,4 @@
-<#
+﻿<#
     Pester 5 tests for Start-ServerEventTimeline.ps1 (the window). Loaded with
     -LoadFunctionsOnly: no window opens and no server is queried. XAML is only loaded on an
     STA thread (pwsh and Windows PowerShell both start STA).
@@ -116,8 +116,9 @@ Describe 'Window layout' {
     }
 
     It 'loads in WPF with every named control' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
-        $names = 'ServersBox', 'AroundRadio', 'RangeRadio', 'AtBox', 'PlusMinusCombo', 'FromBox', 'ToBox', 'LastHourButton', 'Last24Button',
-            'LogPanel', 'SecurityCheck', 'AllLogsCheck', 'CapBox', 'TimeoutBox', 'RunAsButton', 'PickFromAdButton', 'SearchButton',
+        $names = 'ServerInput', 'ServerInputHint', 'AddServerButton', 'ServerCountText', 'DomainText', 'ChangeDomainButton', 'ServerList',
+            'SuggestPopup', 'SuggestList', 'AddSeveralButton', 'ClearServersButton', 'AroundRadio', 'RangeRadio', 'AtBox', 'PlusMinusCombo', 'FromBox', 'ToBox', 'LastHourButton', 'Last24Button',
+            'LogPanel', 'SecurityCheck', 'AllLogsCheck', 'CapBox', 'TimeoutBox', 'RunAsButton', 'SearchButton',
             'CancelButton', 'StatusList', 'BannerText', 'TimeZoneNote', 'LevelFilter', 'ServerFilter', 'LogFilter', 'FlaggedOnlyCheck',
             'FilterText', 'CountText', 'EventGrid', 'DetailText', 'ExportCsvButton', 'ExportHtmlButton', 'CopyButton', 'ThisComputerButton', 'LogsButton', 'LogsPopup', 'CoreLogPanel', 'LogsAllButton', 'LogsNoneButton', 'LogsDefaultButton', 'SaveFolderBox', 'BrowseFolderButton', 'OpenFolderButton',
             'SummaryList', 'CollapseCheck', 'HiddenNote', 'ShowAllButton', 'TotalCapBox', 'RecentButton', 'TicketNoteButton'
@@ -136,6 +137,25 @@ Describe 'Window layout' {
         $tip | Should -BeLike '*Documents\TicketNotes\Ticket_*'
         $tip | Should -BeLike '*Run a search first*'
         $tip | Should -Not -BeLike '*ticket note*'
+    }
+
+    It 'no longer has the free-text servers box or the Pick from AD button' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $script:Window.FindName('ServersBox') | Should -BeNullOrEmpty
+        $script:Window.FindName('PickFromAdButton') | Should -BeNullOrEmpty
+    }
+
+    It 'says what to type in the empty server box' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $script:Window.FindName('ServerInputHint').Text | Should -Be 'Type a server name or IP address'
+        $script:Window.FindName('ServerInputHint').IsHitTestVisible | Should -BeFalse
+    }
+
+    It 'shows each server with its note and a remove button' {
+        $xaml = New-TimelineWindowXaml
+        $xaml | Should -Match '<ListBox x:Name="ServerList"'
+        $xaml | Should -Match 'Binding Display'
+        $xaml | Should -Match 'Binding Note'
+        $xaml | Should -Match 'Content="×"'
+        $xaml | Should -Match 'Binding NoteKind'
     }
 
     It 'keeps the event grid virtualized and ungrouped' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
