@@ -25,7 +25,19 @@
     not retried.
 
     Export the visible rows to CSV or an HTML report, or copy the selected rows as text for a
-    ticket. Files go to -OutputPath (default: a Reports folder beside this script).
+    ticket. Files go to -OutputPath (default: a Reports folder beside this script). Ticket
+    note... writes the four-part ticket note (TicketNote\Join-TicketNotes.ps1 can merge it
+    with the quick checks' notes) and the HTML report into the ticket's folder.
+
+    A summary line per server sits above the grid ("APP01: 1 unexpected restart, 3 service
+    failures"). Right-click a row to search every server around that event, show only that
+    kind of event, hide a noisy source or show only that server. Collapse repeats turns
+    hundreds of identical routine events into one row.
+
+    With -NoGui it runs in the console instead (for RMM scripts and scheduled tasks): it reads
+    the servers, prints how each went and what was found, and writes the CSV and HTML report
+    (and the ticket note with -TicketNumber). Exit code 0 = every log read, 1 = a server or
+    log could not be read in full, 2 = could not run (for example a time it couldn't read).
 
 .PARAMETER ComputerName
     Servers to fill in when the window opens. You can also type them in the window. Without
@@ -46,9 +58,66 @@
 .PARAMETER LoadFunctionsOnly
     Define the functions and return without opening anything (used by the tests).
 
+.PARAMETER NoGui
+    Run in the console: no window. Use -At (with -PlusMinusMinutes), -From and -To, or
+    -LastMinutes (default 60) for the time, and -ComputerName (default: this computer).
+
+.PARAMETER At
+    -NoGui: look around this time, each server's local time (yyyy-MM-dd HH:mm).
+
+.PARAMETER PlusMinusMinutes
+    -NoGui: minutes either side of -At (default 15).
+
+.PARAMETER From
+    -NoGui: start of the window, each server's local time (yyyy-MM-dd HH:mm). Needs -To.
+
+.PARAMETER To
+    -NoGui: end of the window, each server's local time (yyyy-MM-dd HH:mm). Needs -From.
+
+.PARAMETER LastMinutes
+    -NoGui: the last N minutes, when neither -At nor -From/-To is given (default 60).
+
+.PARAMETER LogName
+    -NoGui: logs to read, by their checkbox label (System, Task Scheduler, Group Policy...) or
+    their log name. Default: the same logs ticked by default in the window.
+
+.PARAMETER IncludeSecurity
+    -NoGui: also read the Security log (slow on domain controllers and file servers).
+
+.PARAMETER AllLogs
+    -NoGui: also read every log on each server that has events (can be 100+ logs).
+
+.PARAMETER Cap
+    -NoGui: stop each log at this many events (default 5000).
+
+.PARAMETER TotalCap
+    -NoGui: stop each server at this many events in total (default 50000).
+
+.PARAMETER TimeoutSec
+    -NoGui: give up on a log after this many seconds (default 60).
+
+.PARAMETER Credential
+    -NoGui: read the servers with this account (the window has Run as... instead).
+
+.PARAMETER TicketNumber
+    -NoGui: write the ticket note, the CSV and the HTML report into
+    <OutputPath or Documents\TicketNotes>\Ticket_<number>, the folder TicketNote's
+    Join-TicketNotes.ps1 reads. Letters, digits, - or _, up to 32 characters.
+
+.PARAMETER NoClipboard
+    -NoGui with -TicketNumber: don't copy the ticket note to the clipboard.
+
 .EXAMPLE
     .\Start-ServerEventTimeline.ps1
     Opens the window.
+
+.EXAMPLE
+    .\Start-ServerEventTimeline.ps1 -NoGui -ComputerName APP01, SQL01 -At '2026-11-17 03:00' -PlusMinusMinutes 30 -OutputPath D:\Reports
+    No window: reads both servers around 03:00 and writes the CSV and HTML report to D:\Reports.
+
+.EXAMPLE
+    .\Start-ServerEventTimeline.ps1 -NoGui -ComputerName APP01 -LastMinutes 120 -TicketNumber 482113
+    No window: the last two hours on APP01, with a ticket note in Documents\TicketNotes\Ticket_482113.
 
 .EXAMPLE
     .\Start-ServerEventTimeline.ps1 -ComputerName APP01, SQL01, DC01
@@ -73,13 +142,34 @@
     - SystemParameters.VirtualScreenLeft (smoke-test window placement):
       https://learn.microsoft.com/dotnet/api/system.windows.systemparameters.virtualscreenleft
     - DataGrid row virtualization: https://learn.microsoft.com/dotnet/api/system.windows.controls.datagrid.enablerowvirtualization
+    - Keeping the sort when ItemsSource changes (the view's SortDescriptions are rebuilt, and
+      DataGridColumn.SortDirection is only the header arrow):
+      https://learn.microsoft.com/dotnet/api/system.windows.controls.datagridcolumn.sortdirection
+      https://learn.microsoft.com/dotnet/api/system.windows.controls.itemcollection.sortdescriptions
+    - Ticket notes: CaseKit.ps1 (copy of TicketNote\CaseKit.ps1), see TicketNote\README.md.
 #>
 [CmdletBinding()]
 param(
     [string[]]$ComputerName,
     [string]$OutputPath,
     [switch]$SmokeTest,
-    [switch]$LoadFunctionsOnly
+    [switch]$LoadFunctionsOnly,
+    [switch]$NoGui,
+    [string]$At,
+    [ValidateRange(1, 1440)][int]$PlusMinusMinutes = 15,
+    [string]$From,
+    [string]$To,
+    [ValidateRange(1, 525600)][int]$LastMinutes = 60,
+    [string[]]$LogName,
+    [switch]$IncludeSecurity,
+    [switch]$AllLogs,
+    [ValidateRange(1, 1000000)][int]$Cap = 5000,
+    [ValidateRange(1, 10000000)][int]$TotalCap = 50000,
+    [ValidateRange(1, 3600)][int]$TimeoutSec = 60,
+    [pscredential]$Credential,
+    # Checked with Test-TicketNumber (CaseKit.ps1) so a bad value gets a plain message and exit 2.
+    [string]$TicketNumber,
+    [switch]$NoClipboard
 )
 
 . (Join-Path $PSScriptRoot 'ServerEventTimeline.Engine.ps1')
@@ -207,6 +297,7 @@ function New-TimelineWindowXaml {
           <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
             <Button x:Name="ThisComputerButton" Content="This computer" ToolTip="Add this computer: its logs are read directly, no network needed"/>
             <Button x:Name="PickFromAdButton" Content="Pick from AD..." ToolTip="Add domain controllers or search Active Directory for servers"/>
+            <Button x:Name="RecentButton" Content="Recent" ToolTip="Server lists you searched before (remembered per user)"/>
           </StackPanel>
         </StackPanel>
         <StackPanel Grid.Column="1" Margin="0,0,20,0">
@@ -273,8 +364,11 @@ function New-TimelineWindowXaml {
               <TextBox x:Name="CapBox" Width="70" Text="5000"/>
               <TextBlock Text="events.   Give up on a log after" VerticalAlignment="Center" Margin="6,0,6,0"/>
               <TextBox x:Name="TimeoutBox" Width="50" Text="60"/>
-              <TextBlock Text="seconds.   " VerticalAlignment="Center" Margin="6,0,6,0"/>
-              <Button x:Name="RunAsButton" Content="Run as another account..." ToolTip="Read the servers with a different account (for example another domain)"/>
+              <TextBlock Text="seconds." VerticalAlignment="Center" Margin="6,0,6,0"/>
+              <TextBlock Text="Stop each server at" VerticalAlignment="Center" Margin="0,6,6,0"/>
+              <TextBox x:Name="TotalCapBox" Width="80" Text="50000" Margin="0,6,0,0" ToolTip="A safety limit for All logs: once a server reaches this many events, its remaining logs are not read (and are named)"/>
+              <TextBlock Text="events in total.   " VerticalAlignment="Center" Margin="6,6,6,0"/>
+              <Button x:Name="RunAsButton" Content="Run as another account..." Margin="0,6,8,0" ToolTip="Read the servers with a different account (for example another domain)"/>
             </WrapPanel>
           </Expander>
         </StackPanel>
@@ -299,16 +393,29 @@ function New-TimelineWindowXaml {
       </StackPanel>
     </Grid>
 
-    <!-- Narrow it down -->
-    <WrapPanel Grid.Row="2" Margin="0,12,0,8">
-      <TextBlock Text="Show" VerticalAlignment="Center" Margin="0,0,8,0" Foreground="{StaticResource Muted}"/>
-      <ComboBox x:Name="LevelFilter" MinWidth="170"/>
-      <ComboBox x:Name="ServerFilter" MinWidth="150"/>
-      <ComboBox x:Name="LogFilter" MinWidth="200"/>
-      <CheckBox x:Name="FlaggedOnlyCheck" Content="Flagged only" VerticalAlignment="Center" Margin="4,0,12,0"/>
-      <TextBox x:Name="FilterText" Width="260" ToolTip="Search message, source or event ID"/>
-      <TextBlock x:Name="CountText" VerticalAlignment="Center" Margin="12,0,0,0" Foreground="{StaticResource Muted}"/>
-    </WrapPanel>
+    <!-- What was found, then narrow it down -->
+    <StackPanel Grid.Row="2" Margin="0,12,0,8">
+      <Border x:Name="SummaryBorder" Background="{StaticResource Card}" BorderBrush="{StaticResource Accent}" BorderThickness="3,0,0,0"
+              CornerRadius="2" Padding="12,8" Margin="0,0,0,10" Visibility="Collapsed">
+        <StackPanel>
+          <TextBlock Style="{StaticResource Label}" Text="WHAT WAS FOUND (EVERY EVENT READ, BEFORE FILTERS)"/>
+          <ItemsControl x:Name="SummaryList" FontSize="13"/>
+        </StackPanel>
+      </Border>
+      <WrapPanel>
+        <TextBlock Text="Show" VerticalAlignment="Center" Margin="0,0,8,0" Foreground="{StaticResource Muted}"/>
+        <ComboBox x:Name="LevelFilter" MinWidth="170"/>
+        <ComboBox x:Name="ServerFilter" MinWidth="150"/>
+        <ComboBox x:Name="LogFilter" MinWidth="200"/>
+        <CheckBox x:Name="FlaggedOnlyCheck" Content="Flagged only" VerticalAlignment="Center" Margin="4,0,12,0"/>
+        <CheckBox x:Name="CollapseCheck" Content="Collapse repeats" VerticalAlignment="Center" Margin="0,0,12,0"
+                  ToolTip="Show the same routine event on the same server once, with how many times it happened. Flagged events are never collapsed."/>
+        <TextBox x:Name="FilterText" Width="260" ToolTip="Search message, source or event ID"/>
+        <TextBlock x:Name="CountText" VerticalAlignment="Center" Margin="12,0,0,0" Foreground="{StaticResource Muted}"/>
+        <TextBlock x:Name="HiddenNote" VerticalAlignment="Center" Margin="12,0,8,0" Foreground="{StaticResource Warn}" Visibility="Collapsed"/>
+        <Button x:Name="ShowAllButton" Content="Show everything again" Visibility="Collapsed" ToolTip="Bring back hidden sources and leave 'only this event'"/>
+      </WrapPanel>
+    </StackPanel>
 
     <!-- The timeline -->
     <DataGrid x:Name="EventGrid" Grid.Row="3" AutoGenerateColumns="False" IsReadOnly="True" EnableRowVirtualization="True"
@@ -383,6 +490,7 @@ function New-TimelineWindowXaml {
           <Button x:Name="ExportCsvButton" Content="Export CSV" IsEnabled="False" ToolTip="Save the rows you can see as a CSV file"/>
           <Button x:Name="ExportHtmlButton" Content="Export HTML report" IsEnabled="False" ToolTip="Save a report with the rows you can see and how each server went"/>
           <Button x:Name="CopyButton" Content="Copy selected rows" IsEnabled="False" ToolTip="Copy the selected rows as text for a ticket note"/>
+          <Button x:Name="TicketNoteButton" Content="Ticket note..." IsEnabled="False" ToolTip="Write the ticket note (what was found, what's ruled out, what couldn't be checked) and the HTML report into the ticket's folder, and copy the note"/>
         </StackPanel>
         <TextBlock x:Name="StatusMessage" VerticalAlignment="Center" Margin="8,0,0,0" Foreground="{StaticResource Muted}" TextTrimming="CharacterEllipsis"/>
       </DockPanel>
@@ -408,9 +516,158 @@ function Get-TimelineWindowText {
 function Invoke-TimelineSearch {
     <# Starts the background engine for one search request (Run as credential included). #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)]$Request, [string[]]$Logs, [bool]$AllLogs, [pscredential]$Credential)
+    param([Parameter(Mandatory)]$Request, [string[]]$Logs, [bool]$AllLogs, [pscredential]$Credential, [hashtable]$EngineOptions = @{})
+    $totalCap = if ($Request.PSObject.Properties['TotalCap'] -and $Request.TotalCap -gt 0) { [int]$Request.TotalCap } else { 50000 }
     Start-TimelineEngine -Servers $Request.Servers -Window $Request.Window -SelectedLogs $Logs -AllLogs:$AllLogs `
-        -Cap $Request.Cap -TimeoutSec $Request.TimeoutSec -Credential $Credential
+        -Cap $Request.Cap -ServerTotalCap $totalCap -TimeoutSec $Request.TimeoutSec -Credential $Credential @EngineOptions
+}
+
+function Get-GridRowKey {
+    # Server|Log|RecordId: the same event, even when a collapsed row is rebuilt as a new object.
+    param($Row)
+    '{0}|{1}|{2}' -f $Row.Server, $Row.Log, $Row.RecordId
+}
+
+function Set-GridItemsPreservingState {
+    <#
+        Replaces the grid's rows without losing what the tech was doing: the column they sorted
+        by and the rows they selected. Setting ItemsSource rebuilds the view, which drops its
+        SortDescriptions, and the header arrow (DataGridColumn.SortDirection) is only a display.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Grid, [object[]]$Items)
+    $sorts = @($Grid.Items.SortDescriptions | ForEach-Object { $_ })
+    $arrows = @($Grid.Columns | Where-Object { $null -ne $_.SortDirection } | ForEach-Object { [PSCustomObject]@{ Column = $_; Direction = $_.SortDirection } })
+    $selected = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($s in @($Grid.SelectedItems)) { [void]$selected.Add((Get-GridRowKey $s)) }
+
+    $Grid.ItemsSource = $Items
+
+    if ($sorts.Count -gt 0) {
+        $Grid.Items.SortDescriptions.Clear()
+        foreach ($sd in $sorts) { $Grid.Items.SortDescriptions.Add($sd) }
+    }
+    foreach ($a in $arrows) { $a.Column.SortDirection = $a.Direction }
+    if ($selected.Count -gt 0) {
+        foreach ($r in @($Items)) {
+            if ($selected.Contains((Get-GridRowKey $r))) { [void]$Grid.SelectedItems.Add($r) }
+        }
+    }
+}
+
+function Invoke-TimelineConsole {
+    <#
+        -NoGui: reads the servers without a window, prints how each went and what was found,
+        writes the CSV, the HTML report and a log (and a ticket note with -TicketNumber).
+        Returns the exit code: 0 every log read, 1 something couldn't be read in full,
+        2 couldn't run.
+    #>
+    [CmdletBinding()]
+    param(
+        [string[]]$ComputerName,
+        [string]$At, [int]$PlusMinusMinutes = 15, [string]$From, [string]$To, [int]$LastMinutes = 60,
+        [string[]]$LogName, [switch]$IncludeSecurity, [switch]$AllLogs,
+        [int]$Cap = 5000, [int]$TotalCap = 50000, [int]$TimeoutSec = 60,
+        [pscredential]$Credential,
+        [string]$OutputPath,
+        [Parameter(Mandatory)][string]$DefaultOutputPath,
+        [string]$TicketNumber,
+        [switch]$NoClipboard,
+        [hashtable]$EngineOptions = @{},
+        [int]$PollMs = 250
+    )
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    $say = {
+        param([string]$Level, [string]$Message)
+        $color = @{ PASS = 'Green'; WARN = 'Yellow'; FAIL = 'Red'; INFO = 'Cyan' }[$Level]
+        Write-Host "[$Level] $Message" -ForegroundColor $color
+        $lines.Add(('{0} [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message))
+    }
+
+    # What to read
+    $serversText = if (@($ComputerName).Count -gt 0) { @($ComputerName) -join ',' } else { @(Get-LocalComputerNames)[0] }
+    $mode = if ($From -or $To) { 'Range' } elseif ($At) { 'Around' } else { 'Relative' }
+    $req = ConvertFrom-TimelineInputs -ServersText $serversText -Mode $mode -AtText $At -PlusMinusMinutes $PlusMinusMinutes `
+        -FromText $From -ToText $To -LastMinutes $LastMinutes -CapText ([string]$Cap) -TimeoutText ([string]$TimeoutSec) -TotalCapText ([string]$TotalCap)
+    if (-not $req.Ok) { & $say FAIL $req.Message; return 2 }
+    if ($TicketNumber -and -not (Test-TicketNumber -TicketNumber $TicketNumber)) {
+        & $say FAIL "'$TicketNumber' is not a usable ticket number. Use letters, digits, - or _ (up to 32 characters, starting with a letter or digit), for example 482113."
+        return 2
+    }
+    $logs = @(Resolve-TimelineLogNames -Names $LogName)
+    if ($IncludeSecurity -and $logs -notcontains 'Security') { $logs += 'Security' }
+
+    # Where the files go
+    try {
+        if ($TicketNumber) {
+            $root = if ($OutputPath) { $OutputPath } else { Get-TicketNoteDefaultRoot }
+            $folder = Resolve-TicketFolder -TicketNumber $TicketNumber -Root $root
+        }
+        else {
+            $folder = if ($OutputPath) { $OutputPath } else { $DefaultOutputPath }
+            if (-not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force -ErrorAction Stop | Out-Null }
+        }
+    }
+    catch { & $say FAIL "Couldn't create the output folder: $($_.Exception.Message)"; return 2 }
+
+    $windowText = Get-TimelineWindowText -Window $req.Window
+    & $say INFO ('Searching {0} server(s): {1}. {2}. Logs: {3}{4}' -f $req.Servers.Count, ($req.Servers -join ', '), $windowText,
+        ($logs -join ', '), $(if ($AllLogs) { ' + all logs with events' } else { '' }))
+
+    # Read, the same background engine as the window
+    $engine = Invoke-TimelineSearch -Request $req -Logs $logs -AllLogs ([bool]$AllLogs) -Credential $Credential -EngineOptions $EngineOptions
+    $store = New-TimelineRowStore
+    $reported = @{}
+    try {
+        do {
+            $u = Update-TimelineEngine -Engine $engine
+            if (@($u.NewRows).Count -gt 0) { Add-TimelineRows -Store $store -NewRows @($u.NewRows) }
+            foreach ($s in $engine.Status.Values) {
+                if ($reported.ContainsKey($s.Server) -or $s.State -in @('Waiting', 'Querying')) { continue }
+                $reported[$s.Server] = $true
+                switch ($s.State) {
+                    'Done'         { & $say PASS ('{0}: {1:N0} events (via {2})' -f $s.Server, $s.EventCount, $s.Transport) }
+                    'DoneWithGaps' { & $say WARN ('{0}: {1:N0} events, some logs incomplete (via {2})' -f $s.Server, $s.EventCount, $s.Transport) }
+                    'Unreachable'  { & $say FAIL ("{0}: couldn't reach - {1}" -f $s.Server, $s.Reason) }
+                    default        { & $say WARN ('{0}: {1}' -f $s.Server, $s.State) }
+                }
+            }
+            if (-not $u.Finished) { Start-Sleep -Milliseconds $PollMs }
+        } until ($u.Finished)
+    }
+    finally { Close-TimelineEngine -Engine $engine }
+
+    $rows = $store.Rows.ToArray()
+    $summary = @(Get-TimelineSummaryLines -Rows $rows -Status $engine.Status)
+    foreach ($line in $summary) { & $say INFO "Found - $line" }
+    $banner = Get-TimelineBannerText -Status $engine.Status
+    foreach ($line in @($banner -split [Environment]::NewLine | Where-Object { $_ })) { & $say WARN $line }
+
+    # Files
+    $stamp = Get-Date -Format 'yyyy-MM-dd_HHmmss'
+    $htmlPath = Join-Path $folder "ServerEventTimeline_$stamp.html"
+    try {
+        Export-TimelineCsv -Rows $rows -Path (Join-Path $folder "ServerEventTimeline_$stamp.csv")
+        $context = @{
+            WindowText = $windowText; Servers = $req.Servers; Logs = $logs; FiltersText = 'none (console mode: every event read)'
+            GeneratedAt = Get-Date; ServerOutcomes = @($engine.Status.Values); Summary = $summary
+        }
+        [System.IO.File]::WriteAllText($htmlPath, (ConvertTo-TimelineHtml -Rows $rows -Context $context), (New-Object System.Text.UTF8Encoding $true))
+        & $say PASS ('Saved {0:N0} events to {1}' -f $rows.Count, $folder)
+    }
+    catch { & $say FAIL "Couldn't save the report: $($_.Exception.Message)" }
+
+    if ($TicketNumber) {
+        $note = New-TimelineTicketNote -Status $engine.Status -Rows $rows -WindowText $windowText -Logs $logs -EvidencePaths @($htmlPath)
+        $null = Publish-TicketNote -Note $note -Folder $folder -PasteSafe -NoClipboard:$NoClipboard
+    }
+
+    try { [System.IO.File]::WriteAllLines((Join-Path $folder "ServerEventTimeline_$stamp.log"), $lines.ToArray(), (New-Object System.Text.UTF8Encoding $true)) } catch { }
+
+    $incomplete = @($engine.Status.Values | Where-Object { $_.State -ne 'Done' }).Count
+    if ($incomplete -gt 0) { return 1 }
+    return 0
 }
 
 function Set-SmokeWindowPosition {
@@ -443,8 +700,9 @@ function Show-ServerEventTimeline {
         LastRebuild = [Diagnostics.Stopwatch]::StartNew(); Reported = @{}; Finished = $true
         OutputPath = $OutputPath; LogFile = $null; Credential = $null; LogChecks = @(); ExitCode = 0
         Request = $null; Selected = @()
+        Hidden = New-Object System.Collections.Generic.List[string]; EventKey = ''; VisibleRows = @(); InUpdate = $false
     }
-    foreach ($name in 'LogsButton', 'LogsPopup', 'CoreLogPanel', 'LogsAllButton', 'LogsNoneButton', 'LogsDefaultButton',
+    foreach ($name in 'SummaryBorder', 'SummaryList', 'CollapseCheck', 'HiddenNote', 'ShowAllButton', 'TotalCapBox', 'RecentButton', 'TicketNoteButton', 'LogsButton','LogsPopup', 'CoreLogPanel', 'LogsAllButton', 'LogsNoneButton', 'LogsDefaultButton',
         'SaveFolderBox', 'BrowseFolderButton', 'OpenFolderButton', 'ThisComputerButton', 'ServersBox', 'AroundRadio', 'RangeRadio', 'AtBox', 'PlusMinusCombo', 'FromBox', 'ToBox', 'LastHourButton',
         'Last24Button', 'LogPanel', 'SecurityCheck', 'AllLogsCheck', 'CapBox', 'TimeoutBox', 'RunAsButton', 'PickFromAdButton',
         'SearchButton', 'CancelButton', 'InputError', 'StatusList', 'BannerText', 'TimeZoneNote', 'LevelFilter', 'ServerFilter',
@@ -590,7 +848,7 @@ function Show-ServerEventTimeline {
         if (-not $Mode) { $Mode = if ($ui.RangeRadio.IsChecked) { 'Range' } else { 'Around' } }
         ConvertFrom-TimelineInputs -ServersText $ui.ServersBox.Text -Mode $Mode -AtText $ui.AtBox.Text `
             -PlusMinusMinutes ([int]$ui.PlusMinusCombo.SelectedItem.Tag) -FromText $ui.FromBox.Text -ToText $ui.ToBox.Text `
-            -LastMinutes $LastMinutes -CapText $ui.CapBox.Text -TimeoutText $ui.TimeoutBox.Text
+            -LastMinutes $LastMinutes -CapText $ui.CapBox.Text -TimeoutText $ui.TimeoutBox.Text -TotalCapText $ui.TotalCapBox.Text
     }
 
     function Update-InputState {
@@ -605,6 +863,7 @@ function Show-ServerEventTimeline {
         $ui.LastHourButton.IsEnabled = $serversOk -and -not $running
         $ui.Last24Button.IsEnabled = $serversOk -and -not $running
         $ui.CancelButton.IsEnabled = [bool]$running
+        $ui.TicketNoteButton.IsEnabled = [bool]($ui.Engine -and $ui.Finished)
     }
 
     function Get-CurrentFilter {
@@ -612,25 +871,58 @@ function Show-ServerEventTimeline {
             MinLevel    = [string]$ui.LevelFilter.SelectedItem.Tag
             Server      = if ($ui.ServerFilter.SelectedItem) { [string]$ui.ServerFilter.SelectedItem.Tag } else { '*' }
             Log         = if ($ui.LogFilter.SelectedItem) { [string]$ui.LogFilter.SelectedItem.Tag } else { '*' }
-            FlaggedOnly = [bool]$ui.FlaggedOnlyCheck.IsChecked
-            Text        = $ui.FilterText.Text
+            FlaggedOnly   = [bool]$ui.FlaggedOnlyCheck.IsChecked
+            Text          = $ui.FilterText.Text
+            HiddenSources = $ui.Hidden.ToArray()
+            EventKey      = $ui.EventKey
         }
     }
 
+    function Update-Summary {
+        # The strip above the grid: what was found on each server, from every event read.
+        if (-not $ui.Engine) { $ui.SummaryBorder.Visibility = 'Collapsed'; return }
+        $ui.SummaryList.ItemsSource = @(Get-TimelineSummaryLines -Rows $ui.Store.Rows.ToArray() -Status $ui.Engine.Status)
+        $ui.SummaryBorder.Visibility = 'Visible'
+    }
+
+    function Update-HiddenNote {
+        $parts = @()
+        if ($ui.Hidden.Count -gt 0) { $parts += 'Hidden: {0}' -f ($ui.Hidden -join ', ') }
+        if ($ui.EventKey) { $parts += 'Only: {0}' -f ($ui.EventKey -replace '\|', ' event ') }
+        $ui.HiddenNote.Text = $parts -join '   '
+        $shown = if ($parts.Count -gt 0) { 'Visible' } else { 'Collapsed' }
+        $ui.HiddenNote.Visibility = $shown
+        $ui.ShowAllButton.Visibility = $shown
+    }
+
     function Update-View {
-        # Merges rows that arrived, re-applies the filter and refreshes the grid.
-        if ($ui.PendingRows.Count -gt 0) {
-            Add-TimelineRows -Store $ui.Store -NewRows $ui.PendingRows.ToArray()
-            $ui.PendingRows.Clear()
-            Set-ChoiceItems -Combo $ui.LogFilter -AllLabel 'All logs' -Names @($ui.Store.Logs)
+        # Merges rows that arrived, re-applies the filter and refreshes the grid, keeping the
+        # tech's sort and selection. Refilling a filter combo fires SelectionChanged, which
+        # would call this again mid-update: the InUpdate guard skips that nested call.
+        if ($ui.InUpdate) { return }
+        $ui.InUpdate = $true
+        try {
+            if ($ui.PendingRows.Count -gt 0) {
+                Add-TimelineRows -Store $ui.Store -NewRows $ui.PendingRows.ToArray()
+                $ui.PendingRows.Clear()
+                Set-ChoiceItems -Combo $ui.LogFilter -AllLabel 'All logs' -Names @($ui.Store.Logs)
+            }
+            $visible = @(Select-TimelineRows -Rows $ui.Store.Rows.ToArray() -Filter (Get-CurrentFilter))
+            $ui.VisibleRows = $visible
+            $shown = if ($ui.CollapseCheck.IsChecked) { @(Group-TimelineRepeats -Rows $visible) } else { $visible }
+            Set-GridItemsPreservingState -Grid $ui.EventGrid -Items $shown
+            $ui.CountText.Text = if ($shown.Count -ne $visible.Count) {
+                'Showing {0:N0} of {1:N0} events ({2:N0} rows after collapsing repeats)' -f $visible.Count, $ui.Store.Rows.Count, $shown.Count
+            }
+            else { 'Showing {0:N0} of {1:N0} events' -f $visible.Count, $ui.Store.Rows.Count }
+            $has = $visible.Count -gt 0
+            $ui.ExportCsvButton.IsEnabled = $has
+            $ui.ExportHtmlButton.IsEnabled = $has
+            Update-Summary
+            Update-HiddenNote
+            $ui.LastRebuild.Restart()
         }
-        $visible = @(Select-TimelineRows -Rows $ui.Store.Rows.ToArray() -Filter (Get-CurrentFilter))
-        $ui.EventGrid.ItemsSource = $visible
-        $ui.CountText.Text = 'Showing {0:N0} of {1:N0} events' -f $visible.Count, $ui.Store.Rows.Count
-        $has = $visible.Count -gt 0
-        $ui.ExportCsvButton.IsEnabled = $has
-        $ui.ExportHtmlButton.IsEnabled = $has
-        $ui.LastRebuild.Restart()
+        finally { $ui.InUpdate = $false }
     }
 
     function Update-StatusPanel {
@@ -644,6 +936,7 @@ function Show-ServerEventTimeline {
         $ui.TimeZoneNote.Text = [string]$note
         $ui.TimeZoneNote.Visibility = if ($note) { 'Visible' } else { 'Collapsed' }
         Set-ChoiceItems -Combo $ui.ServerFilter -AllLabel 'All servers' -Names @($status.Keys)
+        Update-Summary
         foreach ($s in $status.Values) {
             if ($ui.Reported.ContainsKey($s.Server) -or $s.State -in @('Waiting', 'Querying')) { continue }
             $ui.Reported[$s.Server] = $true
@@ -673,6 +966,13 @@ function Show-ServerEventTimeline {
         $ui.DetailText.Text = 'Select an event to see everything about it here.'
         $ui.Finished = $false
         $ui.Engine = Invoke-TimelineSearch -Request $req -Logs $logs -AllLogs ([bool]$ui.AllLogsCheck.IsChecked) -Credential $ui.Credential
+        if (-not $ui.Smoke) {
+            try {
+                $recent = @((Read-TimelineSettings -Path $SettingsPath).RecentServerLists)
+                Save-TimelineSettings -Path $SettingsPath -RecentServerLists @(Add-RecentServerList -Recent $recent -Servers $req.Servers)
+            }
+            catch { }
+        }
         Write-TimelineLog INFO ('Searching {0} server(s): {1}. {2}. Logs: {3}{4}' -f $req.Servers.Count, ($req.Servers -join ', '),
             (Get-TimelineWindowText -Window $req.Window), ($logs -join ', '), $(if ($ui.AllLogsCheck.IsChecked) { ' + all logs with events' } else { '' }))
         Set-StatusMessage 'Reading the servers in the background - you can filter and scroll while it works.'
@@ -685,10 +985,13 @@ function Show-ServerEventTimeline {
         $filter = Get-CurrentFilter
         $filtersText = 'Level: {0}; server: {1}; log: {2}; flagged only: {3}; text: "{4}"' -f $ui.LevelFilter.SelectedItem.Content,
             $ui.ServerFilter.SelectedItem.Content, $ui.LogFilter.SelectedItem.Content, $(if ($filter.FlaggedOnly) { 'yes' } else { 'no' }), $filter.Text
+        if ($ui.Hidden.Count -gt 0) { $filtersText += '; hidden sources: {0}' -f ($ui.Hidden -join ', ') }
+        if ($ui.EventKey) { $filtersText += '; only event: {0}' -f $ui.EventKey }
         @{
             WindowText = Get-TimelineWindowText -Window $ui.Request.Window
             Servers = $ui.Request.Servers; Logs = $ui.Selected; FiltersText = $filtersText; GeneratedAt = Get-Date
             ServerOutcomes = @($ui.Engine.Status.Values)
+            Summary = @(Get-TimelineSummaryLines -Rows $ui.Store.Rows.ToArray() -Status $ui.Engine.Status)
         }
     }
 
@@ -696,7 +999,8 @@ function Show-ServerEventTimeline {
         param([ValidateSet('Csv', 'Html')][string]$Kind)
         if ($ui.Smoke) { [void]$ui.SmokeFailures.Add('an export would have been written'); return }
         Sync-SaveFolder
-        $rows = @($ui.EventGrid.ItemsSource)
+        # Every filtered event, even when repeats are collapsed on screen.
+        $rows = @($ui.VisibleRows)
         try {
             if (-not (Test-Path -LiteralPath $ui.OutputPath)) { New-Item -ItemType Directory -Path $ui.OutputPath -Force | Out-Null }
             $stamp = Get-Date -Format 'yyyy-MM-dd_HHmmss'
@@ -721,7 +1025,13 @@ function Show-ServerEventTimeline {
     # Events
     $ui.AroundRadio.add_Checked({ Update-InputState })
     $ui.RangeRadio.add_Checked({ Update-InputState })
-    foreach ($box in @($ui.ServersBox, $ui.AtBox, $ui.FromBox, $ui.ToBox, $ui.CapBox, $ui.TimeoutBox)) { $box.add_TextChanged({ Update-InputState }) }
+    foreach ($box in @($ui.ServersBox, $ui.AtBox, $ui.FromBox, $ui.ToBox, $ui.CapBox, $ui.TimeoutBox, $ui.TotalCapBox)) { $box.add_TextChanged({ Update-InputState }) }
+    $ui.CollapseCheck.add_Click({ Update-View })
+    $ui.ShowAllButton.add_Click({
+            $ui.Hidden.Clear(); $ui.EventKey = ''
+            Update-View
+            Set-StatusMessage 'Showing every event again.'
+        })
     $ui.PlusMinusCombo.add_SelectionChanged({ Update-InputState })
     $ui.SearchButton.add_Click({ Start-Search })
     $ui.LastHourButton.add_Click({ Start-Search -Mode Relative -LastMinutes 60 })
@@ -748,9 +1058,118 @@ function Show-ServerEventTimeline {
                     "Log: $($r.Log)    Level: $($r.LevelName)    Source: $($r.Provider)    Event ID: $($r.EventId)    Record: $($r.RecordId)"
                     "User: $($r.User)"
                     $(if ($r.Flag) { "Flag: $($r.Flag)" })
+                    $(if ($r.PSObject.Properties['Members']) {
+                            $times = @($r.Members | Select-Object -First 50 | ForEach-Object { ([datetime]$_.TimeServerLocal).ToString('HH:mm:ss') })
+                            $more = if (@($r.Members).Count -gt 50) { ' ...' } else { '' }
+                            'Happened {0} times on {1}, from {2:yyyy-MM-dd HH:mm:ss} to {3:yyyy-MM-dd HH:mm:ss} (server local). Times: {4}{5}' -f `
+                                $r.RepeatCount, $r.Server, $r.TimeServerLocal, $r.LastTimeServerLocal, ($times -join ', '), $more
+                        })
                     ''
                     $r.Message
                 ) | Where-Object { $null -ne $_ }) -join [Environment]::NewLine
+        })
+
+    # Right-click a row: dig in around it, or quiet the noise.
+    $rowMenu = New-Object System.Windows.Controls.ContextMenu
+    $newItem = {
+        param([string]$Header, [scriptblock]$OnClick)
+        $mi = New-Object System.Windows.Controls.MenuItem
+        $mi.Header = $Header
+        $mi.add_Click($OnClick)
+        [void]$rowMenu.Items.Add($mi)
+        $mi
+    }
+    $miAround = & $newItem 'Search all servers around this event (+/- 5 min)' {
+        $r = $ui.EventGrid.SelectedItem
+        if (-not $r -or ($ui.Engine -and -not $ui.Finished)) { return }
+        $ui.AroundRadio.IsChecked = $true
+        $ui.AtBox.Text = Get-AroundEventText -Row $r
+        $five = @($ui.PlusMinusCombo.Items | Where-Object { [int]$_.Tag -eq 5 })[0]
+        if ($five) { $ui.PlusMinusCombo.SelectedItem = $five }
+        Start-Search
+        Set-StatusMessage ("Searching every server 5 minutes either side of {0} (each server's local time)." -f $ui.AtBox.Text)
+    }
+    $miOnly = & $newItem 'Show only this event (same source and ID)' {
+        $r = $ui.EventGrid.SelectedItem
+        if (-not $r) { return }
+        $ui.EventKey = Get-TimelineEventKey -Row $r
+        Update-View
+    }
+    $miHide = & $newItem 'Hide events from this source' {
+        $r = $ui.EventGrid.SelectedItem
+        if (-not $r -or $ui.Hidden.Contains([string]$r.Provider)) { return }
+        $ui.Hidden.Add([string]$r.Provider)
+        Update-View
+        Set-StatusMessage ("Hidden: {0}. 'Show everything again' brings it back." -f $r.Provider)
+    }
+    $miServer = & $newItem 'Show only this server' {
+        $r = $ui.EventGrid.SelectedItem
+        if (-not $r) { return }
+        $item = @($ui.ServerFilter.Items | Where-Object { [string]$_.Tag -eq [string]$r.Server })[0]
+        if ($item) { $ui.ServerFilter.SelectedItem = $item }
+    }
+    [void]$rowMenu.Items.Add((New-Object System.Windows.Controls.Separator))
+    $null = & $newItem 'Copy selected rows' { $ui.CopyButton.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Button]::ClickEvent))) }
+    $miShowAll = & $newItem 'Show everything again' { $ui.ShowAllButton.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Button]::ClickEvent))) }
+    $rowMenu.add_Opened({
+            $has = [bool]$ui.EventGrid.SelectedItem
+            foreach ($mi in @($miOnly, $miHide, $miServer)) { $mi.IsEnabled = $has }
+            $miAround.IsEnabled = $has -and -not ($ui.Engine -and -not $ui.Finished)
+            $miShowAll.IsEnabled = ($ui.Hidden.Count -gt 0) -or [bool]$ui.EventKey
+        })
+    $ui.EventGrid.ContextMenu = $rowMenu
+
+    # Recent: the server lists searched before (per user, with the save folder).
+    $recentMenu = New-Object System.Windows.Controls.ContextMenu
+    $ui.RecentButton.ContextMenu = $recentMenu
+    $ui.RecentButton.add_Click({
+            $recentMenu.Items.Clear()
+            $lists = if ($ui.Smoke) { @() } else { @((Read-TimelineSettings -Path $SettingsPath).RecentServerLists) }
+            if ($lists.Count -eq 0) {
+                $none = New-Object System.Windows.Controls.MenuItem
+                $none.Header = 'No recent searches yet'; $none.IsEnabled = $false
+                [void]$recentMenu.Items.Add($none)
+            }
+            foreach ($l in $lists) {
+                $mi = New-Object System.Windows.Controls.MenuItem
+                $mi.Header = if ($l.Length -gt 90) { $l.Substring(0, 87) + '...' } else { $l }
+                $mi.Tag = $l; $mi.ToolTip = $l
+                $mi.add_Click({ param($clicked) $ui.ServersBox.Text = [string]$clicked.Tag })
+                [void]$recentMenu.Items.Add($mi)
+            }
+            $recentMenu.PlacementTarget = $ui.RecentButton
+            $recentMenu.Placement = 'Bottom'
+            $recentMenu.IsOpen = $true
+        })
+
+    # Ticket note: the note and the HTML report into Documents\TicketNotes\Ticket_<n>, where
+    # TicketNote\Join-TicketNotes.ps1 finds it alongside the quick checks' notes.
+    $ui.TicketNoteButton.add_Click({
+            if ($ui.Smoke) { [void]$ui.SmokeFailures.Add('a ticket note would have been written'); return }
+            if (-not $ui.Engine -or -not $ui.Finished) { return }
+            Add-Type -AssemblyName Microsoft.VisualBasic
+            $number = [Microsoft.VisualBasic.Interaction]::InputBox('Ticket number (letters, digits, - or _):', 'Ticket note', '')
+            if (-not $number) { return }
+            $number = $number.Trim()
+            if (-not (Test-TicketNumber -TicketNumber $number)) {
+                Set-StatusMessage "'$number' is not a usable ticket number. Use letters, digits, - or _ (up to 32 characters)."
+                return
+            }
+            try {
+                $folder = Resolve-TicketFolder -TicketNumber $number -Root (Get-TicketNoteDefaultRoot)
+                $context = Get-ExportContext
+                $htmlPath = Join-Path $folder ('ServerEventTimeline_{0}.html' -f (Get-Date -Format 'yyyy-MM-dd_HHmmss'))
+                [System.IO.File]::WriteAllText($htmlPath, (ConvertTo-TimelineHtml -Rows @($ui.VisibleRows) -Context $context), (New-Object System.Text.UTF8Encoding $true))
+                $note = New-TimelineTicketNote -Status $ui.Engine.Status -Rows $ui.Store.Rows.ToArray() -WindowText $context.WindowText -Logs $ui.Selected -EvidencePaths @($htmlPath)
+                $published = Publish-TicketNote -Note $note -Folder $folder -PasteSafe
+                $copied = if ($published.Copied) { ' and copied to the clipboard' } else { '' }
+                Write-TimelineLog PASS "Ticket note saved to $($published.NotePath)$copied"
+                Set-StatusMessage "Ticket note saved in $folder$copied."
+            }
+            catch {
+                Write-TimelineLog FAIL "Couldn't write the ticket note: $($_.Exception.Message)"
+                Set-StatusMessage "Couldn't write the ticket note: $($_.Exception.Message)"
+            }
         })
     # Run as: prompt for an account; cancelling the prompt goes back to the signed-in account.
     $ui.RunAsButton.add_Click({
@@ -869,6 +1288,8 @@ function Show-ServerEventTimeline {
                 if ($ui.LogPanel.Children.Count -eq 0) { [void]$ui.SmokeFailures.Add('the log checkboxes were not built') }
                 if (-not $ui.EventGrid.EnableRowVirtualization) { [void]$ui.SmokeFailures.Add('the event grid is not virtualized') }
                 if ($ui.PlusMinusCombo.Items.Count -eq 0 -or $ui.LevelFilter.Items.Count -eq 0) { [void]$ui.SmokeFailures.Add('the choice lists are empty') }
+                if (-not $ui.EventGrid.ContextMenu -or $ui.EventGrid.ContextMenu.Items.Count -lt 4) { [void]$ui.SmokeFailures.Add('the right-click menu was not built') }
+                try { Update-View } catch { [void]$ui.SmokeFailures.Add("refreshing the empty grid failed: $($_.Exception.Message)") }
                 $deadline.Stop()
                 $window.Close()
             })
@@ -891,6 +1312,20 @@ function Show-ServerEventTimeline {
 if ($LoadFunctionsOnly) { return }
 
 $defaultOutputPath = Join-Path $PSScriptRoot 'Reports'
+
+if ($NoGui) {
+    try {
+        $code = Invoke-TimelineConsole -ComputerName $ComputerName -At $At -PlusMinusMinutes $PlusMinusMinutes -From $From -To $To `
+            -LastMinutes $LastMinutes -LogName $LogName -IncludeSecurity:$IncludeSecurity -AllLogs:$AllLogs -Cap $Cap -TotalCap $TotalCap `
+            -TimeoutSec $TimeoutSec -Credential $Credential -OutputPath $OutputPath -DefaultOutputPath $defaultOutputPath `
+            -TicketNumber $TicketNumber -NoClipboard:$NoClipboard
+        exit ([int](@($code)[-1]))
+    }
+    catch {
+        Write-Host "[FAIL] Server Event Timeline could not run: $($_.Exception.Message)" -ForegroundColor Red
+        exit 2
+    }
+}
 
 # WPF needs an STA thread. Windows PowerShell and pwsh start STA by default, but a host can be
 # MTA: relaunch in an STA process with the same parameters.

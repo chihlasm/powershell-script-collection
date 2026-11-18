@@ -156,6 +156,12 @@ Describe 'Get-LogPlan' {
         $plan.Query | Should -Be @('System', 'Some-Vendor/Admin')
     }
 
+    It 'still queries Security when it is missing from the list, so an account that cannot see it gets "access denied", not "doesn''t exist"' {
+        $plan = Get-LogPlan -Probe $script:Probe -Catalog $script:Catalog -SelectedNames @('System', 'Security')
+        $plan.Query | Should -Be @('System', 'Security')
+        @($plan.Skipped | Where-Object Log -eq 'Security').Count | Should -Be 0
+    }
+
     It 'queries the selected logs as-is when the channel list could not be read' {
         $probe = [PSCustomObject]@{ Server = 'srv-fake-01'; Channels = @() }
         (Get-LogPlan -Probe $probe -Catalog $script:Catalog -SelectedNames @('System', 'Application')).Query | Should -Be @('System', 'Application')

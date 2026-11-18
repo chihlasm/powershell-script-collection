@@ -284,6 +284,12 @@ function Get-LogPlan {
         $label = ($Catalog | Where-Object Name -eq $name | Select-Object -First 1).Label
         if (-not $label) { $label = $name }
         if (-not $haveList) { $query.Add($name); continue }
+        # Security is on every Windows machine, but listing it fails for an account that can't
+        # read it ("If you're not running PowerShell as an Administrator, you might see error
+        # messages that you can't retrieve information about a log", Get-WinEvent on Learn), and
+        # the probe lists with SilentlyContinue. Query it anyway: the read then reports access
+        # denied instead of a misleading "doesn't exist".
+        if ($name -eq 'Security' -and -not $channels.ContainsKey($name)) { $query.Add($name); continue }
         if (-not $channels.ContainsKey($name)) {
             $skipped.Add([PSCustomObject]@{ Log = $name; Reason = "$label log doesn't exist on $($Probe.Server)" })
         }

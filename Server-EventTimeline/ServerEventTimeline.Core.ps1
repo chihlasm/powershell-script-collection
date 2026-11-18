@@ -404,6 +404,13 @@ th{color:var(--muted);font-weight:600}.l1,.l2{color:var(--err)}.l3{color:var(--w
         (& $e $Context.WindowText), (& $e (@($Context.Servers) -join ', ')), (& $e (@($Context.Logs) -join ', ')),
         (& $e $Context.FiltersText), (& $e ([datetime]$Context.GeneratedAt).ToString('yyyy-MM-dd HH:mm:ss')))
 
+    if (@($Context.Summary).Count -gt 0) {
+        # The verdict first: what was found on each server, in plain words.
+        [void]$sb.Append('<h2>What was found</h2><ul>')
+        foreach ($line in @($Context.Summary)) { [void]$sb.AppendFormat('<li>{0}</li>', (& $e $line)) }
+        [void]$sb.Append('</ul>')
+    }
+
     [void]$sb.Append('<h2>How each server went</h2><table><tr><th>Server</th><th>Result</th><th>Details</th></tr>')
     foreach ($o in @($Context.ServerOutcomes)) {
         $details = New-Object System.Collections.Generic.List[string]
@@ -970,7 +977,8 @@ function New-TimelineTicketNote {
         [string]$WindowText,
         [string[]]$Logs,
         [datetime]$Now = (Get-Date),
-        [int]$MaxEventLines = 15
+        [int]$MaxEventLines = 15,
+        [string[]]$EvidencePaths = @()
     )
     $fc = Get-TimelineFlagCounts -Rows $Rows
     $items = New-Object System.Collections.Generic.List[object]
@@ -1028,5 +1036,5 @@ function New-TimelineTicketNote {
     $scopeLine = 'Servers: {0}' -f ($servers -join ', ')
     if (@($Logs).Count -gt 0) { $scopeLine += ' | Logs: {0}' -f (@($Logs) -join ', ') }
     $stamp = New-TicketNoteStamp -ScopeLabel Computer -Scope ($servers -join ', ') -Now $Now
-    New-TicketNote -Tool 'Server-EventTimeline' -Headline $headline -ScopeLine $scopeLine -Items $items.ToArray() -NextSteps $next.ToArray() -Stamp $stamp
+    New-TicketNote -Tool 'Server-EventTimeline' -Headline $headline -ScopeLine $scopeLine -Items $items.ToArray() -NextSteps $next.ToArray() -Stamp $stamp -EvidencePaths $EvidencePaths
 }

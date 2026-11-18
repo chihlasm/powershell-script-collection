@@ -287,3 +287,12 @@ Describe 'New-TimelineTicketNote' {
         $text | Should -BeLike '*Changed anything: No*'
     }
 }
+
+Describe 'HTML report verdict' {
+    It 'puts the per-server summary at the top of the report' {
+        $ctx = @{ WindowText = 'The last 60 minutes'; Servers = @('APP01'); Logs = @('System'); FiltersText = 'none'; GeneratedAt = (Get-Date)
+            ServerOutcomes = @(); Summary = @('APP01: 1 unexpected restart <script>') }
+        $html = ConvertTo-TimelineHtml -Rows @() -Context $ctx
+        $html | Should -BeLike '*<h2>What was found</h2>*APP01: 1 unexpected restart &lt;script&gt;*How each server went*'
+    }
+}
