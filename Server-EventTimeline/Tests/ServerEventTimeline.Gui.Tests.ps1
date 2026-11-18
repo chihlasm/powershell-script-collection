@@ -53,6 +53,20 @@ Describe 'Window layout' {
         foreach ($n in $names) { $script:Window.FindName($n) | Should -Not -BeNullOrEmpty -Because "control $n" }
     }
 
+    It 'says what the ticket button does, even before a search has run' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $button = $script:Window.FindName('TicketNoteButton')
+        # A noun ("Ticket note...") left people guessing; the label names the result.
+        $button.Content | Should -Be 'Copy summary for ticket...'
+        # WPF hides tooltips on disabled controls unless ShowOnDisabled is set, and this button
+        # is disabled until a search finishes - exactly when someone hovers to find out what it is.
+        [System.Windows.Controls.ToolTipService]::GetShowOnDisabled($button) | Should -BeTrue
+        $tip = "$($button.ToolTip)"
+        $tip | Should -BeLike '*paste*ticket*'
+        $tip | Should -BeLike '*Documents\TicketNotes\Ticket_*'
+        $tip | Should -BeLike '*Run a search first*'
+        $tip | Should -Not -BeLike '*ticket note*'
+    }
+
     It 'keeps the event grid virtualized and ungrouped' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
         $grid = $script:Window.FindName('EventGrid')
         $grid.EnableRowVirtualization | Should -BeTrue

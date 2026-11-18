@@ -546,8 +546,10 @@ installs and app crashes are flagged in colour.
 - **Flagged only** plus **Errors and worse** gets you to the interesting rows fast.
 - **Right-click a row** to search every server 5 minutes either side of it, or to hide a
   noisy source. **Collapse repeats** turns hundreds of identical routine events into one row.
-- **Ticket note...** saves the ticket note and the HTML report in the ticket's folder (the
-  same one the quick checks use, so **TicketNote** can join them) and copies the note.
+- **Copy summary for ticket...** copies a short summary to paste into the ticket (what was
+  found, what's ruled out, what couldn't be checked, what to do next) and saves it with the
+  HTML report in the ticket's folder (the same one the quick checks use, so **TicketNote**
+  can join them).
 - **Copy selected rows** puts them on the clipboard for the ticket. **Export HTML report**
   saves the whole picture in the save folder.
 

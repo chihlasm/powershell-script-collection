@@ -286,7 +286,8 @@ function New-TimelineWindowXaml {
     <Border Grid.Row="0" Background="{StaticResource Card}" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="4" Padding="14,12">
       <Grid>
         <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="300"/>
+          <!-- Wide enough for the three server buttons in one row (the smoke test checks nothing is cut off). -->
+          <ColumnDefinition Width="340"/>
           <ColumnDefinition Width="Auto"/>
           <ColumnDefinition Width="*"/>
         </Grid.ColumnDefinitions>
@@ -489,8 +490,10 @@ function New-TimelineWindowXaml {
         <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
           <Button x:Name="ExportCsvButton" Content="Export CSV" IsEnabled="False" ToolTip="Save the rows you can see as a CSV file"/>
           <Button x:Name="ExportHtmlButton" Content="Export HTML report" IsEnabled="False" ToolTip="Save a report with the rows you can see and how each server went"/>
-          <Button x:Name="CopyButton" Content="Copy selected rows" IsEnabled="False" ToolTip="Copy the selected rows as text for a ticket note"/>
-          <Button x:Name="TicketNoteButton" Content="Ticket note..." IsEnabled="False" ToolTip="Write the ticket note (what was found, what's ruled out, what couldn't be checked) and the HTML report into the ticket's folder, and copy the note"/>
+          <Button x:Name="CopyButton" Content="Copy selected rows" IsEnabled="False" ToolTip="Copy the selected rows as text, to paste into a ticket or an email"/>
+          <!-- ShowOnDisabled: the button is disabled until a search finishes, which is when people hover to find out what it does. -->
+          <Button x:Name="TicketNoteButton" Content="Copy summary for ticket..." IsEnabled="False" ToolTipService.ShowOnDisabled="True"
+                  ToolTip="Asks for the ticket number, then writes a short summary you can paste into the ticket:&#10;- what was found on each server&#10;- what's ruled out&#10;- what couldn't be checked&#10;- what to do next&#10;&#10;The summary is copied to the clipboard and saved with the HTML report in&#10;Documents\TicketNotes\Ticket_&lt;number&gt;.&#10;&#10;Run a search first."/>
         </StackPanel>
         <TextBlock x:Name="StatusMessage" VerticalAlignment="Center" Margin="8,0,0,0" Foreground="{StaticResource Muted}" TextTrimming="CharacterEllipsis"/>
       </DockPanel>
@@ -695,6 +698,40 @@ function Set-SmokeWindowPosition {
     $Window.ShowActivated = $false
     $Window.Left = [System.Windows.SystemParameters]::VirtualScreenLeft - $Window.Width - 200
     $Window.Top = [System.Windows.SystemParameters]::VirtualScreenTop - $Window.Height - 200
+}
+
+function Get-ClippedRowItems {
+    <#
+        Names of controls cut off at the right edge of a horizontal row (StackPanel) after the
+        window has rendered. A StackPanel never shrinks or wraps its children: whatever does not
+        fit is clipped silently, which is how the Recent button lost half its label.
+    #>
+    param([Parameter(Mandatory)]$Root)
+    $found = New-Object System.Collections.ArrayList
+    $stack = New-Object System.Collections.Stack
+    $stack.Push($Root)
+    while ($stack.Count -gt 0) {
+        $node = $stack.Pop()
+        # The row itself reports its full width; the cut happens in the panel that holds it, so
+        # measure each child's right edge against that container.
+        $container = if ($node -is [System.Windows.FrameworkElement]) { $node.Parent } else { $null }
+        if ($node -is [System.Windows.Controls.StackPanel] -and $node.Orientation -eq 'Horizontal' -and $node.IsVisible -and
+            $container -is [System.Windows.Controls.Panel]) {
+            foreach ($child in $node.Children) {
+                if ($child -isnot [System.Windows.FrameworkElement] -or -not $child.IsVisible) { continue }
+                $right = $child.TranslatePoint((New-Object System.Windows.Point ($child.ActualWidth, 0)), $container).X
+                if ($right -gt $container.ActualWidth + 0.5) {
+                    $label = if ($child.Name) { $child.Name } elseif ($child -is [System.Windows.Controls.ContentControl]) { "$($child.Content)" } else { $child.GetType().Name }
+                    [void]$found.Add($label)
+                }
+            }
+        }
+        if ($node -is [System.Windows.Media.Visual]) {
+            $count = [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($node)
+            for ($i = 0; $i -lt $count; $i++) { $stack.Push([System.Windows.Media.VisualTreeHelper]::GetChild($node, $i)) }
+        }
+    }
+    return $found.ToArray()
 }
 
 function Show-ServerEventTimeline {
@@ -1182,7 +1219,10 @@ function Show-ServerEventTimeline {
             if ($ui.Smoke) { [void]$ui.SmokeFailures.Add('a ticket note would have been written'); return }
             if (-not $ui.Engine -or -not $ui.Finished) { return }
             Add-Type -AssemblyName Microsoft.VisualBasic
-            $number = [Microsoft.VisualBasic.Interaction]::InputBox('Ticket number (letters, digits, - or _):', 'Ticket note', '')
+            $prompt = "This writes a short summary of the search to paste into the ticket: what was found, what's ruled out, " +
+                "what couldn't be checked and what to do next. It's copied to the clipboard and saved with the HTML report " +
+                "in Documents\TicketNotes\Ticket_<number>.`n`nTicket number (letters, digits, - or _):"
+            $number = [Microsoft.VisualBasic.Interaction]::InputBox($prompt, 'Copy summary for ticket', '')
             if (-not $number) { return }
             $number = $number.Trim()
             if (-not (Test-TicketNumber -TicketNumber $number)) {
@@ -1196,9 +1236,9 @@ function Show-ServerEventTimeline {
                 [System.IO.File]::WriteAllText($htmlPath, (ConvertTo-TimelineHtml -Rows @($ui.VisibleRows) -Context $context), (New-Object System.Text.UTF8Encoding $true))
                 $note = New-TimelineTicketNote -Status $ui.Engine.Status -Rows $ui.Store.Rows.ToArray() -WindowText $context.WindowText -Logs $ui.Selected -EvidencePaths @($htmlPath)
                 $published = Publish-TicketNote -Note $note -Folder $folder -PasteSafe
-                $copied = if ($published.Copied) { ' and copied to the clipboard' } else { '' }
-                Write-TimelineLog PASS "Ticket note saved to $($published.NotePath)$copied"
-                Set-StatusMessage "Ticket note saved in $folder$copied."
+                Write-TimelineLog PASS "Ticket summary saved to $($published.NotePath)"
+                if ($published.Copied) { Set-StatusMessage "Summary copied - paste it into the ticket. Also saved in $folder." }
+                else { Set-StatusMessage "Summary saved in $folder (the clipboard wasn't available - copy it from the file)." }
             }
             catch {
                 Write-TimelineLog FAIL "Couldn't write the ticket note: $($_.Exception.Message)"
@@ -1324,6 +1364,8 @@ function Show-ServerEventTimeline {
                 if ($ui.PlusMinusCombo.Items.Count -eq 0 -or $ui.LevelFilter.Items.Count -eq 0) { [void]$ui.SmokeFailures.Add('the choice lists are empty') }
                 if (-not $ui.EventGrid.ContextMenu -or $ui.EventGrid.ContextMenu.Items.Count -lt 4) { [void]$ui.SmokeFailures.Add('the right-click menu was not built') }
                 try { Update-View } catch { [void]$ui.SmokeFailures.Add("refreshing the empty grid failed: $($_.Exception.Message)") }
+                $clipped = @(Get-ClippedRowItems -Root $window)
+                if ($clipped.Count -gt 0) { [void]$ui.SmokeFailures.Add("these are cut off at the right edge: $($clipped -join ', ')") }
                 $deadline.Stop()
                 $window.Close()
             })

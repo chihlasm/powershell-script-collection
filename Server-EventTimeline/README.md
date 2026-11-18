@@ -54,9 +54,11 @@ logs (local admin, or a member of **Event Log Readers**, on each server).
 8. Click a row to see everything about the event. Then **Export CSV**, **Export HTML report**
    (with *What was found* at the top), or **Copy selected rows** to paste into the ticket.
    Exports always contain every filtered event, even when repeats are collapsed.
-9. **Ticket note...** asks for the ticket number and writes the four-part ticket note
-   (found, ruled out, couldn't check, next steps) and the HTML report into
-   `Documents\TicketNotes\Ticket_<number>`, then copies the note. That's the folder the quick
+9. **Copy summary for ticket...** asks for the ticket number, then writes a short summary to
+   paste into the ticket (what was found, what's ruled out, what couldn't be checked, what to
+   do next) and copies it to the clipboard. The summary (a ticket note) and the HTML report are
+   saved in `Documents\TicketNotes\Ticket_<number>`. Hover the button for the same explanation,
+   even before a search has run. That's the folder the quick
    checks use, so [TicketNote](../TicketNote/)'s `Join-TicketNotes.ps1` merges them into one
    note. A server is only *ruled out* when every log was read in full and nothing was flagged.
 10. **Save reports to:** shows where exports go. Type a folder or press **Browse...** (for
