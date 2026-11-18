@@ -857,6 +857,46 @@ function Get-TimelineFlagCounts {
     [PSCustomObject]@{ Counts = $counts; Flagged = $flagged }
 }
 
+function Get-TimelineUnrecognisedErrors {
+    <#
+        Per server: Critical and Error events that are NOT on the known list (no flag), e.g. SQL,
+        IIS, Group Policy or backup errors. The summary and the ticket note only describe the
+        known events, so without this a server with 40 SQL errors read as "nothing flagged" and
+        was "ruled out". Returns @{ <server> = @{ Count; Sources = 'MSSQLSERVER 30, NETLOGON 10' } }
+        with the three commonest sources.
+    #>
+    [CmdletBinding()]
+    param([object[]]$Rows, [int]$TopSources = 3)
+    $perServer = @{}
+    foreach ($r in $Rows) {
+        if ($r.Flag -or [int]$r.Level -notin @(1, 2)) { continue }
+        $s = [string]$r.Server
+        if (-not $perServer.ContainsKey($s)) { $perServer[$s] = @{} }
+        $p = [string]$r.Provider
+        if ($perServer[$s].ContainsKey($p)) { $perServer[$s][$p]++ } else { $perServer[$s][$p] = 1 }
+    }
+    $out = @{}
+    foreach ($s in $perServer.Keys) {
+        $bySource = @($perServer[$s].GetEnumerator() | Sort-Object @{ Expression = 'Value'; Descending = $true }, @{ Expression = 'Key' })
+        $total = ($bySource | Measure-Object -Property Value -Sum).Sum
+        $top = @($bySource | Select-Object -First $TopSources | ForEach-Object { '{0} {1}' -f $_.Key, $_.Value }) -join ', '
+        $out[$s] = @{ Count = [int]$total; Sources = $top }
+    }
+    return $out
+}
+
+function Format-TimelineEventCount {
+    # "1 event" / "1,240 events"
+    param([int]$Count)
+    if ($Count -eq 1) { '1 event' } else { '{0:N0} events' -f $Count }
+}
+
+function Format-TimelineUnrecognisedText {
+    # "41 errors this tool doesn't recognise" / "1 error this tool doesn't recognise"
+    param([int]$Count)
+    if ($Count -eq 1) { "1 error this tool doesn't recognise" } else { "$Count errors this tool doesn't recognise" }
+}
+
 function Format-TimelineCountParts {
     # "1 unexpected restart", "3 service failures" ... for one kind (Problem/Warning/Info) or all.
     param($Counts, [string]$Kind)
@@ -873,11 +913,22 @@ function Get-TimelineSummaryLines {
     <#
         The plain-English strip above the grid: one line per server, e.g.
         "APP01: 1 unexpected restart, 3 service failures, 1 update installed".
-        Counts every row read (not just the filtered ones).
+        Counts every row read (not just the filtered ones). Errors that aren't on the known
+        list are named too ("but 40 errors this tool doesn't recognise"), so "nothing flagged"
+        is never read as "nothing wrong". ErrorHint is appended to that (the window says how to
+        see them). With -Logs, a closing line says when the Security log wasn't read (sign-ins
+        and lockouts are only there); SecurityHint is that line's text.
     #>
     [CmdletBinding()]
-    param([object[]]$Rows, $Status)
+    param(
+        [object[]]$Rows,
+        $Status,
+        [string[]]$Logs,
+        [string]$ErrorHint = '',
+        [string]$SecurityHint = "Security log not read: sign-in and lockout problems won't show up here."
+    )
     $fc = Get-TimelineFlagCounts -Rows $Rows
+    $unrec = Get-TimelineUnrecognisedErrors -Rows $Rows
     $servers = if ($Status) { @($Status.Keys) } else { @($Rows | ForEach-Object { [string]$_.Server } | Select-Object -Unique) }
     foreach ($s in $servers) {
         $st = if ($Status) { $Status[$s] } else { $null }
@@ -892,11 +943,18 @@ function Get-TimelineSummaryLines {
         $line = if ($found) { "${s}: $found" }
         elseif ($fc.Flagged[$s]) { '{0}: {1} flagged events' -f $s, $fc.Flagged[$s] }
         elseif ($events -eq 0) { "${s}: no events in this window" }
-        else { '{0}: nothing flagged in {1:N0} events' -f $s, $events }
+        else { '{0}: nothing flagged in {1}' -f $s, (Format-TimelineEventCount -Count $events) }
+        if ($unrec.ContainsKey($s)) {
+            $joiner = if ($found -or $fc.Flagged[$s]) { ', plus ' } else { ', but ' }
+            $line += $joiner + (Format-TimelineUnrecognisedText -Count $unrec[$s].Count) + $ErrorHint
+        }
         if ($state -eq 'DoneWithGaps') { $line += ' (some logs incomplete)' }
         if ($state -eq 'Cancelled') { $line += ' (cancelled)' }
         $line
     }
+    # @($null).Count is 1, so filter out empties before asking whether a log list was given.
+    $chosen = @($Logs | Where-Object { $_ })
+    if ($chosen.Count -gt 0 -and $chosen -notcontains 'Security' -and $SecurityHint) { $SecurityHint }
 }
 
 function Group-TimelineRepeats {
@@ -982,7 +1040,9 @@ function New-TimelineTicketNote {
     <#
         The four-part ticket note (CaseKit) for a search: what was found per server, which
         servers came back clean, what could not be checked, and next steps. A server is only
-        "ruled out" when every log was read and nothing was flagged.
+        "ruled out" when every log was read, nothing was flagged and it had no errors the tool
+        doesn't recognise (those are a warning with their sources: "ruled out" must not hide 40
+        SQL errors). When -Logs is given without Security, that's listed as not checked.
     #>
     [CmdletBinding()]
     param(
@@ -995,6 +1055,7 @@ function New-TimelineTicketNote {
         [string[]]$EvidencePaths = @()
     )
     $fc = Get-TimelineFlagCounts -Rows $Rows
+    $unrec = Get-TimelineUnrecognisedErrors -Rows $Rows
     $items = New-Object System.Collections.Generic.List[object]
     $next = New-Object System.Collections.Generic.List[string]
     $servers = @($Status.Keys)
@@ -1014,6 +1075,12 @@ function New-TimelineTicketNote {
         foreach ($k in $script:SummaryKinds) {
             if ($k.Next -and $fc.Counts[$s] -and $fc.Counts[$s].Contains($k.Key)) { $next.Add(($k.Next -f $s)) }
         }
+        $hasUnrec = $unrec.ContainsKey($s)
+        if ($hasUnrec) {
+            $u = $unrec[$s]
+            $items.Add((New-TicketNoteItem -Kind Warning -Text ('{0}: {1} ({2}) - review them' -f $s, (Format-TimelineUnrecognisedText -Count $u.Count), $u.Sources)))
+            $next.Add(('Review the {0} on {1}: filter the timeline to Errors and worse, or see the report.' -f $(if ($u.Count -eq 1) { 'error' } else { "$($u.Count) errors" }), $s))
+        }
         $gaps = @($st.Logs | Where-Object { $_.Outcome -in @('Capped', 'TimedOut', 'Failed', 'NotRead', 'Cancelled', 'Pending') })
         foreach ($g in $gaps) {
             $why = if ($g.Reason) { $g.Reason } else { ([string]$g.Outcome).ToLowerInvariant() }
@@ -1031,12 +1098,16 @@ function New-TimelineTicketNote {
         if ($st.State -eq 'Cancelled' -and $gaps.Count -eq 0) {
             $items.Add((New-TicketNoteItem -Kind NotChecked -Text "${s}: the search was cancelled before it finished"))
         }
-        if (-not $fc.Flagged[$s]) {
+        if (-not $fc.Flagged[$s] -and -not $hasUnrec) {
             if ($complete) {
-                $items.Add((New-TicketNoteItem -Kind Clear -CouldLook $true -Text ('{0}: no flagged events in {1:N0} events' -f $s, [int]$st.EventCount)))
+                $items.Add((New-TicketNoteItem -Kind Clear -CouldLook $true -Text ('{0}: no flagged events in {1}' -f $s, (Format-TimelineEventCount -Count ([int]$st.EventCount)))))
             }
             else { $items.Add((New-TicketNoteItem -Kind Info -Text "${s}: nothing flagged in the logs that were read")) }
         }
+    }
+    $chosen = @($Logs | Where-Object { $_ })
+    if ($chosen.Count -gt 0 -and $chosen -notcontains 'Security') {
+        $items.Add((New-TicketNoteItem -Kind NotChecked -Text 'Security log (sign-ins, lockouts, permission changes): not part of this search'))
     }
     if ($incomplete) { $next.Add('Read the incomplete logs again with a narrower window (or raise the limits under More options).') }
 
@@ -1051,6 +1122,9 @@ function New-TimelineTicketNote {
 
     $flagText = if ($flaggedRows.Count -eq 1) { '1 flagged event' } else { '{0} flagged events' -f $flaggedRows.Count }
     $headline = '{0} - {1} across {2} server(s)' -f $WindowText, $flagText, $servers.Count
+    $unrecTotal = 0
+    foreach ($v in $unrec.Values) { $unrecTotal += $v.Count }
+    if ($unrecTotal -gt 0) { $headline += ', plus ' + (Format-TimelineUnrecognisedText -Count $unrecTotal) }
     $scopeLine = 'Servers: {0}' -f ($servers -join ', ')
     if (@($Logs).Count -gt 0) { $scopeLine += ' | Logs: {0}' -f (@($Logs) -join ', ') }
     $stamp = New-TicketNoteStamp -ScopeLabel Computer -Scope ($servers -join ', ') -Now $Now

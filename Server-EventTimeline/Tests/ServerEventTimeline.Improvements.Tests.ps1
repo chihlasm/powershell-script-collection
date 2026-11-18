@@ -1,4 +1,4 @@
-<#
+﻿<#
     Pester 5 tests for the second round of Server Event Timeline features (pure logic in
     ServerEventTimeline.Core.ps1): the per-server summary, hide/only-this-event filters,
     collapsed repeats, recent server lists, the per-server total limit, log names for the
@@ -285,6 +285,92 @@ Describe 'New-TimelineTicketNote' {
         $script:Note.Stamp.Scope | Should -Be 'APP01, SQL01, DC01'
         $text = @(ConvertTo-TicketNoteText -Note $script:Note -PasteSafe) -join "`n"
         $text | Should -BeLike '*Changed anything: No*'
+    }
+}
+
+Describe 'Errors the tool does not recognise' {
+    BeforeAll {
+        # 30 SQL errors, 10 Netlogon errors, 1 critical from a backup agent: none on the known list.
+        $script:SqlErrors = @(
+            @(1..30 | ForEach-Object { New-TestRow -Server SQL01 -Provider 'MSSQLSERVER' -Id 17053 -Log Application -Level 2 -RecordId $_ })
+            @(31..40 | ForEach-Object { New-TestRow -Server SQL01 -Provider 'NETLOGON' -Id 5719 -Level 2 -RecordId $_ })
+            New-TestRow -Server SQL01 -Provider 'BackupAgent' -Id 900 -Log Application -Level 1 -RecordId 41
+            New-TestRow -Server SQL01 -Provider 'MSSQLSERVER' -Id 100 -Log Application -Level 3 -RecordId 42
+            New-TestRow -Server SQL01 -RecordId 43
+        )
+        $script:ReadAll = @([PSCustomObject]@{ Log = 'System'; Outcome = 'Read'; Count = 43; Reason = '' })
+    }
+
+    It 'counts unflagged errors and criticals per server with their main sources, ignoring warnings and flagged events' {
+        $u = Get-TimelineUnrecognisedErrors -Rows (@($script:SqlErrors) + @($script:BusyRows))
+        $u['SQL01'].Count | Should -Be 41
+        $u['SQL01'].Sources | Should -Be 'MSSQLSERVER 30, NETLOGON 10, BackupAgent 1'
+        # APP01's errors (41, 6008, 7031, 7000) are all on the known list.
+        $u.ContainsKey('APP01') | Should -BeFalse
+    }
+
+    It 'does not say "nothing flagged" without mentioning the unrecognised errors' {
+        $status = [ordered]@{ SQL01 = (New-TestStatus -Server SQL01 -EventCount 43) }
+        @(Get-TimelineSummaryLines -Rows $script:SqlErrors -Status $status)[0] |
+            Should -Be "SQL01: nothing flagged in 43 events, but 41 errors this tool doesn't recognise"
+    }
+
+    It 'adds the window hint for reviewing them, and uses the singular for one' {
+        $rows = @(New-TestRow -Server SQL01 -Provider 'MSSQLSERVER' -Id 17053 -Log Application -Level 2)
+        $status = [ordered]@{ SQL01 = (New-TestStatus -Server SQL01 -EventCount 1) }
+        @(Get-TimelineSummaryLines -Rows $rows -Status $status -ErrorHint " - set Show to 'Errors and worse' to review it")[0] |
+            Should -Be "SQL01: nothing flagged in 1 event, but 1 error this tool doesn't recognise - set Show to 'Errors and worse' to review it"
+    }
+
+    It 'mentions them after the flagged findings too' {
+        $rows = @($script:SqlErrors) + @(New-TestRow -Server SQL01 -Provider 'Application Error' -Id 1000 -Log Application -Level 2 -RecordId 50)
+        $status = [ordered]@{ SQL01 = (New-TestStatus -Server SQL01 -EventCount 44) }
+        @(Get-TimelineSummaryLines -Rows $rows -Status $status)[0] |
+            Should -Be "SQL01: 1 app crash or hang, plus 41 errors this tool doesn't recognise"
+    }
+
+    It 'never rules out a server with unrecognised errors; warns with the sources and suggests reviewing them' {
+        $status = [ordered]@{ SQL01 = (New-TestStatus -Server SQL01 -EventCount 43 -Logs $script:ReadAll) }
+        $note = New-TimelineTicketNote -Status $status -Rows $script:SqlErrors -WindowText 'w' -Logs @('System', 'Application')
+        @($note.RuledOut).Count | Should -Be 0
+        $note.Checked | Should -Contain "WARNING: SQL01: 41 errors this tool doesn't recognise (MSSQLSERVER 30, NETLOGON 10, BackupAgent 1) - review them"
+        ($note.NextSteps -join "`n") | Should -BeLike '*Review the 41 errors on SQL01*'
+        $note.Headline | Should -Be "w - 0 flagged events across 1 server(s), plus 41 errors this tool doesn't recognise"
+    }
+
+    It 'still rules out a fully read server whose only errors are on the known list or absent' {
+        $status = [ordered]@{ SQL01 = (New-TestStatus -Server SQL01 -EventCount 1 -Logs $script:ReadAll) }
+        $note = New-TimelineTicketNote -Status $status -Rows @(New-TestRow -Server SQL01) -WindowText 'w' -Logs @('System', 'Security')
+        $note.RuledOut | Should -Contain 'SQL01: no flagged events in 1 event'
+    }
+}
+
+Describe 'Security log not chosen' {
+    It 'adds a closing line to the summary when the Security log was not read' {
+        $status = [ordered]@{ APP01 = (New-TestStatus -Server APP01 -EventCount 1) }
+        $lines = @(Get-TimelineSummaryLines -Rows @(New-TestRow) -Status $status -Logs @('System', 'Application'))
+        $lines[-1] | Should -BeLike 'Security log not read*sign-in*lockout*'
+        $lines.Count | Should -Be 2
+    }
+
+    It 'uses the hint the caller gives (the window and the console say different things)' {
+        $status = [ordered]@{ APP01 = (New-TestStatus -Server APP01 -EventCount 1) }
+        $lines = @(Get-TimelineSummaryLines -Rows @(New-TestRow) -Status $status -Logs @('System') -SecurityHint 'Security log not read: add -IncludeSecurity.')
+        $lines[-1] | Should -Be 'Security log not read: add -IncludeSecurity.'
+    }
+
+    It 'says nothing about it when Security was read, or when no log list was given' {
+        $status = [ordered]@{ APP01 = (New-TestStatus -Server APP01 -EventCount 1) }
+        @(Get-TimelineSummaryLines -Rows @(New-TestRow) -Status $status -Logs @('System', 'Security')).Count | Should -Be 1
+        @(Get-TimelineSummaryLines -Rows @(New-TestRow) -Status $status).Count | Should -Be 1
+    }
+
+    It 'lists it under Could not check in the ticket note' {
+        $status = [ordered]@{ APP01 = (New-TestStatus -Server APP01 -EventCount 1 -Logs @([PSCustomObject]@{ Log = 'System'; Outcome = 'Read'; Count = 1; Reason = '' })) }
+        $note = New-TimelineTicketNote -Status $status -Rows @(New-TestRow) -WindowText 'w' -Logs @('System')
+        ($note.CouldNotCheck -join "`n") | Should -BeLike '*Security log*not part of this search*'
+        $none = New-TimelineTicketNote -Status $status -Rows @(New-TestRow) -WindowText 'w' -Logs @('System', 'Security')
+        ($none.CouldNotCheck -join "`n") | Should -Not -BeLike '*Security log*'
     }
 }
 

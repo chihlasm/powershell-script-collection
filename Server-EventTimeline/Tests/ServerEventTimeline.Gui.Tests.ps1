@@ -198,6 +198,15 @@ Describe 'Console mode (-NoGui)' {
         @(Get-ChildItem -LiteralPath $out -Filter 'ServerEventTimeline_*.log').Count | Should -Be 1
     }
 
+    It 'says the Security log was not read, with the console switch that adds it, in the output and the report' {
+        $out = Join-Path $TestDrive 'nosec'
+        $said = @(Invoke-TimelineConsole -ComputerName 'srv-fake-01' -LastMinutes 60 -LogName System `
+                -OutputPath $out -DefaultOutputPath (Join-Path $TestDrive 'default') -EngineOptions $script:Fakes -PollMs 20 6>&1) -join "`n"
+        $said | Should -BeLike '*Security log not read*-IncludeSecurity*'
+        $html = Get-Content -LiteralPath (Get-ChildItem -LiteralPath $out -Filter 'ServerEventTimeline_*.html')[0].FullName -Raw
+        $html | Should -BeLike '*What was found*Security log not read*'
+    }
+
     It 'exits 1 when a server could not be read' {
         $out = Join-Path $TestDrive 'run2'
         $code = Invoke-TimelineConsole -ComputerName 'srv-fake-01', 'srv-fake-dead' -LastMinutes 60 -LogName System `

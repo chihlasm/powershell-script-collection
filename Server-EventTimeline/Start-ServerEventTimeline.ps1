@@ -655,7 +655,8 @@ function Invoke-TimelineConsole {
     finally { Close-TimelineEngine -Engine $engine }
 
     $rows = $store.Rows.ToArray()
-    $summary = @(Get-TimelineSummaryLines -Rows $rows -Status $engine.Status)
+    $summary = @(Get-TimelineSummaryLines -Rows $rows -Status $engine.Status -Logs $logs `
+            -SecurityHint 'Security log not read: add -IncludeSecurity for sign-in or lockout problems.')
     foreach ($line in $summary) { & $say INFO "Found - $line" }
     $banner = Get-TimelineBannerText -Status $engine.Status
     foreach ($line in @($banner -split [Environment]::NewLine | Where-Object { $_ })) { & $say WARN $line }
@@ -940,7 +941,9 @@ function Show-ServerEventTimeline {
         $key = '{0}|{1}' -f $ui.Store.Rows.Count, (@($ui.Engine.Status.Values | ForEach-Object { "$($_.Server)=$($_.State)" }) -join ',')
         if ($key -eq $ui.SummaryKey) { return }
         $ui.SummaryKey = $key
-        $ui.SummaryList.ItemsSource = @(Get-TimelineSummaryLines -Rows $ui.Store.Rows.ToArray() -Status $ui.Engine.Status)
+        $ui.SummaryList.ItemsSource = @(Get-TimelineSummaryLines -Rows $ui.Store.Rows.ToArray() -Status $ui.Engine.Status -Logs $ui.Selected `
+                -ErrorHint " - set Show to 'Errors and worse' to review them" `
+                -SecurityHint "Security log not read: tick it under Which logs? to see sign-in or lockout problems.")
         $ui.SummaryBorder.Visibility = 'Visible'
     }
 
@@ -1055,7 +1058,7 @@ function Show-ServerEventTimeline {
             WindowText = Get-TimelineWindowText -Window $ui.Request.Window
             Servers = $ui.Request.Servers; Logs = $ui.Selected; FiltersText = $filtersText; GeneratedAt = Get-Date
             ServerOutcomes = @($ui.Engine.Status.Values)
-            Summary = @(Get-TimelineSummaryLines -Rows $ui.Store.Rows.ToArray() -Status $ui.Engine.Status)
+            Summary = @(Get-TimelineSummaryLines -Rows $ui.Store.Rows.ToArray() -Status $ui.Engine.Status -Logs $ui.Selected)
         }
     }
 

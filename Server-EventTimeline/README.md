@@ -40,6 +40,16 @@ logs (local admin, or a member of **Event Log Readers**, on each server).
 5. Read **What was found** above the list: one line per server, for example
    *APP01: 1 unexpected restart, 3 service failures, 1 update installed* or
    *SQL01: nothing flagged in 1,240 events*. It counts every event read, whatever the filters.
+
+   **What it does and doesn't know.** It recognises about 30 well-known Windows events
+   (unexpected restarts, blue screens, disk errors, service and app crashes, low memory, time
+   problems, updates) and counts those. It does **not** know what the ticket is about, and it
+   doesn't understand application errors such as SQL, IIS, Group Policy or backup software. So
+   it never stops at "nothing flagged": errors and critical events it doesn't recognise are
+   counted too, as *SQL01: nothing flagged in 1,240 events, but 40 errors this tool doesn't
+   recognise*. Set **Show** to *Errors and worse* to read them. If the Security log wasn't
+   ticked, a last line says so: sign-in and lockout problems are only in that log. Counts are
+   events, not incidents: *12 disk errors* can be one failing disk logging 12 times.
 6. Narrow it down: level (Warnings and worse, Errors and worse...), server, log, **Flagged
    only**, or search the message, source or event ID. **Collapse repeats** shows the same
    routine event on the same server once, as *[240x, last at 03:14:22] ...*; click it to see
@@ -60,7 +70,11 @@ logs (local admin, or a member of **Event Log Readers**, on each server).
    saved in `Documents\TicketNotes\Ticket_<number>`. Hover the button for the same explanation,
    even before a search has run. That's the folder the quick
    checks use, so [TicketNote](../TicketNote/)'s `Join-TicketNotes.ps1` merges them into one
-   note. A server is only *ruled out* when every log was read in full and nothing was flagged.
+   note. A server is only *ruled out* when every log was read in full, nothing was flagged and
+   it had no errors the tool doesn't recognise; those are listed as a warning with their main
+   sources (*SQL01: 40 errors this tool doesn't recognise (MSSQLSERVER 30, NETLOGON 10)*) and a
+   next step to review them. A Security log that wasn't part of the search is listed under
+   *couldn't check*.
 10. **Save reports to:** shows where exports go. Type a folder or press **Browse...** (for
    example the ticket's folder). The folder is remembered for next time, per user, in
    `%APPDATA%\ServerEventTimeline\settings.json`. **Open folder** shows it in File Explorer.
