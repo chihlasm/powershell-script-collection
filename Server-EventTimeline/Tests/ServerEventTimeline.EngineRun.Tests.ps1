@@ -55,6 +55,33 @@ Describe 'Timeline engine' {
         $sorted[0].TimeServerLocal | Should -Be ([datetime]'2026-11-17 02:46')
     }
 
+    It 'never blocks the window long when a log returns thousands of events (it froze: Not Responding)' {
+        # The window's heartbeat calls Update-TimelineEngine every 250 ms on the UI thread. Turning
+        # 5,000 events into rows there took 3-4 s per log, so the window stopped responding.
+        $bigLog = {
+            param($EnginePath, $Server, $Transport, $LogName, $StartUtc, $EndUtc, $Cap, $Credential)
+            $events = foreach ($m in 0..4999) {
+                [PSCustomObject]@{ TimeCreatedUtc = ([datetime]$StartUtc).AddSeconds($m / 10); Id = 7036; ProviderName = 'Service Control Manager'
+                    Level = 4; LogName = $LogName; Message = "event $m from $Server"; RecordId = $m; UserSid = ''; MachineName = $Server }
+            }
+            [PSCustomObject]@{ Server = $Server; Log = $LogName; Outcome = 'Read'; Count = 5000; Events = @($events); Reason = '' }
+        }
+        $script:Engine = Start-TimelineEngine -Servers @('srv-fake-01') -Window $script:Window -SelectedLogs @('System') -ProbeScript $script:OkProbe -LogScript $bigLog
+        $rows = 0; $slowest = 0.0
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        do {
+            $t = [Diagnostics.Stopwatch]::StartNew()
+            $u = Update-TimelineEngine -Engine $script:Engine
+            $slowest = [Math]::Max($slowest, $t.Elapsed.TotalMilliseconds)
+            $rows += @($u.NewRows).Count
+            if ($u.Finished) { break }
+            Start-Sleep -Milliseconds 50
+        } while ($sw.Elapsed.TotalSeconds -lt 60)
+        $rows | Should -Be 5000
+        $slowest | Should -BeLessThan 400
+        $script:Engine.Status['srv-fake-01'].EventCount | Should -Be 5000
+    }
+
     It 'keeps going when one server is unreachable' {
         $probe = {
             param($EnginePath, $Server, $Credential, $WindowStartLocal)

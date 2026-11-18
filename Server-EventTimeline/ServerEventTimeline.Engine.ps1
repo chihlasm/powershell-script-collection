@@ -326,6 +326,25 @@ $script:DefaultProbeTask = {
     . $EnginePath
     Invoke-ServerProbe -ComputerName $Server -Credential $Credential -WindowStartLocal $WindowStartLocal
 }
+# Runs in the log task's runspace, after the log script: turns the events into timeline rows
+# there. Converting on the window's heartbeat took 0.6-0.8 ms per event on the UI thread - a
+# 5,000-event log froze the window for 3-4 s and Windows marked it "Not Responding".
+$script:RowConverterTask = {
+    param($EnginePath, $Server, $UtcOffsetMinutes)
+    begin { . $EnginePath }
+    process {
+        $r = $_
+        if ($null -ne $r -and $r.PSObject.Properties['Events'] -and -not $r.PSObject.Properties['Rows']) {
+            $rows = New-Object System.Collections.Generic.List[object]
+            foreach ($e in @($r.Events)) {
+                if ($null -ne $e) { $rows.Add((ConvertTo-TimelineRow -Server $Server -EventRecord $e -UtcOffsetMinutes $UtcOffsetMinutes)) }
+            }
+            $r | Add-Member -NotePropertyName Rows -NotePropertyValue $rows.ToArray()
+        }
+        $r
+    }
+}
+
 $script:DefaultLogTask = {
     param($EnginePath, $Server, $Transport, $LogName, $StartUtc, $EndUtc, $Cap, $Credential)
     . $EnginePath
@@ -395,6 +414,11 @@ function Start-PendingTimelineTasks {
         $ps.RunspacePool = $Engine.Pool
         [void]$ps.AddScript($script.ToString())
         foreach ($k in $task.Parameters.Keys) { [void]$ps.AddParameter($k, $task.Parameters[$k]) }
+        if ($task.PSObject.Properties['Convert']) {
+            # Piped after the log script, in the same runspace: rows are built off the UI thread.
+            [void]$ps.AddScript($script:RowConverterTask.ToString())
+            foreach ($k in $task.Convert.Keys) { [void]$ps.AddParameter($k, $task.Convert[$k]) }
+        }
         $task | Add-Member -NotePropertyName PowerShell -NotePropertyValue $ps -Force
         $task | Add-Member -NotePropertyName Handle -NotePropertyValue $ps.BeginInvoke() -Force
         $task | Add-Member -NotePropertyName Started -NotePropertyValue ([Diagnostics.Stopwatch]::StartNew()) -Force
@@ -440,6 +464,7 @@ function Complete-TimelineProbe {
         Set-TimelineLogOutcome -Status $st -Log $log -Outcome 'Pending'
         [void]$Engine.Pending.Add([PSCustomObject]@{
                 Kind = 'Log'; Server = $Task.Server; Log = $log
+                Convert = [ordered]@{ EnginePath = $script:EngineFilePath; Server = $Task.Server; UtcOffsetMinutes = $st.UtcOffsetMinutes }
                 Parameters = [ordered]@{ EnginePath = $script:EngineFilePath; Server = $Task.Server; Transport = $Probe.Transport; LogName = $log
                     StartUtc = $utc.StartUtc; EndUtc = $utc.EndUtc; Cap = $Engine.Cap; Credential = $Engine.Credential }
             })
@@ -450,7 +475,11 @@ function Complete-TimelineLog {
     param($Engine, $Task, $Result, $Rows)
     $st = $Engine.Status[$Task.Server]
     if (-not $Result) { Set-TimelineLogOutcome -Status $st -Log $Task.Log -Outcome 'Failed' -Reason 'No answer from the server.'; return }
-    $events = @($Result.Events | Where-Object { $_ })
+    # Rows were built in the task's runspace (RowConverterTask); events are converted here only
+    # when a result arrives without them.
+    $prebuilt = [bool]$Result.PSObject.Properties['Rows']
+    # @() around the whole if: assigning an if unrolls a one-row array (no .Count on 5.1).
+    $events = @(if ($prebuilt) { $Result.Rows } else { $Result.Events | Where-Object { $_ } })
     $room = [Math]::Max($Engine.ServerTotalCap - $st.EventCount, 0)
     $reason = 'stopped at the {0:N0} event total for this server' -f $Engine.ServerTotalCap
     $outcome = $Result.Outcome
@@ -463,7 +492,8 @@ function Complete-TimelineLog {
     }
     $hitTotal = ($st.EventCount + $events.Count) -ge $Engine.ServerTotalCap
 
-    foreach ($e in $events) { $Rows.Add((ConvertTo-TimelineRow -Server $Task.Server -EventRecord $e -UtcOffsetMinutes $st.UtcOffsetMinutes)) }
+    if ($prebuilt) { $Rows.AddRange([object[]]$events) }
+    else { foreach ($e in $events) { $Rows.Add((ConvertTo-TimelineRow -Server $Task.Server -EventRecord $e -UtcOffsetMinutes $st.UtcOffsetMinutes)) } }
     $st.EventCount += $events.Count
     Set-TimelineLogOutcome -Status $st -Log $Task.Log -Outcome $outcome -Count $events.Count -Reason $why
 
