@@ -1,4 +1,4 @@
-<#
+﻿<#
     Pester 5 tests for ServerEventTimeline.ServerList.ps1 (the server list: directory entries,
     suggestions, notes, file parsing, background lookups). No AD, DNS or real settings: the
     background jobs get fake loader and lookup scriptblocks.
@@ -98,5 +98,105 @@ Describe 'Find-ServerSuggestions' {
 
     It 'returns nothing for blank text' {
         @(Find-ServerSuggestions -Directory $script:Dir -Recent @('FS01') -Text '  ' -Max 8).Count | Should -Be 0
+    }
+}
+
+Describe 'Server list' {
+    BeforeAll {
+        $script:Local = @('APP02', 'app02.contoso.local', 'localhost', '.', '127.0.0.1', '::1')
+        $script:Dir = @(New-FakeDirectory)
+        function New-List { New-Object 'System.Collections.ObjectModel.ObservableCollection[object]' }
+    }
+
+    It 'adds each name from pasted text, in order' {
+        $items = New-List
+        $added = @(Add-ServerListItems -Items $items -Names @("FS01, FS02`nFS03") -LocalNames $script:Local)
+        ($items | ForEach-Object Name) -join ',' | Should -Be 'FS01,FS02,FS03'
+        $added -join ',' | Should -Be 'FS01,FS02,FS03'
+    }
+
+    It 'turns every name for this computer into one row noted "this computer"' {
+        $items = New-List
+        $null = Add-ServerListItems -Items $items -Names @('localhost', '127.0.0.1', '.', 'app02.contoso.local', 'APP02') -LocalNames $script:Local
+        $items.Count | Should -Be 1
+        $items[0].Name | Should -Be 'APP02'
+        $items[0].IsLocal | Should -BeTrue
+        Update-ServerListNote -Item $items[0] -Directory $script:Dir -LoadedDomain 'contoso.local' -Lookup $null
+        $items[0].Note | Should -Be 'this computer'
+    }
+
+    It 'strips a DOMAIN\ prefix and skips a name already in the list (any case)' {
+        $items = New-List
+        $null = Add-ServerListItems -Items $items -Names @('CONTOSO\FS01') -LocalNames $script:Local
+        $items[0].Name | Should -Be 'FS01'
+        @(Add-ServerListItems -Items $items -Names @('fs01') -LocalNames $script:Local).Count | Should -Be 0
+        $items.Count | Should -Be 1
+    }
+
+    It 'notes domain controllers, disabled accounts and the OS from AD' {
+        $dc = New-ServerListItem -Name 'DC01.contoso.local' -LocalNames $script:Local
+        Update-ServerListNote -Item $dc -Directory $script:Dir -LoadedDomain 'contoso.local' -Lookup $null
+        $dc.Note | Should -Be 'domain controller'
+        $old = New-ServerListItem -Name 'FSOLD' -LocalNames $script:Local
+        Update-ServerListNote -Item $old -Directory $script:Dir -LoadedDomain 'contoso.local' -Lookup $null
+        $old.Note | Should -Be 'disabled in AD'
+        $old.NoteKind | Should -Be 'Warn'
+        $fs = New-ServerListItem -Name 'fs02' -LocalNames $script:Local
+        Update-ServerListNote -Item $fs -Directory $script:Dir -LoadedDomain 'contoso.local' -Lookup $null
+        $fs.Note | Should -Be 'Windows Server 2012 R2 Standard'
+        $fs.NoteKind | Should -Be 'Info'
+    }
+
+    It 'says "not in AD" only for short names and names in the loaded domain' {
+        $a = New-ServerListItem -Name 'FS9' -LocalNames $script:Local
+        Update-ServerListNote -Item $a -Directory $script:Dir -LoadedDomain 'contoso.local' -Lookup $null
+        $a.Note | Should -Be 'not in AD'
+        $a.NoteKind | Should -Be 'Warn'
+        $b = New-ServerListItem -Name 'fs9.contoso.local' -LocalNames $script:Local
+        Update-ServerListNote -Item $b -Directory $script:Dir -LoadedDomain 'contoso.local' -Lookup $null
+        $b.Note | Should -Be 'not in AD'
+        $c = New-ServerListItem -Name 'fs9.fabrikam.com' -LocalNames $script:Local
+        Update-ServerListNote -Item $c -Directory $script:Dir -LoadedDomain 'contoso.local' -Lookup $null
+        $c.Note | Should -Be ''
+        $d = New-ServerListItem -Name 'FS9' -LocalNames $script:Local
+        Update-ServerListNote -Item $d -Directory @() -LoadedDomain '' -Lookup $null
+        $d.Note | Should -Be ''
+    }
+
+    It 'searches the DNS name of an IP only when it looks back up to the same IP' {
+        $ip = New-ServerListItem -Name '10.0.4.21' -LocalNames $script:Local
+        $ip.IsIp | Should -BeTrue
+        Update-ServerListNote -Item $ip -Directory $script:Dir -LoadedDomain 'contoso.local' -Lookup $null
+        $ip.Note | Should -Be ''
+        $ip.Lookup | Should -Be 'Pending'
+        Update-ServerListNote -Item $ip -Directory $script:Dir -LoadedDomain 'contoso.local' -Lookup ([PSCustomObject]@{ Name = '10.0.4.21'; IsIp = $true; PtrName = 'SQL01.contoso.local'; ForwardMatches = $true })
+        $ip.Display | Should -Be '10.0.4.21 → SQL01.contoso.local'
+        $ip.SearchName | Should -Be 'SQL01.contoso.local'
+        $ip.Lookup | Should -Be 'Done'
+
+        $stale = New-ServerListItem -Name '10.0.4.22' -LocalNames $script:Local
+        Update-ServerListNote -Item $stale -Directory $script:Dir -LoadedDomain 'contoso.local' -Lookup ([PSCustomObject]@{ Name = '10.0.4.22'; IsIp = $true; PtrName = 'OLD01.contoso.local'; ForwardMatches = $false })
+        $stale.Note | Should -Be "IP · name doesn't match"
+        $stale.NoteKind | Should -Be 'Warn'
+        $stale.SearchName | Should -Be '10.0.4.22'
+
+        $none = New-ServerListItem -Name '10.0.4.23' -LocalNames $script:Local
+        Update-ServerListNote -Item $none -Directory $script:Dir -LoadedDomain 'contoso.local' -Lookup ([PSCustomObject]@{ Name = '10.0.4.23'; IsIp = $true; PtrName = ''; ForwardMatches = $false })
+        $none.Note | Should -Be 'IP · no name found'
+        $none.SearchName | Should -Be '10.0.4.23'
+    }
+
+    It 'builds the server text the search reads' {
+        $fs = New-ServerListItem -Name 'FS01' -LocalNames $script:Local
+        $ip = New-ServerListItem -Name '10.0.4.21' -LocalNames $script:Local
+        Update-ServerListNote -Item $ip -Directory @() -LoadedDomain '' -Lookup ([PSCustomObject]@{ Name = '10.0.4.21'; IsIp = $true; PtrName = 'SQL01.contoso.local'; ForwardMatches = $true })
+        Get-ServerSearchText -Items @($fs, $ip) | Should -Be 'FS01, SQL01.contoso.local'
+    }
+
+    It 'recognises IP addresses' {
+        Test-IpAddress -Text '10.0.4.21' | Should -BeTrue
+        Test-IpAddress -Text 'fe80::1' | Should -BeTrue
+        Test-IpAddress -Text '5' | Should -BeFalse
+        Test-IpAddress -Text 'FS01' | Should -BeFalse
     }
 }

@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
     The server list for Server Event Timeline: computers read from Active Directory, the
     suggestions shown while typing, the notes beside each server, reading a server list file,
@@ -100,4 +100,121 @@ function Find-ServerSuggestions {
         }
     }
     return $out.ToArray()
+}
+
+function Test-IpAddress {
+    <# True for an IPv4 or IPv6 address ("10.0.4.21", "fe80::1"); a bare number like "5" is not one. #>
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Text)
+    $t = ([string]$Text).Trim()
+    if (-not $t) { return $false }
+    # IPAddress.TryParse accepts "5" as 0.0.0.5; only dotted IPv4 or IPv6 count here.
+    if ($t -notmatch '^\d{1,3}(\.\d{1,3}){3}$' -and $t -notmatch ':') { return $false }
+    $ip = $null
+    return [System.Net.IPAddress]::TryParse($t, [ref]$ip)
+}
+
+function New-ServerListItem {
+    <# One row of the server list. Any name for this computer becomes its own name. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Name, [string[]]$LocalNames)
+    $n = $Name.Trim()
+    $isLocal = $false
+    if ($LocalNames -and (Test-IsLocalComputer -Name $n -LocalNames $LocalNames)) { $n = $LocalNames[0]; $isLocal = $true }
+    [PSCustomObject]@{
+        Name       = $n
+        Display    = $n
+        Note       = ''
+        NoteKind   = 'Info'
+        IsIp       = (-not $isLocal) -and (Test-IpAddress -Text $n)
+        IsLocal    = $isLocal
+        SearchName = $n
+        Lookup     = 'Pending'
+    }
+}
+
+function Add-ServerListItems {
+    <#
+        Adds names to the list (pasted text with commas, spaces or new lines becomes several
+        names; a DOMAIN\ prefix is dropped) and returns the names actually added. A name
+        already in the list, in any case, is skipped.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowEmptyCollection()]$Items, [string[]]$Names, [string[]]$LocalNames)
+    $added = New-Object System.Collections.Generic.List[string]
+    foreach ($text in @($Names | Where-Object { $_ })) {
+        foreach ($raw in @(ConvertTo-ServerList -Text $text)) {
+            $clean = $raw.Trim()
+            $slash = $clean.LastIndexOf('\')
+            if ($slash -ge 0) { $clean = $clean.Substring($slash + 1) }
+            if (-not $clean) { continue }
+            $item = New-ServerListItem -Name $clean -LocalNames $LocalNames
+            $exists = @($Items | Where-Object { [string]::Equals($_.Name, $item.Name, 'OrdinalIgnoreCase') }).Count -gt 0
+            if ($exists) { continue }
+            [void]$Items.Add($item)
+            $added.Add($item.Name)
+        }
+    }
+    return $added.ToArray()
+}
+
+function Find-DirectoryEntry {
+    <# The AD entry for a name (short or DNS name, any case), or $null. #>
+    [CmdletBinding()]
+    param([object[]]$Directory, [string]$Name)
+    foreach ($e in @($Directory | Where-Object { $_ })) {
+        if ([string]::Equals($e.DnsName, $Name, 'OrdinalIgnoreCase')) { return $e }
+    }
+    if ($Name.IndexOf('.') -lt 0) {
+        foreach ($e in @($Directory | Where-Object { $_ })) {
+            if ([string]::Equals($e.Name, $Name, 'OrdinalIgnoreCase')) { return $e }
+        }
+    }
+    return $null
+}
+
+function Update-ServerListNote {
+    <#
+        Fills in the note beside a server (and, for an IP whose name looks back up to the same
+        IP, the name that is searched instead - see REFERENCES). -Lookup is a DNS result from
+        Receive-NameLookups, or $null while it is still running.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Item, [object[]]$Directory, [string]$LoadedDomain, $Lookup)
+
+    $set = { param($note, $kind) $Item.Note = $note; $Item.NoteKind = $kind }
+    if ($Item.IsLocal) { & $set 'this computer' 'Info'; $Item.Lookup = 'Done'; return }
+
+    if ($Item.IsIp) {
+        $Item.Display = $Item.Name; $Item.SearchName = $Item.Name
+        if ($null -eq $Lookup) { & $set '' 'Info'; $Item.Lookup = 'Pending'; return }
+        $Item.Lookup = 'Done'
+        if (-not [string]$Lookup.PtrName) { & $set 'IP · no name found' 'Info'; return }
+        if (-not $Lookup.ForwardMatches) { & $set "IP · name doesn't match" 'Warn'; return }
+        $Item.Display = '{0} → {1}' -f $Item.Name, $Lookup.PtrName
+        $Item.SearchName = [string]$Lookup.PtrName
+        $entry = Find-DirectoryEntry -Directory $Directory -Name $Lookup.PtrName
+        if ($entry -and $entry.IsDC) { & $set 'domain controller' 'Info' } else { & $set '' 'Info' }
+        return
+    }
+
+    if ($null -ne $Lookup) { $Item.Lookup = 'Done' }
+    $loaded = @($Directory | Where-Object { $_ }).Count -gt 0
+    $entry = Find-DirectoryEntry -Directory $Directory -Name $Item.Name
+    if ($entry) {
+        if ($entry.IsDC) { & $set 'domain controller' 'Info' }
+        elseif (-not $entry.Enabled) { & $set 'disabled in AD' 'Warn' }
+        else { & $set $entry.OS 'Info' }
+        return
+    }
+    $dot = $Item.Name.IndexOf('.')
+    $inLoadedDomain = ($dot -lt 0) -or ($LoadedDomain -and [string]::Equals($Item.Name.Substring($dot + 1), $LoadedDomain, 'OrdinalIgnoreCase'))
+    if ($loaded -and $inLoadedDomain) { & $set 'not in AD' 'Warn' } else { & $set '' 'Info' }
+}
+
+function Get-ServerSearchText {
+    <# The server text ConvertFrom-TimelineInputs reads: each row's search name, comma-separated. #>
+    [CmdletBinding()]
+    param([object[]]$Items)
+    return (@($Items | Where-Object { $_ } | ForEach-Object { $_.SearchName }) -join ', ')
 }
