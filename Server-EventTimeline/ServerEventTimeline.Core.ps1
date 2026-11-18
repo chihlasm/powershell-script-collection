@@ -48,7 +48,15 @@
     - Resource-Exhaustion-Detector 2004: https://learn.microsoft.com/troubleshoot/windows-server/performance/troubleshoot-application-service-memory-leaks
     - Not flagged because no Microsoft page confirmed them: SCM 7023/7009, Disk 7, Ntfs 137,
       volmgr 161, WindowsUpdateClient 20/43, Time-Service 36.
+    - One unexpected restart writes both Kernel-Power 41 and EventLog 6008, and one start
+      writes both EventLog 6005 and Kernel-General 12 (same reboot-causes page above), so
+      the summary counts each pair once.
+
+    The ticket note is built with CaseKit.ps1 (a copy of TicketNote\CaseKit.ps1; see the
+    TicketNote README), which defines functions only.
 #>
+
+. (Join-Path $PSScriptRoot 'CaseKit.ps1')
 
 function ConvertTo-ServerList {
     <# Turns whatever a tech pasted into a clean list of server names. #>
@@ -195,6 +203,42 @@ $script:FlagCatalog = @(
 
 $script:LevelNames = @{ 0 = 'Information'; 1 = 'Critical'; 2 = 'Error'; 3 = 'Warning'; 4 = 'Information'; 5 = 'Verbose' }
 
+# The summary line above the grid and the ticket note count flagged events in plain words.
+# Labels map to a summary kind; Max = several event IDs written for ONE happening (41 + 6008
+# for one unexpected restart, 6005 + Kernel-General 12 for one start), so the kind's count is
+# the largest per-ID count, not the sum. Kind = how the ticket note files it. Flags with no
+# entry here (clean shutdowns, the WER report that follows every app crash) are not counted.
+$script:SummaryKinds = @(
+    @{ Key = 'UnexpectedRestart'; One = 'unexpected restart'; Many = 'unexpected restarts'; Max = $true; Kind = 'Problem'
+        Labels = @('Restarted without a clean shutdown (crash or power loss)', 'Previous shutdown was unexpected')
+        Next = 'Check power, the hypervisor host or the hardware logs for {0} around the unexpected restart.' }
+    @{ Key = 'Bugcheck'; One = 'blue screen'; Many = 'blue screens'; Max = $false; Kind = 'Problem'
+        Labels = @('Restarted after a blue screen (bugcheck)')
+        Next = 'Collect the memory dump (C:\Windows\MEMORY.DMP or C:\Windows\Minidump) from {0} and analyse the blue screen.' }
+    @{ Key = 'Disk'; One = 'disk error'; Many = 'disk errors'; Max = $false; Kind = 'Problem'
+        Labels = @('Disk error during a paging operation', 'Disk I/O had to be retried', 'Disk controller error', 'Storage reset after a request timed out', 'File system corruption found (run chkdsk)', 'Volume needs an offline chkdsk')
+        Next = 'Check the disk and storage health of {0} (hardware, SAN or hypervisor storage).' }
+    @{ Key = 'ServiceFailure'; One = 'service failure'; Many = 'service failures'; Max = $false; Kind = 'Warning'
+        Labels = @('Service crashed (recovery action scheduled)', 'Service stopped unexpectedly', 'Service stopped with an error', 'Service failed to start', 'Service timed out responding')
+        Next = 'Check the failing services on {0}: each event names the service.' }
+    @{ Key = 'AppCrash'; One = 'app crash or hang'; Many = 'app crashes or hangs'; Max = $false; Kind = 'Warning'
+        Labels = @('Application crashed', 'Application stopped responding'); Next = '' }
+    @{ Key = 'LowMemory'; One = 'low-memory warning'; Many = 'low-memory warnings'; Max = $false; Kind = 'Warning'
+        Labels = @('Windows ran low on memory'); Next = 'Check memory use on {0}: the event names the processes using the most.' }
+    @{ Key = 'TimeChange'; One = 'system time change'; Many = 'system time changes'; Max = $false; Kind = 'Warning'
+        Labels = @('System time was changed'); Next = '' }
+    @{ Key = 'TimeSync'; One = 'time sync problem'; Many = 'time sync problems'; Max = $false; Kind = 'Warning'
+        Labels = @('No domain time source could be found', 'Time server name lookup failed'); Next = '' }
+    @{ Key = 'Update'; One = 'update installed'; Many = 'updates installed'; Max = $false; Kind = 'Info'
+        Labels = @('Windows Update installed an update'); Next = '' }
+    @{ Key = 'RestartRequested'; One = 'restart or shutdown requested'; Many = 'restarts or shutdowns requested'; Max = $false; Kind = 'Info'
+        Labels = @('Restart or shutdown requested'); Next = '' }
+    @{ Key = 'Started'; One = 'Windows start'; Many = 'Windows starts'; Max = $true; Kind = 'Info'
+        Labels = @('Windows started (event log service started)', 'Windows started'); Next = '' }
+)
+$script:SummaryKindByLabel = @{}
+foreach ($k in $script:SummaryKinds) { foreach ($l in $k.Labels) { $script:SummaryKindByLabel[$l] = $k } }
+
 function Get-EventFlag {
     <# The flag for one event, or $null. #>
     [CmdletBinding()]
@@ -273,7 +317,8 @@ function Test-RowMatchesFilter {
     <#
         True when the row passes the grid's filters. Filter keys: MinLevel (All | Warning |
         Error | Critical), Server ('*' or a name), Log ('*' or a name), FlaggedOnly, Text
-        (literal, case-insensitive, matched against message, provider and event ID).
+        (literal, case-insensitive, matched against message, provider and event ID),
+        HiddenSources (provider names to hide) and EventKey ('Provider|Id': only that event).
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Row, [Parameter(Mandatory)][hashtable]$Filter)
@@ -283,6 +328,8 @@ function Test-RowMatchesFilter {
     if ($Filter.Server -and $Filter.Server -ne '*' -and $Row.Server -ne $Filter.Server) { return $false }
     if ($Filter.Log -and $Filter.Log -ne '*' -and $Row.Log -ne $Filter.Log) { return $false }
     if ($Filter.FlaggedOnly -and -not $Row.Flag) { return $false }
+    if (@($Filter.HiddenSources) -contains [string]$Row.Provider) { return $false }
+    if ($Filter.EventKey -and (Get-TimelineEventKey -Row $Row) -ne $Filter.EventKey) { return $false }
 
     $text = [string]$Filter.Text
     if ($text) {
@@ -481,8 +528,14 @@ function Select-TimelineRows {
     $flagged = [bool]$Filter.FlaggedOnly
     $text = [string]$Filter.Text
     $cmp = [StringComparison]::OrdinalIgnoreCase
+    $hidden = $null
+    if (@($Filter.HiddenSources | Where-Object { $_ }).Count -gt 0) {
+        $hidden = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+        foreach ($h in @($Filter.HiddenSources)) { [void]$hidden.Add([string]$h) }
+    }
+    $eventKey = [string]$Filter.EventKey
 
-    if ($null -eq $levels -and -not $server -and -not $log -and -not $flagged -and -not $text) { return @($Rows) }
+    if ($null -eq $levels -and -not $server -and -not $log -and -not $flagged -and -not $text -and -not $hidden -and -not $eventKey) { return @($Rows) }
 
     $out = New-Object System.Collections.Generic.List[object]
     foreach ($r in $Rows) {
@@ -490,6 +543,8 @@ function Select-TimelineRows {
         if ($server -and $r.Server -ne $server) { continue }
         if ($log -and $r.Log -ne $log) { continue }
         if ($flagged -and -not $r.Flag) { continue }
+        if ($hidden -and $hidden.Contains([string]$r.Provider)) { continue }
+        if ($eventKey -and ('{0}|{1}' -f $r.Provider, $r.EventId) -ne $eventKey) { continue }
         if ($text -and ('{0}|{1}|{2}' -f $r.EventId, $r.Provider, $r.Message).IndexOf($text, $cmp) -lt 0) { continue }
         $out.Add($r)
     }
@@ -537,10 +592,10 @@ function ConvertFrom-TimelineInputs {
         [string]$AtText, [int]$PlusMinusMinutes = 15,
         [string]$FromText, [string]$ToText,
         [int]$LastMinutes = 60,
-        [string]$CapText = '5000', [string]$TimeoutText = '60'
+        [string]$CapText = '5000', [string]$TimeoutText = '60', [string]$TotalCapText = '50000'
     )
 
-    $fail = { param($m) [PSCustomObject]@{ Ok = $false; Message = $m; Servers = @(); Window = $null; Cap = 0; TimeoutSec = 0 } }
+    $fail = { param($m) [PSCustomObject]@{ Ok = $false; Message = $m; Servers = @(); Window = $null; Cap = 0; TimeoutSec = 0; TotalCap = 0 } }
     $readDate = {
         param($text)
         $d = [datetime]::MinValue
@@ -561,6 +616,8 @@ function ConvertFrom-TimelineInputs {
     $cap = 0; $timeout = 0
     if (-not [int]::TryParse($CapText, [ref]$cap) -or $cap -le 0) { return (& $fail 'The number of events per log must be a whole number above 0.') }
     if (-not [int]::TryParse($TimeoutText, [ref]$timeout) -or $timeout -le 0) { return (& $fail 'The timeout must be a whole number of seconds above 0.') }
+    $totalCap = 0
+    if (-not [int]::TryParse($TotalCapText, [ref]$totalCap) -or $totalCap -le 0) { return (& $fail 'The total events per server must be a whole number above 0.') }
 
     try {
         switch ($Mode) {
@@ -579,7 +636,7 @@ function ConvertFrom-TimelineInputs {
     }
     catch { return (& $fail $_.Exception.Message) }
 
-    [PSCustomObject]@{ Ok = $true; Message = ''; Servers = $servers; Window = $window; Cap = $cap; TimeoutSec = $timeout }
+    [PSCustomObject]@{ Ok = $true; Message = ''; Servers = $servers; Window = $window; Cap = $cap; TimeoutSec = $timeout; TotalCap = $totalCap }
 }
 
 function Get-TimelineStatusLines {
@@ -695,22 +752,48 @@ function Read-TimelineSettings {
     <# The remembered settings; empty when the file is missing or damaged. #>
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Path)
-    $empty = [PSCustomObject]@{ SaveFolder = $null }
+    $empty = [PSCustomObject]@{ SaveFolder = $null; RecentServerLists = @() }
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $empty }
     try {
         $data = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-        return [PSCustomObject]@{ SaveFolder = [string]$data.SaveFolder }
+        return [PSCustomObject]@{
+            SaveFolder        = [string]$data.SaveFolder
+            RecentServerLists = @($data.RecentServerLists | Where-Object { $_ } | ForEach-Object { [string]$_ })
+        }
     }
     catch { return $empty }
 }
 
 function Save-TimelineSettings {
-    <# Remembers the save folder for next time. #>
+    <# Remembers the save folder and/or the recent server lists; whatever isn't given is kept. #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$Path, [string]$SaveFolder)
+    param([Parameter(Mandatory)][string]$Path, [string]$SaveFolder, [string[]]$RecentServerLists)
+    $current = Read-TimelineSettings -Path $Path
+    $data = [ordered]@{ SaveFolder = $current.SaveFolder; RecentServerLists = @($current.RecentServerLists) }
+    if ($PSBoundParameters.ContainsKey('SaveFolder')) { $data.SaveFolder = $SaveFolder }
+    if ($PSBoundParameters.ContainsKey('RecentServerLists')) { $data.RecentServerLists = @($RecentServerLists) }
     $dir = Split-Path -Parent $Path
     if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    @{ SaveFolder = $SaveFolder } | ConvertTo-Json | Set-Content -LiteralPath $Path -Encoding UTF8
+    $data | ConvertTo-Json | Set-Content -LiteralPath $Path -Encoding UTF8
+}
+
+function Add-RecentServerList {
+    <#
+        The recent server lists with this one first. A list already there (same names in any
+        order or case) moves to the top instead of appearing twice.
+    #>
+    [CmdletBinding()]
+    param([string[]]$Recent, [Parameter(Mandatory)][string[]]$Servers, [int]$Max = 8)
+    $norm = { param($t) (@(ConvertTo-ServerList -Text $t | ForEach-Object { $_.ToLowerInvariant() } | Sort-Object) -join ',') }
+    $text = (@($Servers) -join ', ')
+    $key = & $norm $text
+    $out = New-Object System.Collections.Generic.List[string]
+    $out.Add($text)
+    foreach ($r in @($Recent | Where-Object { $_ })) {
+        if ($out.Count -ge $Max) { break }
+        if ((& $norm $r) -ne $key) { $out.Add([string]$r) }
+    }
+    return $out.ToArray()
 }
 
 function Resolve-TimelineOutputFolder {
@@ -720,4 +803,230 @@ function Resolve-TimelineOutputFolder {
     if ($OutputPath) { return $OutputPath }
     if ($Remembered -and (Test-Path -LiteralPath $Remembered -PathType Container)) { return $Remembered }
     return $Default
+}
+
+function Get-TimelineEventKey {
+    <# 'Provider|Id': what "Show only this event" filters on. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Row)
+    '{0}|{1}' -f $Row.Provider, $Row.EventId
+}
+
+function Get-AroundEventText {
+    <# The row's time as the Around box reads it (server-local, to the second). #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Row)
+    ([datetime]$Row.TimeServerLocal).ToString('yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Get-TimelineFlagCounts {
+    <#
+        Per server: the summary kinds that occurred and how often, in $script:SummaryKinds
+        order (Counts = @{ <server> = [ordered]@{ <kind key> = <count> } }), and how many
+        rows carry any flag (Flagged = @{ <server> = <count> }).
+    #>
+    [CmdletBinding()]
+    param([object[]]$Rows)
+    $perLabel = @{}
+    $flagged = @{}
+    foreach ($r in $Rows) {
+        if (-not $r.Flag) { continue }
+        $s = [string]$r.Server
+        if (-not $perLabel.ContainsKey($s)) { $perLabel[$s] = @{}; $flagged[$s] = 0 }
+        $flagged[$s]++
+        $l = [string]$r.Flag
+        if ($perLabel[$s].ContainsKey($l)) { $perLabel[$s][$l]++ } else { $perLabel[$s][$l] = 1 }
+    }
+    $counts = @{}
+    foreach ($s in $perLabel.Keys) {
+        $c = [ordered]@{}
+        foreach ($k in $script:SummaryKinds) {
+            $values = @($k.Labels | ForEach-Object { if ($perLabel[$s].ContainsKey($_)) { [int]$perLabel[$s][$_] } else { 0 } })
+            $n = if ($k.Max) { ($values | Measure-Object -Maximum).Maximum } else { ($values | Measure-Object -Sum).Sum }
+            if ($n -gt 0) { $c[$k.Key] = [int]$n }
+        }
+        $counts[$s] = $c
+    }
+    [PSCustomObject]@{ Counts = $counts; Flagged = $flagged }
+}
+
+function Format-TimelineCountParts {
+    # "1 unexpected restart", "3 service failures" ... for one kind (Problem/Warning/Info) or all.
+    param($Counts, [string]$Kind)
+    foreach ($k in $script:SummaryKinds) {
+        if ($Kind -and $k.Kind -ne $Kind) { continue }
+        if ($Counts -and $Counts.Contains($k.Key)) {
+            $n = [int]$Counts[$k.Key]
+            '{0} {1}' -f $n, $(if ($n -eq 1) { $k.One } else { $k.Many })
+        }
+    }
+}
+
+function Get-TimelineSummaryLines {
+    <#
+        The plain-English strip above the grid: one line per server, e.g.
+        "APP01: 1 unexpected restart, 3 service failures, 1 update installed".
+        Counts every row read (not just the filtered ones).
+    #>
+    [CmdletBinding()]
+    param([object[]]$Rows, $Status)
+    $fc = Get-TimelineFlagCounts -Rows $Rows
+    $servers = if ($Status) { @($Status.Keys) } else { @($Rows | ForEach-Object { [string]$_.Server } | Select-Object -Unique) }
+    foreach ($s in $servers) {
+        $st = if ($Status) { $Status[$s] } else { $null }
+        $found = @(Format-TimelineCountParts -Counts $fc.Counts[$s]) -join ', '
+        $state = if ($st) { [string]$st.State } else { 'Done' }
+        $events = if ($st) { [int]$st.EventCount } else { @($Rows | Where-Object Server -eq $s).Count }
+        if ($state -eq 'Unreachable') { "${s}: couldn't be read"; continue }
+        if ($state -in @('Waiting', 'Querying')) {
+            if ($found) { "${s}: still reading... so far $found" } else { "${s}: still reading..." }
+            continue
+        }
+        $line = if ($found) { "${s}: $found" }
+        elseif ($fc.Flagged[$s]) { '{0}: {1} flagged events' -f $s, $fc.Flagged[$s] }
+        elseif ($events -eq 0) { "${s}: no events in this window" }
+        else { '{0}: nothing flagged in {1:N0} events' -f $s, $events }
+        if ($state -eq 'DoneWithGaps') { $line += ' (some logs incomplete)' }
+        if ($state -eq 'Cancelled') { $line += ' (cancelled)' }
+        $line
+    }
+}
+
+function Group-TimelineRepeats {
+    <#
+        Collapses the same unflagged event (server, log, source, ID, level) into one row at its
+        first time, e.g. "[240x, last at 03:14:22] Task triggered...". Flagged events are never
+        collapsed, so each crash keeps its own time. The originals are kept in Members and are
+        not changed.
+    #>
+    [CmdletBinding()]
+    param([object[]]$Rows)
+    $groups = @{}
+    $order = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $Rows) {
+        if ($r.Flag) { $order.Add($r); continue }
+        $key = '{0}|{1}|{2}|{3}|{4}' -f $r.Server, $r.Log, $r.Provider, $r.EventId, $r.Level
+        if ($groups.ContainsKey($key)) { $groups[$key].Add($r); continue }
+        $list = New-Object System.Collections.Generic.List[object]
+        $list.Add($r)
+        $groups[$key] = $list
+        $order.Add($list)
+    }
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($item in $order) {
+        if ($item -isnot [System.Collections.Generic.List[object]]) { $out.Add($item); continue }
+        if ($item.Count -eq 1) { $out.Add($item[0]); continue }
+        $first = $item[0]
+        $lastLocal = [datetime]$item[$item.Count - 1].TimeServerLocal
+        $format = if ($lastLocal.Date -eq ([datetime]$first.TimeServerLocal).Date) { 'HH:mm:ss' } else { 'yyyy-MM-dd HH:mm:ss' }
+        $copy = $first.PSObject.Copy()
+        $copy.MessageFirstLine = '[{0}x, last at {1}] {2}' -f $item.Count, $lastLocal.ToString($format), $first.MessageFirstLine
+        $copy | Add-Member -NotePropertyName RepeatCount -NotePropertyValue $item.Count
+        $copy | Add-Member -NotePropertyName LastTimeServerLocal -NotePropertyValue $lastLocal
+        $copy | Add-Member -NotePropertyName Members -NotePropertyValue $item.ToArray()
+        $out.Add($copy)
+    }
+    return $out.ToArray()
+}
+
+function Expand-TimelineRepeats {
+    <# Every original row behind collapsed rows (for exports and copying). #>
+    [CmdletBinding()]
+    param([object[]]$Rows)
+    foreach ($r in $Rows) {
+        if ($r.PSObject.Properties['Members']) { $r.Members } else { $r }
+    }
+}
+
+function Resolve-TimelineLogNames {
+    <#
+        Log names for the console mode: checkbox labels (System, Task Scheduler...) or log
+        names, any case; anything else is passed through as a log name. None = the defaults.
+    #>
+    [CmdletBinding()]
+    param([string[]]$Names)
+    $catalog = @(Get-TimelineLogCatalog)
+    $wanted = @($Names | Where-Object { $_ -and $_.Trim() })
+    if ($wanted.Count -eq 0) { return @($catalog | Where-Object Default | ForEach-Object Name) }
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($n in $wanted) {
+        $t = $n.Trim()
+        $hit = $catalog | Where-Object { $_.Name -eq $t -or $_.Label -eq $t } | Select-Object -First 1
+        $name = if ($hit) { $hit.Name } else { $t }
+        if ($seen.Add($name)) { $name }
+    }
+}
+
+function New-TimelineTicketNote {
+    <#
+        The four-part ticket note (CaseKit) for a search: what was found per server, which
+        servers came back clean, what could not be checked, and next steps. A server is only
+        "ruled out" when every log was read and nothing was flagged.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Status,
+        [object[]]$Rows,
+        [string]$WindowText,
+        [string[]]$Logs,
+        [datetime]$Now = (Get-Date),
+        [int]$MaxEventLines = 15
+    )
+    $fc = Get-TimelineFlagCounts -Rows $Rows
+    $items = New-Object System.Collections.Generic.List[object]
+    $next = New-Object System.Collections.Generic.List[string]
+    $servers = @($Status.Keys)
+    $incomplete = $false
+
+    foreach ($s in $servers) {
+        $st = $Status[$s]
+        if ($st.State -eq 'Unreachable') {
+            $items.Add((New-TicketNoteItem -Kind NotChecked -Text "${s}: couldn't be read - $($st.Reason)"))
+            $next.Add("Check that $s can be reached over WinRM (TCP 5985) or the remote event log, and that your account can read its logs.")
+            continue
+        }
+        foreach ($kind in 'Problem', 'Warning', 'Info') {
+            $parts = @(Format-TimelineCountParts -Counts $fc.Counts[$s] -Kind $kind)
+            if ($parts.Count -gt 0) { $items.Add((New-TicketNoteItem -Kind $kind -Text ('{0}: {1}' -f $s, ($parts -join ', ')))) }
+        }
+        foreach ($k in $script:SummaryKinds) {
+            if ($k.Next -and $fc.Counts[$s] -and $fc.Counts[$s].Contains($k.Key)) { $next.Add(($k.Next -f $s)) }
+        }
+        $gaps = @($st.Logs | Where-Object { $_.Outcome -in @('Capped', 'TimedOut', 'Failed', 'NotRead', 'Cancelled', 'Pending') })
+        foreach ($g in $gaps) {
+            $why = if ($g.Reason) { $g.Reason } else { ([string]$g.Outcome).ToLowerInvariant() }
+            $items.Add((New-TicketNoteItem -Kind NotChecked -Text ('{0} {1}: {2}' -f $s, $g.Log, $why)))
+        }
+        foreach ($skip in @($st.Logs | Where-Object Outcome -eq 'Skipped')) {
+            $items.Add((New-TicketNoteItem -Kind NotChecked -Text $skip.Reason))
+        }
+        $complete = ($st.State -eq 'Done') -and $gaps.Count -eq 0
+        if (-not $complete) { $incomplete = $true }
+        if ($st.State -eq 'Cancelled' -and $gaps.Count -eq 0) {
+            $items.Add((New-TicketNoteItem -Kind NotChecked -Text "${s}: the search was cancelled before it finished"))
+        }
+        if (-not $fc.Flagged[$s]) {
+            if ($complete) {
+                $items.Add((New-TicketNoteItem -Kind Clear -CouldLook $true -Text ('{0}: no flagged events in {1:N0} events' -f $s, [int]$st.EventCount)))
+            }
+            else { $items.Add((New-TicketNoteItem -Kind Info -Text "${s}: nothing flagged in the logs that were read")) }
+        }
+    }
+    if ($incomplete) { $next.Add('Read the incomplete logs again with a narrower window (or raise the limits under More options).') }
+
+    $flaggedRows = @($Rows | Where-Object { $_.Flag } | Sort-Object TimeUtc)
+    foreach ($r in @($flaggedRows | Select-Object -First $MaxEventLines)) {
+        $items.Add((New-TicketNoteItem -Kind Info -Text ('{0} {1} (server local): {2} - {3} {4}' -f $r.Server,
+                    ([datetime]$r.TimeServerLocal).ToString('yyyy-MM-dd HH:mm:ss'), $r.Flag, $r.Provider, $r.EventId)))
+    }
+    if ($flaggedRows.Count -gt $MaxEventLines) {
+        $items.Add((New-TicketNoteItem -Kind Info -Text ('... and {0} more flagged events (see the report)' -f ($flaggedRows.Count - $MaxEventLines))))
+    }
+
+    $flagText = if ($flaggedRows.Count -eq 1) { '1 flagged event' } else { '{0} flagged events' -f $flaggedRows.Count }
+    $headline = '{0} - {1} across {2} server(s)' -f $WindowText, $flagText, $servers.Count
+    $scopeLine = 'Servers: {0}' -f ($servers -join ', ')
+    if (@($Logs).Count -gt 0) { $scopeLine += ' | Logs: {0}' -f (@($Logs) -join ', ') }
+    $stamp = New-TicketNoteStamp -ScopeLabel Computer -Scope ($servers -join ', ') -Now $Now
+    New-TicketNote -Tool 'Server-EventTimeline' -Headline $headline -ScopeLine $scopeLine -Items $items.ToArray() -NextSteps $next.ToArray() -Stamp $stamp
 }
