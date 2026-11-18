@@ -694,7 +694,10 @@ Describe 'Packet loss and slow answers (no network)' {
     }
     It 'Export-PortOutageReport reads the loss logs too, and the status log reader ignores them' {
         $logs = Join-Path $TestDrive 'export-loss'
-        $now = Get-Date
+        # Fixed at midday (yesterday, so every change is in the past): the logs are one file per
+        # day, and with the real clock a run between midnight and 2 am split the changes over two
+        # days and found 3 files instead of 2.
+        $now = (Get-Date).Date.AddHours(-12)
         [void](Write-PortStateChangeLog -LogDirectory $logs -Change ([PSCustomObject]@{ Timestamp = $now.AddHours(-3); Label = 'DC'; Host = 'dc01'; Port = 389; PreviousStatus = 'Not checked'; NewStatus = 'Open'; LatencyMs = 1 }))
         foreach ($c in @(
                 [PSCustomObject]@{ Kind = 'Loss'; Timestamp = $now.AddHours(-2); Label = 'DC'; Host = 'dc01'; Port = 389; PreviousStatus = 'OK'; NewStatus = 'High loss'; LossPercent = 20; JitterMs = 3; AvgMs = 9; Sent = 10; Received = 8 }
@@ -702,7 +705,7 @@ Describe 'Packet loss and slow answers (no network)' {
             (Write-PortLossChangeLog -LogDirectory $logs -Change $c).Ok | Should -BeTrue
         }
         @((Read-PortStateLog -LogDirectory $logs).Rows).Count | Should -Be 1
-        $out = Export-PortOutageReport -LogDirectory $logs -OutputPath (Join-Path $TestDrive 'export-out') -Days 1
+        $out = Export-PortOutageReport -LogDirectory $logs -OutputPath (Join-Path $TestDrive 'export-out') -Days 1 -Now $now
         @($out.LossReport.Periods).Count | Should -Be 1
         @($out.LogFiles).Count | Should -Be 2
     }
