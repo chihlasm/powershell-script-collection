@@ -701,6 +701,43 @@ function Set-SmokeWindowPosition {
     $Window.Top = [System.Windows.SystemParameters]::VirtualScreenTop - $Window.Height - 200
 }
 
+function Copy-TimelineRows {
+    <#
+        Puts the rows on the clipboard as text and returns the status line to show. Never
+        throws: [System.Windows.Clipboard]::SetText threw when another program (clipboard
+        history, RDP's clipboard, a chat app) had the clipboard open, and that closed the window.
+        Copy-TicketNoteToClipboard (CaseKit.ps1) returns $false instead.
+    #>
+    param([object[]]$Rows)
+    $merged = @(Merge-TimelineRows -Rows @($Rows | Where-Object { $null -ne $_ }))
+    if ($merged.Count -eq 0) { return 'Select one or more rows first.' }
+    if (Copy-TicketNoteToClipboard -Text (ConvertTo-TimelineText -Rows $merged)) {
+        return ('Copied {0} row(s) - paste them into the ticket.' -f $merged.Count)
+    }
+    "Couldn't copy: another program is using the clipboard. Wait a moment and try again."
+}
+
+function Register-TimelineErrorGuard {
+    <#
+        An exception inside a button or menu handler escapes the WPF dispatcher, ShowDialog
+        throws and the window closes; its console is hidden, so nobody sees why. This handles
+        the dispatcher's UnhandledException instead: $OnError gets the message and the window
+        stays open. Returns the handler so it can be removed.
+          https://learn.microsoft.com/dotnet/api/system.windows.threading.dispatcher.unhandledexception
+    #>
+    param([Parameter(Mandatory)][System.Windows.Threading.Dispatcher]$Dispatcher, [Parameter(Mandatory)][scriptblock]$OnError)
+    $handler = [System.Windows.Threading.DispatcherUnhandledExceptionEventHandler] {
+        param($sender, $e)
+        $e.Handled = $true
+        $ex = $e.Exception
+        # PowerShell wraps a failed .NET call in MethodInvocationException; the inner one says what went wrong.
+        while ($ex.InnerException -and $ex -is [System.Management.Automation.MethodInvocationException]) { $ex = $ex.InnerException }
+        try { & $OnError $ex.Message } catch { }
+    }.GetNewClosure()
+    $Dispatcher.add_UnhandledException($handler)
+    $handler
+}
+
 function Test-TimelineOwnProcess {
     <#
         True when this PowerShell process was started only to run this script (-File <this
@@ -805,6 +842,14 @@ function Show-ServerEventTimeline {
     }
 
     function Set-StatusMessage { param([string]$Text) $ui.StatusMessage.Text = $Text }
+
+    # Whatever goes wrong in a button or menu, the window stays open and says what happened.
+    $null = Register-TimelineErrorGuard -Dispatcher $window.Dispatcher -OnError {
+        param($Message)
+        if ($ui.Smoke) { [void]$ui.SmokeFailures.Add("an error in the window: $Message") }
+        Write-TimelineLog FAIL "Something went wrong (the window stays open): $Message"
+        Set-StatusMessage "Something went wrong: $Message"
+    }
 
     # Inputs: defaults
     $now = Get-Date
@@ -1336,10 +1381,7 @@ function Show-ServerEventTimeline {
     $ui.ExportHtmlButton.add_Click({ Invoke-Export -Kind Html })
     $ui.CopyButton.add_Click({
             if ($ui.Smoke) { [void]$ui.SmokeFailures.Add('the clipboard would have been changed'); return }
-            $rows = @(Merge-TimelineRows -Rows @($ui.EventGrid.SelectedItems))
-            if ($rows.Count -eq 0) { Set-StatusMessage 'Select one or more rows first.'; return }
-            [System.Windows.Clipboard]::SetText((ConvertTo-TimelineText -Rows $rows))
-            Set-StatusMessage ('Copied {0} row(s) - paste them into the ticket.' -f $rows.Count)
+            Set-StatusMessage (Copy-TimelineRows -Rows @($ui.EventGrid.SelectedItems))
         })
 
     # The heartbeat: collect background results without ever waiting on a server.

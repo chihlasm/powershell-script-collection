@@ -34,6 +34,55 @@ Describe 'Own process for the window' {
     }
 }
 
+Describe 'Copy selected rows' {
+    # The window vanished after a right-click copy: [System.Windows.Clipboard]::SetText threw
+    # (another program had the clipboard open) and nothing caught it.
+    BeforeAll {
+        $script:CopyRows = @(
+            [PSCustomObject]@{ Server = 'APP01'; TimeUtc = [datetime]'2026-11-17 08:02:14'; TimeServerLocal = [datetime]'2026-11-17 03:02:14'
+                RecordId = 7; LevelName = 'Error'; Provider = 'Service Control Manager'; EventId = 7031; MessageFirstLine = 'The Print Spooler service terminated unexpectedly.' }
+        )
+    }
+
+    It 'copies the rows and says how many' {
+        Mock Copy-TicketNoteToClipboard { $true }
+        Copy-TimelineRows -Rows $script:CopyRows | Should -Be 'Copied 1 row(s) - paste them into the ticket.'
+        Should -Invoke Copy-TicketNoteToClipboard -Times 1 -ParameterFilter { $Text -like '*APP01*Service Control Manager*7031*' }
+    }
+
+    It 'says so, instead of failing, when the clipboard is busy' {
+        Mock Copy-TicketNoteToClipboard { $false }
+        Copy-TimelineRows -Rows $script:CopyRows | Should -BeLike "Couldn't copy*clipboard*try again*"
+    }
+
+    It 'asks for a selection when no row is selected' {
+        Mock Copy-TicketNoteToClipboard { throw 'should not run' }
+        Copy-TimelineRows -Rows @() | Should -Be 'Select one or more rows first.'
+        Should -Invoke Copy-TicketNoteToClipboard -Times 0
+    }
+}
+
+Describe 'An error in a button or menu does not close the window' {
+    # An exception thrown inside a WPF event handler escapes the dispatcher, ShowDialog throws,
+    # and the window's process (its console hidden) exits without a word. The guard reports it
+    # and keeps the window open. Tested on a real dispatcher with no window.
+    It 'reports the error and keeps the dispatcher running' {
+        Add-Type -AssemblyName WindowsBase
+        $dispatcher = [System.Windows.Threading.Dispatcher]::CurrentDispatcher
+        $seen = New-Object System.Collections.ArrayList
+        $handler = Register-TimelineErrorGuard -Dispatcher $dispatcher -OnError { param($Message) [void]$seen.Add($Message) }
+        try {
+            $frame = New-Object System.Windows.Threading.DispatcherFrame
+            [void]$dispatcher.BeginInvoke([Action] { $null = [System.IO.File]::ReadAllText((Join-Path $TestDrive 'missing\none.txt')) })
+            [void]$dispatcher.BeginInvoke([Action] { $frame.Continue = $false })
+            { [System.Windows.Threading.Dispatcher]::PushFrame($frame) } | Should -Not -Throw
+            $seen.Count | Should -Be 1
+            $seen[0] | Should -BeLike '*missing*'
+        }
+        finally { $dispatcher.remove_UnhandledException($handler) }
+    }
+}
+
 Describe 'Help and parameters' {
     It 'has every help section' {
         $script:Help.Synopsis | Should -Not -BeNullOrEmpty
