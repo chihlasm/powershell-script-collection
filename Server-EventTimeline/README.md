@@ -10,6 +10,9 @@ Read-only: it changes nothing on any server.
 ```powershell
 .\Start-ServerEventTimeline.ps1
 .\Start-ServerEventTimeline.ps1 -ComputerName APP01, SQL01, DC01
+
+# No window (RMM scripts, scheduled runs): CSV + HTML report, and a ticket note
+.\Start-ServerEventTimeline.ps1 -NoGui -ComputerName APP01, SQL01 -At '2026-11-17 03:00' -TicketNumber 482113
 ```
 
 Run it from your admin workstation. Your account needs to be able to read the servers' event
@@ -20,7 +23,8 @@ logs (local admin, or a member of **Event Log Readers**, on each server).
 1. **Which servers?** The list starts with **this computer** already filled in. Type more
    names (commas, spaces or new lines all work), press **This computer** to add it back, or
    use **Pick from AD...** to add every domain controller or find servers by part of their
-   name. Workstations work too: any Windows machine you can reach.
+   name. **Recent** lists the last 8 server lists you searched (for example one client's
+   servers), so you don't retype them. Workstations work too: any Windows machine you can reach.
 2. **When?** "Around 2026-11-17 03:00 +/- 15 min" is the usual start. You can switch to
    **From ... to ...**, or press **Last hour** / **Last 24 hours** to search right away.
    **The time is each server's local time**: "03:00" means 03:00 on each server, which is
@@ -33,11 +37,29 @@ logs (local admin, or a member of **Event Log Readers**, on each server).
 4. Press **Search**. Each server is read in the background. Rows appear as servers finish,
    and you can scroll and filter while it works. **Cancel** stops at once and keeps what was
    read.
-5. Narrow it down: level (Warnings and worse, Errors and worse...), server, log, **Flagged
-   only**, or search the message, source or event ID.
-6. Click a row to see everything about the event. Then **Export CSV**, **Export HTML report**,
-   or **Copy selected rows** to paste into the ticket.
-7. **Save reports to:** shows where exports go. Type a folder or press **Browse...** (for
+5. Read **What was found** above the list: one line per server, for example
+   *APP01: 1 unexpected restart, 3 service failures, 1 update installed* or
+   *SQL01: nothing flagged in 1,240 events*. It counts every event read, whatever the filters.
+6. Narrow it down: level (Warnings and worse, Errors and worse...), server, log, **Flagged
+   only**, or search the message, source or event ID. **Collapse repeats** shows the same
+   routine event on the same server once, as *[240x, last at 03:14:22] ...*; click it to see
+   every time it happened. Flagged events are never collapsed.
+7. **Right-click a row:**
+   - **Search all servers around this event (+/- 5 min)**: what happened just before and
+     after it, everywhere. The time is that server's local time.
+   - **Show only this event**: the same source and event ID on every server.
+   - **Hide events from this source**: for chatty sources such as Task Scheduler. What's
+     hidden is named next to the filters; **Show everything again** brings it back.
+   - **Show only this server**.
+8. Click a row to see everything about the event. Then **Export CSV**, **Export HTML report**
+   (with *What was found* at the top), or **Copy selected rows** to paste into the ticket.
+   Exports always contain every filtered event, even when repeats are collapsed.
+9. **Ticket note...** asks for the ticket number and writes the four-part ticket note
+   (found, ruled out, couldn't check, next steps) and the HTML report into
+   `Documents\TicketNotes\Ticket_<number>`, then copies the note. That's the folder the quick
+   checks use, so [TicketNote](../TicketNote/)'s `Join-TicketNotes.ps1` merges them into one
+   note. A server is only *ruled out* when every log was read in full and nothing was flagged.
+10. **Save reports to:** shows where exports go. Type a folder or press **Browse...** (for
    example the ticket's folder). The folder is remembered for next time, per user, in
    `%APPDATA%\ServerEventTimeline\settings.json`. **Open folder** shows it in File Explorer.
    `-OutputPath` on the command line overrides it for that run.
@@ -91,7 +113,7 @@ Each server shows one line:
   - *didn't answer within 60 s*: that log was too slow. The other logs on that server
     still show.
   - *not read - stopped at the 50,000 event total for this server*: "All logs" hit its
-    safety limit.
+    safety limit. Raise it under **More options** (*Stop each server at ... events in total*).
 - **couldn't reach - why**, for example *Access denied on DC01: check you're an admin
   there, or use Run as*, or *WinRM and remote event log are both unreachable from here*.
 
@@ -117,8 +139,12 @@ tells you to compare the UTC column.
    installed on this workstation"*. The event ID and source are still correct.
 3. **Access denied** is reported straight away, not retried the other way.
 
-A dead server is spotted in about 2 seconds (port check), so it never holds up the others.
-Up to 8 servers are read at once.
+**Security log:** an account that isn't allowed to read a server's Security log can't see it
+in that server's list of logs either. The tool reads it anyway when you tick Security, so you
+get *Access denied* (the real reason) rather than *doesn't exist*.
+
+A dead server is spotted in about 4 seconds (a 2-second port check for WinRM, then one for
+the remote event log), so it never holds up the others. Up to 8 servers are read at once.
 
 **Run as:** under **More options**, **Run as another account...** reads the servers with a
 different account (for example another domain's admin). Cancel the prompt to go back to your
@@ -129,21 +155,62 @@ own account.
 - **Cancel on the remote-event-log route:** the window stops waiting at once, but a query
   already running over RPC can carry on in the background for a short while until the server
   answers. WinRM queries stop properly.
-- **Daylight saving on the remote-event-log route:** the server's UTC offset is read as it is
-  *now*. A window on the other side of a daylight-saving change can be an hour out. The WinRM
-  route uses the offset at the window's start, so it is exact.
+- **Daylight saving:** one UTC offset is used per server for the whole window. On the WinRM
+  route (and for this computer) it is the offset at the window's **start**; on the
+  remote-event-log route it is the offset **now**. So a window that crosses a daylight-saving
+  change, or a remote-event-log search on the other side of one, can be up to an hour out for
+  part of the window. The UTC column is always right: compare that when in doubt.
+- **Search around this event** uses that row's server-local time on every server. If the
+  servers are in different time zones (the blue note says so), search by a From/To range
+  instead.
 - **Big windows:** 50,000 rows are fine, but filtering then takes about a second.
+
+## Without the window (-NoGui)
+
+For RMM scripts, scheduled tasks or a quick look from a console. It uses the same background
+reading, prints how each server went and *What was found*, and writes the CSV, the HTML report
+and a log.
+
+```powershell
+# Around a time (each server's local time), +/- 30 minutes
+.\Start-ServerEventTimeline.ps1 -NoGui -ComputerName APP01, SQL01 -At '2026-11-17 03:00' -PlusMinusMinutes 30 -OutputPath D:\Reports
+
+# A range, extra logs, with a ticket note (Documents\TicketNotes\Ticket_482113)
+.\Start-ServerEventTimeline.ps1 -NoGui -ComputerName DC01 -From '2026-11-17 02:00' -To '2026-11-17 04:00' -LogName System, 'Group Policy' -IncludeSecurity -TicketNumber 482113
+
+# The last two hours on this computer
+.\Start-ServerEventTimeline.ps1 -NoGui -LastMinutes 120
+```
+
+| Option | What it does |
+|---|---|
+| `-ComputerName` | Servers to read. Default: this computer. |
+| `-At` + `-PlusMinusMinutes` | Around a time (default +/- 15 min). |
+| `-From` + `-To` | A range. |
+| `-LastMinutes` | The last N minutes (default 60), when no time is given. |
+| `-LogName` | Logs by checkbox label (`System`, `Task Scheduler`, `Group Policy`...) or log name. Default: the window's default logs. |
+| `-IncludeSecurity`, `-AllLogs` | Same as the window's Slow options. |
+| `-Cap`, `-TotalCap`, `-TimeoutSec` | Per log, per server and per log time limits (defaults 5000, 50000, 60). |
+| `-Credential` | Read the servers as another account. |
+| `-TicketNumber` | Write the ticket note, CSV and report into `<-OutputPath or Documents\TicketNotes>\Ticket_<number>`, and copy the note (`-NoClipboard` to skip that). |
+| `-OutputPath` | Where the files go (without `-TicketNumber`, default `Reports\` beside the script). |
+
+Exit codes: `0` every log was read in full, `1` a server or log couldn't be read in full
+(the output says which), `2` couldn't run (a time it couldn't read, a bad ticket number, or a
+folder it couldn't create).
 
 ## Files
 
-- `Start-ServerEventTimeline.ps1`: the window (run this)
-- `ServerEventTimeline.Core.ps1`: logic: times, logs, flags, filters, exports
+- `Start-ServerEventTimeline.ps1`: the window and the -NoGui mode (run this)
+- `ServerEventTimeline.Core.ps1`: logic: times, logs, flags, summary, filters, exports, ticket note
 - `ServerEventTimeline.Engine.ps1`: reading servers in the background
+- `CaseKit.ps1`: the shared ticket-note kit (an identical copy of `TicketNote\CaseKit.ps1`)
 - The save folder (default `Reports\` beside the script; see step 7): exports and an activity log,
   `ServerEventTimeline_yyyy-MM-dd_HHmmss.*`. These contain client data: don't commit or
   sync them.
 
-Keep the three `.ps1` files together. Needs Windows PowerShell 5.1 or PowerShell 7 on
+Keep the four `.ps1` files together. Recent server lists and the save folder are remembered
+per user in `%APPDATA%\ServerEventTimeline\settings.json`. Needs Windows PowerShell 5.1 or PowerShell 7 on
 Windows. Pick from AD needs the RSAT Active Directory tools (optional).
 
 ## Smoke test

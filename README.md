@@ -88,7 +88,7 @@ handed out, so it always matches this repository.
 |---|---|
 | [Hyper-V-Inventory](Hyper-V-Inventory/) / [VMware-Inventory](VMware-Inventory/) | Host and VM inventory with capacity rollups |
 | [HyperV-Host-Diagnostics](HyperV-Host-Diagnostics/) | Hyper-V host evidence for guest data loss or reboots |
-| [Server-EventTimeline](Server-EventTimeline/) | What happened on these servers around a time? Every event from several servers merged into one filterable timeline (window), important events flagged, CSV/HTML export |
+| [Server-EventTimeline](Server-EventTimeline/) | What happened on these servers around a time? Every event from several servers merged into one filterable timeline (window or -NoGui), important events flagged and summarised per server, right-click to search around an event, CSV/HTML export and a ticket note |
 | [Sql-Corruption-Diagnostic](Sql-Corruption-Diagnostic/) | Read-only SQL Server corruption diagnostics |
 | [Schedule-Reboot](Schedule-Reboot/) | Schedule a one-time server reboot |
 

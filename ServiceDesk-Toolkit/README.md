@@ -541,9 +541,15 @@ installs and app crashes are flagged in colour.
   Viewer on the server shows).
 - A **yellow banner** means a log is incomplete (it hit the limit or was too slow). Narrow
   the time window and search again.
+- Read the **What was found** box above the list first: one line per server, for example
+  *APP01: 1 unexpected restart, 2 service failures*.
 - **Flagged only** plus **Errors and worse** gets you to the interesting rows fast.
+- **Right-click a row** to search every server 5 minutes either side of it, or to hide a
+  noisy source. **Collapse repeats** turns hundreds of identical routine events into one row.
+- **Ticket note...** saves the ticket note and the HTML report in the ticket's folder (the
+  same one the quick checks use, so **TicketNote** can join them) and copies the note.
 - **Copy selected rows** puts them on the clipboard for the ticket. **Export HTML report**
-  saves the whole picture in the `Reports` folder.
+  saves the whole picture in the save folder.
 
 ---
 
