@@ -18,6 +18,12 @@ Read-only: it changes nothing on any server.
 Run it from your admin workstation. Your account needs to be able to read the servers' event
 logs (local admin, or a member of **Event Log Readers**, on each server).
 
+The window always opens in a PowerShell process of its own, so the PowerShell you start it
+from (a terminal, VS Code) stays free to use and is unaffected when you close the window.
+Running the window inside a session that had been open for hours (VS Code's PowerShell, a
+long-lived terminal) sometimes crashed that whole session with *Not enough quota is available
+to process this command*; a process of its own avoids that.
+
 ## How to use it
 
 1. **Which servers?** The list starts with **this computer** already filled in. Type more

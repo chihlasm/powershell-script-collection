@@ -12,6 +12,28 @@ BeforeAll {
     $script:Help = Get-Help $script:AppPath -Full
 }
 
+Describe 'Own process for the window' {
+    # The window crashed long-running sessions (VS Code's PowerShell, a terminal open for hours)
+    # with Win32Exception 1816 from WPF, taking the whole session down. It now always runs in a
+    # process of its own; this decides whether the current one already is.
+    BeforeAll { $script:Me = 'C:\Tools\Server-EventTimeline\Start-ServerEventTimeline.ps1' }
+
+    It 'is its own process when started with -File for this script' {
+        Test-TimelineOwnProcess -CommandLineArgs @('C:\Program Files\PowerShell\7\pwsh.dll', '-NoProfile', '-STA', '-File', $script:Me, '-ComputerName', 'APP01') -ScriptPath $script:Me | Should -BeTrue
+        Test-TimelineOwnProcess -CommandLineArgs @('powershell.exe', '-file', 'c:\tools\server-eventtimeline\start-servereventtimeline.ps1') -ScriptPath $script:Me | Should -BeTrue
+    }
+
+    It 'is not its own process in an interactive session, VS Code, or with -NoExit' {
+        Test-TimelineOwnProcess -CommandLineArgs @('C:\Program Files\PowerShell\7\pwsh.dll') -ScriptPath $script:Me | Should -BeFalse
+        Test-TimelineOwnProcess -CommandLineArgs @('pwsh.dll', '-NoProfile', '-Command', "Import-Module 'PowerShellEditorServices'") -ScriptPath $script:Me | Should -BeFalse
+        Test-TimelineOwnProcess -CommandLineArgs @('pwsh.dll', '-NoExit', '-File', $script:Me) -ScriptPath $script:Me | Should -BeFalse
+    }
+
+    It 'is not its own process when -File runs a different script that calls this one' {
+        Test-TimelineOwnProcess -CommandLineArgs @('pwsh.dll', '-File', 'C:\Tools\Launcher.ps1') -ScriptPath $script:Me | Should -BeFalse
+    }
+}
+
 Describe 'Help and parameters' {
     It 'has every help section' {
         $script:Help.Synopsis | Should -Not -BeNullOrEmpty

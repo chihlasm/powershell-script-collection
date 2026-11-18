@@ -701,6 +701,27 @@ function Set-SmokeWindowPosition {
     $Window.Top = [System.Windows.SystemParameters]::VirtualScreenTop - $Window.Height - 200
 }
 
+function Test-TimelineOwnProcess {
+    <#
+        True when this PowerShell process was started only to run this script (-File <this
+        script>, without -NoExit), so the window can run here. Otherwise the window is started in
+        a new process: in a long-running session (VS Code's PowerShell, a terminal open for hours)
+        WPF crashed with Win32Exception 1816 "Not enough quota is available to process this
+        command" (HwndTarget.UpdateWindowSettings), killing the whole session. Every crash on
+        record was in a process that had been open for 30 minutes to 20 hours; none in a fresh one.
+    #>
+    param([string[]]$CommandLineArgs, [Parameter(Mandatory)][string]$ScriptPath)
+    $fileArg = $null
+    for ($i = 0; $i -lt $CommandLineArgs.Count; $i++) {
+        $a = $CommandLineArgs[$i]
+        if ($a -like '-noe*') { return $false }
+        if (($a -eq '-File' -or $a -eq '-f') -and $i + 1 -lt $CommandLineArgs.Count) { $fileArg = $CommandLineArgs[$i + 1]; break }
+    }
+    if (-not $fileArg) { return $false }
+    try { $full = [System.IO.Path]::GetFullPath($fileArg.Trim('"')) } catch { return $false }
+    return [string]::Equals($full, [System.IO.Path]::GetFullPath($ScriptPath), [StringComparison]::OrdinalIgnoreCase)
+}
+
 function Get-ClippedRowItems {
     <#
         Names of controls cut off at the right edge of a horizontal row (StackPanel) after the
@@ -1406,9 +1427,12 @@ if ($NoGui) {
     }
 }
 
-# WPF needs an STA thread. Windows PowerShell and pwsh start STA by default, but a host can be
-# MTA: relaunch in an STA process with the same parameters.
-if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Threading.ApartmentState]::STA) {
+# The window always runs in a PowerShell process of its own, started with -STA (WPF needs an
+# STA thread; some hosts are MTA). Run inside a long-lived session (VS Code's PowerShell, a
+# terminal open for hours), WPF crashed with "Not enough quota is available to process this
+# command" and took the whole session with it - see Test-TimelineOwnProcess.
+$ownProcess = Test-TimelineOwnProcess -CommandLineArgs ([Environment]::GetCommandLineArgs()) -ScriptPath $PSCommandPath
+if (-not $ownProcess -or [System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Threading.ApartmentState]::STA) {
     $exe = (Get-Process -Id $PID).Path
     $relaunch = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', "`"$PSCommandPath`"")
     # A trailing backslash would escape the closing quote on the command line.
@@ -1420,6 +1444,7 @@ if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Thr
         exit $child.ExitCode
     }
     Start-Process -FilePath $exe -ArgumentList $relaunch -WindowStyle Hidden
+    Write-Host '[INFO] Server Event Timeline is opening in its own window. This PowerShell stays free to use.' -ForegroundColor Cyan
     return
 }
 
