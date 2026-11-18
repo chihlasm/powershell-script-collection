@@ -289,3 +289,23 @@ Describe 'Background AD load and DNS lookups' {
         $r['NOPE'].Resolves | Should -BeFalse
     }
 }
+
+Describe 'The "Suggestions from" line' {
+    It 'says what it is doing, in plain words' {
+        Get-DomainLineText -State Loading -Domain 'contoso.local' | Should -Be 'Loading servers from contoso.local...'
+        Get-DomainLineText -State Loading -Domain '' | Should -Be "Loading servers from this computer's domain..."
+        Get-DomainLineText -State Loaded -Domain 'contoso.local' -Count 412 | Should -Be 'Suggestions from: contoso.local (412 servers)'
+        Get-DomainLineText -State Loaded -Domain 'contoso.local' -Count 1 | Should -Be 'Suggestions from: contoso.local (1 server)'
+        Get-DomainLineText -State Failed -Domain 'contoso.local' -ErrorText 'The server is not operational' | Should -Be "Couldn't read contoso.local: The server is not operational"
+        Get-DomainLineText -State NoDomain | Should -Be 'Suggestions from: no domain'
+    }
+
+    It 'throws away a load started before the domain or account changed' {
+        Test-StaleDirectoryResult -Result ([PSCustomObject]@{ Generation = 2 }) -CurrentGeneration 3 | Should -BeTrue
+        Test-StaleDirectoryResult -Result ([PSCustomObject]@{ Generation = 3 }) -CurrentGeneration 3 | Should -BeFalse
+    }
+
+    It 'counts only enabled servers' {
+        Get-DirectoryServerCount -Directory @(New-FakeDirectory) | Should -Be 4
+    }
+}

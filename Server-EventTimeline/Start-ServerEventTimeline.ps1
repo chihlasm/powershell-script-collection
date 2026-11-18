@@ -786,7 +786,7 @@ function Register-TimelineErrorGuard {
     #>
     param([Parameter(Mandatory)][System.Windows.Threading.Dispatcher]$Dispatcher, [Parameter(Mandatory)][scriptblock]$OnError)
     $handler = [System.Windows.Threading.DispatcherUnhandledExceptionEventHandler] {
-        param($sender, $e)
+        param($source, $e)
         $e.Handled = $true
         $ex = $e.Exception
         # PowerShell wraps a failed .NET call in MethodInvocationException; the inner one says what went wrong.
@@ -1421,6 +1421,8 @@ function Show-ServerEventTimeline {
                 $ui.RunAsButton.Content = 'Run as another account...'
                 Write-TimelineLog INFO 'Reading servers as the signed-in account.'
             }
+            # Suggestions come from AD as this account too.
+            Start-WindowDirectoryLoad
         })
 
     $ui.ThisComputerButton.add_Click({
@@ -1461,6 +1463,134 @@ function Show-ServerEventTimeline {
             Update-InputState
         })
 
+    # Suggestions: every computer account of the chosen domain (or DC) is read once in the
+    # background (ServerList.ps1); typing then filters that list instantly. The heartbeat below
+    # collects the load and the DNS lookups. A load started before the domain or Run as account
+    # changed is thrown away (its generation is old).
+    $ui.DirectoryGeneration = 0; $ui.DirectoryJob = $null; $ui.DirectoryState = 'NoDomain'
+    $ui.Lookups = @{}; $ui.LookupJob = $null; $ui.LookupQueue = New-Object System.Collections.Generic.List[string]
+    $ui.AdTarget = if ($ui.Smoke) { '' } else { [string](Read-TimelineSettings -Path $SettingsPath).AdTarget }
+    $ui.AdAvailable = [bool](Get-Module -ListAvailable -Name ActiveDirectory -ErrorAction SilentlyContinue)
+    function Start-WindowDirectoryLoad {
+        $ui.DirectoryGeneration++
+        $ui.Directory = @(); $ui.LoadedDomain = ''
+        if ($ui.Smoke -or -not $ui.AdAvailable) {
+            $ui.DirectoryState = 'NoDomain'; $ui.DomainText.Text = Get-DomainLineText -State NoDomain
+            Update-ServerNotes
+            return
+        }
+        $ui.DirectoryState = 'Loading'
+        $ui.DomainText.Text = Get-DomainLineText -State Loading -Domain $ui.AdTarget
+        $ui.DirectoryJob = Start-DirectoryLoad -Server $ui.AdTarget -Credential $ui.Credential -Generation $ui.DirectoryGeneration
+        Update-ServerNotes
+    }
+    function Receive-WindowDirectoryLoad {
+        if (-not $ui.DirectoryJob) { return }
+        $r = Receive-DirectoryLoad -Job $ui.DirectoryJob
+        if ($null -eq $r) { return }
+        $ui.DirectoryJob = $null
+        if (Test-StaleDirectoryResult -Result $r -CurrentGeneration $ui.DirectoryGeneration) { return }
+        if ($r.Ok) {
+            $ui.Directory = @($r.Entries); $ui.LoadedDomain = $r.Domain; $ui.DirectoryState = 'Loaded'
+            $ui.DomainText.Text = Get-DomainLineText -State Loaded -Domain $r.Domain -Count (Get-DirectoryServerCount -Directory $ui.Directory)
+            Write-TimelineLog INFO $ui.DomainText.Text
+            # Names typed before AD arrived and not found there: ask DNS about them.
+            Request-ServerLookups -Names @($ui.ServerItems | ForEach-Object Name)
+        }
+        elseif (-not $ui.AdTarget -and -not (Get-LocalComputerIdentity).DomainName) {
+            # Not joined to a domain and none chosen: only servers searched before are suggested.
+            $ui.DirectoryState = 'NoDomain'; $ui.DomainText.Text = Get-DomainLineText -State NoDomain
+        }
+        else {
+            $ui.DirectoryState = 'Failed'
+            $ui.DomainText.Text = Get-DomainLineText -State Failed -Domain $ui.AdTarget -ErrorText $r.Error
+            Write-TimelineLog WARN $ui.DomainText.Text
+        }
+        $ui.DomainText.Foreground = $window.FindResource($(if ($ui.DirectoryState -eq 'Failed') { 'Warn' } else { 'Muted' }))
+        $ui.DomainText.ToolTip = $ui.DomainText.Text
+        Update-ServerNotes
+    }
+    function Request-ServerLookups {
+        # DNS for new IPs, and for names AD doesn't know; one background job at a time.
+        param([string[]]$Names)
+        if ($ui.Smoke) { return }
+        foreach ($n in @($Names | Where-Object { $_ })) {
+            if ($ui.Lookups.ContainsKey($n) -or $ui.LookupQueue.Contains($n)) { continue }
+            $isIp = Test-IpAddress -Text $n
+            $local = Test-IsLocalComputer -Name $n -LocalNames $ui.LocalNames
+            $known = $null -ne (Find-DirectoryEntry -Directory $ui.Directory -Name $n)
+            if ($isIp -or (-not $local -and -not $known -and $ui.DirectoryState -eq 'Loaded')) { $ui.LookupQueue.Add($n) }
+        }
+        if (-not $ui.LookupJob -and $ui.LookupQueue.Count -gt 0) {
+            $ui.LookupJob = Start-NameLookups -Names $ui.LookupQueue.ToArray()
+            $ui.LookupQueue.Clear()
+        }
+    }
+    function Receive-WindowLookups {
+        if (-not $ui.LookupJob) { return }
+        $r = Receive-NameLookups -Job $ui.LookupJob
+        if ($null -eq $r) { return }
+        $ui.LookupJob = $null
+        foreach ($k in $r.Keys) { $ui.Lookups[$k] = $r[$k] }
+        Update-ServerNotes
+        Request-ServerLookups -Names @()
+    }
+    if (-not $ui.AdAvailable) {
+        $ui.ChangeDomainButton.IsEnabled = $false
+        $ui.ChangeDomainButton.ToolTip = 'Needs the RSAT Active Directory tools on this workstation. You can still type server names and IP addresses.'
+        [System.Windows.Controls.ToolTipService]::SetShowOnDisabled($ui.ChangeDomainButton, $true)
+    }
+    $ui.ChangeDomainButton.add_Click({
+            if ($ui.Smoke) { return }
+            Add-Type -AssemblyName Microsoft.VisualBasic
+            $text = [Microsoft.VisualBasic.Interaction]::InputBox("Domain or domain controller to read servers from (leave empty for this computer's domain):",
+                'Suggestions from', $ui.AdTarget)
+            # InputBox returns '' for Cancel as well as for an empty answer; only a change reloads.
+            $text = $text.Trim()
+            if ($text -eq $ui.AdTarget) { return }
+            $ui.AdTarget = $text
+            try { Save-TimelineSettings -Path $SettingsPath -AdTarget $text } catch { }
+            Start-WindowDirectoryLoad
+        })
+
+    # Autocomplete under the server box: Down/Up choose, Enter adds, Esc closes.
+    $ui.ServerInput.add_TextChanged({
+            $s = @(Find-ServerSuggestions -Directory $ui.Directory -Recent $(if ($ui.Smoke) { @() } else { @((Read-TimelineSettings -Path $SettingsPath).RecentServerLists) }) -Text $ui.ServerInput.Text -Max 8)
+            $ui.SuggestList.ItemsSource = $s
+            $ui.SuggestList.SelectedIndex = -1
+            $ui.SuggestPopup.PlacementTarget = $ui.ServerInput
+            $ui.SuggestPopup.IsOpen = $s.Count -gt 0 -and $ui.ServerInput.IsKeyboardFocused
+        })
+    $ui.ServerInput.add_PreviewKeyDown({
+            param($s, $e)
+            if (-not $ui.SuggestPopup.IsOpen) { return }
+            $count = $ui.SuggestList.Items.Count
+            switch ([string]$e.Key) {
+                'Down' { $ui.SuggestList.SelectedIndex = [math]::Min($ui.SuggestList.SelectedIndex + 1, $count - 1); $ui.SuggestList.ScrollIntoView($ui.SuggestList.SelectedItem); $e.Handled = $true }
+                'Up' { $ui.SuggestList.SelectedIndex = [math]::Max($ui.SuggestList.SelectedIndex - 1, 0); $ui.SuggestList.ScrollIntoView($ui.SuggestList.SelectedItem); $e.Handled = $true }
+                'Escape' { $ui.SuggestPopup.IsOpen = $false; $e.Handled = $true }
+                'Return' {
+                    if ($ui.SuggestList.SelectedItem) {
+                        $ui.ServerInput.Text = [string]$ui.SuggestList.SelectedItem.Name
+                        & $addTyped
+                        $e.Handled = $true
+                    }
+                }
+            }
+        })
+    $ui.SuggestList.add_PreviewMouseLeftButtonUp({
+            param($s, $e)
+            $item = [System.Windows.Controls.ItemsControl]::ContainerFromElement($ui.SuggestList, $e.OriginalSource)
+            if (-not $item) { return }
+            $ui.ServerInput.Text = [string]$item.Content.Name
+            & $addTyped
+            $ui.ServerInput.Focus()
+        })
+    $ui.ServerInput.add_LostKeyboardFocus({ if (-not $ui.SuggestList.IsMouseOver) { $ui.SuggestPopup.IsOpen = $false } })
+    # The popup does not follow the window when it moves; close it instead.
+    $window.add_LocationChanged({ $ui.SuggestPopup.IsOpen = $false })
+    $window.add_Deactivated({ $ui.SuggestPopup.IsOpen = $false })
+
     $ui.ExportCsvButton.add_Click({ Invoke-Export -Kind Csv })
     $ui.ExportHtmlButton.add_Click({ Invoke-Export -Kind Html })
     $ui.CopyButton.add_Click({
@@ -1473,6 +1603,9 @@ function Show-ServerEventTimeline {
     $timer.Interval = [TimeSpan]::FromMilliseconds(250)
     $timer.add_Tick({
             try {
+                # The server list's background work runs whether or not a search is.
+                Receive-WindowDirectoryLoad
+                Receive-WindowLookups
                 if (-not $ui.Engine -or $ui.Finished) { return }
                 $u = Update-TimelineEngine -Engine $ui.Engine
                 foreach ($r in @($u.NewRows)) { $ui.PendingRows.Add($r) }
@@ -1492,10 +1625,14 @@ function Show-ServerEventTimeline {
             catch { Write-TimelineLog FAIL "Background update failed: $($_.Exception.Message)" }
         })
     $timer.Start()
+    # Read the chosen domain's servers for suggestions (in the background; not in smoke mode).
+    Start-WindowDirectoryLoad
 
     $window.add_Closing({
             $timer.Stop()
             if ($ui.Engine) { Close-TimelineEngine -Engine $ui.Engine }
+            # A slow AD or DNS call must not hold the window open: ask it to stop, don't wait.
+            foreach ($job in @($ui.DirectoryJob, $ui.LookupJob)) { if ($job) { try { [void]$job.PowerShell.BeginStop($null, $null) } catch { } } }
         })
 
     if ($ui.Smoke) {

@@ -378,3 +378,31 @@ function Receive-NameLookups {
     foreach ($o in @($r.All | Where-Object { $_ })) { $map[[string]$o.Name] = [PSCustomObject]$o }
     return $map
 }
+
+function Get-DirectoryServerCount {
+    <# How many enabled servers the loaded directory holds (what suggestions draw from). #>
+    [CmdletBinding()]
+    param([object[]]$Directory)
+    return @($Directory | Where-Object { $_ -and $_.Enabled -and $_.IsServer }).Count
+}
+
+function Get-DomainLineText {
+    <# The "Suggestions from:" line under the server card's header. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][ValidateSet('Loading', 'Loaded', 'Failed', 'NoDomain')][string]$State,
+        [string]$Domain, [int]$Count, [string]$ErrorText)
+    $name = if ($Domain) { $Domain } else { "this computer's domain" }
+    switch ($State) {
+        'Loading' { "Loading servers from $name..." }
+        'Loaded' { 'Suggestions from: {0} ({1} {2})' -f $name, $Count, $(if ($Count -eq 1) { 'server' } else { 'servers' }) }
+        'Failed' { "Couldn't read ${name}: $ErrorText" }
+        'NoDomain' { 'Suggestions from: no domain' }
+    }
+}
+
+function Test-StaleDirectoryResult {
+    <# True when a finished load belongs to an older domain or account choice (ignore it). #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Result, [int]$CurrentGeneration)
+    return [int]$Result.Generation -ne $CurrentGeneration
+}
