@@ -26,11 +26,31 @@ to process this command*; a process of its own avoids that.
 
 ## How to use it
 
-1. **Which servers?** The list starts with **this computer** already filled in. Type more
-   names (commas, spaces or new lines all work), press **This computer** to add it back, or
-   use **Pick from AD...** to add every domain controller or find servers by part of their
-   name. **Recent** lists the last 8 server lists you searched (for example one client's
-   servers), so you don't retype them. Workstations work too: any Windows machine you can reach.
+1. **Which servers?** The list starts with **this computer** already filled in. Each server
+   is one row with a short note beside it (*domain controller*, its Windows version, *this
+   computer*, or *not in AD* in yellow) and an **×** to remove it. The count is in the corner.
+   - **Type a name or an IP address and press Enter** (or **Add**). As you type, servers from
+     Active Directory are suggested; use the arrow keys and Enter, or click one. Pasting several
+     names at once (commas, spaces or new lines) adds them all.
+   - **Suggestions from:** says which domain the suggestions come from: this computer's domain,
+     unless you press **Change...** and type another domain or a domain controller (handy on
+     a VPN into a client's network). It's remembered, and read with the **Run as** account
+     when one is set. Without the RSAT Active Directory tools, only servers you searched
+     before are suggested.
+   - **Add several...** opens a dialog with three tabs: **Paste** a list, **Find in AD** (by
+     part of the name, all domain controllers, or everything in an OU), or **From a file**
+     (a .txt with one server per line, or a .csv: a column named Name, ComputerName,
+     DNSHostName, HostName, Server or IPAddress is found by itself, otherwise you pick it).
+     Each server is checked against AD and DNS. Ones that look unused (disabled, no sign-in
+     for over 30 days) or that nobody knows start unticked; tick what you want and press
+     **Add N servers**.
+   - **IP addresses work.** The tool looks the IP up in DNS. If the name it finds points back
+     to the same IP, that name is searched (the row shows *10.0.4.21 → SQL01.contoso.local*).
+     If not, the IP itself is searched: that reads the remote event log over RPC with your
+     account, because WinRM with an IP needs the IP in TrustedHosts and a Run as account.
+   - **This computer** adds it back, **Recent** puts back one of the last 8 server lists you
+     searched (it replaces the list), and **Clear** empties it. Workstations work too: any
+     Windows machine you can reach.
 2. **When?** "Around 2026-11-17 03:00 +/- 15 min" is the usual start. You can switch to
    **From ... to ...**, or press **Last hour** / **Last 24 hours** to search right away.
    **The time is each server's local time**: "03:00" means 03:00 on each server, which is
@@ -228,14 +248,17 @@ folder it couldn't create).
 - `Start-ServerEventTimeline.ps1`: the window and the -NoGui mode (run this)
 - `ServerEventTimeline.Core.ps1`: logic: times, logs, flags, summary, filters, exports, ticket note
 - `ServerEventTimeline.Engine.ps1`: reading servers in the background
+- `ServerEventTimeline.ServerList.ps1`: the server list: AD suggestions, notes, IP lookups, file import
+- `ServerEventTimeline.AddServersDialog.ps1`: the "Add several servers" dialog
 - `CaseKit.ps1`: the shared ticket-note kit (an identical copy of `TicketNote\CaseKit.ps1`)
 - The save folder (default `Reports\` beside the script; see step 7): exports and an activity log,
   `ServerEventTimeline_yyyy-MM-dd_HHmmss.*`. These contain client data: don't commit or
   sync them.
 
-Keep the four `.ps1` files together. Recent server lists and the save folder are remembered
-per user in `%APPDATA%\ServerEventTimeline\settings.json`. Needs Windows PowerShell 5.1 or PowerShell 7 on
-Windows. Pick from AD needs the RSAT Active Directory tools (optional).
+Keep the six `.ps1` files together. Recent server lists, the save folder and the domain for
+suggestions are remembered per user in `%APPDATA%\ServerEventTimeline\settings.json`. Needs
+Windows PowerShell 5.1 or PowerShell 7 on Windows. Suggestions from Active Directory and Find
+in AD need the RSAT Active Directory tools (optional).
 
 ## Smoke test
 

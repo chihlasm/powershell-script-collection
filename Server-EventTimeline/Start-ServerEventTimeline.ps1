@@ -6,7 +6,7 @@
     into one timeline you can filter, with the important ones flagged.
 
 .DESCRIPTION
-    Type one or more servers and a time ("around 03:00, plus or minus 15 minutes"), pick the
+    Add one or more servers and a time ("around 03:00, plus or minus 15 minutes"), pick the
     logs, and press Search. Each server is read in the background (the window never freezes),
     and all events land on one timeline sorted by time. Known-important events (unexpected
     restarts, service crashes, disk errors, update installs, app crashes, blue screens, time
@@ -34,13 +34,25 @@
     kind of event, hide a noisy source or show only that server. Collapse repeats turns
     hundreds of identical routine events into one row.
 
+    Servers go in a list, one row each, with a note beside it (domain controller, the OS, not
+    in AD, this computer). Type a name or an IP address and press Enter; suggestions come from
+    Active Directory as you type. The "Suggestions from:" line says which domain they come
+    from: this computer's domain unless you choose another domain or a domain controller with
+    Change... (remembered per user), read with the Run as account when one is set. "Add
+    several..." pastes a list, finds servers in AD (by name, domain controllers, or an OU) or
+    reads a .txt/.csv file, then adds the ones you tick. An IP address is looked up in DNS:
+    when its name points back to the same IP, that name is searched (shown as "10.0.4.21 ->
+    SQL01.contoso.local"); otherwise the IP itself is searched, which reads the remote event
+    log over RPC (WinRM with an IP needs TrustedHosts and an explicit credential).
+
     With -NoGui it runs in the console instead (for RMM scripts and scheduled tasks): it reads
     the servers, prints how each went and what was found, and writes the CSV and HTML report
     (and the ticket note with -TicketNumber). Exit code 0 = every log read, 1 = a server or
     log could not be read in full, 2 = could not run (for example a time it couldn't read).
 
 .PARAMETER ComputerName
-    Servers to fill in when the window opens. You can also type them in the window. Without
+    Servers to fill in when the window opens (names or IP addresses). You can also add them in
+    the window. Without
     it, the list starts with this computer. This computer (by its name, FQDN, localhost, . or
     127.0.0.1) is always read directly from its own logs: no WinRM or network needed.
 
@@ -132,8 +144,10 @@
     admin workstation with rights to read the servers' event logs (Event Log Readers or local
     admin on each server).
 
-    Files: ServerEventTimeline.Core.ps1 (logic), ServerEventTimeline.Engine.ps1 (remote reads
-    and the background engine) and this window must stay in the same folder.
+    Files: ServerEventTimeline.Core.ps1 (logic), ServerEventTimeline.ServerList.ps1 (the server
+    list: AD suggestions, notes, file import), ServerEventTimeline.Engine.ps1 (remote reads and
+    the background engine), ServerEventTimeline.AddServersDialog.ps1 (the "Add several servers"
+    dialog), CaseKit.ps1 and this window must stay in the same folder.
 
     REFERENCES
     - Get-WinEvent: https://learn.microsoft.com/powershell/module/microsoft.powershell.diagnostics/get-winevent
@@ -147,6 +161,14 @@
       https://learn.microsoft.com/dotnet/api/system.windows.controls.datagridcolumn.sortdirection
       https://learn.microsoft.com/dotnet/api/system.windows.controls.itemcollection.sortdescriptions
     - Ticket notes: CaseKit.ps1 (copy of TicketNote\CaseKit.ps1), see TicketNote\README.md.
+    - Server list: lastLogonTimestamp is updated only every 9-14 days, so "no sign-in for N
+      days" is coarse and the threshold is 30 days:
+      https://learn.microsoft.com/windows/win32/adschema/a-lastlogontimestamp
+    - An IP address in a remote command uses NTLM, so WinRM needs HTTPS or TrustedHosts plus
+      -Credential; a DNS name that looks back up to the IP is searched instead:
+      https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_remote_troubleshooting#how-to-use-an-ip-address-in-a-remote-command
+    - Get-ADComputer / Get-ADDomainController / Get-ADDomain (-Server, -Credential):
+      https://learn.microsoft.com/powershell/module/activedirectory/get-adcomputer
 #>
 [CmdletBinding()]
 param(

@@ -14,9 +14,18 @@
 BeforeDiscovery {
     $repoRoot = Split-Path -Parent $PSScriptRoot
     $skip = '\\(dist|work-in-progress|\.worktrees|Tests)\\'
+    # A file another script in its folder dot-sources (a dialog such as Server-EventTimeline's
+    # AddServersDialog.ps1) runs inside that script's process, which does the check.
+    $isDotSourced = {
+        param($file)
+        $pattern = '(?m)^\s*\.\s+\(Join-Path\s+\$PSScriptRoot\s+[''"]' + [regex]::Escape($file.Name) + '[''"]\)'
+        @(Get-ChildItem -LiteralPath $file.DirectoryName -Filter *.ps1 -File | Where-Object { $_.FullName -ne $file.FullName } |
+                Where-Object { (Get-Content -LiteralPath $_.FullName -Raw) -match $pattern }).Count -gt 0
+    }
     $script:GuiScripts = @(Get-ChildItem -LiteralPath $repoRoot -Recurse -Filter *.ps1 -File |
             Where-Object { $_.FullName -notmatch $skip } |
             Where-Object { (Get-Content -LiteralPath $_.FullName -Raw) -match 'XamlReader' } |
+            Where-Object { -not (& $isDotSourced $_) } |
             ForEach-Object { @{ Name = $_.FullName.Substring($repoRoot.Length + 1); Path = $_.FullName } })
 }
 

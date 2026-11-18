@@ -1,4 +1,4 @@
-<#
+﻿<#
     Pester 5 tests for ServerEventTimeline.Core.ps1 (pure logic: no network, no UI, no real
     event logs). Run:  pwsh -File Tests\Invoke-AllTests.ps1 -Path .\Server-EventTimeline\Tests
 #>
@@ -426,54 +426,52 @@ Describe 'Status wording' {
     }
 }
 
-Describe 'Get-AdServerCandidates' {
-    BeforeAll {
-        $env:ADPS_LoadDefaultDrive = '0'
-        # Stubs with the real parameter names (verified on Microsoft Learn); functions win over
-        # the real module's cmdlets, so the RSAT module is never loaded and no DC is contacted.
-        function global:Get-ADDomainController { param($Filter, $Server, $Credential) throw 'stub: mock me' }
-        function global:Get-ADComputer { param($Filter, $Properties, $ResultSetSize, $Server, $Credential) throw 'stub: mock me' }
-    }
-    AfterAll {
-        Remove-Item -Path Function:\global:Get-ADDomainController, Function:\global:Get-ADComputer -ErrorAction SilentlyContinue
-    }
-    BeforeEach {
-        Mock Import-Module { } -ParameterFilter { $Name -eq 'ActiveDirectory' }
-    }
-
-    It 'explains when the ActiveDirectory module is missing' {
-        Mock Import-Module { throw 'not found' } -ParameterFilter { $Name -eq 'ActiveDirectory' }
-        { Get-AdServerCandidates -Kind DomainControllers } | Should -Throw -ExpectedMessage '*ActiveDirectory module*'
-    }
-
-    It 'returns every domain controller host name, falling back to the name' {
-        Mock Get-ADDomainController { @([PSCustomObject]@{ HostName = 'dc01.contoso.local'; Name = 'DC01' }, [PSCustomObject]@{ HostName = $null; Name = 'DC02' }) }
-        @(Get-AdServerCandidates -Kind DomainControllers) | Should -Be @('dc01.contoso.local', 'DC02')
-        Should -Invoke Get-ADDomainController -Times 1 -ParameterFilter { $Filter -eq '*' }
-    }
-
-    It 'finds servers whose name contains the text, at most 200' {
-        Mock Get-ADComputer { @([PSCustomObject]@{ DNSHostName = 'sql01.contoso.local'; Name = 'SQL01' }, [PSCustomObject]@{ DNSHostName = $null; Name = 'SQL02' }) }
-        @(Get-AdServerCandidates -Kind Search -SearchText 'sql') | Should -Be @('sql01.contoso.local', 'SQL02')
-        Should -Invoke Get-ADComputer -Times 1 -ParameterFilter {
-            $Filter -like "*Name -like '*sql*'*" -and $Filter -like "*OperatingSystem -like '*Server*'*" -and $ResultSetSize -eq 200 -and $Properties -contains 'DNSHostName'
-        }
-    }
-
-    It 'escapes a quote in the search text' {
-        Mock Get-ADComputer { @() }
-        $null = Get-AdServerCandidates -Kind Search -SearchText "o'brien"
-        Should -Invoke Get-ADComputer -Times 1 -ParameterFilter { $Filter -like "*o''brien*" }
-    }
-
-    It 'needs search text for a search' {
-        { Get-AdServerCandidates -Kind Search -SearchText '  ' } | Should -Throw -ExpectedMessage '*part of the server name*'
+Describe 'The old Pick from AD functions are gone' {
+    # Replaced by the server list (ServerEventTimeline.ServerList.ps1): suggestions while typing
+    # and the "Add several servers" dialog, both from one background AD load.
+    It 'no longer defines Get-AdServerCandidates or Add-ServerNames' {
+        Get-Command Get-AdServerCandidates -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+        Get-Command Add-ServerNames -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
     }
 }
 
-Describe 'Add-ServerNames' {
-    It 'adds new names after the existing ones without duplicates' {
-        Add-ServerNames -ExistingText 'app01, SQL01' -Names @('sql01', 'dc01') | Should -Be 'app01, SQL01, dc01'
+Describe 'The default AD loader (stubbed AD cmdlets, run in this process)' {
+    BeforeAll {
+        $env:ADPS_LoadDefaultDrive = '0'
+        # Stubs with the real parameter names (checked with Get-Command against RSAT);
+        # functions win over the module's cmdlets, so no DC is ever contacted.
+        function global:Get-ADDomain { param($Identity, $Server, $Credential) throw 'stub: mock me' }
+        function global:Get-ADDomainController { param($Identity, $Filter, $Server, $Credential) throw 'stub: mock me' }
+        function global:Get-ADComputer { param($Identity, $Filter, $Properties, $ResultSetSize, $SearchBase, $Server, $Credential) throw 'stub: mock me' }
+    }
+    AfterAll {
+        Remove-Item -Path Function:\global:Get-ADDomain, Function:\global:Get-ADDomainController, Function:\global:Get-ADComputer -ErrorAction SilentlyContinue
+    }
+    BeforeEach {
+        Mock Import-Module { } -ParameterFilter { $Name -eq 'ActiveDirectory' }
+        Mock Get-ADDomain { [PSCustomObject]@{ DNSRoot = 'contoso.local' } }
+        Mock Get-ADDomainController { @([PSCustomObject]@{ HostName = 'dc01.contoso.local'; Name = 'DC01' }) }
+        Mock Get-ADComputer { @(
+                [PSCustomObject]@{ Name = 'DC01'; DNSHostName = 'dc01.contoso.local'; OperatingSystem = 'Windows Server 2022'; Enabled = $true; lastLogonTimestamp = 0; DistinguishedName = 'CN=DC01,OU=Domain Controllers,DC=contoso,DC=local' },
+                [PSCustomObject]@{ Name = 'PC01'; DNSHostName = ''; OperatingSystem = 'Windows 11 Pro'; Enabled = $false; lastLogonTimestamp = $null; DistinguishedName = 'CN=PC01,OU=Desks,DC=contoso,DC=local' }) }
+    }
+
+    It 'reads every computer account and marks the domain controllers' {
+        $r = & $script:DefaultDirectoryLoader -ListPath $script:ServerListFilePath -Server '' -Credential $null
+        $r.Domain | Should -Be 'contoso.local'
+        @($r.Entries).Count | Should -Be 2
+        @($r.Entries)[0].IsDC | Should -BeTrue
+        @($r.Entries)[1].Enabled | Should -BeFalse
+        Should -Invoke Get-ADComputer -Times 1 -ParameterFilter {
+            $Filter -eq '*' -and $Properties -contains 'lastLogonTimestamp' -and $Properties -contains 'OperatingSystem' -and $Properties -contains 'Enabled' -and -not $Server
+        }
+    }
+
+    It 'reads the chosen domain or DC, as the Run as account' {
+        $cred = New-Object System.Management.Automation.PSCredential ('CONTOSO\admin', (New-Object System.Security.SecureString))
+        $null = & $script:DefaultDirectoryLoader -ListPath $script:ServerListFilePath -Server 'dc01.contoso.local' -Credential $cred
+        Should -Invoke Get-ADDomain -Times 1 -ParameterFilter { $Server -eq 'dc01.contoso.local' -and $Credential.UserName -eq 'CONTOSO\admin' }
+        Should -Invoke Get-ADComputer -Times 1 -ParameterFilter { $Server -eq 'dc01.contoso.local' -and $Credential.UserName -eq 'CONTOSO\admin' }
     }
 }
 

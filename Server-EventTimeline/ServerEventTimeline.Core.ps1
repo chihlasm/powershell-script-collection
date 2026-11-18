@@ -701,45 +701,6 @@ function Get-TimelineTimeZoneNote {
     return $null
 }
 
-function Get-AdServerCandidates {
-    <#
-        Server names from Active Directory: every domain controller, or servers whose name
-        contains some text (at most 200). Needs the RSAT ActiveDirectory module, loaded at run
-        time (no #Requires -Modules, per the repo convention).
-        Get-ADDomainController -Filter: HostName is the DNSHostName attribute (can be empty).
-        https://learn.microsoft.com/powershell/module/activedirectory/get-addomaincontroller
-        Get-ADComputer -Filter / -Properties / -ResultSetSize:
-        https://learn.microsoft.com/powershell/module/activedirectory/get-adcomputer
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][ValidateSet('DomainControllers', 'Search')][string]$Kind,
-        [string]$SearchText
-    )
-
-    try { Import-Module ActiveDirectory -ErrorAction Stop }
-    catch { throw "The ActiveDirectory module isn't available on this workstation. Install the RSAT Active Directory tools, or type the server names." }
-
-    if ($Kind -eq 'DomainControllers') {
-        return @(Get-ADDomainController -Filter '*' -ErrorAction Stop | ForEach-Object { if ($_.HostName) { $_.HostName } else { $_.Name } })
-    }
-
-    $text = ([string]$SearchText).Trim()
-    if (-not $text) { throw 'Type part of the server name to search for.' }
-    $safe = $text.Replace("'", "''")
-    $filter = "Name -like '*$safe*' -and OperatingSystem -like '*Server*'"
-    return @(Get-ADComputer -Filter $filter -Properties DNSHostName, OperatingSystem -ResultSetSize 200 -ErrorAction Stop |
-            ForEach-Object { if ($_.DNSHostName) { $_.DNSHostName } else { $_.Name } })
-}
-
-function Add-ServerNames {
-    <# The servers box text with new names added after the existing ones (no duplicates). #>
-    [CmdletBinding()]
-    param([AllowEmptyString()][string]$ExistingText, [string[]]$Names)
-    $all = @(ConvertTo-ServerList -Text (($ExistingText, ($Names -join ',')) -join ','))
-    return ($all -join ', ')
-}
-
 function Get-LogSelectionSummary {
     <# The text on the closed logs dropdown, e.g. "System, Application + 8 more". #>
     [CmdletBinding()]
