@@ -860,3 +860,53 @@ Describe 'One button for the other ways to add servers' {
         $src | Should -Match "-like 'Recent:\*'"
     }
 }
+
+Describe 'When? as a two-way switch' {
+    # The section was cramped: both ways of choosing a time were always on screen, the greyed-out
+    # one included, and From and To shared one narrow row. Now a switch picks the way and only
+    # its boxes show; From and To get a row each.
+    It 'has a short heading with the local-time note beside it' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
+        $w.FindName('WhenHeading').Text | Should -Be 'WHEN?'
+        $w.FindName('WhenNote').Text | Should -Be "each server's local time"
+    }
+
+    It 'switches between Around a time and Between two times with segment buttons' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
+        $around = $w.FindName('AroundRadio'); $range = $w.FindName('RangeRadio')
+        $around.Content | Should -Be 'Around a time'
+        $range.Content | Should -Be 'Between two times'
+        $around.Style | Should -Be $w.FindResource('Segment')
+        $range.Style | Should -Be $w.FindResource('Segment')
+        $around.IsChecked | Should -BeTrue
+        $around.Parent | Should -BeOfType [System.Windows.Controls.Primitives.UniformGrid]
+        $around.Parent | Should -Be $range.Parent
+    }
+
+    It 'shows only the chosen way''s boxes: Around first, Between hidden' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
+        $w.FindName('AroundPanel').Visibility | Should -Be 'Visible'
+        $w.FindName('RangePanel').Visibility | Should -Be 'Collapsed'
+        $w.FindName('AtBox').Parent | Should -Be $w.FindName('AroundPanel')
+        $w.FindName('FromBox').Parent | Should -Be $w.FindName('RangePanel')
+        $w.FindName('ToBox').Parent | Should -Be $w.FindName('RangePanel')
+        # From and To on rows of their own, each labelled.
+        [System.Windows.Controls.Grid]::GetRow($w.FindName('FromBox')) | Should -Be 0
+        [System.Windows.Controls.Grid]::GetRow($w.FindName('ToBox')) | Should -Be 1
+        @($w.FindName('RangePanel').Children | Where-Object { $_ -is [System.Windows.Controls.TextBlock] } | ForEach-Object Text) | Should -Be @('From', 'To')
+    }
+
+    It 'swaps the boxes when the switch changes' {
+        $src = Get-Content -LiteralPath $script:AppPath -Raw
+        $body = $src.Substring($src.IndexOf('function Update-InputState'), 600)
+        $body | Should -Match 'AroundPanel\.Visibility'
+        $body | Should -Match 'RangePanel\.Visibility'
+    }
+
+    It 'keeps Last hour and Last 24 hours on a "Search now:" line' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
+        $row = $w.FindName('LastHourButton').Parent
+        $row | Should -Be $w.FindName('Last24Button').Parent
+        @($row.Children | Where-Object { $_ -is [System.Windows.Controls.TextBlock] } | ForEach-Object Text) | Should -Be @('Search now:')
+    }
+}
