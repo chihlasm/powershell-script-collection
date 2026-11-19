@@ -37,6 +37,8 @@ to process this command*; a process of its own avoids that.
      a VPN into a client's network). It's remembered, and read with the **Run as** account
      when one is set. Without the RSAT Active Directory tools, only servers you searched
      before are suggested.
+   - The **▾** button next to **Add** holds the other ways in: **Add several...**, **Add this
+     computer**, **Recent lists** and **Clear the list**.
    - **Add several...** opens a dialog with three tabs: **Paste** a list, **Find in AD** (by
      part of the name, all domain controllers, or everything in an OU), or **From a file**
      (a .txt with one server per line, or a .csv: a column named Name, ComputerName,
@@ -48,9 +50,10 @@ to process this command*; a process of its own avoids that.
      to the same IP, that name is searched (the row shows *10.0.4.21 → SQL01.contoso.local*).
      If not, the IP itself is searched: that reads the remote event log over RPC with your
      account, because WinRM with an IP needs the IP in TrustedHosts and a Run as account.
-   - **This computer** adds it back, **Recent** puts back one of the last 8 server lists you
-     searched (it replaces the list), and **Clear** empties it. Workstations work too: any
-     Windows machine you can reach.
+   - **Add this computer** adds it back, **Recent lists** puts back one of the last 8 server
+     lists you searched (it replaces the list), and **Clear the list** empties it (it asks
+     first when there are more than 3). Workstations work too: any Windows machine you can
+     reach.
 2. **When?** "Around 2026-11-17 03:00 +/- 15 min" is the usual start. You can switch to
    **From ... to ...**, or press **Last hour** / **Last 24 hours** to search right away.
    **The time is each server's local time**: "03:00" means 03:00 on each server, which is

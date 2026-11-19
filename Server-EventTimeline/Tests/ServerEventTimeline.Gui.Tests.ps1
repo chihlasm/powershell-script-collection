@@ -117,11 +117,11 @@ Describe 'Window layout' {
 
     It 'loads in WPF with every named control' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
         $names = 'ServerInput', 'ServerInputHint', 'AddServerButton', 'ServerCountText', 'DomainText', 'ChangeDomainButton', 'ServerList',
-            'SuggestPopup', 'SuggestList', 'AddSeveralButton', 'ClearServersButton', 'AroundRadio', 'RangeRadio', 'AtBox', 'PlusMinusCombo', 'FromBox', 'ToBox', 'LastHourButton', 'Last24Button',
+            'SuggestPopup', 'SuggestList', 'AddMenuButton', 'ServerListHint', 'AroundRadio', 'RangeRadio', 'AtBox', 'PlusMinusCombo', 'FromBox', 'ToBox', 'LastHourButton', 'Last24Button',
             'LogPanel', 'SecurityCheck', 'AllLogsCheck', 'CapBox', 'TimeoutBox', 'RunAsButton', 'SearchButton',
             'CancelButton', 'SidebarColumn', 'SidebarPanel', 'SidebarStrip', 'CollapseSidebarButton', 'ExpandSidebarButton', 'NotesList', 'BannerText', 'TimeZoneNote', 'LevelFilter', 'ServerFilter', 'LogFilter', 'FlaggedOnlyCheck',
-            'FilterText', 'CountText', 'EventGrid', 'DetailText', 'ExportCsvButton', 'ExportHtmlButton', 'CopyButton', 'ThisComputerButton', 'LogsButton', 'LogsPopup', 'CoreLogPanel', 'LogsAllButton', 'LogsNoneButton', 'LogsDefaultButton', 'SaveFolderBox', 'BrowseFolderButton', 'OpenFolderButton',
-            'SummaryList', 'CollapseCheck', 'HiddenNote', 'ShowAllButton', 'TotalCapBox', 'RecentButton', 'TicketNoteButton'
+            'FilterText', 'CountText', 'EventGrid', 'DetailText', 'ExportCsvButton', 'ExportHtmlButton', 'CopyButton', 'LogsButton', 'LogsPopup', 'CoreLogPanel', 'LogsAllButton', 'LogsNoneButton', 'LogsDefaultButton', 'SaveFolderBox', 'BrowseFolderButton', 'OpenFolderButton',
+            'SummaryList', 'CollapseCheck', 'HiddenNote', 'ShowAllButton', 'TotalCapBox', 'TicketNoteButton'
         foreach ($n in $names) { $script:Window.FindName($n) | Should -Not -BeNullOrEmpty -Because "control $n" }
     }
 
@@ -145,7 +145,7 @@ Describe 'Window layout' {
     }
 
     It 'says what to type in the empty server box' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
-        $script:Window.FindName('ServerInputHint').Text | Should -Be 'Type a server name or IP address'
+        $script:Window.FindName('ServerInputHint').Text | Should -Be 'Server name or IP address'
         $script:Window.FindName('ServerInputHint').IsHitTestVisible | Should -BeFalse
     }
 
@@ -796,5 +796,67 @@ Describe 'Error dots in the window' {
     It 'a click on a dot selects its event, like a click on a symbol' {
         $src = Get-Content -LiteralPath $script:AppPath -Raw
         $src | Should -Match '\.Source\.Uid -in @\(.mark., .dot.\)'
+    }
+}
+
+Describe 'One button for the other ways to add servers' {
+    It 'replaces the four buttons under the list with a down arrow next to Add' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
+        foreach ($gone in 'AddSeveralButton', 'ThisComputerButton', 'RecentButton', 'ClearServersButton') { $w.FindName($gone) | Should -BeNullOrEmpty -Because "$gone is in the menu now" }
+        $b = $w.FindName('AddMenuButton')
+        $b | Should -Not -BeNullOrEmpty
+        $b.Content | Should -Be ([string][char]0x25BE)
+        "$($b.ToolTip)" | Should -BeLike '*several*this computer*recent*'
+        # Docked right in the same row as Add, so it sits just to the right of it.
+        $b.Parent | Should -Be $w.FindName('AddServerButton').Parent
+    }
+
+    It 'lists Add several, Add this computer, Recent lists and Clear the list, in that order' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $menu = New-ServerAddMenu -ServerCount 4 -RecentLists @('APP01, SQL01', 'DC01')
+        $items = @($menu.Items | Where-Object { $_ -is [System.Windows.Controls.MenuItem] })
+        @($items | ForEach-Object Tag) | Should -Be @('AddSeveral', 'ThisComputer', 'Recent', 'Clear')
+        $items[0].Header | Should -BeLike 'Add several...*'
+        $items[1].Header | Should -Be 'Add this computer'
+        $items[3].Header | Should -Be 'Clear the list (4 servers)'
+        $items[3].IsEnabled | Should -BeTrue
+        @($menu.Items | Where-Object { $_ -is [System.Windows.Controls.Separator] }).Count | Should -Be 1
+        $menu.Items.IndexOf(@($menu.Items | Where-Object { $_ -is [System.Windows.Controls.Separator] })[0]) | Should -Be 3
+    }
+
+    It 'shows the recent lists in a submenu, each tagged with its list' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $menu = New-ServerAddMenu -ServerCount 0 -RecentLists @('APP01, SQL01', 'DC01')
+        $recent = @($menu.Items | Where-Object { $_.Tag -eq 'Recent' })[0]
+        @($recent.Items | ForEach-Object Tag) | Should -Be @('Recent:APP01, SQL01', 'Recent:DC01')
+        "$($recent.ToolTip)" | Should -BeLike '*replaces the list*'
+    }
+
+    It 'says there are no recent lists yet, and greys out Clear when the list is empty' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $menu = New-ServerAddMenu -ServerCount 0 -RecentLists @()
+        $recent = @($menu.Items | Where-Object { $_.Tag -eq 'Recent' })[0]
+        $recent.Items.Count | Should -Be 1
+        $recent.Items[0].Header | Should -Be 'No recent searches yet'
+        $recent.Items[0].IsEnabled | Should -BeFalse
+        $clear = @($menu.Items | Where-Object { $_.Tag -eq 'Clear' })[0]
+        $clear.IsEnabled | Should -BeFalse
+        $clear.Header | Should -Be 'Clear the list'
+        (New-ServerAddMenu -ServerCount 1 -RecentLists @()).Items | Where-Object { $_.Tag -eq 'Clear' } | ForEach-Object Header | Should -Be 'Clear the list (1 server)'
+    }
+
+    It 'hints at the arrow while the server list is empty' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
+        $hint = $w.FindName('ServerListHint')
+        $hint.Text | Should -Be ('Type a name above, or use {0} for several at once' -f [char]0x25BE)
+        $hint.IsHitTestVisible | Should -BeFalse
+        $src = Get-Content -LiteralPath $script:AppPath -Raw
+        $count = $src.Substring($src.IndexOf('function Update-ServerCount'), 400)
+        $count | Should -Match 'ServerListHint\.Visibility'
+    }
+
+    It 'the arrow opens the menu built by New-ServerAddMenu, and each item does what its button did' {
+        $src = Get-Content -LiteralPath $script:AppPath -Raw
+        $src | Should -Match '\$ui\.AddMenuButton\.add_Click'
+        $src | Should -Match 'New-ServerAddMenu -ServerCount'
+        foreach ($tag in 'AddSeveral', 'ThisComputer', 'Clear') { $src | Should -Match "'$tag'" }
+        $src | Should -Match "-like 'Recent:\*'"
     }
 }

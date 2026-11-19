@@ -49,7 +49,8 @@
     in AD, this computer). Type a name or an IP address and press Enter; suggestions come from
     Active Directory as you type. The "Suggestions from:" line says which domain they come
     from: this computer's domain unless you choose another domain or a domain controller with
-    Change... (remembered per user), read with the Run as account when one is set. "Add
+    Change... (remembered per user), read with the Run as account when one is set. The arrow
+    next to Add holds Add several..., Add this computer, Recent lists and Clear the list. "Add
     several..." pastes a list, finds servers in AD (by name, domain controllers, or an OU) or
     reads a .txt/.csv file, then adds the ones you tick. An IP address is looked up in DNS:
     when its name points back to the same IP, that name is searched (shown as "10.0.4.21 ->
@@ -393,11 +394,13 @@ function New-TimelineWindowXaml {
                        TextWrapping="Wrap" Text="Suggestions from: ..."/>
           </DockPanel>
           <DockPanel LastChildFill="True">
+            <Button x:Name="AddMenuButton" DockPanel.Dock="Right" Content="&#9662;" FontSize="15" Margin="2,0,0,0" Padding="8,0"
+                    ToolTip="More ways to add servers: several at once (paste, find in AD, or a file), this computer, recent lists - or clear the list"/>
             <Button x:Name="AddServerButton" DockPanel.Dock="Right" Content="Add" Style="{StaticResource Primary}" Margin="6,0,0,0" Padding="14,4"
                     ToolTip="Add the server typed on the left (Enter does the same)"/>
             <Grid>
               <TextBox x:Name="ServerInput" ToolTip="A server name or IP address. Paste several, separated by commas, spaces or new lines, to add them all."/>
-              <TextBlock x:Name="ServerInputHint" Text="Type a server name or IP address" Foreground="{StaticResource Muted}" Margin="9,0,0,0"
+              <TextBlock x:Name="ServerInputHint" Text="Server name or IP address" Foreground="{StaticResource Muted}" Margin="9,0,0,0"
                          VerticalAlignment="Center" IsHitTestVisible="False"/>
             </Grid>
           </DockPanel>
@@ -416,7 +419,8 @@ function New-TimelineWindowXaml {
               </ListBox>
             </Border>
           </Popup>
-          <ListBox x:Name="ServerList" Margin="0,6,0,0" MinHeight="30" MaxHeight="220" Background="{StaticResource Panel}" BorderBrush="{StaticResource Line}"
+          <Grid Margin="0,6,0,0">
+          <ListBox x:Name="ServerList" MinHeight="30" MaxHeight="220" Background="{StaticResource Panel}" BorderBrush="{StaticResource Line}"
                    Foreground="{StaticResource Text}" ScrollViewer.HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
             <ListBox.ItemTemplate>
               <DataTemplate>
@@ -445,12 +449,9 @@ function New-TimelineWindowXaml {
               </DataTemplate>
             </ListBox.ItemTemplate>
           </ListBox>
-          <WrapPanel Margin="0,8,0,0">
-            <Button x:Name="AddSeveralButton" Content="Add several..." Padding="10,6" Margin="0,0,6,4" ToolTip="Paste a list, find servers in Active Directory, or read them from a file"/>
-            <Button x:Name="ThisComputerButton" Content="This computer" Padding="10,6" Margin="0,0,6,4" ToolTip="Add this computer: its logs are read directly, no network needed"/>
-            <Button x:Name="RecentButton" Content="Recent" Padding="10,6" Margin="0,0,6,4" ToolTip="Server lists you searched before (remembered per user). Picking one replaces the list."/>
-            <Button x:Name="ClearServersButton" Content="Clear" Padding="10,6" Margin="0,0,0,4" ToolTip="Remove every server from the list"/>
-          </WrapPanel>
+          <TextBlock x:Name="ServerListHint" Text="Type a name above, or use &#9662; for several at once" Foreground="{StaticResource Muted}" FontSize="11"
+                     Margin="8,0" VerticalAlignment="Center" TextWrapping="Wrap" IsHitTestVisible="False"/>
+          </Grid>
 
           <TextBlock Style="{StaticResource Label}" Text="WHEN? (EACH SERVER'S LOCAL TIME)" Margin="0,14,0,4"/>
           <RadioButton x:Name="AroundRadio" Content="Around" GroupName="When" IsChecked="True" Margin="0,0,0,4"/>
@@ -1309,6 +1310,44 @@ function Show-TimelineStrip {
     }
 }
 
+function New-ServerAddMenu {
+    <#
+        The menu behind the arrow next to Add: Add several..., Add this computer, Recent lists
+        (a submenu; picking one replaces the list) and, below a line, Clear the list (greyed out
+        when it's empty). Each item's Tag says what it does: AddSeveral, ThisComputer, Clear,
+        or Recent:<the list>.
+    #>
+    param([int]$ServerCount, [string[]]$RecentLists)
+    $menu = [System.Windows.Controls.ContextMenu]::new()
+    $item = {
+        param([string]$Header, [string]$Tag, [string]$Tip)
+        $mi = [System.Windows.Controls.MenuItem]::new()
+        $mi.Header = $Header; $mi.Tag = $Tag
+        if ($Tip) { $mi.ToolTip = $Tip }
+        $mi
+    }
+    [void]$menu.Items.Add((& $item 'Add several... (paste, find in AD, or a file)' 'AddSeveral' 'Paste a list, find servers in Active Directory, or read them from a .txt or .csv file'))
+    [void]$menu.Items.Add((& $item 'Add this computer' 'ThisComputer' 'Its logs are read directly: no network needed'))
+    $recent = & $item 'Recent lists' 'Recent' 'Server lists you searched before (remembered per user). Picking one replaces the list.'
+    $lists = @($RecentLists | Where-Object { $_ })
+    if ($lists.Count -eq 0) {
+        $none = & $item 'No recent searches yet' ''
+        $none.IsEnabled = $false
+        [void]$recent.Items.Add($none)
+    }
+    foreach ($l in $lists) {
+        $header = if ($l.Length -gt 90) { $l.Substring(0, 87) + '...' } else { $l }
+        [void]$recent.Items.Add((& $item $header "Recent:$l" $l))
+    }
+    [void]$menu.Items.Add($recent)
+    [void]$menu.Items.Add([System.Windows.Controls.Separator]::new())
+    $clearHeader = if ($ServerCount -eq 1) { 'Clear the list (1 server)' } elseif ($ServerCount -gt 1) { "Clear the list ($ServerCount servers)" } else { 'Clear the list' }
+    $clear = & $item $clearHeader 'Clear' 'Remove every server from the list (asks first when there are more than 3)'
+    $clear.IsEnabled = $ServerCount -gt 0
+    [void]$menu.Items.Add($clear)
+    $menu
+}
+
 function Register-TimelineErrorGuard {
     <#
         An exception inside a button or menu handler escapes the WPF dispatcher, ShowDialog
@@ -1409,9 +1448,9 @@ function Show-ServerEventTimeline {
         Restoring = $false; SummaryKey = ''; Story = $null
         TimeRange = $null; StripClock = (New-Object System.Diagnostics.Stopwatch); StripModel = $null; StripSpan = $null; StripWidth = 0; SearchStartedUtc = $null; StripDrag = $null
     }
-    foreach ($name in 'SummaryBorder', 'SummaryList', 'CollapseCheck', 'HiddenNote', 'ShowAllButton', 'TotalCapBox', 'RecentButton', 'TicketNoteButton', 'LogsButton','LogsPopup', 'CoreLogPanel', 'LogsAllButton', 'LogsNoneButton', 'LogsDefaultButton',
-        'SaveFolderBox', 'BrowseFolderButton', 'OpenFolderButton', 'ThisComputerButton', 'ServerInput', 'ServerInputHint', 'AddServerButton', 'ServerCountText', 'DomainText', 'ChangeDomainButton',
-        'ServerList', 'SuggestPopup', 'SuggestList', 'AddSeveralButton', 'ClearServersButton', 'AroundRadio', 'RangeRadio', 'AtBox', 'PlusMinusCombo', 'FromBox', 'ToBox', 'LastHourButton',
+    foreach ($name in 'SummaryBorder', 'SummaryList', 'CollapseCheck', 'HiddenNote', 'ShowAllButton', 'TotalCapBox', 'TicketNoteButton', 'LogsButton','LogsPopup', 'CoreLogPanel', 'LogsAllButton', 'LogsNoneButton', 'LogsDefaultButton',
+        'SaveFolderBox', 'BrowseFolderButton', 'OpenFolderButton', 'AddMenuButton', 'ServerListHint', 'ServerInput', 'ServerInputHint', 'AddServerButton', 'ServerCountText', 'DomainText', 'ChangeDomainButton',
+        'ServerList', 'SuggestPopup', 'SuggestList', 'AroundRadio', 'RangeRadio', 'AtBox', 'PlusMinusCombo', 'FromBox', 'ToBox', 'LastHourButton',
         'Last24Button', 'LogPanel', 'SecurityCheck', 'AllLogsCheck', 'CapBox', 'TimeoutBox', 'RunAsButton',
         'SearchButton', 'CancelButton', 'InputError', 'BannerText', 'TimeZoneNote', 'LevelFilter', 'ServerFilter',
         'LogFilter', 'FlaggedOnlyCheck', 'FilterText', 'CountText', 'EventGrid', 'DetailText', 'ExportCsvButton', 'ExportHtmlButton',
@@ -1456,7 +1495,7 @@ function Show-ServerEventTimeline {
     function Update-ServerCount {
         $n = $ui.ServerItems.Count
         $ui.ServerCountText.Text = if ($n -eq 1) { '1 server' } else { "$n servers" }
-        $ui.ClearServersButton.IsEnabled = $n -gt 0
+        $ui.ServerListHint.Visibility = if ($n -eq 0) { 'Visible' } else { 'Collapsed' }
     }
     function Update-ServerNotes {
         foreach ($item in @($ui.ServerItems)) {
@@ -1915,28 +1954,27 @@ function Show-ServerEventTimeline {
         })
     $ui.EventGrid.ContextMenu = $rowMenu
 
-    # Recent: the server lists searched before (per user, with the save folder).
-    $recentMenu = New-Object System.Windows.Controls.ContextMenu
-    $ui.RecentButton.ContextMenu = $recentMenu
-    $ui.RecentButton.add_Click({
-            $recentMenu.Items.Clear()
+    # The arrow next to Add: several at once, this computer, a recent list, or clear the list.
+    # Built fresh each time it opens, so the recent lists and the server count are current.
+    $ui.AddMenuButton.add_Click({
             $lists = if ($ui.Smoke) { @() } else { @((Read-TimelineSettings -Path $SettingsPath).RecentServerLists) }
-            if ($lists.Count -eq 0) {
-                $none = New-Object System.Windows.Controls.MenuItem
-                $none.Header = 'No recent searches yet'; $none.IsEnabled = $false
-                [void]$recentMenu.Items.Add($none)
-            }
-            foreach ($l in $lists) {
-                $mi = New-Object System.Windows.Controls.MenuItem
-                $mi.Header = if ($l.Length -gt 90) { $l.Substring(0, 87) + '...' } else { $l }
-                $mi.Tag = $l; $mi.ToolTip = $l
-                # A remembered list replaces the current one.
-                $mi.add_Click({ param($clicked) $ui.ServerItems.Clear(); $null = Add-ServersToList -Names @([string]$clicked.Tag) })
-                [void]$recentMenu.Items.Add($mi)
-            }
-            $recentMenu.PlacementTarget = $ui.RecentButton
-            $recentMenu.Placement = 'Bottom'
-            $recentMenu.IsOpen = $true
+            $menu = New-ServerAddMenu -ServerCount $ui.ServerItems.Count -RecentLists $lists
+            $menu.AddHandler([System.Windows.Controls.MenuItem]::ClickEvent, [System.Windows.RoutedEventHandler] {
+                    param($sender, $e)
+                    $tag = [string]$e.OriginalSource.Tag
+                    if ($tag -eq 'AddSeveral') { & $addSeveral }
+                    elseif ($tag -eq 'ThisComputer') { & $addThisComputer }
+                    elseif ($tag -eq 'Clear') { & $clearServers }
+                    elseif ($tag -like 'Recent:*') {
+                        # A remembered list replaces the current one.
+                        $ui.ServerItems.Clear()
+                        $null = Add-ServersToList -Names @($tag.Substring(7))
+                        Update-ServerCount
+                    }
+                })
+            $menu.PlacementTarget = $ui.AddMenuButton
+            $menu.Placement = 'Bottom'
+            $menu.IsOpen = $true
         })
 
     # Ticket note: the note and the HTML report into Documents\TicketNotes\Ticket_<n>, where
@@ -2005,9 +2043,9 @@ function Show-ServerEventTimeline {
             if ($item) { $ui.ServerFilter.SelectedItem = $item }
         })
 
-    $ui.ThisComputerButton.add_Click({
-            $null = Add-ServersToList -Names @($ui.LocalNames[0])
-        })
+    $addThisComputer = {
+        $null = Add-ServersToList -Names @($ui.LocalNames[0])
+    }
 
     # Typing a server: Enter or Add puts it in the list (pasted text with commas, spaces or new
     # lines becomes several rows).
@@ -2036,17 +2074,17 @@ function Show-ServerEventTimeline {
             Update-ServerCount
             Update-InputState
         })
-    $ui.ClearServersButton.add_Click({
-            $n = $ui.ServerItems.Count
-            if ($n -eq 0) { return }
-            if ($n -gt 3 -and -not $ui.Smoke) {
-                $answer = [System.Windows.MessageBox]::Show("Remove all $n servers from the list?", 'Server Event Timeline', 'YesNo', 'Question')
-                if ($answer -ne 'Yes') { return }
-            }
-            $ui.ServerItems.Clear()
-            Update-ServerCount
-            Update-InputState
-        })
+    $clearServers = {
+        $n = $ui.ServerItems.Count
+        if ($n -eq 0) { return }
+        if ($n -gt 3 -and -not $ui.Smoke) {
+            $answer = [System.Windows.MessageBox]::Show("Remove all $n servers from the list?", 'Server Event Timeline', 'YesNo', 'Question')
+            if ($answer -ne 'Yes') { return }
+        }
+        $ui.ServerItems.Clear()
+        Update-ServerCount
+        Update-InputState
+    }
 
     # Suggestions: every computer account of the chosen domain (or DC) is read once in the
     # background (ServerList.ps1); typing then filters that list instantly. The heartbeat below
@@ -2140,15 +2178,15 @@ function Show-ServerEventTimeline {
         })
 
     # "Add several...": paste, find in the loaded AD, or read a file; adds the ticked servers.
-    $ui.AddSeveralButton.add_Click({
-            if ($ui.Smoke) { return }
-            $ui.SuggestPopup.IsOpen = $false
-            $names = @(Show-AddServersDialog -Owner $window -Directory $ui.Directory -DirectoryState $ui.DirectoryState -DomainText $ui.DomainText.Text)
-            if ($names.Count -gt 0) {
-                $added = @(Add-ServersToList -Names $names)
-                Set-StatusMessage ('Added {0} server(s) to the list.' -f $added.Count)
-            }
-        })
+    $addSeveral = {
+        if ($ui.Smoke) { return }
+        $ui.SuggestPopup.IsOpen = $false
+        $names = @(Show-AddServersDialog -Owner $window -Directory $ui.Directory -DirectoryState $ui.DirectoryState -DomainText $ui.DomainText.Text)
+        if ($names.Count -gt 0) {
+            $added = @(Add-ServersToList -Names $names)
+            Set-StatusMessage ('Added {0} server(s) to the list.' -f $added.Count)
+        }
+    }
 
     # Autocomplete under the server box: Down/Up choose, Enter adds, Esc closes.
     $ui.ServerInput.add_TextChanged({
