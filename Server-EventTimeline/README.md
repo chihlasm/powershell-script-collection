@@ -54,8 +54,10 @@ to process this command*; a process of its own avoids that.
      lists you searched (it replaces the list), and **Clear the list** empties it (it asks
      first when there are more than 3). Workstations work too: any Windows machine you can
      reach.
-2. **When?** "Around 2026-11-17 03:00 +/- 15 min" is the usual start. You can switch to
-   **From ... to ...**, or press **Last hour** / **Last 24 hours** to search right away.
+2. **When?** The switch picks the way: **Around a time** ("2026-11-17 03:00 +/- 15 min",
+   the usual start) or **Between two times** (a From box and a To box). Only the boxes for
+   the way you picked show. Under them, **Search now: Last hour / Last 24 hours** searches
+   right away.
    **The time is each server's local time**: "03:00" means 03:00 on each server, which is
    what the client says and what Event Viewer on the server shows.
 3. **Which logs?** Click the logs box to open the list. It's grouped as **Everyday**

@@ -321,6 +321,28 @@ function New-TimelineWindowXaml {
     </Style>
     <Style TargetType="CheckBox"><Setter Property="Foreground" Value="{StaticResource Text}"/><Setter Property="Margin" Value="0,0,16,6"/><Setter Property="Cursor" Value="Hand"/></Style>
     <Style TargetType="RadioButton"><Setter Property="Foreground" Value="{StaticResource Text}"/><Setter Property="Margin" Value="0,0,12,0"/><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Cursor" Value="Hand"/></Style>
+    <!-- A radio button drawn as one half of a switch (When?: Around a time | Between two times). -->
+    <Style x:Key="Segment" TargetType="RadioButton">
+      <Setter Property="Foreground" Value="{StaticResource Muted}"/><Setter Property="Cursor" Value="Hand"/><Setter Property="Margin" Value="0"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="RadioButton">
+            <Border x:Name="b" Background="#191C22" BorderBrush="{StaticResource LineStrong}" BorderThickness="1" Padding="0,6">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="#232731"/><Setter Property="Foreground" Value="{StaticResource Text}"/></Trigger>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="b" Property="Background" Value="#1D3A50"/><Setter TargetName="b" Property="BorderBrush" Value="{StaticResource Accent}"/>
+                <Setter Property="Foreground" Value="{StaticResource Text}"/><Setter Property="Panel.ZIndex" Value="1"/>
+              </Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="{StaticResource Accent}"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
     <Style TargetType="ComboBoxItem">
       <Setter Property="Background" Value="{StaticResource Card}"/><Setter Property="Foreground" Value="{StaticResource Text}"/><Setter Property="Padding" Value="8,4"/>
       <Style.Triggers>
@@ -453,35 +475,49 @@ function New-TimelineWindowXaml {
                      Margin="8,0" VerticalAlignment="Center" TextWrapping="Wrap" IsHitTestVisible="False"/>
           </Grid>
 
-          <TextBlock Style="{StaticResource Label}" Text="WHEN? (EACH SERVER'S LOCAL TIME)" Margin="0,14,0,4"/>
-          <RadioButton x:Name="AroundRadio" Content="Around" GroupName="When" IsChecked="True" Margin="0,0,0,4"/>
-          <Grid Margin="0,0,0,8">
+          <!-- When? A switch picks the way; only that way's boxes show (Update-InputState). -->
+          <DockPanel Margin="0,16,0,8">
+            <TextBlock x:Name="WhenNote" DockPanel.Dock="Right" Text="each server's local time" Foreground="{StaticResource Muted}" FontSize="11" VerticalAlignment="Bottom"
+                       ToolTip="The times you type are read as each server's own local time (what Event Viewer on that server shows)"/>
+            <TextBlock x:Name="WhenHeading" Style="{StaticResource Label}" Text="WHEN?" Margin="0"/>
+          </DockPanel>
+          <UniformGrid Columns="2" Margin="0,0,0,10">
+            <RadioButton x:Name="AroundRadio" Style="{StaticResource Segment}" Content="Around a time" GroupName="When" IsChecked="True"
+                         ToolTip="Search a few minutes either side of one time"/>
+            <RadioButton x:Name="RangeRadio" Style="{StaticResource Segment}" Content="Between two times" GroupName="When" Margin="-1,0,0,0"
+                         ToolTip="Search from one time to another"/>
+          </UniformGrid>
+          <Grid x:Name="AroundPanel" Margin="0,0,0,12">
             <Grid.ColumnDefinitions>
               <ColumnDefinition Width="*"/>
               <ColumnDefinition Width="Auto"/>
               <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <TextBox x:Name="AtBox" Grid.Column="0" ToolTip="yyyy-MM-dd HH:mm"/>
-            <TextBlock Grid.Column="1" Text=" +/- " VerticalAlignment="Center" Foreground="{StaticResource Muted}"/>
-            <ComboBox x:Name="PlusMinusCombo" Grid.Column="2" MinWidth="90" Margin="0"/>
+            <TextBlock Grid.Column="1" Text="+/-" Margin="8,0" VerticalAlignment="Center" Foreground="{StaticResource Muted}"/>
+            <ComboBox x:Name="PlusMinusCombo" Grid.Column="2" MinWidth="80" Margin="0"/>
           </Grid>
-          <RadioButton x:Name="RangeRadio" Content="From ... to ..." GroupName="When" Margin="0,0,0,4"/>
-          <Grid Margin="0,0,0,8">
+          <Grid x:Name="RangePanel" Margin="0,0,0,12" Visibility="Collapsed">
             <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="*"/>
-              <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="36"/>
               <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
-            <TextBox x:Name="FromBox" Grid.Column="0" ToolTip="yyyy-MM-dd HH:mm"/>
-            <TextBlock Grid.Column="1" Text=" to " VerticalAlignment="Center" Foreground="{StaticResource Muted}"/>
-            <TextBox x:Name="ToBox" Grid.Column="2" ToolTip="yyyy-MM-dd HH:mm"/>
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <TextBlock Text="From" VerticalAlignment="Center" Foreground="{StaticResource Muted}"/>
+            <TextBox x:Name="FromBox" Grid.Column="1" ToolTip="yyyy-MM-dd HH:mm"/>
+            <TextBlock Grid.Row="1" Text="To" VerticalAlignment="Center" Margin="0,6,0,0" Foreground="{StaticResource Muted}"/>
+            <TextBox x:Name="ToBox" Grid.Row="1" Grid.Column="1" Margin="0,6,0,0" ToolTip="yyyy-MM-dd HH:mm"/>
           </Grid>
-          <WrapPanel>
-            <Button x:Name="LastHourButton" Content="Last hour" Margin="0,0,6,4" ToolTip="Search the last 60 minutes now"/>
-            <Button x:Name="Last24Button" Content="Last 24 hours" Margin="0,0,0,4" ToolTip="Search the last 24 hours now (can be a lot of events)"/>
-          </WrapPanel>
+          <DockPanel>
+            <TextBlock Text="Search now:" VerticalAlignment="Center" Margin="0,0,8,0" Foreground="{StaticResource Muted}"/>
+            <Button x:Name="LastHourButton" Content="Last hour" Padding="10,4" Margin="0,0,6,0" ToolTip="Search the last 60 minutes now"/>
+            <Button x:Name="Last24Button" Content="Last 24 hours" Padding="10,4" Margin="0" HorizontalAlignment="Left" ToolTip="Search the last 24 hours now (can be a lot of events)"/>
+          </DockPanel>
 
-          <StackPanel Margin="0,10,0,0">
+          <StackPanel Margin="0,16,0,0">
             <TextBlock Style="{StaticResource Label}" Text="WHICH LOGS?"/>
             <ToggleButton x:Name="LogsButton" HorizontalAlignment="Stretch" Foreground="{StaticResource Text}" Cursor="Hand" ToolTip="Choose which logs to read">
               <ToggleButton.Template>
@@ -1450,7 +1486,7 @@ function Show-ServerEventTimeline {
     }
     foreach ($name in 'SummaryBorder', 'SummaryList', 'CollapseCheck', 'HiddenNote', 'ShowAllButton', 'TotalCapBox', 'TicketNoteButton', 'LogsButton','LogsPopup', 'CoreLogPanel', 'LogsAllButton', 'LogsNoneButton', 'LogsDefaultButton',
         'SaveFolderBox', 'BrowseFolderButton', 'OpenFolderButton', 'AddMenuButton', 'ServerListHint', 'ServerInput', 'ServerInputHint', 'AddServerButton', 'ServerCountText', 'DomainText', 'ChangeDomainButton',
-        'ServerList', 'SuggestPopup', 'SuggestList', 'AroundRadio', 'RangeRadio', 'AtBox', 'PlusMinusCombo', 'FromBox', 'ToBox', 'LastHourButton',
+        'ServerList', 'SuggestPopup', 'SuggestList', 'AroundRadio', 'RangeRadio', 'AroundPanel', 'RangePanel', 'AtBox', 'PlusMinusCombo', 'FromBox', 'ToBox', 'LastHourButton',
         'Last24Button', 'LogPanel', 'SecurityCheck', 'AllLogsCheck', 'CapBox', 'TimeoutBox', 'RunAsButton',
         'SearchButton', 'CancelButton', 'InputError', 'BannerText', 'TimeZoneNote', 'LevelFilter', 'ServerFilter',
         'LogFilter', 'FlaggedOnlyCheck', 'FilterText', 'CountText', 'EventGrid', 'DetailText', 'ExportCsvButton', 'ExportHtmlButton',
@@ -1641,6 +1677,9 @@ function Show-ServerEventTimeline {
         $around = [bool]$ui.AroundRadio.IsChecked
         $ui.AtBox.IsEnabled = $around; $ui.PlusMinusCombo.IsEnabled = $around
         $ui.FromBox.IsEnabled = -not $around; $ui.ToBox.IsEnabled = -not $around
+        # Only the chosen way's boxes show.
+        $ui.AroundPanel.Visibility = if ($around) { 'Visible' } else { 'Collapsed' }
+        $ui.RangePanel.Visibility = if ($around) { 'Collapsed' } else { 'Visible' }
         $running = $ui.Engine -and -not $ui.Finished
         $req = Get-InputRequest
         $ui.InputError.Text = if ($req.Ok) { '' } else { $req.Message }
