@@ -172,6 +172,38 @@ A short log is never presented as a quiet one: an incomplete log is always named
 The order is always by real (UTC) time. If you mix servers in different time zones, a note
 tells you to compare the UTC column.
 
+### The timeline picture
+
+Above the event list, each server gets a lane across the search window:
+
+- a symbol for each flagged event: amber triangle for disk or low memory, red cross for a
+  crash, blue square for an update, purple diamond for a time change, grey circle for a
+  restart or anything else flagged;
+- small red dots for errors the tool doesn't recognise (stronger where there are more);
+- a grey bar for the quiet stretch before an unexpected restart.
+
+Hover a symbol to see what it was. Click it to select that event in the list. **Drag across
+the picture** to see only that stretch of time: a chip such as *17:52 - 17:58 x* appears next
+to the search box, and exports and copies use the same rows. Double-click the picture, or the
+chip's x, to see the whole window again. The picture follows the Show filters. It shows each
+server's local time when they all share a time zone, and UTC (it says so) when they don't.
+**Hide picture** folds it away; that's remembered.
+
+### What happened
+
+The **What happened** tab, next to the event details, tells the story of the search in plain
+English, in order: *17:49 AD-01: Disk I/O had to be retried (3 in 3 min)*, *17:57 AD-01:
+Application crashed (7 errors in the 5 minutes before)*, *Restarted without a clean shutdown -
+back up at 18:04*. Repeats within 10 minutes fold into one line, a restart and its start-up
+events become one line, and quiet stretches of 10 minutes or more show as *25 minutes later*.
+Click a line to select its event (filters that hide it are cleared). **Copy for ticket** copies
+the lines. The ticket summary and the HTML report carry the same story, and the report has the
+picture too.
+
+Windows writes the unexpected-restart events (Kernel-Power 41, EventLog 6008) when the server
+comes back up, so the story says when it was back and estimates the outage from the quiet gap
+before it.
+
 ## How it reaches servers
 
 0. **This computer** (by its name, its FQDN, `localhost`, `.` or `127.0.0.1`) is read
@@ -257,13 +289,14 @@ folder it couldn't create).
 - `ServerEventTimeline.Engine.ps1`: reading servers in the background
 - `ServerEventTimeline.ServerList.ps1`: the server list: AD suggestions, notes, IP lookups, file import
 - `ServerEventTimeline.AddServersDialog.ps1`: the "Add several servers" dialog
+- `ServerEventTimeline.Story.ps1`: "What happened" and the timeline picture's layout
 - `CaseKit.ps1`: the shared ticket-note kit (an identical copy of `TicketNote\CaseKit.ps1`)
 - The save folder (default `Reports\` beside the script; see step 7): exports and an activity log,
   `ServerEventTimeline_yyyy-MM-dd_HHmmss.*`. These contain client data: don't commit or
   sync them.
 
-Keep the six `.ps1` files together. Recent server lists, the save folder and the domain for
-suggestions are remembered per user in `%APPDATA%\ServerEventTimeline\settings.json`. Needs
+Keep the seven `.ps1` files together. Recent server lists, the save folder, the domain for
+suggestions and whether the picture is hidden are remembered per user in `%APPDATA%\ServerEventTimeline\settings.json`. Needs
 Windows PowerShell 5.1 or PowerShell 7 on Windows. Suggestions from Active Directory and Find
 in AD need the RSAT Active Directory tools (optional).
 

@@ -37,6 +37,14 @@
     kind of event, hide a noisy source or show only that server. Collapse repeats turns
     hundreds of identical routine events into one row.
 
+    Above the events, a timeline picture gives each server a lane: a symbol per flagged event,
+    red dots for errors the tool doesn't recognise, and a grey bar for the quiet stretch before
+    an unexpected restart. Hover for what it was, click to select it, drag across to see only
+    that stretch of time (double-click to see all of it), or Hide picture. The What happened
+    tab beside the event details tells the story in plain English, in order, with repeats and
+    restarts folded into one line each; Copy for ticket copies it. The ticket summary and the
+    HTML report carry the same story, and the report has the picture.
+
     Servers go in a list, one row each, with a note beside it (domain controller, the OS, not
     in AD, this computer). Type a name or an IP address and press Enter; suggestions come from
     Active Directory as you type. The "Suggestions from:" line says which domain they come
@@ -890,6 +898,7 @@ function Invoke-TimelineConsole {
         ($logs -join ', '), $(if ($AllLogs) { ' + all logs with events' } else { '' }))
 
     # Read, the same background engine as the window
+    $startedUtc = [datetime]::UtcNow
     $engine = Invoke-TimelineSearch -Request $req -Logs $logs -AllLogs ([bool]$AllLogs) -Credential $Credential -EngineOptions $EngineOptions
     $store = New-TimelineRowStore
     $reported = @{}
@@ -924,9 +933,11 @@ function Invoke-TimelineConsole {
     $htmlPath = Join-Path $folder "ServerEventTimeline_$stamp.html"
     try {
         Export-TimelineCsv -Rows $rows -Path (Join-Path $folder "ServerEventTimeline_$stamp.csv")
+        $span = Get-TimelineStripWindow -Window $engine.Window -Status $engine.Status -NowUtc $startedUtc
         $context = @{
             WindowText = $windowText; Servers = $req.Servers; Logs = $logs; FiltersText = 'none (console mode: every event read)'
             GeneratedAt = Get-Date; ServerOutcomes = @($engine.Status.Values); Summary = $summary
+            StartUtc = $span.StartUtc; EndUtc = $span.EndUtc
         }
         [System.IO.File]::WriteAllText($htmlPath, (ConvertTo-TimelineHtml -Rows $rows -Context $context), (New-Object System.Text.UTF8Encoding $true))
         & $say PASS ('Saved {0:N0} events to {1}' -f $rows.Count, $folder)
@@ -1752,11 +1763,15 @@ function Show-ServerEventTimeline {
             $ui.ServerFilter.SelectedItem.Content, $ui.LogFilter.SelectedItem.Content, $(if ($filter.FlaggedOnly) { 'yes' } else { 'no' }), $filter.Text
         if ($ui.Hidden.Count -gt 0) { $filtersText += '; hidden sources: {0}' -f ($ui.Hidden -join ', ') }
         if ($ui.EventKey) { $filtersText += '; only event: {0}' -f $ui.EventKey }
+        if ($ui.TimeRange) { $filtersText += '; time: {0}' -f $ui.TimeRangeText.Text }
+        $span = if ($ui.TimeRange) { $ui.TimeRange } else { Get-TimelineStripWindow -Window $ui.Engine.Window -Status $ui.Engine.Status -NowUtc $ui.SearchStartedUtc }
         @{
             WindowText = Get-TimelineWindowText -Window $ui.Request.Window
             Servers = $ui.Request.Servers; Logs = $ui.Selected; FiltersText = $filtersText; GeneratedAt = Get-Date
             ServerOutcomes = @($ui.Engine.Status.Values)
             Summary = @(Get-TimelineSummaryLines -Rows $ui.Store.Rows.ToArray() -Status $ui.Engine.Status -Logs $ui.Selected)
+            # The picture's time: the dragged range, else the whole search window.
+            StartUtc = $span.StartUtc; EndUtc = $span.EndUtc
         }
     }
 

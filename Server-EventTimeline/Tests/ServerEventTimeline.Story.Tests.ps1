@@ -446,3 +446,71 @@ foreach (`$try in 1..3) { `$sw = [Diagnostics.Stopwatch]::StartNew(); [void](Get
         [int]$last | Should -BeLessThan 100
     }
 }
+
+Describe 'The picture in the HTML report' {
+    BeforeAll {
+        $script:R0 = [datetime]::SpecifyKind([datetime]'2026-11-18 22:45', [DateTimeKind]::Utc)
+        $script:R1 = [datetime]::SpecifyKind([datetime]'2026-11-18 23:05', [DateTimeKind]::Utc)
+        $script:ReportRows = Sort-Rows @(
+            (Disk153 '2026-11-18 17:50')
+            (New-TestRow -Time '2026-11-18 17:51' -Level 2 -Provider 'Ntfs' -Id 5)
+            (New-TestRow -Time '2026-11-18 17:58' -Level 2 -Provider 'Other' -Id 9)
+            (New-TestRow -Time '2026-11-18 18:04' -Provider 'Microsoft-Windows-Kernel-Power' -Id 41 -Level 1)
+            (New-TestRow -Server 'AD-03' -Time '2026-11-18 17:55' -Provider 'Microsoft-Windows-WindowsUpdateClient' -Id 19)
+        )
+        function New-SvgContext {
+            param([string[]]$Servers = @('AD-01', 'AD-03'), [switch]$NoWindow)
+            $c = @{ WindowText = 'w'; Servers = $Servers; Logs = @('System'); FiltersText = 'none'; GeneratedAt = [datetime]'2026-11-18 18:10'
+                Summary = @(); ServerOutcomes = @() }
+            if (-not $NoWindow) { $c.StartUtc = $script:R0; $c.EndUtc = $script:R1 }
+            $c
+        }
+    }
+
+    It 'has a title on every mark, dot, down bar and server name' {
+        $m = Get-TimelineStripModel -Rows $script:ReportRows -Servers @('AD-01', 'AD-03') -StartUtc $script:R0 -EndUtc $script:R1 -Width 900
+        $svg = ConvertTo-TimelineStripSvg -Model $m -Width 900
+        ([regex]::Matches($svg, '<title>')).Count | Should -Be (@($m.Marks).Count + @($m.Dots).Count + @($m.DownBars).Count + @($m.Lanes).Count)
+        $svg | Should -BeLike '<svg*'
+        $svg | Should -BeLike '*Disk I/O had to be retried*'
+        $svg | Should -BeLike '*server local time*'
+    }
+
+    It 'the report has the picture under a Timeline heading, before What happened' {
+        $html = ConvertTo-TimelineHtml -Rows $script:ReportRows -Context (New-SvgContext)
+        ([regex]::Matches($html, '<svg')).Count | Should -Be 1
+        $html.IndexOf('<h2>Timeline</h2>') | Should -BeGreaterThan 0
+        $html.IndexOf('<h2>Timeline</h2>') | Should -BeLessThan $html.IndexOf('<h2>What happened</h2>')
+    }
+
+    It 'the SVG encodes every piece of text' {
+        $row = Disk153 '2026-11-18 17:50' -Server 'a<b'
+        $html = ConvertTo-TimelineHtml -Rows @($row) -Context (New-SvgContext -Servers 'a<b')
+        $svgPart = $html.Substring($html.IndexOf('<svg'), $html.IndexOf('</svg>') - $html.IndexOf('<svg'))
+        $svgPart | Should -BeLike '*a&lt;b*'
+        $svgPart | Should -Not -BeLike '*a<b*'
+    }
+
+    It 'the report still has no script' {
+        $html = ConvertTo-TimelineHtml -Rows $script:ReportRows -Context (New-SvgContext)
+        $html | Should -Not -BeLike '*<script*'
+    }
+
+    It 'a report with no rows still renders' {
+        $html = ConvertTo-TimelineHtml -Rows @() -Context (New-SvgContext -NoWindow)
+        $html | Should -BeLike '*</html>'
+    }
+
+    It 'takes the time span from the rows when the caller gives none' {
+        $html = ConvertTo-TimelineHtml -Rows $script:ReportRows -Context (New-SvgContext -NoWindow)
+        $html | Should -BeLike '*<svg*'
+    }
+
+    It 'both report callers pass the time span' {
+        $src = Get-Content -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'Start-ServerEventTimeline.ps1') -Raw
+        $export = $src.Substring($src.IndexOf('function Get-ExportContext'), 1400)
+        $export | Should -Match 'StartUtc'
+        $console = $src.Substring($src.IndexOf('$context = @{'), 500)
+        $console | Should -Match 'StartUtc'
+    }
+}

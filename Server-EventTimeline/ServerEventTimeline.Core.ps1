@@ -407,7 +407,7 @@ h1{font-size:22px;margin:0 0 4px}h2{font-size:16px;margin:24px 0 8px;color:var(-
 th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
 th{color:var(--muted);font-weight:600}.l1,.l2{color:var(--err)}.l3{color:var(--warn)}
 .flag{color:var(--accent);font-weight:600}td.msg{white-space:pre-wrap;word-break:break-word}
-ul.story{list-style:none;padding:0;margin:0}ul.story li{padding:4px 0;border-bottom:1px solid var(--line)}ul.story li.gap{color:var(--muted);font-size:12px;padding-left:24px;border:none}.when{color:var(--muted)}
+svg.strip{display:block;background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:6px 0;max-width:1100px}ul.story{list-style:none;padding:0;margin:0}ul.story li{padding:4px 0;border-bottom:1px solid var(--line)}ul.story li.gap{color:var(--muted);font-size:12px;padding-left:24px;border:none}.when{color:var(--muted)}
 </style></head><body>
 <h1>Server Event Timeline</h1>
 '@)
@@ -420,6 +420,20 @@ ul.story{list-style:none;padding:0;margin:0}ul.story li{padding:4px 0;border-bot
         [void]$sb.Append('<h2>What was found</h2><ul>')
         foreach ($line in @($Context.Summary)) { [void]$sb.AppendFormat('<li>{0}</li>', (& $e $line)) }
         [void]$sb.Append('</ul>')
+    }
+    # The picture: each server's flagged events and errors over the search window (or, when
+    # the caller gives no window, the time the rows cover).
+    $start = $Context.StartUtc; $end = $Context.EndUtc
+    $all = @($Rows)
+    if (($null -eq $start -or $null -eq $end) -and $all.Count -gt 0) {
+        $times = @($all | ForEach-Object { [datetime]$_.TimeUtc } | Sort-Object)
+        $start = $times[0]; $end = $times[-1]
+        if ($end -le $start) { $start = $start.AddMinutes(-5); $end = $end.AddMinutes(5) }
+    }
+    if ($null -ne $start -and $null -ne $end -and @($Context.Servers).Count -gt 0) {
+        $model = Get-TimelineStripModel -Rows $all -Servers @($Context.Servers) -StartUtc $start -EndUtc $end -Width 900
+        [void]$sb.Append('<h2>Timeline</h2>')
+        [void]$sb.Append((ConvertTo-TimelineStripSvg -Model $model -Width 900))
     }
     # What happened, in order, from the same rows the report lists.
     [void]$sb.Append((ConvertTo-TimelineStoryHtml -Story (Get-TimelineStory -Rows $Rows)))

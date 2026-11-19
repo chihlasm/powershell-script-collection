@@ -519,3 +519,70 @@ function Get-TimelineStripWindow {
     }
     [PSCustomObject]@{ StartUtc = $start; EndUtc = $end }
 }
+
+function ConvertTo-TimelineStripSvg {
+    <#
+        The picture for the HTML report: the same lanes, symbols, error dots and down bars as
+        the window, as inline SVG with a <title> on each for the hover text. No script, so the
+        report stays self-contained. Every piece of text is HTML-encoded. Colours for lines
+        and labels come from the report's CSS variables, so light mode works.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Model, [Parameter(Mandatory)][double]$Width)
+    $e = { param($s) [System.Net.WebUtility]::HtmlEncode([string]$s) }
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $n = { param([double]$v) $v.ToString('0.#', $inv) }
+    $label = 118; $axis = 14; $lane = 22; $legendPx = 22
+    $lanes = @($Model.Lanes)
+    $plotH = $axis + [Math]::Max(1, $lanes.Count) * $lane + 6
+    $w = $label + $Width + 16
+    $h = $plotH + $legendPx
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendFormat('<svg class="strip" viewBox="0 0 {0} {1}" width="100%" role="img" aria-label="Timeline of the flagged events on each server" font-family="Segoe UI, sans-serif" font-size="11">', (& $n $w), (& $n $h))
+    foreach ($t in @($Model.Ticks)) {
+        $x = & $n ($label + $t.X)
+        [void]$sb.AppendFormat('<line x1="{0}" x2="{0}" y1="{1}" y2="{2}" stroke="var(--line)"/>', $x, ($axis - 2), ($plotH - 4))
+        [void]$sb.AppendFormat('<text x="{0}" y="10" fill="var(--muted)" font-size="10" text-anchor="middle">{1}</text>', $x, (& $e $t.Label))
+    }
+    foreach ($l in $lanes) {
+        $y = $axis + $l.Index * $lane + $lane / 2
+        $name = [string]$l.Server
+        $short = if ($name -match '^\d{1,3}(\.\d{1,3}){3}$') { $name } else { ($name -split '\.')[0] }
+        [void]$sb.AppendFormat('<text x="4" y="{0}" fill="var(--text)"><title>{1}</title>{2}</text>', (& $n ($y + 4)), (& $e $name), (& $e $short))
+        [void]$sb.AppendFormat('<line x1="{0}" x2="{1}" y1="{2}" y2="{2}" stroke="var(--line)"/>', $label, (& $n ($label + $Width)), (& $n $y))
+    }
+    foreach ($b in @($Model.DownBars)) {
+        $y = $axis + $b.Lane * $lane + $lane / 2 - 6
+        [void]$sb.AppendFormat('<rect x="{0}" y="{1}" width="{2}" height="12" rx="2" fill="#2A2F3A" stroke="#4A5160"><title>{3}</title></rect>',
+            (& $n ($label + $b.X1)), (& $n $y), (& $n ([Math]::Max(2, $b.X2 - $b.X1))), (& $e $b.Text))
+    }
+    foreach ($d in @($Model.Dots)) {
+        [void]$sb.AppendFormat('<circle cx="{0}" cy="{1}" r="2.5" fill="#E06C5A" opacity="{2}"><title>{3}</title></circle>',
+            (& $n ($label + $d.X)), (& $n ($axis + $d.Lane * $lane + $lane / 2)), (& $n $d.Opacity), (& $e (Get-TimelineStripToolTip -Item $d)))
+    }
+    foreach ($m in @($Model.Marks)) {
+        $cx = $label + $m.X; $cy = $axis + $m.Lane * $lane + $lane / 2
+        $tip = '<title>{0}</title>' -f (& $e (Get-TimelineStripToolTip -Item $m))
+        $c = $m.Color
+        $shape = switch ($m.Shape) {
+            'Triangle' { '<polygon points="{0},{1} {2},{3} {4},{3}" fill="{5}">{6}</polygon>' -f (& $n $cx), (& $n ($cy - 5)), (& $n ($cx + 5)), (& $n ($cy + 4)), (& $n ($cx - 5)), $c, $tip }
+            'Diamond' { '<polygon points="{0},{1} {2},{3} {0},{4} {5},{3}" fill="{6}">{7}</polygon>' -f (& $n $cx), (& $n ($cy - 5)), (& $n ($cx + 5)), (& $n $cy), (& $n ($cy + 5)), (& $n ($cx - 5)), $c, $tip }
+            'Square' { '<rect x="{0}" y="{1}" width="9" height="9" rx="1.5" fill="{2}">{3}</rect>' -f (& $n ($cx - 4.5)), (& $n ($cy - 4.5)), $c, $tip }
+            'Cross' { '<path d="M{0},{1} L{2},{3} M{2},{1} L{0},{3}" stroke="{4}" stroke-width="2.6" stroke-linecap="round" fill="none">{5}</path>' -f (& $n ($cx - 4.5)), (& $n ($cy - 4.5)), (& $n ($cx + 4.5)), (& $n ($cy + 4.5)), $c, $tip }
+            default { '<circle cx="{0}" cy="{1}" r="4" fill="{2}">{3}</circle>' -f (& $n $cx), (& $n $cy), $c, $tip }
+        }
+        [void]$sb.Append($shape)
+    }
+    # The legend, under the lanes.
+    $x = $label
+    $ly = $plotH + 14
+    foreach ($part in @(@('Disk', 'disk or low memory'), @('AppCrash', 'crash'), @('Update', 'update'), @('TimeJump', 'time change'), @('Restart', 'restart or other'))) {
+        $st = Get-TimelineCategoryStyle -Category $part[0]
+        [void]$sb.AppendFormat('<text x="{0}" y="{1}"><tspan fill="{2}">{3}</tspan><tspan fill="var(--muted)"> {4}</tspan></text>', (& $n $x), (& $n $ly), $st.Color, (& $e $st.Glyph), (& $e $part[1]))
+        $x += 18 + 6.2 * $part[1].Length + 14
+    }
+    $axisText = if ($Model.AxisIsUtc) { 'times in UTC (the servers are in different time zones)' } else { 'server local time' }
+    [void]$sb.AppendFormat('<text x="{0}" y="{1}"><tspan fill="#E06C5A">&#8226;</tspan><tspan fill="var(--muted)"> errors &#183; {2}</tspan></text>', (& $n $x), (& $n $ly), (& $e $axisText))
+    [void]$sb.Append('</svg>')
+    $sb.ToString()
+}
