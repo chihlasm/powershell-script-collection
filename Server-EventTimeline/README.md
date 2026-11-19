@@ -290,6 +290,9 @@ folder it couldn't create).
 - `ServerEventTimeline.ServerList.ps1`: the server list: AD suggestions, notes, IP lookups, file import
 - `ServerEventTimeline.AddServersDialog.ps1`: the "Add several servers" dialog
 - `ServerEventTimeline.Story.ps1`: "What happened" and the timeline picture's layout
+- `Build-TestZip.ps1`: builds `dist\Server-EventTimeline.zip` (repository root) to copy to a test
+  server: the scripts above and this README in a `Server-EventTimeline` folder, plus `BUILD.txt`
+  naming the commit. It never includes `Reports\` or the tests. Not needed on the server.
 - `CaseKit.ps1`: the shared ticket-note kit (an identical copy of `TicketNote\CaseKit.ps1`)
 - The save folder (default `Reports\` beside the script; see step 7): exports and an activity log,
   `ServerEventTimeline_yyyy-MM-dd_HHmmss.*`. These contain client data: don't commit or
