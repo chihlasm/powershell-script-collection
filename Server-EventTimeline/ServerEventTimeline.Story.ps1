@@ -262,3 +262,29 @@ function ConvertTo-TimelineStoryHtml {
     }
     $sb.ToString()
 }
+
+# One symbol and colour per flag category, shared by the story tab, the picture strip and
+# the report. Anything without its own (a restart, a category added later) is a grey circle,
+# so new flags still show up. Glyphs are built from code points to keep this file ASCII.
+$script:TimelineCategoryShapes = @{
+    Disk = 'Triangle'; LowMemory = 'Triangle'
+    AppCrash = 'Cross'; ServiceCrash = 'Cross'; Bugcheck = 'Cross'
+    Update = 'Square'; TimeJump = 'Diamond'
+}
+$script:TimelineShapeStyles = @{
+    Triangle = @{ Color = '#E0B43A'; Glyph = [string][char]0x25B2 }
+    Cross    = @{ Color = '#E06C5A'; Glyph = [string][char]0x2716 }
+    Square   = @{ Color = '#5DADE2'; Glyph = [string][char]0x25A0 }
+    Diamond  = @{ Color = '#B48EDB'; Glyph = [string][char]0x25C6 }
+    Circle   = @{ Color = '#8B94A3'; Glyph = [string][char]0x25CF }
+}
+
+function Get-TimelineCategoryStyle {
+    <# Shape ('Triangle'|'Cross'|'Square'|'Diamond'|'Circle'), Color ('#RRGGBB') and Glyph for a flag category. #>
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Category)
+    $shape = $script:TimelineCategoryShapes[$Category]
+    if (-not $shape) { $shape = 'Circle' }
+    $st = $script:TimelineShapeStyles[$shape]
+    [PSCustomObject]@{ Shape = $shape; Color = $st.Color; Glyph = $st.Glyph }
+}

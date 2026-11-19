@@ -264,6 +264,25 @@ function New-TimelineWindowXaml {
         </Setter.Value>
       </Setter>
     </Style>
+    <Style TargetType="TabControl">
+      <Setter Property="Background" Value="Transparent"/><Setter Property="BorderThickness" Value="0"/><Setter Property="Padding" Value="0"/>
+    </Style>
+    <Style TargetType="TabItem">
+      <Setter Property="Foreground" Value="{StaticResource Muted}"/><Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="TabItem">
+            <Border x:Name="b" BorderThickness="0,0,0,2" BorderBrush="Transparent" Background="Transparent" Padding="12,3,12,4">
+              <ContentPresenter ContentSource="Header"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsSelected" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="{StaticResource Accent}"/><Setter Property="Foreground" Value="{StaticResource Text}"/></Trigger>
+              <Trigger Property="IsMouseOver" Value="True"><Setter Property="Foreground" Value="{StaticResource Text}"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
     <Style TargetType="TextBox">
       <Setter Property="Background" Value="{StaticResource Input}"/><Setter Property="Foreground" Value="{StaticResource Text}"/>
       <Setter Property="BorderBrush" Value="{StaticResource LineStrong}"/><Setter Property="CaretBrush" Value="{StaticResource Text}"/>
@@ -544,7 +563,7 @@ function New-TimelineWindowXaml {
         <RowDefinition Height="Auto"/>
         <RowDefinition Height="*" MinHeight="120"/>
         <RowDefinition Height="6"/>
-        <RowDefinition Height="120" MinHeight="60"/>
+        <RowDefinition Height="150" MinHeight="90"/>
         <RowDefinition Height="Auto"/>
       </Grid.RowDefinitions>
 
@@ -620,10 +639,57 @@ function New-TimelineWindowXaml {
 
       <GridSplitter Grid.Row="2" HorizontalAlignment="Stretch" Background="{StaticResource Line}" Cursor="SizeNS" ToolTip="Drag to resize the event details"/>
 
-      <!-- Everything about the selected event -->
-      <TextBox x:Name="DetailText" Grid.Row="3" IsReadOnly="True" TextWrapping="Wrap" VerticalContentAlignment="Top"
-               VerticalScrollBarVisibility="Auto" FontFamily="Consolas" Background="{StaticResource Panel}"
-               Text="Select an event to see everything about it here."/>
+      <!-- Everything about the selected event, and what happened in order -->
+      <Grid Grid.Row="3">
+        <TabControl x:Name="DetailTabs">
+          <TabItem Header="Event details">
+            <TextBox x:Name="DetailText" IsReadOnly="True" TextWrapping="Wrap" VerticalContentAlignment="Top"
+                     VerticalScrollBarVisibility="Auto" FontFamily="Consolas" Background="{StaticResource Panel}"
+                     Text="Select an event to see everything about it here."/>
+          </TabItem>
+          <TabItem Header="What happened">
+            <Grid Background="{StaticResource Panel}">
+              <TextBlock x:Name="StoryEmptyText" Text="Search to see the important events here, in order." Foreground="{StaticResource Muted}" Margin="10,8" TextWrapping="Wrap"/>
+              <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <ItemsControl x:Name="StoryList" Margin="6,4">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                      <Grid>
+                        <Button x:Name="line" Tag="{Binding RowId}" Style="{StaticResource CardButton}" Margin="0,0,0,2" Padding="8,3" ToolTip="Show this event in the list">
+                          <Grid>
+                            <Grid.ColumnDefinitions>
+                              <ColumnDefinition Width="18"/>
+                              <ColumnDefinition Width="Auto"/>
+                              <ColumnDefinition Width="Auto"/>
+                              <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="{Binding Glyph}" Foreground="{Binding GlyphColor}" FontFamily="Segoe UI Symbol"/>
+                            <TextBlock Grid.Column="1" Text="{Binding TimeText}" Foreground="{StaticResource Muted}" Margin="0,0,8,0"/>
+                            <Border Grid.Column="2" Background="#232731" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="8" Padding="6,0" Margin="0,0,8,0" VerticalAlignment="Top">
+                              <TextBlock Text="{Binding Server}" FontSize="11"/>
+                            </Border>
+                            <StackPanel Grid.Column="3">
+                              <TextBlock Text="{Binding Text}" TextWrapping="Wrap"/>
+                              <TextBlock Text="{Binding Detail}" Foreground="{StaticResource Muted}" FontSize="11" TextWrapping="Wrap" Visibility="{Binding DetailVisibility}"/>
+                            </StackPanel>
+                          </Grid>
+                        </Button>
+                        <TextBlock x:Name="gap" Text="{Binding Text}" Foreground="{StaticResource Muted}" FontSize="11" Margin="34,1,0,3" Visibility="Collapsed"/>
+                      </Grid>
+                      <DataTemplate.Triggers>
+                        <DataTrigger Binding="{Binding Kind}" Value="Gap"><Setter TargetName="line" Property="Visibility" Value="Collapsed"/><Setter TargetName="gap" Property="Visibility" Value="Visible"/></DataTrigger>
+                        <DataTrigger Binding="{Binding Kind}" Value="More"><Setter TargetName="line" Property="Visibility" Value="Collapsed"/><Setter TargetName="gap" Property="Visibility" Value="Visible"/></DataTrigger>
+                      </DataTemplate.Triggers>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </ScrollViewer>
+            </Grid>
+          </TabItem>
+        </TabControl>
+        <Button x:Name="CopyStoryButton" Content="Copy for ticket" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0" Padding="8,1" IsEnabled="False"
+                ToolTip="Copy what happened, in order, to paste into the ticket"/>
+      </Grid>
 
       <!-- Get it into the ticket -->
       <StackPanel Grid.Row="4" Margin="0,10,0,0">
@@ -904,6 +970,103 @@ function Copy-TimelineRows {
     "Couldn't copy: another program is using the clipboard. Wait a moment and try again."
 }
 
+function Get-TimelineGridFilter {
+    <# The event list's filters as Select-TimelineRows takes them, read from the window's controls. #>
+    param([Parameter(Mandatory)][hashtable]$Ui)
+    @{
+        MinLevel      = if ($Ui.LevelFilter.SelectedItem) { [string]$Ui.LevelFilter.SelectedItem.Tag } else { 'All' }
+        Server        = if ($Ui.ServerFilter.SelectedItem) { [string]$Ui.ServerFilter.SelectedItem.Tag } else { '*' }
+        Log           = if ($Ui.LogFilter.SelectedItem) { [string]$Ui.LogFilter.SelectedItem.Tag } else { '*' }
+        FlaggedOnly   = [bool]$Ui.FlaggedOnlyCheck.IsChecked
+        Text          = $Ui.FilterText.Text
+        HiddenSources = $Ui.Hidden.ToArray()
+        EventKey      = $Ui.EventKey
+    }
+}
+
+function Set-TimelineStoryView {
+    <#
+        Fills the "What happened" tab. $null = no search yet; a story with no lines = nothing
+        flagged. Each line gets its symbol and colour (Get-TimelineCategoryStyle), the time and
+        the detail line only when there is one.
+    #>
+    param([Parameter(Mandatory)]$Window, $Story)
+    $list = $Window.FindName('StoryList')
+    $empty = $Window.FindName('StoryEmptyText')
+    $copy = $Window.FindName('CopyStoryButton')
+    $lines = if ($Story) { @($Story.Lines) } else { @() }
+    if ($lines.Count -eq 0) {
+        $list.ItemsSource = $null
+        $empty.Text = if ($Story) { 'Nothing the tool recognises happened in this window - check the errors in the list.' } else { 'Search to see the important events here, in order.' }
+        $empty.Visibility = 'Visible'
+        $copy.IsEnabled = $false
+        return
+    }
+    $events = @($lines | Where-Object { $_.Kind -eq 'Event' })
+    # Times show the date too when the story spans more than one day.
+    $days = @($events | ForEach-Object { ([datetime]$_.TimeServerLocal).Date } | Select-Object -Unique)
+    $format = if ($days.Count -gt 1) { 'MM-dd HH:mm' } else { 'HH:mm' }
+    $items = New-Object System.Collections.Generic.List[object]
+    foreach ($l in $lines) {
+        if ($l.Kind -ne 'Event') { $items.Add([PSCustomObject]@{ Kind = $l.Kind; Text = $l.Text; RowId = '' }); continue }
+        $style = Get-TimelineCategoryStyle -Category $l.Category
+        $items.Add([PSCustomObject]@{
+                Kind = 'Event'; Glyph = $style.Glyph; GlyphColor = $style.Color; TimeText = ([datetime]$l.TimeServerLocal).ToString($format)
+                Server = $l.Server; Text = $l.Text; Detail = $l.Detail; RowId = $l.RowId
+                DetailVisibility = $(if ($l.Detail) { 'Visible' } else { 'Collapsed' })
+            })
+    }
+    if ($Story.MoreCount -gt 0) {
+        $items.Add([PSCustomObject]@{ Kind = 'More'; Text = ('... and {0:N0} more flagged events - filter the list to see them' -f $Story.MoreCount); RowId = '' })
+    }
+    $list.ItemsSource = $items.ToArray()
+    $empty.Visibility = 'Collapsed'
+    $copy.IsEnabled = $true
+}
+
+function Show-TimelineStoryRow {
+    <#
+        Selects one row (by Get-TimelineRowId) in the event list and scrolls to it. When the
+        current filters hide it, they are cleared first and $Refresh rebuilds the list. Returns
+        $false when the row isn't in the search results any more.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Ui, [Parameter(Mandatory)][string]$RowId, [Parameter(Mandatory)][scriptblock]$Refresh)
+    $parts = $RowId -split '\|'
+    if ($parts.Count -lt 3) { return $false }
+    $server = ($parts[0..($parts.Count - 3)] -join '|'); $log = $parts[-2]; $record = $parts[-1]
+    $row = $null
+    # Inline compare, not a function call per row: the store can hold 100,000 rows.
+    foreach ($r in $Ui.Store.Rows) {
+        if ([string]$r.RecordId -eq $record -and [string]$r.Server -eq $server -and [string]$r.Log -eq $log) { $row = $r; break }
+    }
+    if (-not $row) { return $false }
+
+    if (@(Select-TimelineRows -Rows @($row) -Filter (Get-TimelineGridFilter -Ui $Ui)).Count -eq 0) {
+        foreach ($combo in @($Ui.LevelFilter, $Ui.ServerFilter, $Ui.LogFilter)) { if ($combo.Items.Count -gt 0) { $combo.SelectedIndex = 0 } }
+        $Ui.FlaggedOnlyCheck.IsChecked = $false
+        $Ui.FilterText.Text = ''
+        $Ui.Hidden.Clear()
+        $Ui.EventKey = ''
+        & $Refresh
+    }
+    # Flagged rows are never collapsed into repeats, so the row itself is in the list.
+    $Ui.EventGrid.SelectedItem = $row
+    $Ui.EventGrid.ScrollIntoView($row)
+    return $true
+}
+
+function Copy-TimelineStory {
+    <# Puts the story on the clipboard as ticket lines and returns the status line. Never throws. #>
+    param($Story)
+    $lines = if ($Story) { @(Format-TimelineStoryText -Story $Story) } else { @() }
+    if ($lines.Count -eq 0) { return 'Nothing to copy yet: run a search first.' }
+    $n = @($Story.Lines | Where-Object { $_.Kind -eq 'Event' }).Count
+    if (Copy-TicketNoteToClipboard -Text ($lines -join [Environment]::NewLine)) {
+        return ('Copied what happened ({0} {1}) - paste it into the ticket.' -f $n, $(if ($n -eq 1) { 'line' } else { 'lines' }))
+    }
+    "Couldn't copy: another program is using the clipboard. Wait a moment and try again."
+}
+
 function Register-TimelineErrorGuard {
     <#
         An exception inside a button or menu handler escapes the WPF dispatcher, ShowDialog
@@ -1001,7 +1164,7 @@ function Show-ServerEventTimeline {
         OutputPath = $OutputPath; LogFile = $null; Credential = $null; LogChecks = @(); ExitCode = 0
         Request = $null; Selected = @()
         Hidden = New-Object System.Collections.Generic.List[string]; EventKey = ''; VisibleRows = @(); InUpdate = $false
-        Restoring = $false; SummaryKey = ''
+        Restoring = $false; SummaryKey = ''; Story = $null
     }
     foreach ($name in 'SummaryBorder', 'SummaryList', 'CollapseCheck', 'HiddenNote', 'ShowAllButton', 'TotalCapBox', 'RecentButton', 'TicketNoteButton', 'LogsButton','LogsPopup', 'CoreLogPanel', 'LogsAllButton', 'LogsNoneButton', 'LogsDefaultButton',
         'SaveFolderBox', 'BrowseFolderButton', 'OpenFolderButton', 'ThisComputerButton', 'ServerInput', 'ServerInputHint', 'AddServerButton', 'ServerCountText', 'DomainText', 'ChangeDomainButton',
@@ -1009,7 +1172,7 @@ function Show-ServerEventTimeline {
         'Last24Button', 'LogPanel', 'SecurityCheck', 'AllLogsCheck', 'CapBox', 'TimeoutBox', 'RunAsButton',
         'SearchButton', 'CancelButton', 'InputError', 'BannerText', 'TimeZoneNote', 'LevelFilter', 'ServerFilter',
         'LogFilter', 'FlaggedOnlyCheck', 'FilterText', 'CountText', 'EventGrid', 'DetailText', 'ExportCsvButton', 'ExportHtmlButton',
-        'CopyButton', 'StatusMessage', 'SidebarColumn', 'SidebarPanel', 'SidebarStrip', 'SidebarSplitter', 'CollapseSidebarButton', 'ExpandSidebarButton', 'NotesList') {
+        'CopyButton', 'StatusMessage', 'DetailTabs', 'StoryList', 'StoryEmptyText', 'CopyStoryButton', 'SidebarColumn', 'SidebarPanel', 'SidebarStrip', 'SidebarSplitter', 'CollapseSidebarButton', 'ExpandSidebarButton', 'NotesList') {
         $ui[$name] = $window.FindName($name)
     }
 
@@ -1207,17 +1370,7 @@ function Show-ServerEventTimeline {
         $ui.TicketNoteButton.IsEnabled = [bool]($ui.Engine -and $ui.Finished)
     }
 
-    function Get-CurrentFilter {
-        @{
-            MinLevel    = [string]$ui.LevelFilter.SelectedItem.Tag
-            Server      = if ($ui.ServerFilter.SelectedItem) { [string]$ui.ServerFilter.SelectedItem.Tag } else { '*' }
-            Log         = if ($ui.LogFilter.SelectedItem) { [string]$ui.LogFilter.SelectedItem.Tag } else { '*' }
-            FlaggedOnly   = [bool]$ui.FlaggedOnlyCheck.IsChecked
-            Text          = $ui.FilterText.Text
-            HiddenSources = $ui.Hidden.ToArray()
-            EventKey      = $ui.EventKey
-        }
-    }
+    function Get-CurrentFilter { Get-TimelineGridFilter -Ui $ui }
 
     function Update-Summary {
         # The strip above the grid: what was found on each server, from every event read.
@@ -1233,6 +1386,9 @@ function Show-ServerEventTimeline {
         $ui.SummaryList.ItemsSource = @(Get-TimelineServerCards -Status $ui.Engine.Status -SummaryLines $lines)
         $ui.NotesList.ItemsSource = @(Get-TimelineServerNotes -Status $ui.Engine.Status -SummaryLines $lines)
         $ui.SummaryBorder.Visibility = 'Visible'
+        # What happened, in order, from every event read (same "rows arrived" trigger).
+        $ui.Story = Get-TimelineStory -Rows $ui.Store.Rows.ToArray()
+        Set-TimelineStoryView -Window $window -Story $ui.Story
     }
 
     function Update-HiddenNote {
@@ -1318,6 +1474,8 @@ function Show-ServerEventTimeline {
 
         $ui.Store = New-TimelineRowStore; $ui.PendingRows.Clear(); $ui.Reported = @{}; $ui.Request = $req; $ui.Selected = $logs; $ui.SummaryKey = ''
         $ui.DetailText.Text = 'Select an event to see everything about it here.'
+        $ui.Story = $null
+        Set-TimelineStoryView -Window $window -Story $null
         $ui.Finished = $false
         $ui.Engine = Invoke-TimelineSearch -Request $req -Logs $logs -AllLogs ([bool]$ui.AllLogsCheck.IsChecked) -Credential $ui.Credential
         if (-not $ui.Smoke) {
@@ -1758,6 +1916,14 @@ function Show-ServerEventTimeline {
 
     $ui.ExportCsvButton.add_Click({ Invoke-Export -Kind Csv })
     $ui.ExportHtmlButton.add_Click({ Invoke-Export -Kind Html })
+    # A story line: select its event in the list (clearing filters that hide it).
+    $ui.StoryList.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, [System.Windows.RoutedEventHandler] {
+            param($sender, $e)
+            $id = [string]$e.OriginalSource.Tag
+            if (-not $id) { return }
+            if (-not (Show-TimelineStoryRow -Ui $ui -RowId $id -Refresh { Update-View })) { Set-StatusMessage 'That event is no longer in the list.' }
+        })
+    $ui.CopyStoryButton.add_Click({ Set-StatusMessage (Copy-TimelineStory -Story $ui.Story) })
     $ui.CopyButton.add_Click({
             if ($ui.Smoke) { [void]$ui.SmokeFailures.Add('the clipboard would have been changed'); return }
             Set-StatusMessage (Copy-TimelineRows -Rows @($ui.EventGrid.SelectedItems))

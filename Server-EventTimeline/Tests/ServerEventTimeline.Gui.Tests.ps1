@@ -497,3 +497,114 @@ Describe 'Choosing the domain for suggestions' {
         Invoke-DomainPrompt -Current '' -Press 'OkButton' -Type '  dc01.client.local ' | Should -Be 'dc01.client.local'
     }
 }
+
+Describe 'The What happened tab' {
+    BeforeAll {
+        $script:StRec = 0
+        function New-StoryTestRow {
+            param([string]$Server = 'AD-01', [string]$Time, [string]$Provider = 'Service Control Manager', [int]$Id = 7036, [int]$Level = 4, [string]$Log = 'System')
+            $script:StRec++
+            $e = [PSCustomObject]@{ TimeCreatedUtc = [datetime]::SpecifyKind([datetime]$Time, [DateTimeKind]::Utc); Id = $Id; ProviderName = $Provider
+                Level = $Level; LogName = $Log; Message = "event $script:StRec"; RecordId = $script:StRec; UserSid = ''; MachineName = $Server }
+            ConvertTo-TimelineRow -Server $Server -EventRecord $e -UtcOffsetMinutes 0
+        }
+        function New-StoryTestUi {
+            # The controls the story click touches, from the real XAML, with the filters filled
+            # the way the window fills them.
+            param([object[]]$Rows)
+            $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
+            $ui = @{ Window = $w; Store = (New-TimelineRowStore); Hidden = (New-Object System.Collections.Generic.List[string]); EventKey = '' }
+            foreach ($n in 'LevelFilter', 'ServerFilter', 'LogFilter', 'FlaggedOnlyCheck', 'FilterText', 'EventGrid', 'CollapseCheck') { $ui[$n] = $w.FindName($n) }
+            foreach ($pair in @(@($ui.LevelFilter, @('All', 'Warning', 'Error', 'Critical')), @($ui.ServerFilter, @('*', 'AD-01', 'AD-03')), @($ui.LogFilter, @('*', 'System', 'Application')))) {
+                foreach ($tag in $pair[1]) { $i = New-Object System.Windows.Controls.ComboBoxItem; $i.Content = $tag; $i.Tag = $tag; [void]$pair[0].Items.Add($i) }
+                $pair[0].SelectedIndex = 0
+            }
+            if (@($Rows).Count -gt 0) { Add-TimelineRows -Store $ui.Store -NewRows $Rows }
+            $ui
+        }
+        $script:Refresh = { param($Ui) $Ui.EventGrid.ItemsSource = @(Select-TimelineRows -Rows $Ui.Store.Rows.ToArray() -Filter (Get-TimelineGridFilter -Ui $Ui)) }
+    }
+
+    It 'has the two detail tabs, the story list and Copy for ticket' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
+        foreach ($n in 'DetailTabs', 'DetailText', 'StoryList', 'StoryEmptyText', 'CopyStoryButton') { $w.FindName($n) | Should -Not -BeNullOrEmpty -Because "control $n" }
+        @($w.FindName('DetailTabs').Items | ForEach-Object Header) | Should -Be @('Event details', 'What happened')
+        $w.FindName('CopyStoryButton').Content | Should -Be 'Copy for ticket'
+    }
+
+    It 'shows the waiting text before any search' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
+        $w.FindName('StoryEmptyText').Text | Should -Be 'Search to see the important events here, in order.'
+        Set-TimelineStoryView -Window $w -Story $null
+        $w.FindName('StoryEmptyText').Text | Should -Be 'Search to see the important events here, in order.'
+        $w.FindName('CopyStoryButton').IsEnabled | Should -BeFalse
+    }
+
+    It 'shows the nothing-recognised text when no row is flagged' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
+        Set-TimelineStoryView -Window $w -Story (Get-TimelineStory -Rows @(New-StoryTestRow -Time '2026-11-18 17:00'))
+        $w.FindName('StoryEmptyText').Text | Should -Be 'Nothing the tool recognises happened in this window - check the errors in the list.'
+        $w.FindName('StoryEmptyText').Visibility | Should -Be 'Visible'
+    }
+
+    It 'fills the story from the rows' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
+        $rows = @((New-StoryTestRow -Time '2026-11-18 17:00' -Provider 'Disk' -Id 153 -Level 3), (New-StoryTestRow -Time '2026-11-18 17:30' -Provider 'Microsoft-Windows-WindowsUpdateClient' -Id 19))
+        Set-TimelineStoryView -Window $w -Story (Get-TimelineStory -Rows $rows)
+        @($w.FindName('StoryList').ItemsSource).Count | Should -Be 3
+        $w.FindName('StoryEmptyText').Visibility | Should -Be 'Collapsed'
+        $w.FindName('CopyStoryButton').IsEnabled | Should -BeTrue
+    }
+
+    It 'refreshes the story with the summary, and resets it for a new search' {
+        $src = Get-Content -LiteralPath $script:AppPath -Raw
+        $summary = $src.Substring($src.IndexOf('function Update-Summary'), 1800)
+        $summary | Should -Match 'Set-TimelineStoryView'
+        $start = $src.Substring($src.IndexOf('function Start-Search'), 1500)
+        $start | Should -Match 'Set-TimelineStoryView -Window \$window -Story \$null'
+    }
+
+    It "selects the clicked line's row, clearing filters that hide it" -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $update = New-StoryTestRow -Time '2026-11-18 17:30' -Provider 'Microsoft-Windows-WindowsUpdateClient' -Id 19
+        $ui = New-StoryTestUi -Rows @((New-StoryTestRow -Time '2026-11-18 17:00' -Level 2 -Provider 'Ntfs' -Id 5), $update)
+        $ui.LevelFilter.SelectedIndex = 2      # Errors and worse: hides the Information update
+        $ui.EventKey = 'Ntfs|5'
+        $ui.Hidden.Add('Microsoft-Windows-WindowsUpdateClient')
+        & $script:Refresh $ui
+        @($ui.EventGrid.ItemsSource) -contains $update | Should -BeFalse
+
+        Show-TimelineStoryRow -Ui $ui -RowId (Get-TimelineRowId -Row $update) -Refresh { & $script:Refresh $ui } | Should -BeTrue
+        $ui.EventKey | Should -Be ''
+        $ui.Hidden.Count | Should -Be 0
+        [string]$ui.LevelFilter.SelectedItem.Tag | Should -Be 'All'
+        $ui.EventGrid.SelectedItem | Should -Be $update
+    }
+
+    It 'leaves the filters alone when the row is already shown' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $update = New-StoryTestRow -Time '2026-11-18 17:30' -Provider 'Microsoft-Windows-WindowsUpdateClient' -Id 19
+        $ui = New-StoryTestUi -Rows @($update)
+        $ui.ServerFilter.SelectedIndex = 1
+        & $script:Refresh $ui
+        Show-TimelineStoryRow -Ui $ui -RowId (Get-TimelineRowId -Row $update) -Refresh { & $script:Refresh $ui } | Should -BeTrue
+        [string]$ui.ServerFilter.SelectedItem.Tag | Should -Be 'AD-01'
+        $ui.EventGrid.SelectedItem | Should -Be $update
+    }
+
+    It 'says so when the row is no longer there' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $ui = New-StoryTestUi -Rows @()
+        Show-TimelineStoryRow -Ui $ui -RowId 'AD-09|System|1' -Refresh { } | Should -BeFalse
+    }
+
+    It 'Copy for ticket copies the story lines' {
+        Mock Copy-TicketNoteToClipboard { $true }
+        $story = Get-TimelineStory -Rows @(New-StoryTestRow -Time '2026-11-18 17:30' -Provider 'Microsoft-Windows-WindowsUpdateClient' -Id 19)
+        Copy-TimelineStory -Story $story | Should -Be 'Copied what happened (1 line) - paste it into the ticket.'
+        Should -Invoke Copy-TicketNoteToClipboard -Times 1 -ParameterFilter { $Text -like '*AD-01 2026-11-18 17:30 (server local): Windows Update installed an update*' }
+    }
+
+    It 'Copy for ticket says so instead of failing when the clipboard is busy' {
+        Mock Copy-TicketNoteToClipboard { $false }
+        $story = Get-TimelineStory -Rows @(New-StoryTestRow -Time '2026-11-18 17:30' -Provider 'Microsoft-Windows-WindowsUpdateClient' -Id 19)
+        Copy-TimelineStory -Story $story | Should -BeLike "Couldn't copy*clipboard*try again*"
+    }
+}
