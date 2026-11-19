@@ -68,6 +68,12 @@ Describe 'Build-TestZip.ps1 on Windows PowerShell 5.1' {
         $log = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:BuildScript -OutputPath $out 2>&1 | ForEach-Object { "$_" })
         $LASTEXITCODE | Should -Be 0 -Because ($log -join "`n")
         Test-Path -LiteralPath (Join-Path $out 'Server-EventTimeline.zip') | Should -BeTrue
+        # .NET Framework (5.1) writes backslashes from CreateFromDirectory; the zip format wants '/'.
+        $zip = [System.IO.Compression.ZipFile]::OpenRead((Join-Path $out 'Server-EventTimeline.zip'))
+        try { $names = @($zip.Entries | ForEach-Object FullName) } finally { $zip.Dispose() }
+        $names.Count | Should -Be 9
+        @($names | Where-Object { $_ -like '*\*' }).Count | Should -Be 0
+        $names | Should -Contain 'Server-EventTimeline/BUILD.txt'
     }
 
     It 'works out its default folder in the script body: $PSScriptRoot is empty in 5.1 parameter defaults' {

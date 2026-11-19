@@ -31,8 +31,12 @@
     which ships with Windows PowerShell 5.1.
 
     REFERENCES
-    - ZipFile.CreateFromDirectory:
-      https://learn.microsoft.com/dotnet/api/system.io.compression.zipfile.createfromdirectory
+    - Entry names use '/': .NET Framework apps targeting versions before 4.6.1 (Windows
+      PowerShell 5.1) write '' from ZipFile.CreateFromDirectory, against section 4.4.17.1 of
+      the zip format:
+      https://learn.microsoft.com/dotnet/framework/migration-guide/mitigation-ziparchiveentry-fullname-path-separator
+    - ZipFileExtensions.CreateEntryFromFile:
+      https://learn.microsoft.com/dotnet/api/system.io.compression.zipfileextensions.createentryfromfile
 #>
 [CmdletBinding()]
 param(
@@ -84,8 +88,18 @@ try {
     if (-not (Test-Path -LiteralPath $OutputPath)) { New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null }
     $zip = Join-Path (Resolve-Path -LiteralPath $OutputPath).ProviderPath 'Server-EventTimeline.zip'
     if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    [System.IO.Compression.ZipFile]::CreateFromDirectory($folder, $zip, [System.IO.Compression.CompressionLevel]::Optimal, $true)
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+    # Each entry named with '/' ourselves: CreateFromDirectory on .NET Framework (Windows
+    # PowerShell 5.1) writes '', which the zip format doesn't allow and non-Windows unzip
+    # tools turn into odd flat file names.
+    $archive = [System.IO.Compression.ZipFile]::Open($zip, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        foreach ($item in Get-ChildItem -LiteralPath $folder -File) {
+            [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $item.FullName,
+                ('Server-EventTimeline/' + $item.Name), [System.IO.Compression.CompressionLevel]::Optimal)
+        }
+    }
+    finally { $archive.Dispose() }
     Write-Host "[PASS] Built $zip (commit $commit$note)" -ForegroundColor Green
     $zip
 }
