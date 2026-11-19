@@ -778,3 +778,23 @@ Describe 'The picture strip in the window' {
         Test-TimelineStripDue -Clock ([PSCustomObject]@{ IsRunning = $false; Elapsed = [TimeSpan]::Zero }) -Finished $false | Should -BeTrue
     }
 }
+
+Describe 'Error dots in the window' {
+    It 'each dot has a hover and click area much bigger than the dot, carrying its first error' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $e = [PSCustomObject]@{ TimeCreatedUtc = [datetime]::SpecifyKind([datetime]'2026-11-18 17:50', [DateTimeKind]::Utc); Id = 5; ProviderName = 'Ntfs'
+            Level = 2; LogName = 'System'; Message = 'x'; RecordId = 77; UserSid = ''; MachineName = 'AD-01' }
+        $row = ConvertTo-TimelineRow -Server 'AD-01' -EventRecord $e -UtcOffsetMinutes 0
+        $m = Get-TimelineStripModel -Rows @($row) -Servers @('AD-01') -StartUtc ([datetime]'2026-11-18 17:45') -EndUtc ([datetime]'2026-11-18 18:05') -Width 700
+        $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
+        Show-TimelineStrip -Window $w -Model $m -Width 700
+        $dot = @($w.FindName('StripCanvas').Children | Where-Object Uid -eq 'dot')[0]
+        $dot.Width | Should -BeGreaterOrEqual 14
+        $dot.Tag | Should -Be 'AD-01|System|77'
+        $dot.Cursor | Should -Be ([System.Windows.Input.Cursors]::Hand)
+    }
+
+    It 'a click on a dot selects its event, like a click on a symbol' {
+        $src = Get-Content -LiteralPath $script:AppPath -Raw
+        $src | Should -Match '\.Source\.Uid -in @\(.mark., .dot.\)'
+    }
+}

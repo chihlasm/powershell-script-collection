@@ -423,7 +423,7 @@ function Get-TimelineStripModel {
             $d = $dotAt[$key]
             if ($d) { $d.Count++ }
             else {
-                $d = @{ Lane = $lane; X = $slice * $dotPx + $dotPx / 2; Count = 1; Server = $r.Server; Local = $r.TimeServerLocal }
+                $d = @{ Lane = $lane; X = $slice * $dotPx + $dotPx / 2; Count = 1; Server = $r.Server; Local = $r.TimeServerLocal; First = $r }
                 $dotAt[$key] = $d; $dotList.Add($d)
             }
             continue
@@ -472,7 +472,12 @@ function Get-TimelineStripModel {
         $m.Color = $styles[$m.Shape].Color
         $m.RowId = [string]$r.Server + '|' + [string]$r.Log + '|' + [string]$r.RecordId
     }
-    foreach ($d in $dotList) { $d.Opacity = [Math]::Round(0.35 + 0.65 * [Math]::Min(1.0, ($d.Count - 1) / 19.0), 2) }
+    foreach ($d in $dotList) {
+        $d.Opacity = [Math]::Round(0.35 + 0.65 * [Math]::Min(1.0, ($d.Count - 1) / 19.0), 2)
+        # A click on a dot shows the first error at that spot.
+        $f = $d.First
+        $d.RowId = [string]$f.Server + '|' + [string]$f.Log + '|' + [string]$f.RecordId
+    }
     $marks = $markList.ToArray()
     $dots = $dotList.ToArray()
 
@@ -547,7 +552,7 @@ function Get-TimelineStripToolTip {
         return ('{0}{1}{2} {3:yyyy-MM-dd HH:mm:ss} (server local){1}{4} {5}' -f $label, [Environment]::NewLine, $r.Server, [datetime]$r.TimeServerLocal, $r.Provider, $r.EventId)
     }
     $noun = if ($Item.Count -eq 1) { 'error' } else { 'errors' }
-    '{0} {1} on {2} around {3:HH:mm} (server local)' -f $Item.Count, $noun, $Item.Server, [datetime]$Item.Local
+    '{0} {1} on {2} around {3:HH:mm} (server local) - click to show the first one' -f $Item.Count, $noun, $Item.Server, [datetime]$Item.Local
 }
 
 function Get-TimelineStripWindow {

@@ -610,3 +610,12 @@ foreach (`$try in 1..3) { `$sw = [Diagnostics.Stopwatch]::StartNew(); [void](Get
         $strip | Should -Match '-UtcOffsets \(Get-TimelineServerOffsets -Status \$ui\.Engine\.Status\)'
     }
 }
+
+Describe 'Error dots are easy to hover and click' {
+    It 'a dot remembers the first error at its spot, and says a click shows it' {
+        $rows = @((New-TestRow -Time '2026-11-18 17:50:00' -Level 2 -Provider 'Ntfs' -Id 5), (New-TestRow -Time '2026-11-18 17:50:01' -Level 2 -Provider 'Ntfs' -Id 5))
+        $m = Get-TimelineStripModel -Rows $rows -Servers @('AD-01') -StartUtc ([datetime]'2026-11-18 22:45') -EndUtc ([datetime]'2026-11-18 23:05') -Width 800
+        $m.Dots[0].RowId | Should -Be (Get-TimelineRowId -Row $rows[0])
+        (Get-TimelineStripToolTip -Item $m.Dots[0]) | Should -BeLike '*click to show the first one*'
+    }
+}

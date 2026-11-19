@@ -1267,9 +1267,14 @@ function Show-TimelineStrip {
     $red = Get-TimelineStripBrush '#E06C5A'
     foreach ($d in @($Model.Dots)) {
         $e = [System.Windows.Shapes.Ellipse]::new()
-        $e.Uid = 'dot'; $e.Width = 5; $e.Height = 5; $e.Fill = $red; $e.Opacity = $d.Opacity
+        # A 5 px dot was too small to hover: the dot is drawn 5 px wide (WPF fills inside half
+        # the stroke, so 14 - 9) inside a clear 14 px
+        # ring that still takes the mouse (a Transparent brush is hit-testable, null isn't).
+        $e.Uid = 'dot'; $e.Width = 14; $e.Height = 14; $e.Fill = $red; $e.Opacity = $d.Opacity
+        $e.Stroke = [System.Windows.Media.Brushes]::Transparent; $e.StrokeThickness = 9
+        $e.Tag = $d.RowId; $e.Cursor = [System.Windows.Input.Cursors]::Hand
         $e.DataContext = $d; $e.ToolTip = ' '; $e.add_ToolTipOpening($script:StripToolTipHandler)
-        & $add $e ($x0 + $d.X - 2.5) ($top + $d.Lane * $lanePx + $lanePx / 2 - 2.5)
+        & $add $e ($x0 + $d.X - 7) ($top + $d.Lane * $lanePx + $lanePx / 2 - 7)
     }
     foreach ($m in @($Model.Marks)) {
         $brush = Get-TimelineStripBrush $m.Color
@@ -2246,7 +2251,7 @@ function Show-ServerEventTimeline {
                 return
             }
             $id = [string]$d.Source.Tag
-            if ($d.Source.Uid -eq 'mark' -and $id) {
+            if ($d.Source.Uid -in @('mark', 'dot') -and $id) {
                 if (-not (Show-TimelineStoryRow -Ui $ui -RowId $id -Refresh { Update-View })) { Set-StatusMessage 'That event is no longer in the list.' }
             }
         })
