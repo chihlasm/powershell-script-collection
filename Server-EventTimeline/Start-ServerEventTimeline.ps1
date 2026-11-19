@@ -41,8 +41,10 @@
     red dots for errors the tool doesn't recognise, and a grey bar for the quiet stretch before
     an unexpected restart. Hover for what it was, click to select it, drag across to see only
     that stretch of time (double-click to see all of it), or Hide picture. The What happened
-    tab beside the event details tells the story in plain English, in order, with repeats and
-    restarts folded into one line each; Copy for ticket copies it. The ticket summary and the
+    tab beside the Events tab tells the story in plain English, in order, with repeats and
+    restarts folded into one line each; Copy for ticket copies it. When a search finishes and
+    something stood out, What happened opens on its own - unless you clicked into or scrolled
+    the results while it ran. The ticket summary and the
     HTML report carry the same story, and the report has the picture.
 
     Servers go in a list, one row each, with a note beside it (domain controller, the OS, not
@@ -673,8 +675,16 @@ function New-TimelineWindowXaml {
         </DockPanel>
       </Border>
 
-      <!-- The timeline -->
-      <DataGrid x:Name="EventGrid" Grid.Row="2" AutoGenerateColumns="False" IsReadOnly="True" EnableRowVirtualization="True"
+      <!-- Events and What happened: two big tabs (Set-TimelineMainTab) -->
+      <Grid Grid.Row="2">
+      <TabControl x:Name="MainTabs">
+        <TabControl.Resources>
+          <Style TargetType="TabItem" BasedOn="{StaticResource {x:Type TabItem}}">
+            <Setter Property="FontSize" Value="13"/><Setter Property="FontWeight" Value="SemiBold"/>
+          </Style>
+        </TabControl.Resources>
+        <TabItem x:Name="EventsTab" Header="Events" IsSelected="True" ToolTip="Every event read, with filters above">
+      <DataGrid x:Name="EventGrid" AutoGenerateColumns="False" IsReadOnly="True" EnableRowVirtualization="True"
                 EnableColumnVirtualization="True" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
                 SelectionMode="Extended" SelectionUnit="FullRow" HeadersVisibility="Column" CanUserAddRows="False"
                 Background="{StaticResource Panel}" RowBackground="{StaticResource Panel}" AlternatingRowBackground="#14171C"
@@ -725,26 +735,33 @@ function New-TimelineWindowXaml {
           <DataGridTextColumn Header="Message" Binding="{Binding MessageFirstLine}" Width="*" MinWidth="180"/>
         </DataGrid.Columns>
       </DataGrid>
-
-      <GridSplitter Grid.Row="3" HorizontalAlignment="Stretch" Background="{StaticResource Line}" Cursor="SizeNS" ToolTip="Drag to resize the event details"/>
-
-      <!-- Everything about the selected event, and what happened in order -->
-      <Grid Grid.Row="4">
-        <TabControl x:Name="DetailTabs">
-          <TabItem Header="Event details">
-            <TextBox x:Name="DetailText" IsReadOnly="True" TextWrapping="Wrap" VerticalContentAlignment="Top"
-                     VerticalScrollBarVisibility="Auto" FontFamily="Consolas" Background="{StaticResource Panel}"
-                     Text="Select an event to see everything about it here."/>
-          </TabItem>
-          <TabItem Header="What happened">
-            <Grid Background="{StaticResource Panel}">
-              <TextBlock x:Name="StoryEmptyText" Text="Search to see the important events here, in order." Foreground="{StaticResource Muted}" Margin="10,8" TextWrapping="Wrap"/>
+        </TabItem>
+        <TabItem x:Name="StoryTab" ToolTip="The events that stood out, in order, in plain English">
+          <TabItem.Header>
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Text="What happened"/>
+              <Border x:Name="StoryBadge" Background="#2A7AB0" CornerRadius="8" Padding="6,0" Margin="6,0,0,0" VerticalAlignment="Center" Visibility="Collapsed">
+                <TextBlock x:Name="StoryCountText" Foreground="White" FontSize="11" FontWeight="SemiBold"/>
+              </Border>
+            </StackPanel>
+          </TabItem.Header>
+          <DockPanel Background="{StaticResource Panel}">
+            <!-- Only when the window opened this tab on its own after a search -->
+            <Border x:Name="StoryBanner" DockPanel.Dock="Top" Background="#1D3A50" BorderBrush="{StaticResource Accent}" BorderThickness="0,0,0,1" Padding="12,7" Visibility="Collapsed">
+              <DockPanel>
+                <Button x:Name="StoryBannerEventsButton" DockPanel.Dock="Right" Content="Show all events" Padding="10,2" Margin="8,0,0,0" ToolTip="Go to the Events tab"/>
+                <TextBlock x:Name="StoryBannerText" VerticalAlignment="Center" TextWrapping="Wrap"
+                           Text="Search finished. These are the events that stood out, in order. Click one to see it in the list."/>
+              </DockPanel>
+            </Border>
+            <Grid>
+              <TextBlock x:Name="StoryEmptyText" Text="Search to see the important events here, in order." Foreground="{StaticResource Muted}" Margin="12,10" TextWrapping="Wrap"/>
               <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                <ItemsControl x:Name="StoryList" Margin="6,4">
+                <ItemsControl x:Name="StoryList" Margin="10,8" FontSize="13">
                   <ItemsControl.ItemTemplate>
                     <DataTemplate>
                       <Grid>
-                        <Button x:Name="line" Tag="{Binding RowId}" Style="{StaticResource CardButton}" Margin="0,0,0,2" Padding="8,3" ToolTip="Show this event in the list">
+                        <Button x:Name="line" Tag="{Binding RowId}" Style="{StaticResource CardButton}" Margin="0,0,0,4" Padding="10,6" ToolTip="Show this event in the list">
                           <Grid>
                             <Grid.ColumnDefinitions>
                               <ColumnDefinition Width="18"/>
@@ -774,10 +791,24 @@ function New-TimelineWindowXaml {
                 </ItemsControl>
               </ScrollViewer>
             </Grid>
+          </DockPanel>
+        </TabItem>
+      </TabControl>
+        <Button x:Name="CopyStoryButton" Content="Copy for ticket" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,2,0,0" Padding="10,3" IsEnabled="False"
+                Visibility="Collapsed" ToolTip="Copy what happened, in order, to paste into the ticket"/>
+      </Grid>
+
+      <GridSplitter x:Name="DetailSplitter" Grid.Row="3" HorizontalAlignment="Stretch" Background="{StaticResource Line}" Cursor="SizeNS" ToolTip="Drag to resize the event details"/>
+
+      <!-- Everything about the selected event (folds away on the What happened tab) -->
+      <Grid x:Name="DetailArea" Grid.Row="4">
+        <TabControl x:Name="DetailTabs">
+          <TabItem Header="Event details">
+            <TextBox x:Name="DetailText" IsReadOnly="True" TextWrapping="Wrap" VerticalContentAlignment="Top"
+                     VerticalScrollBarVisibility="Auto" FontFamily="Consolas" Background="{StaticResource Panel}"
+                     Text="Select an event to see everything about it here."/>
           </TabItem>
         </TabControl>
-        <Button x:Name="CopyStoryButton" Content="Copy for ticket" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0" Padding="8,1" IsEnabled="False"
-                ToolTip="Copy what happened, in order, to paste into the ticket"/>
       </Grid>
 
       <!-- Get it into the ticket -->
@@ -1078,6 +1109,65 @@ function Get-TimelineGridFilter {
     }
 }
 
+function Set-TimelineMainTab {
+    <#
+        Opens the Events or the What happened tab. On What happened the event details pane folds
+        away so the story gets the whole height; back on Events it returns at the size it had.
+        -Banner says the window opened the story on its own (only after a search, see
+        Test-TimelineStoryAutoShow). Copy for ticket shows only beside the story.
+    #>
+    param([Parameter(Mandatory)]$Window, [Parameter(Mandatory)][ValidateSet('Events', 'Story')][string]$Tab, [switch]$Banner)
+    $tabs = $Window.FindName('MainTabs')
+    $target = $Window.FindName($Tab + 'Tab')
+    if ($tabs.SelectedItem -ne $target) { $tabs.SelectedItem = $target }
+    $story = $Tab -eq 'Story'
+    $area = $Window.FindName('DetailArea')
+    $row = $area.Parent.RowDefinitions[4]
+    if ($story -and $area.Visibility -eq 'Visible') {
+        $area.Tag = $row.Height
+        $area.Visibility = 'Collapsed'
+        $Window.FindName('DetailSplitter').Visibility = 'Collapsed'
+        $row.MinHeight = 0
+        $row.Height = New-Object System.Windows.GridLength 0
+    }
+    elseif (-not $story -and $area.Visibility -ne 'Visible') {
+        $row.Height = if ($area.Tag -is [System.Windows.GridLength]) { $area.Tag } else { New-Object System.Windows.GridLength 150 }
+        $row.MinHeight = 90
+        $area.Visibility = 'Visible'
+        $Window.FindName('DetailSplitter').Visibility = 'Visible'
+    }
+    $Window.FindName('CopyStoryButton').Visibility = if ($story) { 'Visible' } else { 'Collapsed' }
+    if (-not $story) { $Window.FindName('StoryBanner').Visibility = 'Collapsed' }
+    elseif ($Banner) { $Window.FindName('StoryBanner').Visibility = 'Visible' }
+}
+
+function Test-TimelineStoryAutoShow {
+    <#
+        After a search: open What happened on its own only when something stood out, the search
+        wasn't cancelled, and nobody clicked into or scrolled the results while it ran - a
+        helpdesk tech gets the verdict first, a sysadmin already reading rows isn't pulled away.
+    #>
+    param([int]$StoryCount, [bool]$Touched, [bool]$Cancelled)
+    $StoryCount -gt 0 -and -not $Touched -and -not $Cancelled
+}
+
+function Get-TimelineFinishMessage {
+    <# The status line when a search finishes: how many events, and where to look. #>
+    param([int]$EventCount, [int]$StoryCount, [bool]$Shown)
+    $done = 'Finished: {0:N0} events.' -f $EventCount
+    if ($StoryCount -le 0) { return $done }
+    # Short: the banner on the tab already says where every event is.
+    if ($Shown) { return ('{0} Showing the {1} that stood out.' -f $done, $StoryCount) }
+    '{0} {1} stood out - see What happened.' -f $done, $StoryCount
+}
+
+function Get-TimelineStoryCount {
+    <# How many things stood out: the story's event lines plus the ones past its line limit. #>
+    param($Story)
+    if (-not $Story) { return 0 }
+    @($Story.Lines | Where-Object { $_.Kind -eq 'Event' }).Count + [int]$Story.MoreCount
+}
+
 function Set-TimelineStoryView {
     <#
         Fills the "What happened" tab. $null = no search yet; a story with no lines = nothing
@@ -1088,6 +1178,10 @@ function Set-TimelineStoryView {
     $list = $Window.FindName('StoryList')
     $empty = $Window.FindName('StoryEmptyText')
     $copy = $Window.FindName('CopyStoryButton')
+    # The count on the tab, so it's clear there's something to read there.
+    $count = Get-TimelineStoryCount -Story $Story
+    $Window.FindName('StoryCountText').Text = [string]$count
+    $Window.FindName('StoryBadge').Visibility = if ($count -gt 0) { 'Visible' } else { 'Collapsed' }
     $lines = if ($Story) { @($Story.Lines) } else { @() }
     if ($lines.Count -eq 0) {
         $list.ItemsSource = $null
@@ -1134,6 +1228,13 @@ function Show-TimelineStoryRow {
         if ([string]$r.RecordId -eq $record -and [string]$r.Server -eq $server -and [string]$r.Log -eq $log) { $row = $r; break }
     }
     if (-not $row) { return $false }
+    # The list lives on the Events tab: open it first, so the row can be scrolled to.
+    if ($Ui.MainTabs) {
+        $win = $Ui.MainTabs
+        while ($win -and $win -isnot [System.Windows.Window]) { $win = [System.Windows.LogicalTreeHelper]::GetParent($win) }
+        Set-TimelineMainTab -Window $win -Tab Events
+        $Ui.MainTabs.UpdateLayout()
+    }
 
     if (@(Select-TimelineRows -Rows @($row) -Filter (Get-TimelineGridFilter -Ui $Ui)).Count -eq 0) {
         foreach ($combo in @($Ui.LevelFilter, $Ui.ServerFilter, $Ui.LogFilter)) { if ($combo.Items.Count -gt 0) { $combo.SelectedIndex = 0 } }
@@ -1490,7 +1591,7 @@ function Show-ServerEventTimeline {
         'Last24Button', 'LogPanel', 'SecurityCheck', 'AllLogsCheck', 'CapBox', 'TimeoutBox', 'RunAsButton',
         'SearchButton', 'CancelButton', 'InputError', 'BannerText', 'TimeZoneNote', 'LevelFilter', 'ServerFilter',
         'LogFilter', 'FlaggedOnlyCheck', 'FilterText', 'CountText', 'EventGrid', 'DetailText', 'ExportCsvButton', 'ExportHtmlButton',
-        'CopyButton', 'StatusMessage', 'DetailTabs', 'StoryList', 'StoryEmptyText', 'CopyStoryButton', 'StripBorder', 'StripScroll', 'StripCanvas', 'StripAxisNote', 'StripLegend', 'HidePictureToggle', 'TimeRangeChip', 'TimeRangeText', 'ClearRangeButton', 'SidebarColumn', 'SidebarPanel', 'SidebarStrip', 'SidebarSplitter', 'CollapseSidebarButton', 'ExpandSidebarButton', 'NotesList') {
+        'CopyButton', 'StatusMessage', 'DetailTabs', 'StoryList', 'StoryEmptyText', 'CopyStoryButton', 'MainTabs', 'EventsTab', 'StoryTab', 'StoryBanner', 'StoryBannerEventsButton', 'StripBorder', 'StripScroll', 'StripCanvas', 'StripAxisNote', 'StripLegend', 'HidePictureToggle', 'TimeRangeChip', 'TimeRangeText', 'ClearRangeButton', 'SidebarColumn', 'SidebarPanel', 'SidebarStrip', 'SidebarSplitter', 'CollapseSidebarButton', 'ExpandSidebarButton', 'NotesList') {
         $ui[$name] = $window.FindName($name)
     }
 
@@ -1819,6 +1920,10 @@ function Show-ServerEventTimeline {
         $ui.DetailText.Text = 'Select an event to see everything about it here.'
         $ui.Story = $null
         Set-TimelineStoryView -Window $window -Story $null
+        # Rows stream into the Events tab; whether the story opens on its own at the end
+        # depends on whether the results get clicked or scrolled meanwhile.
+        Set-TimelineMainTab -Window $window -Tab Events
+        $ui.ResultsTouched = $false
         Set-TimelineTimeRange -Ui $ui -FromUtc $null -ToUtc $null
         $ui.SearchStartedUtc = [datetime]::UtcNow
         $ui.StripClock.Reset()
@@ -2337,6 +2442,20 @@ function Show-ServerEventTimeline {
     $stripResize.add_Tick({ $stripResize.Stop(); if ($ui.Engine) { Update-Strip -Force } })
     $ui.StripScroll.add_SizeChanged({ param($sender, $e) if ($e.WidthChanged) { $stripResize.Stop(); $stripResize.Start() } })
     $ui.CopyStoryButton.add_Click({ Set-StatusMessage (Copy-TimelineStory -Story $ui.Story) })
+    # The two big tabs. SelectionChanged bubbles up from the grid and combo boxes inside, so
+    # only the tab control's own change counts.
+    $ui.MainTabs.add_SelectionChanged({
+            param($sender, $e)
+            if ($e.OriginalSource -ne $ui.MainTabs) { return }
+            $tab = if ($ui.MainTabs.SelectedItem -eq $ui.StoryTab) { 'Story' } else { 'Events' }
+            Set-TimelineMainTab -Window $window -Tab $tab
+        })
+    $ui.StoryBannerEventsButton.add_Click({ Set-TimelineMainTab -Window $window -Tab Events })
+    # Clicking or scrolling the results during a search means someone is reading them: the
+    # story then doesn't open on its own when the search finishes.
+    $ui.MainTabs.add_PreviewMouseLeftButtonDown({ $ui.ResultsTouched = $true })
+    $ui.EventGrid.add_PreviewMouseWheel({ $ui.ResultsTouched = $true })
+    $ui.StripCanvas.add_PreviewMouseLeftButtonDown({ $ui.ResultsTouched = $true })
     $ui.CopyButton.add_Click({
             if ($ui.Smoke) { [void]$ui.SmokeFailures.Add('the clipboard would have been changed'); return }
             Set-StatusMessage (Copy-TimelineRows -Rows @($ui.EventGrid.SelectedItems))
@@ -2363,7 +2482,10 @@ function Show-ServerEventTimeline {
                     Update-InputState
                     if (-not $ui.Engine.Cancelled) {
                         Write-TimelineLog INFO ('Search finished: {0:N0} events from {1} server(s).' -f $ui.Store.Rows.Count, $ui.Engine.Status.Count)
-                        Set-StatusMessage ('Finished: {0:N0} events.' -f $ui.Store.Rows.Count)
+                        $stoodOut = Get-TimelineStoryCount -Story $ui.Story
+                        $show = Test-TimelineStoryAutoShow -StoryCount $stoodOut -Touched ([bool]$ui.ResultsTouched) -Cancelled ([bool]$ui.Engine.Cancelled)
+                        if ($show) { Set-TimelineMainTab -Window $window -Tab Story -Banner }
+                        Set-StatusMessage (Get-TimelineFinishMessage -EventCount $ui.Store.Rows.Count -StoryCount $stoodOut -Shown $show)
                     }
                 }
             }
