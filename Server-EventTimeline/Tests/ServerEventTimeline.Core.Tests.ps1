@@ -696,3 +696,16 @@ Describe 'The row store keeps the rows the picture needs' {
         $store.Rows.Count | Should -Be 5
     }
 }
+
+Describe 'Remembering Hide picture' {
+    It 'shows the picture by default, remembers ShowPicture, and keeps it when other settings are saved' {
+        $path = Join-Path $TestDrive 'settings.json'
+        (Read-TimelineSettings -Path $path).ShowPicture | Should -BeTrue
+        Save-TimelineSettings -Path $path -ShowPicture $false
+        (Read-TimelineSettings -Path $path).ShowPicture | Should -BeFalse
+        Save-TimelineSettings -Path $path -SaveFolder 'C:\Reports'
+        $back = Read-TimelineSettings -Path $path
+        $back.ShowPicture | Should -BeFalse
+        $back.SaveFolder | Should -Be 'C:\Reports'
+    }
+}

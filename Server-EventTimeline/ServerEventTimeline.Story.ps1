@@ -460,7 +460,7 @@ function Get-TimelineStripModel {
 
     [PSCustomObject]@{
         Lanes = $lanes.ToArray(); Marks = [object[]]$marks; Dots = [object[]]$dots; DownBars = $bars.ToArray()
-        Ticks = $ticks.ToArray(); AxisIsUtc = $axisUtc
+        Ticks = $ticks.ToArray(); AxisIsUtc = $axisUtc; AxisOffsetMinutes = $offset
     }
 }
 
@@ -498,4 +498,24 @@ function Get-TimelineStripToolTip {
     }
     $noun = if ($Item.Count -eq 1) { 'error' } else { 'errors' }
     '{0} {1} on {2} around {3:HH:mm} (server local)' -f $Item.Count, $noun, $Item.Server, [datetime]$Item.Local
+}
+
+function Get-TimelineStripWindow {
+    <#
+        The time the picture covers: from the earliest server's window start to the latest
+        one's end, in UTC (each server's window is its own local time, so servers in different
+        time zones cover different UTC stretches). Servers not reached yet count with offset 0.
+        -NowUtc fixes a "last N minutes" search to when it started.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Window, $Status, [Nullable[datetime]]$NowUtc)
+    $start = $null; $end = $null
+    $states = @(if ($Status) { $Status.Values } else { $null })
+    foreach ($st in $states) {
+        $offset = if ($st) { [int]$st.UtcOffsetMinutes } else { 0 }
+        $w = ConvertTo-UtcWindow -Window $Window -UtcOffsetMinutes $offset -NowUtc $NowUtc
+        if ($null -eq $start -or $w.StartUtc -lt $start) { $start = $w.StartUtc }
+        if ($null -eq $end -or $w.EndUtc -gt $end) { $end = $w.EndUtc }
+    }
+    [PSCustomObject]@{ StartUtc = $start; EndUtc = $end }
 }

@@ -264,6 +264,24 @@ function New-TimelineWindowXaml {
         </Setter.Value>
       </Setter>
     </Style>
+    <!-- Toggle buttons look like the other buttons (the logs button has its own template). -->
+    <Style TargetType="ToggleButton">
+      <Setter Property="Background" Value="#232731"/><Setter Property="Foreground" Value="{StaticResource Text}"/>
+      <Setter Property="BorderBrush" Value="{StaticResource LineStrong}"/><Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ToggleButton">
+            <Border x:Name="b" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1" CornerRadius="3" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="#2C313D"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="b" Property="Background" Value="#1B1F27"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
     <Style TargetType="TabControl">
       <Setter Property="Background" Value="Transparent"/><Setter Property="BorderThickness" Value="0"/><Setter Property="Padding" Value="0"/>
     </Style>
@@ -561,6 +579,7 @@ function New-TimelineWindowXaml {
     <Grid Grid.Column="2">
       <Grid.RowDefinitions>
         <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
         <RowDefinition Height="*" MinHeight="120"/>
         <RowDefinition Height="6"/>
         <RowDefinition Height="150" MinHeight="90"/>
@@ -578,14 +597,39 @@ function New-TimelineWindowXaml {
           <CheckBox x:Name="CollapseCheck" Content="Collapse repeats" VerticalAlignment="Center" Margin="0,0,12,0"
                     ToolTip="Show the same routine event on the same server once, with how many times it happened. Flagged events are never collapsed."/>
           <TextBox x:Name="FilterText" Width="260" ToolTip="Search message, source or event ID"/>
+          <Border x:Name="TimeRangeChip" Visibility="Collapsed" Background="#1F3A52" BorderBrush="{StaticResource Accent}" BorderThickness="1" CornerRadius="10"
+                  Padding="8,1,2,1" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Only events in this stretch of time (dragged on the timeline picture)">
+            <StackPanel Orientation="Horizontal">
+              <TextBlock x:Name="TimeRangeText" VerticalAlignment="Center"/>
+              <Button x:Name="ClearRangeButton" Content="&#215;" Padding="5,0" Margin="4,0,0,0" ToolTip="Show the whole search window again"/>
+            </StackPanel>
+          </Border>
           <TextBlock x:Name="CountText" VerticalAlignment="Center" Margin="12,0,0,0" Foreground="{StaticResource Muted}"/>
           <TextBlock x:Name="HiddenNote" VerticalAlignment="Center" Margin="12,0,8,0" Foreground="{StaticResource Warn}" Visibility="Collapsed"/>
           <Button x:Name="ShowAllButton" Content="Show everything again" Visibility="Collapsed" ToolTip="Bring back hidden sources and leave 'only this event'"/>
         </WrapPanel>
       </StackPanel>
 
+      <!-- The picture: what happened on each server, and when -->
+      <Border x:Name="StripBorder" Grid.Row="1" Background="{StaticResource Panel}" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="3"
+              Margin="0,0,0,8" Visibility="Collapsed">
+        <DockPanel>
+          <DockPanel DockPanel.Dock="Top" Margin="8,3,4,0" LastChildFill="False">
+            <TextBlock DockPanel.Dock="Left" Text="TIMELINE" FontSize="11" FontWeight="SemiBold" Foreground="{StaticResource Muted}" VerticalAlignment="Center"/>
+            <TextBlock x:Name="StripAxisNote" DockPanel.Dock="Left" Foreground="{StaticResource Muted}" FontSize="11" Margin="6,0,0,0" VerticalAlignment="Center"/>
+            <ToggleButton x:Name="HidePictureToggle" DockPanel.Dock="Right" Content="Hide picture" Padding="8,1" Margin="0" ToolTip="Fold the timeline picture away (remembered next time)"/>
+            <TextBlock x:Name="StripLegend" DockPanel.Dock="Right" FontSize="11" Foreground="{StaticResource Muted}" VerticalAlignment="Center" Margin="0,0,12,0"/>
+          </DockPanel>
+          <ScrollViewer x:Name="StripScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <Canvas x:Name="StripCanvas" Height="108" Background="Transparent" ClipToBounds="True" Cursor="Cross"
+                    ToolTip="Hover a symbol to see what it was, click it to show it in the list. Drag across to see only that stretch of time; double-click to see all of it again."
+                    ToolTipService.InitialShowDelay="1500"/>
+          </ScrollViewer>
+        </DockPanel>
+      </Border>
+
       <!-- The timeline -->
-      <DataGrid x:Name="EventGrid" Grid.Row="1" AutoGenerateColumns="False" IsReadOnly="True" EnableRowVirtualization="True"
+      <DataGrid x:Name="EventGrid" Grid.Row="2" AutoGenerateColumns="False" IsReadOnly="True" EnableRowVirtualization="True"
                 EnableColumnVirtualization="True" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
                 SelectionMode="Extended" SelectionUnit="FullRow" HeadersVisibility="Column" CanUserAddRows="False"
                 Background="{StaticResource Panel}" RowBackground="{StaticResource Panel}" AlternatingRowBackground="#14171C"
@@ -637,10 +681,10 @@ function New-TimelineWindowXaml {
         </DataGrid.Columns>
       </DataGrid>
 
-      <GridSplitter Grid.Row="2" HorizontalAlignment="Stretch" Background="{StaticResource Line}" Cursor="SizeNS" ToolTip="Drag to resize the event details"/>
+      <GridSplitter Grid.Row="3" HorizontalAlignment="Stretch" Background="{StaticResource Line}" Cursor="SizeNS" ToolTip="Drag to resize the event details"/>
 
       <!-- Everything about the selected event, and what happened in order -->
-      <Grid Grid.Row="3">
+      <Grid Grid.Row="4">
         <TabControl x:Name="DetailTabs">
           <TabItem Header="Event details">
             <TextBox x:Name="DetailText" IsReadOnly="True" TextWrapping="Wrap" VerticalContentAlignment="Top"
@@ -692,7 +736,7 @@ function New-TimelineWindowXaml {
       </Grid>
 
       <!-- Get it into the ticket -->
-      <StackPanel Grid.Row="4" Margin="0,10,0,0">
+      <StackPanel Grid.Row="5" Margin="0,10,0,0">
         <DockPanel LastChildFill="True">
           <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
             <Button x:Name="ExportCsvButton" Content="Export CSV" IsEnabled="False" ToolTip="Save the rows you can see as a CSV file"/>
@@ -981,6 +1025,8 @@ function Get-TimelineGridFilter {
         Text          = $Ui.FilterText.Text
         HiddenSources = $Ui.Hidden.ToArray()
         EventKey      = $Ui.EventKey
+        FromUtc       = if ($Ui.TimeRange) { $Ui.TimeRange.StartUtc } else { $null }
+        ToUtc         = if ($Ui.TimeRange) { $Ui.TimeRange.EndUtc } else { $null }
     }
 }
 
@@ -1047,6 +1093,7 @@ function Show-TimelineStoryRow {
         $Ui.FilterText.Text = ''
         $Ui.Hidden.Clear()
         $Ui.EventKey = ''
+        Set-TimelineTimeRange -Ui $Ui -FromUtc $null -ToUtc $null
         & $Refresh
     }
     # Flagged rows are never collapsed into repeats, so the row itself is in the list.
@@ -1065,6 +1112,185 @@ function Copy-TimelineStory {
         return ('Copied what happened ({0} {1}) - paste it into the ticket.' -f $n, $(if ($n -eq 1) { 'line' } else { 'lines' }))
     }
     "Couldn't copy: another program is using the clipboard. Wait a moment and try again."
+}
+
+
+# The picture strip's layout in the window: server names on the left, then the time axis.
+$script:StripLabelPx = 118
+$script:StripAxisPx = 14
+$script:StripLanePx = 22
+$script:StripPadPx = 6
+$script:StripMaxLanes = 6
+$script:StripBrushes = @{}
+
+function Get-TimelineStripBrush {
+    param([string]$Color)
+    $b = $script:StripBrushes[$Color]
+    if (-not $b) {
+        $b = [System.Windows.Media.SolidColorBrush][System.Windows.Media.ColorConverter]::ConvertFromString($Color)
+        $b.Freeze()
+        $script:StripBrushes[$Color] = $b
+    }
+    $b
+}
+
+function Get-TimelineStripCanvasHeight {
+    <# The canvas height for this many lanes (the axis on top, a little room below). #>
+    param([int]$LaneCount)
+    $script:StripAxisPx + [Math]::Max(1, $LaneCount) * $script:StripLanePx + $script:StripPadPx
+}
+
+function Convert-TimelineStripXToUtc {
+    <# A point on the strip's plot area (0 = left edge) back to a UTC time, kept inside the window. #>
+    param([double]$X, [Parameter(Mandatory)][double]$Width, [Parameter(Mandatory)][datetime]$StartUtc, [Parameter(Mandatory)][datetime]$EndUtc)
+    $f = [Math]::Min(1.0, [Math]::Max(0.0, $X / [Math]::Max(1.0, $Width)))
+    [datetime]::SpecifyKind($StartUtc.AddTicks([long](($EndUtc - $StartUtc).Ticks * $f)), [DateTimeKind]::Utc)
+}
+
+function Test-TimelineStripDue {
+    <#
+        Whether the strip should be drawn now: always when forced, when the search has finished
+        or on the first draw; while results arrive, at most once every 2 seconds.
+    #>
+    param([Parameter(Mandatory)]$Clock, [bool]$Finished, [switch]$Force)
+    if ($Force -or $Finished -or -not $Clock.IsRunning) { return $true }
+    $Clock.Elapsed.TotalSeconds -ge 2
+}
+
+function Set-TimelineStripHidden {
+    <# Folds the picture away (the header stays, with a button to bring it back) or shows it. #>
+    param([Parameter(Mandatory)]$Window, [bool]$Hidden)
+    $Window.FindName('StripScroll').Visibility = if ($Hidden) { 'Collapsed' } else { 'Visible' }
+    $toggle = $Window.FindName('HidePictureToggle')
+    $toggle.IsChecked = $Hidden
+    $toggle.Content = if ($Hidden) { 'Show picture' } else { 'Hide picture' }
+}
+
+function Set-TimelineTimeRange {
+    <#
+        Narrows the event list to a stretch of time (dragged on the strip), or clears it with
+        $null. The chip in the filter bar shows the range in the strip's time (server local, or
+        UTC when the servers' clocks differ) and its x clears it.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Ui, $FromUtc, $ToUtc, [int]$OffsetMinutes = 0, [bool]$Utc = $false)
+    if ($null -eq $FromUtc -or $null -eq $ToUtc) {
+        $Ui.TimeRange = $null
+        if ($Ui.TimeRangeChip) { $Ui.TimeRangeChip.Visibility = 'Collapsed' }
+        return
+    }
+    $from = [datetime]$FromUtc; $to = [datetime]$ToUtc
+    if ($to -lt $from) { $from, $to = $to, $from }
+    $Ui.TimeRange = @{ StartUtc = $from; EndUtc = $to }
+    if ($Ui.TimeRangeChip) {
+        $a = $from.AddMinutes($OffsetMinutes); $b = $to.AddMinutes($OffsetMinutes)
+        $fmt = if ($a.Date -eq $b.Date) { 'HH:mm' } else { 'MM-dd HH:mm' }
+        $Ui.TimeRangeText.Text = '{0} - {1}{2}' -f $a.ToString($fmt), $b.ToString($fmt), $(if ($Utc) { ' UTC' } else { '' })
+        $Ui.TimeRangeChip.Visibility = 'Visible'
+    }
+}
+
+function Update-TimelineStripToolTip {
+    <# Fills a strip shape's hover text when it opens (made on demand: there can be hundreds). #>
+    param([Parameter(Mandatory)]$Element)
+    if ($Element.DataContext) { $Element.ToolTip = Get-TimelineStripToolTip -Item $Element.DataContext }
+}
+
+$script:StripToolTipHandler = $null
+
+function Show-TimelineStrip {
+    <#
+        Draws a Get-TimelineStripModel result on the window's strip: lane names, the time axis,
+        down bars, error dots and flagged-event symbols. Marks carry their row (Tag = row id)
+        for a click; dots and marks get their hover text when it opens. -Width is the plot area.
+    #>
+    param([Parameter(Mandatory)]$Window, [Parameter(Mandatory)]$Model, [Parameter(Mandatory)][double]$Width)
+    $canvas = $Window.FindName('StripCanvas')
+    $scroll = $Window.FindName('StripScroll')
+    $lanes = @($Model.Lanes)
+    $canvas.Children.Clear()
+    $canvas.Height = Get-TimelineStripCanvasHeight -LaneCount $lanes.Count
+    $scroll.MaxHeight = Get-TimelineStripCanvasHeight -LaneCount $script:StripMaxLanes
+    $Window.FindName('StripAxisNote').Text = if ($Model.AxisIsUtc) { '(UTC)' } else { '(server local time)' }
+    if (-not $script:StripToolTipHandler) {
+        $script:StripToolTipHandler = [System.Windows.Controls.ToolTipEventHandler] { param($s, $e) Update-TimelineStripToolTip -Element $s }
+    }
+    $x0 = $script:StripLabelPx
+    $top = $script:StripAxisPx
+    $lanePx = $script:StripLanePx
+    $muted = Get-TimelineStripBrush '#8B94A3'
+    $line = Get-TimelineStripBrush '#262A33'
+    $grid = Get-TimelineStripBrush '#1E222A'
+    $add = {
+        param($el, [double]$left, [double]$y)
+        [System.Windows.Controls.Canvas]::SetLeft($el, $left)
+        [System.Windows.Controls.Canvas]::SetTop($el, $y)
+        [void]$canvas.Children.Add($el)
+    }
+
+    foreach ($t in @($Model.Ticks)) {
+        $g = [System.Windows.Shapes.Line]::new()
+        $g.X1 = $x0 + $t.X; $g.X2 = $g.X1; $g.Y1 = $top - 2; $g.Y2 = $canvas.Height - 4; $g.Stroke = $grid; $g.StrokeThickness = 1
+        [void]$canvas.Children.Add($g)
+        $tb = [System.Windows.Controls.TextBlock]::new()
+        $tb.Text = $t.Label; $tb.FontSize = 10; $tb.Foreground = $muted
+        & $add $tb ($x0 + $t.X - 14) -1
+    }
+    foreach ($l in $lanes) {
+        $y = $top + $l.Index * $lanePx + $lanePx / 2
+        $name = [string]$l.Server
+        $short = if ($name -match '^\d{1,3}(\.\d{1,3}){3}$') { $name } else { ($name -split '\.')[0] }
+        $tb = [System.Windows.Controls.TextBlock]::new()
+        $tb.Text = $short; $tb.ToolTip = $name; $tb.FontSize = 11; $tb.Width = $x0 - 10; $tb.TextTrimming = 'CharacterEllipsis'
+        $tb.Foreground = Get-TimelineStripBrush '#D7DCE3'
+        & $add $tb 6 ($y - 8)
+        $base = [System.Windows.Shapes.Line]::new()
+        $base.X1 = $x0; $base.X2 = $x0 + $Width; $base.Y1 = $y; $base.Y2 = $y; $base.Stroke = $line; $base.StrokeThickness = 1
+        [void]$canvas.Children.Add($base)
+    }
+    foreach ($b in @($Model.DownBars)) {
+        $r = [System.Windows.Shapes.Rectangle]::new()
+        $r.Uid = 'bar'; $r.Width = [Math]::Max(2, $b.X2 - $b.X1); $r.Height = 12; $r.RadiusX = 2; $r.RadiusY = 2
+        $r.Fill = Get-TimelineStripBrush '#2A2F3A'; $r.Stroke = Get-TimelineStripBrush '#4A5160'; $r.ToolTip = $b.Text
+        & $add $r ($x0 + $b.X1) ($top + $b.Lane * $lanePx + $lanePx / 2 - 6)
+    }
+    $red = Get-TimelineStripBrush '#E06C5A'
+    foreach ($d in @($Model.Dots)) {
+        $e = [System.Windows.Shapes.Ellipse]::new()
+        $e.Uid = 'dot'; $e.Width = 5; $e.Height = 5; $e.Fill = $red; $e.Opacity = $d.Opacity
+        $e.DataContext = $d; $e.ToolTip = ' '; $e.add_ToolTipOpening($script:StripToolTipHandler)
+        & $add $e ($x0 + $d.X - 2.5) ($top + $d.Lane * $lanePx + $lanePx / 2 - 2.5)
+    }
+    foreach ($m in @($Model.Marks)) {
+        $brush = Get-TimelineStripBrush $m.Color
+        $cx = $x0 + $m.X; $cy = $top + $m.Lane * $lanePx + $lanePx / 2
+        switch ($m.Shape) {
+            'Triangle' { $s = [System.Windows.Shapes.Polygon]::new(); $s.Points = [System.Windows.Media.PointCollection]::Parse('5,0 10,9 0,9'); $s.Fill = $brush; $ox = 5; $oy = 5 }
+            'Diamond' { $s = [System.Windows.Shapes.Polygon]::new(); $s.Points = [System.Windows.Media.PointCollection]::Parse('5,0 10,5 5,10 0,5'); $s.Fill = $brush; $ox = 5; $oy = 5 }
+            'Square' { $s = [System.Windows.Shapes.Rectangle]::new(); $s.Width = 9; $s.Height = 9; $s.RadiusX = 1.5; $s.RadiusY = 1.5; $s.Fill = $brush; $ox = 4.5; $oy = 4.5 }
+            'Cross' {
+                $s = [System.Windows.Shapes.Path]::new(); $s.Data = [System.Windows.Media.Geometry]::Parse('M0,0 L9,9 M9,0 L0,9')
+                $s.Stroke = $brush; $s.StrokeThickness = 2.6; $s.StrokeStartLineCap = 'Round'; $s.StrokeEndLineCap = 'Round'
+                # A clear backing so the gaps between the strokes still take the click.
+                $s.Fill = [System.Windows.Media.Brushes]::Transparent; $ox = 4.5; $oy = 4.5
+            }
+            default { $s = [System.Windows.Shapes.Ellipse]::new(); $s.Width = 8; $s.Height = 8; $s.Fill = $brush; $ox = 4; $oy = 4 }
+        }
+        $s.Uid = 'mark'; $s.Tag = $m.RowId; $s.DataContext = $m; $s.Cursor = [System.Windows.Input.Cursors]::Hand
+        $s.ToolTip = ' '; $s.add_ToolTipOpening($script:StripToolTipHandler)
+        & $add $s ($cx - $ox) ($cy - $oy)
+    }
+
+    $legend = $Window.FindName('StripLegend')
+    if ($legend -and $legend.Inlines.Count -eq 0) {
+        foreach ($part in @(@('Disk', 'disk'), @('AppCrash', 'crash'), @('Update', 'update'), @('TimeJump', 'time'), @('Restart', 'restart/other'))) {
+            $st = Get-TimelineCategoryStyle -Category $part[0]
+            $glyph = [System.Windows.Documents.Run]::new($st.Glyph + ' ')
+            $glyph.Foreground = Get-TimelineStripBrush $st.Color; $glyph.FontFamily = 'Segoe UI Symbol'
+            $legend.Inlines.Add($glyph); $legend.Inlines.Add([System.Windows.Documents.Run]::new($part[1] + '   '))
+        }
+        $dot = [System.Windows.Documents.Run]::new([string][char]0x2022 + ' '); $dot.Foreground = $red
+        $legend.Inlines.Add($dot); $legend.Inlines.Add([System.Windows.Documents.Run]::new('errors   drag to zoom, double-click to zoom out'))
+    }
 }
 
 function Register-TimelineErrorGuard {
@@ -1165,6 +1391,7 @@ function Show-ServerEventTimeline {
         Request = $null; Selected = @()
         Hidden = New-Object System.Collections.Generic.List[string]; EventKey = ''; VisibleRows = @(); InUpdate = $false
         Restoring = $false; SummaryKey = ''; Story = $null
+        TimeRange = $null; StripClock = (New-Object System.Diagnostics.Stopwatch); StripModel = $null; StripSpan = $null; StripWidth = 0; SearchStartedUtc = $null; StripDrag = $null
     }
     foreach ($name in 'SummaryBorder', 'SummaryList', 'CollapseCheck', 'HiddenNote', 'ShowAllButton', 'TotalCapBox', 'RecentButton', 'TicketNoteButton', 'LogsButton','LogsPopup', 'CoreLogPanel', 'LogsAllButton', 'LogsNoneButton', 'LogsDefaultButton',
         'SaveFolderBox', 'BrowseFolderButton', 'OpenFolderButton', 'ThisComputerButton', 'ServerInput', 'ServerInputHint', 'AddServerButton', 'ServerCountText', 'DomainText', 'ChangeDomainButton',
@@ -1172,7 +1399,7 @@ function Show-ServerEventTimeline {
         'Last24Button', 'LogPanel', 'SecurityCheck', 'AllLogsCheck', 'CapBox', 'TimeoutBox', 'RunAsButton',
         'SearchButton', 'CancelButton', 'InputError', 'BannerText', 'TimeZoneNote', 'LevelFilter', 'ServerFilter',
         'LogFilter', 'FlaggedOnlyCheck', 'FilterText', 'CountText', 'EventGrid', 'DetailText', 'ExportCsvButton', 'ExportHtmlButton',
-        'CopyButton', 'StatusMessage', 'DetailTabs', 'StoryList', 'StoryEmptyText', 'CopyStoryButton', 'SidebarColumn', 'SidebarPanel', 'SidebarStrip', 'SidebarSplitter', 'CollapseSidebarButton', 'ExpandSidebarButton', 'NotesList') {
+        'CopyButton', 'StatusMessage', 'DetailTabs', 'StoryList', 'StoryEmptyText', 'CopyStoryButton', 'StripBorder', 'StripScroll', 'StripCanvas', 'StripAxisNote', 'StripLegend', 'HidePictureToggle', 'TimeRangeChip', 'TimeRangeText', 'ClearRangeButton', 'SidebarColumn', 'SidebarPanel', 'SidebarStrip', 'SidebarSplitter', 'CollapseSidebarButton', 'ExpandSidebarButton', 'NotesList') {
         $ui[$name] = $window.FindName($name)
     }
 
@@ -1401,6 +1628,24 @@ function Show-ServerEventTimeline {
         $ui.ShowAllButton.Visibility = $shown
     }
 
+    function Update-Strip {
+        # The picture above the list: flagged events and errors per server, following the
+        # filters. Drawn when a search finishes or a filter changes, at most every 2 seconds
+        # while results arrive (Test-TimelineStripDue), from the store's notable rows only.
+        param([switch]$Force)
+        if (-not $ui.Engine) { $ui.StripBorder.Visibility = 'Collapsed'; return }
+        $ui.StripBorder.Visibility = 'Visible'
+        if ($ui.HidePictureToggle.IsChecked) { return }
+        if (-not (Test-TimelineStripDue -Clock $ui.StripClock -Finished $ui.Finished -Force:$Force)) { return }
+        $ui.StripClock.Restart()
+        $span = if ($ui.TimeRange) { $ui.TimeRange } else { Get-TimelineStripWindow -Window $ui.Engine.Window -Status $ui.Engine.Status -NowUtc $ui.SearchStartedUtc }
+        $room = if ($ui.StripScroll.ActualWidth -gt 0) { $ui.StripScroll.ActualWidth } else { 900 }
+        $width = [Math]::Max(120, $room - $script:StripLabelPx - 24)
+        $ui.StripModel = Get-TimelineStoreStripModel -Store $ui.Store -Filter (Get-CurrentFilter) -Servers @($ui.Engine.Status.Keys) -StartUtc $span.StartUtc -EndUtc $span.EndUtc -Width $width
+        $ui.StripSpan = $span; $ui.StripWidth = $width
+        Show-TimelineStrip -Window $window -Model $ui.StripModel -Width $width
+    }
+
     function Update-View {
         # Merges rows that arrived, re-applies the filter and refreshes the grid, keeping the
         # tech's sort and selection. Refilling a filter combo fires SelectionChanged, which
@@ -1431,6 +1676,7 @@ function Show-ServerEventTimeline {
             $ui.ExportHtmlButton.IsEnabled = $has
             Update-Summary
             Update-HiddenNote
+            Update-Strip
             $ui.LastRebuild.Restart()
         }
         finally { $ui.InUpdate = $false }
@@ -1476,6 +1722,10 @@ function Show-ServerEventTimeline {
         $ui.DetailText.Text = 'Select an event to see everything about it here.'
         $ui.Story = $null
         Set-TimelineStoryView -Window $window -Story $null
+        Set-TimelineTimeRange -Ui $ui -FromUtc $null -ToUtc $null
+        $ui.SearchStartedUtc = [datetime]::UtcNow
+        $ui.StripClock.Reset()
+        $ui.StripCanvas.Children.Clear()
         $ui.Finished = $false
         $ui.Engine = Invoke-TimelineSearch -Request $req -Logs $logs -AllLogs ([bool]$ui.AllLogsCheck.IsChecked) -Credential $ui.Credential
         if (-not $ui.Smoke) {
@@ -1544,6 +1794,7 @@ function Show-ServerEventTimeline {
     $ui.CollapseCheck.add_Click({ Update-View })
     $ui.ShowAllButton.add_Click({
             $ui.Hidden.Clear(); $ui.EventKey = ''
+            Set-TimelineTimeRange -Ui $ui -FromUtc $null -ToUtc $null
             Update-View
             Set-StatusMessage 'Showing every event again.'
         })
@@ -1923,6 +2174,68 @@ function Show-ServerEventTimeline {
             if (-not $id) { return }
             if (-not (Show-TimelineStoryRow -Ui $ui -RowId $id -Refresh { Update-View })) { Set-StatusMessage 'That event is no longer in the list.' }
         })
+    # The picture: hover a symbol, click it, drag across to narrow the list, double-click to widen.
+    $hidden = $false
+    try { $hidden = -not (Read-TimelineSettings -Path $SettingsPath).ShowPicture } catch { }
+    Set-TimelineStripHidden -Window $window -Hidden $hidden
+    $ui.HidePictureToggle.add_Click({
+            $hide = [bool]$ui.HidePictureToggle.IsChecked
+            Set-TimelineStripHidden -Window $window -Hidden $hide
+            if (-not $ui.Smoke) { try { Save-TimelineSettings -Path $SettingsPath -ShowPicture (-not $hide) } catch { } }
+            if (-not $hide) { Update-Strip -Force }
+        })
+    $setRange = {
+        param($From, $To)
+        $utc = $ui.StripModel -and $ui.StripModel.AxisIsUtc
+        $offset = if ($ui.StripModel) { [int]$ui.StripModel.AxisOffsetMinutes } else { 0 }
+        Set-TimelineTimeRange -Ui $ui -FromUtc $From -ToUtc $To -OffsetMinutes $offset -Utc $utc
+        Update-View
+        Update-Strip -Force
+    }
+    $ui.ClearRangeButton.add_Click({ & $setRange $null $null })
+    $ui.StripCanvas.add_MouseLeftButtonDown({
+            param($sender, $e)
+            if ($e.ClickCount -ge 2) { $ui.StripDrag = $null; if ($ui.TimeRange) { & $setRange $null $null }; return }
+            $x = $e.GetPosition($ui.StripCanvas).X
+            $band = [System.Windows.Shapes.Rectangle]::new()
+            $band.Uid = 'drag'; $band.Height = $ui.StripCanvas.Height; $band.Width = 0; $band.IsHitTestVisible = $false
+            $band.Fill = Get-TimelineStripBrush '#335DADE2'
+            [System.Windows.Controls.Canvas]::SetLeft($band, $x); [System.Windows.Controls.Canvas]::SetTop($band, 0)
+            [void]$ui.StripCanvas.Children.Add($band)
+            $ui.StripDrag = @{ X = $x; Source = $e.OriginalSource; Band = $band }
+            [void]$ui.StripCanvas.CaptureMouse()
+        })
+    $ui.StripCanvas.add_MouseMove({
+            param($sender, $e)
+            $d = $ui.StripDrag
+            if (-not $d) { return }
+            $x = $e.GetPosition($ui.StripCanvas).X
+            [System.Windows.Controls.Canvas]::SetLeft($d.Band, [Math]::Min($x, $d.X))
+            $d.Band.Width = [Math]::Abs($x - $d.X)
+        })
+    $ui.StripCanvas.add_MouseLeftButtonUp({
+            param($sender, $e)
+            $d = $ui.StripDrag
+            $ui.StripDrag = $null
+            $ui.StripCanvas.ReleaseMouseCapture()
+            if (-not $d) { return }
+            $ui.StripCanvas.Children.Remove($d.Band)
+            $x = $e.GetPosition($ui.StripCanvas).X
+            if ([Math]::Abs($x - $d.X) -gt 6 -and $ui.StripSpan) {
+                $a = Convert-TimelineStripXToUtc -X ([Math]::Min($x, $d.X) - $script:StripLabelPx) -Width $ui.StripWidth -StartUtc $ui.StripSpan.StartUtc -EndUtc $ui.StripSpan.EndUtc
+                $b = Convert-TimelineStripXToUtc -X ([Math]::Max($x, $d.X) - $script:StripLabelPx) -Width $ui.StripWidth -StartUtc $ui.StripSpan.StartUtc -EndUtc $ui.StripSpan.EndUtc
+                if ($b -gt $a) { & $setRange $a $b }
+                return
+            }
+            $id = [string]$d.Source.Tag
+            if ($d.Source.Uid -eq 'mark' -and $id) {
+                if (-not (Show-TimelineStoryRow -Ui $ui -RowId $id -Refresh { Update-View })) { Set-StatusMessage 'That event is no longer in the list.' }
+            }
+        })
+    $stripResize = New-Object System.Windows.Threading.DispatcherTimer
+    $stripResize.Interval = [TimeSpan]::FromMilliseconds(200)
+    $stripResize.add_Tick({ $stripResize.Stop(); if ($ui.Engine) { Update-Strip -Force } })
+    $ui.StripScroll.add_SizeChanged({ param($sender, $e) if ($e.WidthChanged) { $stripResize.Stop(); $stripResize.Start() } })
     $ui.CopyStoryButton.add_Click({ Set-StatusMessage (Copy-TimelineStory -Story $ui.Story) })
     $ui.CopyButton.add_Click({
             if ($ui.Smoke) { [void]$ui.SmokeFailures.Add('the clipboard would have been changed'); return }

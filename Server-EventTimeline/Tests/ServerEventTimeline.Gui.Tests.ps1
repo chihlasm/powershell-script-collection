@@ -174,8 +174,8 @@ Describe 'Window layout' {
 
     It 'gives the event list the remaining height, with the detail pane below a drag handle' {
         $xaml = New-TimelineWindowXaml
-        $xaml | Should -Match '<DataGrid x:Name="EventGrid" Grid.Row="1"'
-        $xaml | Should -Match '<GridSplitter Grid.Row="2"'
+        $xaml | Should -Match '<DataGrid x:Name="EventGrid" Grid.Row="2"'
+        $xaml | Should -Match '<GridSplitter Grid.Row="3"'
         $xaml | Should -Match '<ScrollViewer x:Name="SidebarScroll"'
     }
 
@@ -606,5 +606,175 @@ Describe 'The What happened tab' {
         Mock Copy-TicketNoteToClipboard { $false }
         $story = Get-TimelineStory -Rows @(New-StoryTestRow -Time '2026-11-18 17:30' -Provider 'Microsoft-Windows-WindowsUpdateClient' -Id 19)
         Copy-TimelineStory -Story $story | Should -BeLike "Couldn't copy*clipboard*try again*"
+    }
+}
+
+Describe 'The picture strip in the window' {
+    BeforeAll {
+        $script:PicRec = 0
+        function New-PicRow {
+            param([string]$Server = 'AD-01', [string]$Time, [string]$Provider = 'Service Control Manager', [int]$Id = 7036, [int]$Level = 4)
+            $script:PicRec++
+            $e = [PSCustomObject]@{ TimeCreatedUtc = [datetime]::SpecifyKind([datetime]$Time, [DateTimeKind]::Utc); Id = $Id; ProviderName = $Provider
+                Level = $Level; LogName = 'System'; Message = "event $script:PicRec"; RecordId = $script:PicRec; UserSid = ''; MachineName = $Server }
+            ConvertTo-TimelineRow -Server $Server -EventRecord $e -UtcOffsetMinutes 0
+        }
+        $script:P0 = [datetime]::SpecifyKind([datetime]'2026-11-18 17:45', [DateTimeKind]::Utc)
+        $script:P1 = [datetime]::SpecifyKind([datetime]'2026-11-18 18:05', [DateTimeKind]::Utc)
+        function New-PicModel { param([string[]]$Servers = @('AD-01'), [object[]]$Rows = @())
+            Get-TimelineStripModel -Rows $Rows -Servers $Servers -StartUtc $script:P0 -EndUtc $script:P1 -Width 700 }
+        function New-PicUi {
+            $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
+            $ui = @{ Window = $w; Store = (New-TimelineRowStore); Hidden = (New-Object System.Collections.Generic.List[string]); EventKey = ''; TimeRange = $null }
+            foreach ($n in 'LevelFilter', 'ServerFilter', 'LogFilter', 'FlaggedOnlyCheck', 'FilterText', 'EventGrid', 'TimeRangeChip', 'TimeRangeText', 'ClearRangeButton') { $ui[$n] = $w.FindName($n) }
+            foreach ($pair in @(@($ui.LevelFilter, @('All', 'Warning', 'Error', 'Critical')), @($ui.ServerFilter, @('*', 'AD-01')), @($ui.LogFilter, @('*', 'System')))) {
+                foreach ($tag in $pair[1]) { $i = New-Object System.Windows.Controls.ComboBoxItem; $i.Content = $tag; $i.Tag = $tag; [void]$pair[0].Items.Add($i) }
+                $pair[0].SelectedIndex = 0
+            }
+            $ui
+        }
+    }
+
+    It 'has the picture strip between the filters and the event list' {
+        $xaml = New-TimelineWindowXaml
+        $xaml | Should -Match '<Border x:Name="StripBorder" Grid.Row="1"'
+        $xaml | Should -Match '<DataGrid x:Name="EventGrid" Grid.Row="2"'
+        $xaml | Should -Match '<GridSplitter Grid.Row="3"'
+    }
+
+    It 'has the strip controls and the time range chip' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
+        foreach ($n in 'StripBorder', 'StripScroll', 'StripCanvas', 'StripAxisNote', 'HidePictureToggle', 'TimeRangeChip', 'TimeRangeText', 'ClearRangeButton') {
+            $w.FindName($n) | Should -Not -BeNullOrEmpty -Because "control $n"
+        }
+        $w.FindName('TimeRangeChip').Visibility | Should -Be 'Collapsed'
+    }
+
+    It 'is about 110 px for 4 servers and stops growing past 6 lanes' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
+        Show-TimelineStrip -Window $w -Model (New-PicModel -Servers @(1..4 | ForEach-Object { "S$_" })) -Width 800
+        $four = $w.FindName('StripCanvas').Height
+        $four | Should -BeGreaterOrEqual 100
+        $four | Should -BeLessOrEqual 120
+        Show-TimelineStrip -Window $w -Model (New-PicModel -Servers @(1..6 | ForEach-Object { "S$_" })) -Width 800
+        $six = $w.FindName('StripCanvas').Height
+        $six | Should -Be ($four + 44)
+        Show-TimelineStrip -Window $w -Model (New-PicModel -Servers @(1..10 | ForEach-Object { "S$_" })) -Width 800
+        $w.FindName('StripCanvas').Height | Should -BeGreaterThan $six
+        $w.FindName('StripScroll').MaxHeight | Should -Be $six
+    }
+
+    It 'draws one shape per mark, dot and down bar, each carrying its row or item' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $rows = @(
+            (New-PicRow -Time '2026-11-18 17:50' -Provider 'Disk' -Id 153 -Level 3)
+            (New-PicRow -Time '2026-11-18 17:51' -Level 2 -Provider 'Ntfs' -Id 5)
+            (New-PicRow -Time '2026-11-18 17:52')
+            (New-PicRow -Time '2026-11-18 17:58' -Level 2 -Provider 'Other' -Id 9)
+            (New-PicRow -Time '2026-11-18 18:04' -Provider 'Microsoft-Windows-Kernel-Power' -Id 41 -Level 1)
+        )
+        $model = New-PicModel -Rows $rows
+        $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
+        Show-TimelineStrip -Window $w -Model $model -Width 800
+        $kids = @($w.FindName('StripCanvas').Children)
+        @($kids | Where-Object Uid -eq 'mark').Count | Should -Be @($model.Marks).Count
+        @($kids | Where-Object Uid -eq 'dot').Count | Should -Be @($model.Dots).Count
+        @($kids | Where-Object Uid -eq 'bar').Count | Should -Be 1
+        $mark = @($kids | Where-Object Uid -eq 'mark')[0]
+        $mark.Tag | Should -Be $model.Marks[0].RowId
+        Update-TimelineStripToolTip -Element $mark
+        "$($mark.ToolTip)" | Should -BeLike 'Disk I/O had to be retried*'
+    }
+
+    It 'labels the axis UTC only when the servers are in different time zones' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
+        Show-TimelineStrip -Window $w -Model (New-PicModel -Rows @(New-PicRow -Time '2026-11-18 17:50' -Provider 'Disk' -Id 153 -Level 3)) -Width 800
+        $w.FindName('StripAxisNote').Text | Should -Be '(server local time)'
+        $m = New-PicModel
+        $m.AxisIsUtc = $true
+        Show-TimelineStrip -Window $w -Model $m -Width 800
+        $w.FindName('StripAxisNote').Text | Should -Be '(UTC)'
+    }
+
+    It 'follows the Level filter' {
+        $store = New-TimelineRowStore
+        Add-TimelineRows -Store $store -NewRows @((New-PicRow -Time '2026-11-18 17:50' -Provider 'Disk' -Id 153 -Level 3), (New-PicRow -Time '2026-11-18 17:55' -Provider 'Microsoft-Windows-WindowsUpdateClient' -Id 19))
+        $all = Get-TimelineStoreStripModel -Store $store -Filter @{ MinLevel = 'All' } -Servers @('AD-01') -StartUtc $script:P0 -EndUtc $script:P1 -Width 700
+        $errors = Get-TimelineStoreStripModel -Store $store -Filter @{ MinLevel = 'Warning' } -Servers @('AD-01') -StartUtc $script:P0 -EndUtc $script:P1 -Width 700
+        @($all.Marks).Count | Should -Be 2
+        @($errors.Marks | ForEach-Object Shape) | Should -Be @('Triangle')
+    }
+
+    It 'maps a point on the strip back to a time' {
+        Convert-TimelineStripXToUtc -X 0 -Width 700 -StartUtc $script:P0 -EndUtc $script:P1 | Should -Be $script:P0
+        Convert-TimelineStripXToUtc -X 350 -Width 700 -StartUtc $script:P0 -EndUtc $script:P1 | Should -Be $script:P0.AddMinutes(10)
+        Convert-TimelineStripXToUtc -X 900 -Width 700 -StartUtc $script:P0 -EndUtc $script:P1 | Should -Be $script:P1
+        Convert-TimelineStripXToUtc -X -5 -Width 700 -StartUtc $script:P0 -EndUtc $script:P1 | Should -Be $script:P0
+    }
+
+    It 'takes the whole search window across servers in different time zones' {
+        $window = New-TimelineWindow -Mode Around -At ([datetime]'2026-11-18 18:00') -PlusMinusMinutes 15
+        $status = [ordered]@{
+            'AD-01' = [PSCustomObject]@{ Server = 'AD-01'; State = 'Done'; Transport = 'WinRM'; UtcOffsetMinutes = -300 }
+            'AD-03' = [PSCustomObject]@{ Server = 'AD-03'; State = 'Done'; Transport = 'WinRM'; UtcOffsetMinutes = 0 }
+        }
+        $span = Get-TimelineStripWindow -Window $window -Status $status
+        $span.StartUtc | Should -Be ([datetime]::SpecifyKind([datetime]'2026-11-18 17:45', [DateTimeKind]::Utc))
+        $span.EndUtc | Should -Be ([datetime]::SpecifyKind([datetime]'2026-11-18 23:15', [DateTimeKind]::Utc))
+    }
+
+    It 'Set-TimelineTimeRange narrows the list and shows the chip; clearing it hides the chip' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $ui = New-PicUi
+        $from = [datetime]::SpecifyKind([datetime]'2026-11-18 22:52', [DateTimeKind]::Utc)
+        Set-TimelineTimeRange -Ui $ui -FromUtc $from -ToUtc $from.AddMinutes(6) -OffsetMinutes -300
+        $ui.TimeRangeChip.Visibility | Should -Be 'Visible'
+        $ui.TimeRangeText.Text | Should -Be '17:52 - 17:58'
+        $f = Get-TimelineGridFilter -Ui $ui
+        $f.FromUtc | Should -Be $from
+        $f.ToUtc | Should -Be $from.AddMinutes(6)
+        Set-TimelineTimeRange -Ui $ui -FromUtc $null -ToUtc $null
+        $ui.TimeRangeChip.Visibility | Should -Be 'Collapsed'
+        (Get-TimelineGridFilter -Ui $ui).FromUtc | Should -BeNullOrEmpty
+    }
+
+    It 'a story click clears a time range that hides the row' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $ui = New-PicUi
+        $row = New-PicRow -Time '2026-11-18 17:50' -Provider 'Disk' -Id 153 -Level 3
+        Add-TimelineRows -Store $ui.Store -NewRows @($row)
+        Set-TimelineTimeRange -Ui $ui -FromUtc $script:P1 -ToUtc $script:P1.AddMinutes(5)
+        Show-TimelineStoryRow -Ui $ui -RowId (Get-TimelineRowId -Row $row) -Refresh { $ui.EventGrid.ItemsSource = @(Select-TimelineRows -Rows $ui.Store.Rows.ToArray() -Filter (Get-TimelineGridFilter -Ui $ui)) } | Should -BeTrue
+        $ui.TimeRange | Should -BeNullOrEmpty
+        $ui.TimeRangeChip.Visibility | Should -Be 'Collapsed'
+        $ui.EventGrid.SelectedItem | Should -Be $row
+    }
+
+    It 'Show everything again clears the time range, and the chip and strip are wired up' {
+        $src = Get-Content -LiteralPath $script:AppPath -Raw
+        $showAll = $src.Substring($src.IndexOf('$ui.ShowAllButton.add_Click'), 400)
+        $showAll | Should -Match 'Set-TimelineTimeRange -Ui \$ui -FromUtc \$null -ToUtc \$null'
+        $src | Should -Match '\$ui.ClearRangeButton.add_Click'
+        $view = $src.Substring($src.IndexOf('function Update-View'), 2600)
+        $view | Should -Match 'Update-Strip'
+    }
+
+    It 'Hide picture folds the strip and says how to bring it back' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
+        Set-TimelineStripHidden -Window $w -Hidden $true
+        $w.FindName('StripScroll').Visibility | Should -Be 'Collapsed'
+        $w.FindName('HidePictureToggle').Content | Should -Be 'Show picture'
+        $w.FindName('HidePictureToggle').IsChecked | Should -BeTrue
+        Set-TimelineStripHidden -Window $w -Hidden $false
+        $w.FindName('StripScroll').Visibility | Should -Be 'Visible'
+        $w.FindName('HidePictureToggle').Content | Should -Be 'Hide picture'
+    }
+
+    It 'does not redraw more than once in 2 seconds while results arrive' {
+        $clock = [PSCustomObject]@{ IsRunning = $true; Elapsed = [TimeSpan]::FromSeconds(0.5) }
+        Test-TimelineStripDue -Clock $clock -Finished $false | Should -BeFalse
+        $clock.Elapsed = [TimeSpan]::FromSeconds(2.1)
+        Test-TimelineStripDue -Clock $clock -Finished $false | Should -BeTrue
+        $clock.Elapsed = [TimeSpan]::FromSeconds(0.1)
+        Test-TimelineStripDue -Clock $clock -Finished $true | Should -BeTrue
+        Test-TimelineStripDue -Clock $clock -Finished $false -Force | Should -BeTrue
+        Test-TimelineStripDue -Clock ([PSCustomObject]@{ IsRunning = $false; Elapsed = [TimeSpan]::Zero }) -Finished $false | Should -BeTrue
     }
 }
