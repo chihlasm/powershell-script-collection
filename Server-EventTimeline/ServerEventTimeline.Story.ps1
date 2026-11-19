@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
     "What happened": the flagged events turned into a short plain-English story, in order, and
     the timeline picture's layout. Pure functions (no UI, no network), dot-sourced by
@@ -287,4 +287,215 @@ function Get-TimelineCategoryStyle {
     if (-not $shape) { $shape = 'Circle' }
     $st = $script:TimelineShapeStyles[$shape]
     [PSCustomObject]@{ Shape = $shape; Color = $st.Color; Glyph = $st.Glyph }
+}
+
+$script:StripMarkMergePx = 4
+$script:StripDotPx = 6
+$script:StripTickSteps = @(1, 2, 5, 10, 15, 30, 60, 120, 180, 360, 720, 1440)
+
+function Get-TimelineStripModel {
+    <#
+        The picture strip's layout: one lane per server (in -Servers order), X from 0 to
+        -Width across StartUtc..EndUtc.
+        - Marks: flagged rows the story counts, symbol and colour by category; marks of one
+          shape closer than 4 px merge, with the count in the tooltip.
+        - Dots: unflagged Error/Critical rows, one per 6 px slice, stronger with more errors.
+        - DownBars: the quiet gap before an unexpected restart (last event, then the restart).
+        - Ticks and AxisIsUtc: local time when every server shares a UTC offset, else UTC.
+        One pass, no function call for ordinary rows: 40,000 rows must take well under 100 ms
+        on the window thread (the window froze once from doing too much there).
+    #>
+    [CmdletBinding()]
+    param(
+        [object[]]$Rows,
+        [string[]]$Servers,
+        [Parameter(Mandatory)][datetime]$StartUtc,
+        [Parameter(Mandatory)][datetime]$EndUtc,
+        [Parameter(Mandatory)][double]$Width,
+        # All rows in UTC order (the store's), when -Rows holds only the flagged and error
+        # ones: the quiet gap before a restart is measured from any event, not just those.
+        [object[]]$ContextRows
+    )
+    if ($null -eq $Rows) { $Rows = @() }
+    $lanes = New-Object System.Collections.Generic.List[object]
+    $laneOf = @{}
+    foreach ($s in @($Servers | Where-Object { $_ })) {
+        if ($laneOf.ContainsKey($s)) { continue }
+        $laneOf[$s] = $lanes.Count
+        $lanes.Add([PSCustomObject]@{ Server = $s; Index = $lanes.Count })
+    }
+    $startTicks = $StartUtc.Ticks
+    $endTicks = $EndUtc.Ticks
+    $span = [Math]::Max([long]1, [long]($endTicks - $startTicks))
+    $scale = $Width / $span
+    $restartGapTicks = [TimeSpan]::FromMinutes($script:StoryRestartMinutes).Ticks
+    $roles = $script:StoryRestartRoles
+    $kinds = $script:SummaryKindByLabel
+
+    $markList = New-Object System.Collections.Generic.List[object]
+    $markAt = @{}
+    $dotList = New-Object System.Collections.Generic.List[object]
+    $dotAt = @{}
+    $bars = New-Object System.Collections.Generic.List[object]
+    $groups = @{}
+
+    $closeGroup = {
+        param($g)
+        if (-not $g -or $g.Role -notin @('Unexpected', 'Bugcheck') -or $null -eq $g.PlainBefore) { return }
+        $mins = [int][Math]::Round(($g.Start - $g.PlainBefore) / 600000000.0)
+        if ($mins -lt 1) { return }
+        $how = if ($g.Role -eq 'Bugcheck') { 'restarted after a blue screen' } else { 'restarted without a clean shutdown' }
+        $bars.Add([PSCustomObject]@{
+                Lane = $g.Lane; X1 = [Math]::Max(0.0, ($g.PlainBefore - $startTicks) * $scale); X2 = ($g.Start - $startTicks) * $scale
+                Text = ('no events for about {0} min, then {1}' -f $mins, $how)
+            })
+    }
+
+    # Locals, not $script: lookups, inside the loop.
+    $dotPx = $script:StripDotPx
+    $mergePx = $script:StripMarkMergePx
+    $shapeOf = $script:TimelineCategoryShapes
+    # foreach with a counter: measurably faster than for ($k...) $Rows[$k] on 5.1.
+    $k = -1
+    foreach ($r in $Rows) {
+        $k++
+        $flag = $r.Flag
+        if (-not $flag) {
+            $level = $r.Level
+            if ($level -ne 1 -and $level -ne 2) { continue }
+        }
+        $t = $r.TimeUtc.Ticks
+        if ($t -lt $startTicks -or $t -gt $endTicks) { continue }
+        $lane = $laneOf[$r.Server]
+        if ($null -eq $lane) { continue }
+        $x = ($t - $startTicks) * $scale
+
+        if (-not $flag) {
+            $slice = [int][Math]::Floor($x / $dotPx)
+            $key = $lane * 1000000 + $slice
+            $d = $dotAt[$key]
+            if ($d) { $d.Count++ }
+            else {
+                $d = @{ Lane = $lane; X = $slice * $dotPx + $dotPx / 2; Count = 1; Server = $r.Server; Local = $r.TimeServerLocal }
+                $dotAt[$key] = $d; $dotList.Add($d)
+            }
+            continue
+        }
+
+        $role = $roles[$flag]
+        if ($role) {
+            $g = $groups[$lane]
+            if ($g -and ($t - $g.Last) -le $restartGapTicks) {
+                $g.Last = $t
+                if ($script:StoryRoleRank[$role] -gt $script:StoryRoleRank[$g.Role]) { $g.Role = $role }
+            }
+            else {
+                & $closeGroup $g
+                # The last event on this server that isn't part of a restart: when it went quiet.
+                $before = $null
+                $look = $Rows; $from = $k - 1
+                if ($ContextRows) {
+                    # Binary search for the first row at or after this one, then walk back.
+                    $look = $ContextRows; $lo = 0; $hi = $ContextRows.Count
+                    while ($lo -lt $hi) { $mid = [int](($lo + $hi) / 2 - 0.5); if ($ContextRows[$mid].TimeUtc.Ticks -lt $t) { $lo = $mid + 1 } else { $hi = $mid } }
+                    $from = $lo - 1
+                }
+                for ($j = $from; $j -ge 0; $j--) {
+                    $p = $look[$j]
+                    if ($p.Server -eq $r.Server -and -not ($p.Flag -and $roles[$p.Flag])) { $before = $p.TimeUtc.Ticks; break }
+                }
+                $groups[$lane] = @{ Lane = $lane; Start = $t; Last = $t; Role = $role; PlainBefore = $before }
+            }
+        }
+        if (-not $kinds.ContainsKey($flag)) { continue }
+        # Same rule as Get-TimelineCategoryStyle, inline: a call per flagged row cost ~0.1 ms.
+        $shape = $shapeOf[[string]$r.FlagCategory]
+        if (-not $shape) { $shape = 'Circle' }
+        $key = [string]$lane + '|' + $shape + '|' + [int][Math]::Floor($x / $mergePx)
+        $m = $markAt[$key]
+        if ($m) { $m.Count++; continue }
+        # Only a new mark pays for its text.
+        $m = @{ Lane = $lane; X = $x; Shape = $shape; Row = $r; Count = 1; Label = $flag }
+        $markAt[$key] = $m; $markList.Add($m)
+    }
+    foreach ($g in $groups.Values) { & $closeGroup $g }
+
+    # The loop's own tables are the output: building 800 new objects with their tooltip text
+    # cost more than the loop. Tooltips are made on demand (Get-TimelineStripToolTip).
+    $styles = $script:TimelineShapeStyles
+    foreach ($m in $markList) {
+        $r = $m.Row
+        $m.Color = $styles[$m.Shape].Color
+        $m.RowId = [string]$r.Server + '|' + [string]$r.Log + '|' + [string]$r.RecordId
+    }
+    foreach ($d in $dotList) { $d.Opacity = [Math]::Round(0.35 + 0.65 * [Math]::Min(1.0, ($d.Count - 1) / 19.0), 2) }
+    $marks = $markList.ToArray()
+    $dots = $dotList.ToArray()
+
+    # The axis: local time when every server shares an offset (read from its rows), else UTC.
+    $offsets = New-Object 'System.Collections.Generic.HashSet[int]'
+    $seen = @{}
+    $sample = if ($ContextRows) { $ContextRows } else { $Rows }
+    $limit = [Math]::Min($sample.Count, 5000)
+    for ($k = 0; $k -lt $limit -and $seen.Count -lt $lanes.Count; $k++) {
+        $r = $sample[$k]
+        if ($seen.ContainsKey($r.Server) -or -not $laneOf.ContainsKey($r.Server)) { continue }
+        $seen[$r.Server] = $true
+        [void]$offsets.Add([int][Math]::Round(([datetime]$r.TimeServerLocal - [datetime]$r.TimeUtc).TotalMinutes))
+    }
+    $axisUtc = $offsets.Count -gt 1
+    $offset = if ($offsets.Count -eq 1) { @($offsets)[0] } else { 0 }
+    $spanMinutes = $span / 600000000.0
+    $step = $script:StripTickSteps[-1]
+    foreach ($candidate in $script:StripTickSteps) { if ($spanMinutes / $candidate -le 8) { $step = $candidate; break } }
+    $shownStart = $StartUtc.AddMinutes($offset)
+    $shownEnd = $EndUtc.AddMinutes($offset)
+    $format = if ($spanMinutes -gt 1440) { 'MM-dd HH:mm' } else { 'HH:mm' }
+    $tick = $shownStart.Date.AddMinutes([Math]::Ceiling(($shownStart - $shownStart.Date).TotalMinutes / $step) * $step)
+    $ticks = New-Object System.Collections.Generic.List[object]
+    while ($tick -le $shownEnd) {
+        $ticks.Add([PSCustomObject]@{ X = ($tick - $shownStart).Ticks * $scale; Label = $tick.ToString($format) })
+        $tick = $tick.AddMinutes($step)
+    }
+
+    [PSCustomObject]@{
+        Lanes = $lanes.ToArray(); Marks = [object[]]$marks; Dots = [object[]]$dots; DownBars = $bars.ToArray()
+        Ticks = $ticks.ToArray(); AxisIsUtc = $axisUtc
+    }
+}
+
+function Get-TimelineStoreStripModel {
+    <#
+        The picture for the window: Get-TimelineStripModel over the store's flagged and error
+        rows (Store.Notable) that pass the event list's filters, with every row as context.
+        Walking only those rows keeps a 40,000-row search well under 100 ms.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Store,
+        [Parameter(Mandatory)][hashtable]$Filter,
+        [string[]]$Servers,
+        [Parameter(Mandatory)][datetime]$StartUtc,
+        [Parameter(Mandatory)][datetime]$EndUtc,
+        [Parameter(Mandatory)][double]$Width
+    )
+    $rows = @(Select-TimelineRows -Rows $Store.Notable.ToArray() -Filter $Filter)
+    Get-TimelineStripModel -Rows $rows -Servers $Servers -StartUtc $StartUtc -EndUtc $EndUtc -Width $Width -ContextRows $Store.Rows.ToArray()
+}
+
+function Get-TimelineStripToolTip {
+    <#
+        The hover text for one mark or dot from Get-TimelineStripModel, made only when shown:
+        a mark says what it was, where and when, and its source and ID ("5 x ..." when several
+        sat on the same spot); a dot says how many errors, on which server, around when.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Item)
+    if ($Item.Row) {
+        $r = $Item.Row
+        $label = if ($Item.Count -gt 1) { '{0} x {1}' -f $Item.Count, $Item.Label } else { $Item.Label }
+        return ('{0}{1}{2} {3:yyyy-MM-dd HH:mm:ss} (server local){1}{4} {5}' -f $label, [Environment]::NewLine, $r.Server, [datetime]$r.TimeServerLocal, $r.Provider, $r.EventId)
+    }
+    $noun = if ($Item.Count -eq 1) { 'error' } else { 'errors' }
+    '{0} {1} on {2} around {3:HH:mm} (server local)' -f $Item.Count, $noun, $Item.Server, [datetime]$Item.Local
 }

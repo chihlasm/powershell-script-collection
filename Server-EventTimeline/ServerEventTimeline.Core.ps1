@@ -501,12 +501,18 @@ function Get-FailureText {
 $script:SortKeysItems = [Array].GetMethod('Sort', [type[]]@([Array], [Array]))
 
 function New-TimelineRowStore {
-    <# The window's rows, kept in UTC order, with a parallel key list and the log names seen. #>
+    <#
+        The window's rows, kept in UTC order, with a parallel key list and the log names seen.
+        Notable (with NotableKeys) holds just the flagged and Error/Critical rows, in the same
+        order: the timeline picture is drawn from those, so it never walks every row.
+    #>
     [PSCustomObject]@{
         # ::new(), not New-Object: a List[object] made with New-Object breaks @() on PS 5.1 and 7.
         Rows = [System.Collections.Generic.List[object]]::new()
         Keys = [System.Collections.Generic.List[long]]::new()
         Logs = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        Notable = [System.Collections.Generic.List[object]]::new()
+        NotableKeys = [System.Collections.Generic.List[long]]::new()
     }
 }
 
@@ -520,10 +526,20 @@ function Add-TimelineRows {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Store, [object[]]$NewRows)
     if (-not $NewRows -or $NewRows.Count -eq 0) { return }
+    $notable = 0
     foreach ($r in $NewRows) {
+        $ticks = ([datetime]$r.TimeUtc).Ticks
         $Store.Rows.Add($r)
-        $Store.Keys.Add(([datetime]$r.TimeUtc).Ticks)
+        $Store.Keys.Add($ticks)
         [void]$Store.Logs.Add([string]$r.Log)
+        if ($r.Flag -or $r.Level -eq 1 -or $r.Level -eq 2) { $Store.Notable.Add($r); $Store.NotableKeys.Add($ticks); $notable++ }
+    }
+    if ($notable -gt 0) {
+        $nKeys = $Store.NotableKeys.ToArray()
+        $nItems = $Store.Notable.ToArray()
+        $script:SortKeysItems.Invoke($null, @($nKeys, $nItems)) | Out-Null
+        $Store.NotableKeys.Clear(); $Store.NotableKeys.AddRange($nKeys)
+        $Store.Notable.Clear(); $Store.Notable.AddRange($nItems)
     }
     $keys = $Store.Keys.ToArray()
     $items = $Store.Rows.ToArray()

@@ -1,4 +1,4 @@
-<#
+﻿<#
     Pester 5 tests for ServerEventTimeline.Story.ps1: the plain-English "What happened" story
     and the timeline picture's layout. Pure logic: no network, no UI, no real event logs.
     Run:  pwsh -File Tests\Invoke-AllTests.ps1 -Path .\Server-EventTimeline\Tests
@@ -239,5 +239,210 @@ Describe 'The story in the ticket note and the HTML report' {
         $html = ConvertTo-TimelineHtml -Rows @($row) -Context (New-ReportContext)
         $html | Should -Not -BeLike '*<script>*'
         $html | Should -BeLike '*&lt;script&gt;*'
+    }
+}
+
+Describe 'Get-TimelineStripModel (the picture strip)' {
+    BeforeAll {
+        $script:S0 = [datetime]::SpecifyKind([datetime]'2026-11-18 22:45', [DateTimeKind]::Utc)
+        $script:S1 = [datetime]::SpecifyKind([datetime]'2026-11-18 23:05', [DateTimeKind]::Utc)
+        function Get-Strip { param($Rows, [string[]]$Servers = @('AD-01', 'AD-03', 'AD-04'), [double]$Width = 800)
+            Get-TimelineStripModel -Rows @($Rows) -Servers $Servers -StartUtc $script:S0 -EndUtc $script:S1 -Width $Width }
+    }
+
+    It 'gives each server a lane, in the order given' {
+        $m = Get-Strip @()
+        @($m.Lanes | ForEach-Object Server) | Should -Be @('AD-01', 'AD-03', 'AD-04')
+        @($m.Lanes | ForEach-Object Index) | Should -Be @(0, 1, 2)
+    }
+
+    It 'draws a mark only for flagged rows the story counts' {
+        $rows = @(
+            (Disk153 '2026-11-18 17:50')
+            (New-TestRow -Time '2026-11-18 17:51' -Log Application -Provider 'Windows Error Reporting' -Id 1001)
+            (New-TestRow -Time '2026-11-18 17:52')
+        )
+        $m = Get-Strip $rows
+        @($m.Marks).Count | Should -Be 1
+        $m.Marks[0].Shape | Should -Be 'Triangle'
+        $m.Marks[0].Color | Should -Be '#E0B43A'
+        $m.Marks[0].Lane | Should -Be 0
+        $m.Marks[0].X | Should -Be 200
+        $m.Marks[0].RowId | Should -Be (Get-TimelineRowId -Row $rows[0])
+        (Get-TimelineStripToolTip -Item $m.Marks[0]) | Should -BeLike 'Disk I/O had to be retried*AD-01*2026-11-18 17:50:00*Disk 153*'
+    }
+
+    It 'picks the symbol and colour by category, grey for anything unknown' {
+        $crash = New-TestRow -Time '2026-11-18 17:57' -Log Application -Provider 'Application Error' -Id 1000 -Level 2
+        $odd = New-TestRow -Time '2026-11-18 17:58' -Provider 'Microsoft-Windows-WindowsUpdateClient' -Id 19
+        $odd.FlagCategory = 'Lockout'
+        $m = Get-Strip @($crash, $odd)
+        $m.Marks[0].Shape | Should -Be 'Cross'
+        $m.Marks[0].Color | Should -Be '#E06C5A'
+        $m.Marks[1].Shape | Should -Be 'Circle'
+        $m.Marks[1].Color | Should -Be '#8B94A3'
+    }
+
+    It 'merges marks of one kind that would sit on the same spot, and says how many' {
+        $rows = @(foreach ($s in 0..4) { Disk153 ('2026-11-18 17:50:0{0}' -f $s) })
+        $m = Get-Strip $rows
+        @($m.Marks).Count | Should -Be 1
+        (Get-TimelineStripToolTip -Item $m.Marks[0]) | Should -BeLike '5 x Disk I/O had to be retried*'
+    }
+
+    It 'puts errors into slices about 6 px wide, one dot per slice, with the count' {
+        $rows = @(foreach ($i in 0..299) { New-TestRow -Time '2026-11-18 17:50' -Level 2 -Provider 'Ntfs' -Id 5 })
+        $rows += @(foreach ($i in 0..4) { New-TestRow -Time '2026-11-18 17:50' -Level 4 })
+        $m = Get-Strip $rows
+        @($m.Dots).Count | Should -Be 1
+        $m.Dots[0].Count | Should -Be 300
+        $m.Dots[0].Opacity | Should -Be 1.0
+        (Get-TimelineStripToolTip -Item $m.Dots[0]) | Should -BeLike '300 errors*AD-01*'
+        @($m.Marks).Count | Should -Be 0
+    }
+
+    It 'makes a lone error dot faint' {
+        (Get-Strip @(New-TestRow -Time '2026-11-18 17:50' -Level 2 -Provider 'Ntfs' -Id 5)).Dots[0].Opacity | Should -Be 0.35
+    }
+
+    It 'draws a down bar from the last event before an unexpected restart to the restart' {
+        $rows = Sort-Rows @(
+            New-TestRow -Time '2026-11-18 17:58' -Level 2 -Provider 'Other' -Id 1
+            New-TestRow -Time '2026-11-18 18:04' -Provider 'Microsoft-Windows-Kernel-Power' -Id 41 -Level 1
+            New-TestRow -Time '2026-11-18 18:04:02' -Provider 'EventLog' -Id 6005
+        )
+        $m = Get-Strip $rows
+        @($m.DownBars).Count | Should -Be 1
+        $m.DownBars[0].X1 | Should -Be 520
+        $m.DownBars[0].X2 | Should -Be 760
+        $m.DownBars[0].Text | Should -Be 'no events for about 6 min, then restarted without a clean shutdown'
+    }
+
+    It 'draws no down bar for a requested restart' {
+        $rows = Sort-Rows @(
+            New-TestRow -Time '2026-11-18 17:58' -Provider 'User32' -Id 1074
+            New-TestRow -Time '2026-11-18 18:01' -Provider 'EventLog' -Id 6005
+        )
+        @((Get-Strip $rows).DownBars).Count | Should -Be 0
+    }
+
+    It 'labels the axis in local time when every server shares an offset, in UTC when they differ' {
+        $same = @((Disk153 '2026-11-18 17:50'), (Disk153 '2026-11-18 17:55' -Server 'AD-03'))
+        $m = Get-Strip $same
+        $m.AxisIsUtc | Should -BeFalse
+        @($m.Ticks | ForEach-Object Label) | Should -Contain '17:50'
+
+        $mixed = @((Disk153 '2026-11-18 17:50'), (New-TestRow -Server 'AD-03' -Time '2026-11-18 22:55' -Provider 'Microsoft-Windows-Kernel-General' -Id 1 -OffsetMinutes 0))
+        $m2 = Get-Strip $mixed
+        $m2.AxisIsUtc | Should -BeTrue
+        @($m2.Ticks | ForEach-Object Label) | Should -Contain '22:50'
+    }
+
+    It 'places ticks across the window, left to right' {
+        $m = Get-Strip @(Disk153 '2026-11-18 17:50')
+        $xs = @($m.Ticks | ForEach-Object X)
+        $xs.Count | Should -BeGreaterThan 2
+        $xs.Count | Should -BeLessThan 10
+        ($xs | Sort-Object) | Should -Be $xs
+        $xs[0] | Should -BeGreaterOrEqual 0
+        $xs[-1] | Should -BeLessOrEqual 800
+    }
+
+    It 'drops rows outside the window and servers without a lane' {
+        $m = Get-Strip @((Disk153 '2026-11-18 16:00'), (Disk153 '2026-11-18 17:50' -Server 'AD-99'))
+        @($m.Marks).Count | Should -Be 0
+    }
+
+    It 'works for one row and for no rows' {
+        $one = Get-Strip @(New-TestRow -Time '2026-11-18 17:50')
+        , $one.Marks | Should -BeOfType [object[]]
+        , $one.Dots | Should -BeOfType [object[]]
+        , $one.DownBars | Should -BeOfType [object[]]
+        @($one.Lanes).Count | Should -Be 3
+        $none = Get-TimelineStripModel -Rows @() -Servers @('AD-01') -StartUtc $script:S0 -EndUtc $script:S1 -Width 800
+        @($none.Marks).Count | Should -Be 0
+        @($none.Lanes).Count | Should -Be 1
+    }
+
+    It 'the store path draws the same picture, and finds the quiet gap from information rows' {
+        $rows = Sort-Rows @(
+            New-TestRow -Time '2026-11-18 17:50' -Level 2 -Provider 'Ntfs' -Id 5
+            New-TestRow -Time '2026-11-18 17:58'
+            New-TestRow -Time '2026-11-18 18:04' -Provider 'Microsoft-Windows-Kernel-Power' -Id 41 -Level 1
+            New-TestRow -Time '2026-11-18 18:04:02' -Provider 'EventLog' -Id 6005
+            (Disk153 '2026-11-18 17:52' -Server 'AD-03')
+        )
+        $store = New-TimelineRowStore
+        Add-TimelineRows -Store $store -NewRows $rows
+        $viaStore = Get-TimelineStoreStripModel -Store $store -Filter @{ MinLevel = 'All' } -Servers @('AD-01', 'AD-03', 'AD-04') -StartUtc $script:S0 -EndUtc $script:S1 -Width 800
+        $direct = Get-Strip $rows
+        @($viaStore.Marks | ForEach-Object { '{0}|{1}|{2}' -f $_.Lane, $_.X, $_.Shape }) | Should -Be @($direct.Marks | ForEach-Object { '{0}|{1}|{2}' -f $_.Lane, $_.X, $_.Shape })
+        @($viaStore.Dots).Count | Should -Be @($direct.Dots).Count
+        # The last event before the restart is an Information row (17:58), not a notable one.
+        $viaStore.DownBars[0].X1 | Should -Be 520
+        $viaStore.DownBars[0].X2 | Should -Be 760
+        $viaStore.AxisIsUtc | Should -BeFalse
+    }
+
+    It 'the store path follows the filters' {
+        $store = New-TimelineRowStore
+        Add-TimelineRows -Store $store -NewRows @((Disk153 '2026-11-18 17:50'), (New-TestRow -Time '2026-11-18 17:55' -Provider 'Microsoft-Windows-WindowsUpdateClient' -Id 19))
+        $m = Get-TimelineStoreStripModel -Store $store -Filter @{ MinLevel = 'Warning' } -Servers @('AD-01') -StartUtc $script:S0 -EndUtc $script:S1 -Width 800
+        @($m.Marks | ForEach-Object Shape) | Should -Be @('Triangle')
+    }
+
+    It 'builds the picture for a 40,000-row search in under 100 ms' {
+        $servers = 'AD-01', 'AD-02', 'AD-03', 'AD-04'
+        $rows = New-Object System.Collections.Generic.List[object]
+        for ($i = 0; $i -lt 40000; $i++) {
+            $t = $script:S0.AddMilliseconds($i * 30)
+            $kind = $i % 100
+            $level = if ($kind -lt 10) { 2 } else { 4 }
+            $flag = if ($kind -eq 50) { 'Disk I/O had to be retried' } else { '' }
+            $rows.Add([PSCustomObject]@{ Server = $servers[$i % 4]; Log = 'System'; TimeUtc = $t; TimeServerLocal = $t.AddHours(-5); Level = $level
+                    Flag = $flag; FlagCategory = $(if ($flag) { 'Disk' } else { '' }); Provider = 'Disk'; EventId = 153; RecordId = $i; Message = ''; MessageFirstLine = '' })
+        }
+        $store = New-TimelineRowStore
+        Add-TimelineRows -Store $store -NewRows $rows.ToArray()
+        $filter = @{ MinLevel = 'All'; Server = '*'; Log = '*' }
+        [void](Get-TimelineStoreStripModel -Store $store -Filter $filter -Servers $servers -StartUtc $script:S0 -EndUtc $script:S1 -Width 900)
+        $best = [double]::MaxValue
+        foreach ($try in 1..3) {
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            [void](Get-TimelineStoreStripModel -Store $store -Filter $filter -Servers $servers -StartUtc $script:S0 -EndUtc $script:S1 -Width 900)
+            $best = [Math]::Min($best, $sw.Elapsed.TotalMilliseconds)
+        }
+        $best | Should -BeLessThan 100
+    }
+
+    It 'builds the picture for a 40,000-row search in under 100 ms on Windows PowerShell 5.1' -Skip:(-not (Get-Command powershell.exe -ErrorAction SilentlyContinue)) {
+        $core = Join-Path (Split-Path -Parent $PSScriptRoot) 'ServerEventTimeline.Core.ps1'
+        $script = @"
+`$ErrorActionPreference = 'Stop'
+. '$core'
+`$s0 = [datetime]::SpecifyKind([datetime]'2026-11-18 22:45', [DateTimeKind]::Utc)
+`$servers = 'AD-01', 'AD-02', 'AD-03', 'AD-04'
+`$rows = New-Object System.Collections.Generic.List[object]
+for (`$i = 0; `$i -lt 40000; `$i++) {
+    `$t = `$s0.AddMilliseconds(`$i * 30); `$kind = `$i % 100
+    `$flag = if (`$kind -eq 50) { 'Disk I/O had to be retried' } else { '' }
+    `$rows.Add([PSCustomObject]@{ Server = `$servers[`$i % 4]; Log = 'System'; TimeUtc = `$t; TimeServerLocal = `$t.AddHours(-5); Level = `$(if (`$kind -lt 10) { 2 } else { 4 })
+        Flag = `$flag; FlagCategory = `$(if (`$flag) { 'Disk' } else { '' }); Provider = 'Disk'; EventId = 153; RecordId = `$i; Message = ''; MessageFirstLine = '' })
+}
+`$store = New-TimelineRowStore
+Add-TimelineRows -Store `$store -NewRows `$rows.ToArray()
+`$e = `$s0.AddMinutes(20); `$f = @{ MinLevel = 'All'; Server = '*'; Log = '*' }
+[void](Get-TimelineStoreStripModel -Store `$store -Filter `$f -Servers `$servers -StartUtc `$s0 -EndUtc `$e -Width 900)
+`$best = [double]::MaxValue
+foreach (`$try in 1..3) { `$sw = [Diagnostics.Stopwatch]::StartNew(); [void](Get-TimelineStoreStripModel -Store `$store -Filter `$f -Servers `$servers -StartUtc `$s0 -EndUtc `$e -Width 900); `$best = [Math]::Min(`$best, `$sw.Elapsed.TotalMilliseconds) }
+[int]`$best
+"@
+        $file = Join-Path $TestDrive 'strip-timing.ps1'
+        Set-Content -LiteralPath $file -Value $script -Encoding UTF8
+        $out = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $file 2>&1 | ForEach-Object { "$_" })
+        $last = $out | Select-Object -Last 1
+        # A number, not an error that happens to convert to 0.
+        $last | Should -Match '^\d+$' -Because ($out -join "`n")
+        [int]$last | Should -BeLessThan 100
     }
 }

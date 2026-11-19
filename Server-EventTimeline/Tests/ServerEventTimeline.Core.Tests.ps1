@@ -685,3 +685,14 @@ Describe 'The time range filter (FromUtc / ToUtc)' {
         @(Select-TimelineRows -Rows $script:RangeRows -Filter $f).Count | Should -Be @($script:RangeRows | Where-Object { Test-RowMatchesFilter -Row $_ -Filter $f }).Count
     }
 }
+
+Describe 'The row store keeps the rows the picture needs' {
+    It 'Add-TimelineRows keeps flagged and error rows in their own list, in UTC order' {
+        $mk = { param($m, $level, $flag) [PSCustomObject]@{ Server = 'AD-01'; Log = 'System'; TimeUtc = [datetime]::SpecifyKind(([datetime]'2026-11-18 17:00').AddMinutes($m), [DateTimeKind]::Utc); Level = $level; Flag = $flag; Message = "m$m" } }
+        $store = New-TimelineRowStore
+        Add-TimelineRows -Store $store -NewRows @((& $mk 5 2 ''), (& $mk 1 4 ''), (& $mk 3 4 'Windows Update installed an update'))
+        Add-TimelineRows -Store $store -NewRows @((& $mk 2 1 ''), (& $mk 4 3 ''))
+        @($store.Notable | ForEach-Object Message) | Should -Be @('m2', 'm3', 'm5')
+        $store.Rows.Count | Should -Be 5
+    }
+}
