@@ -404,6 +404,7 @@ h1{font-size:22px;margin:0 0 4px}h2{font-size:16px;margin:24px 0 8px;color:var(-
 th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
 th{color:var(--muted);font-weight:600}.l1,.l2{color:var(--err)}.l3{color:var(--warn)}
 .flag{color:var(--accent);font-weight:600}td.msg{white-space:pre-wrap;word-break:break-word}
+ul.story{list-style:none;padding:0;margin:0}ul.story li{padding:4px 0;border-bottom:1px solid var(--line)}ul.story li.gap{color:var(--muted);font-size:12px;padding-left:24px;border:none}.when{color:var(--muted)}
 </style></head><body>
 <h1>Server Event Timeline</h1>
 '@)
@@ -417,6 +418,8 @@ th{color:var(--muted);font-weight:600}.l1,.l2{color:var(--err)}.l3{color:var(--w
         foreach ($line in @($Context.Summary)) { [void]$sb.AppendFormat('<li>{0}</li>', (& $e $line)) }
         [void]$sb.Append('</ul>')
     }
+    # What happened, in order, from the same rows the report lists.
+    [void]$sb.Append((ConvertTo-TimelineStoryHtml -Story (Get-TimelineStory -Rows $Rows)))
 
     [void]$sb.Append('<h2>How each server went</h2><table><tr><th>Server</th><th>Result</th><th>Details</th></tr>')
     foreach ($o in @($Context.ServerOutcomes)) {
@@ -1125,13 +1128,10 @@ function New-TimelineTicketNote {
     }
     if ($incomplete) { $next.Add('Read the incomplete logs again with a narrower window (or raise the limits under More options).') }
 
-    $flaggedRows = @($Rows | Where-Object { $_.Flag } | Sort-Object TimeUtc)
-    foreach ($r in @($flaggedRows | Select-Object -First $MaxEventLines)) {
-        $items.Add((New-TicketNoteItem -Kind Info -Text ('{0} {1} (server local): {2} - {3} {4}' -f $r.Server,
-                    ([datetime]$r.TimeServerLocal).ToString('yyyy-MM-dd HH:mm:ss'), $r.Flag, $r.Provider, $r.EventId)))
-    }
-    if ($flaggedRows.Count -gt $MaxEventLines) {
-        $items.Add((New-TicketNoteItem -Kind Info -Text ('... and {0} more flagged events (see the report)' -f ($flaggedRows.Count - $MaxEventLines))))
+    $flaggedRows = @($Rows | Where-Object { $_.Flag })
+    # What happened, in order: repeats and restarts folded into one line each (Story.ps1).
+    foreach ($line in @(Format-TimelineStoryText -Story (Get-TimelineStory -Rows $Rows -MaxLines $MaxEventLines))) {
+        $items.Add((New-TicketNoteItem -Kind Info -Text $line))
     }
 
     $flagText = if ($flaggedRows.Count -eq 1) { '1 flagged event' } else { '{0} flagged events' -f $flaggedRows.Count }

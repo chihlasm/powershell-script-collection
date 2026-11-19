@@ -178,3 +178,66 @@ Describe 'Get-TimelineRowId and Format-TimelineGap' {
         Format-TimelineGap -Minutes 2880 | Should -Be '2 days later'
     }
 }
+
+Describe 'The story in the ticket note and the HTML report' {
+    BeforeAll {
+        function New-NoteStatus {
+            param([string[]]$Servers = @('AD-01'))
+            $st = [ordered]@{}
+            foreach ($s in $Servers) {
+                $st[$s] = [PSCustomObject]@{ Server = $s; State = 'Done'; Transport = 'WinRM'; EventCount = 10; Reason = ''
+                    Logs = @([PSCustomObject]@{ Log = 'System'; Outcome = 'Read'; Count = 10; Reason = '' }) }
+            }
+            $st
+        }
+        function New-ReportContext {
+            param([string[]]$Servers = @('AD-01'))
+            @{ WindowText = 'Around 2026-11-18 17:50 +/- 15 min'; Servers = $Servers; Logs = @('System'); FiltersText = 'none'
+                GeneratedAt = [datetime]'2026-11-18 18:10'; Summary = @('AD-01: 3 disk errors'); ServerOutcomes = @() }
+        }
+    }
+
+    It 'the ticket note lists story lines instead of raw flagged rows' {
+        $rows = @((Disk153 '2026-11-18 17:49'), (Disk153 '2026-11-18 17:50:30'), (Disk153 '2026-11-18 17:52'))
+        $note = New-TimelineTicketNote -Status (New-NoteStatus) -Rows $rows -WindowText 'w' -Now ([datetime]'2026-11-18 18:00')
+        $text = $note.Checked -join "`n"
+        $text | Should -BeLike '*AD-01 2026-11-18 17:49 (server local): Disk I/O had to be retried (3 in 3 min)*'
+        $text | Should -Not -BeLike '*Disk 153*'
+    }
+
+    It 'the ticket note keeps 15 story lines and says how many more' {
+        $rows = @(foreach ($i in 0..19) { Disk153 (([datetime]'2026-11-18 00:00').AddMinutes($i * 11).ToString('yyyy-MM-dd HH:mm')) })
+        $note = New-TimelineTicketNote -Status (New-NoteStatus) -Rows $rows -WindowText 'w' -Now ([datetime]'2026-11-18 18:00')
+        @($note.Checked | Where-Object { $_ -like '*(server local):*' }).Count | Should -Be 15
+        ($note.Checked -join "`n") | Should -BeLike '*... and 5 more flagged events (see the report)*'
+        ($note.Checked -join "`n") | Should -Not -BeLike '*minutes later*'
+    }
+
+    It 'Format-TimelineStoryText gives one line per event and no gap or detail lines' {
+        $rows = @((Disk153 '2026-11-18 17:00'), (New-TestRow -Time '2026-11-18 17:25' -Provider 'Microsoft-Windows-WindowsUpdateClient' -Id 19 -Message 'Installed KB1'))
+        $lines = @(Format-TimelineStoryText -Story (Get-TimelineStory -Rows $rows))
+        $lines | Should -Be @('AD-01 2026-11-18 17:00 (server local): Disk I/O had to be retried', 'AD-01 2026-11-18 17:25 (server local): Windows Update installed an update')
+    }
+
+    It 'the HTML report has a What happened section after What was found' {
+        $html = ConvertTo-TimelineHtml -Rows @(Disk153 '2026-11-18 17:49') -Context (New-ReportContext)
+        $at = $html.IndexOf('<h2>What happened</h2>')
+        $at | Should -BeGreaterThan $html.IndexOf('<h2>What was found</h2>')
+        $html.Substring($at) | Should -BeLike '*Disk I/O had to be retried*'
+    }
+
+    It 'the HTML story is built from the rows the report was given' {
+        $html = ConvertTo-TimelineHtml -Rows @(Disk153 '2026-11-18 17:49' -Server 'AD-03') -Context (New-ReportContext -Servers 'AD-01', 'AD-03')
+        $section = $html.Substring($html.IndexOf('<h2>What happened</h2>'))
+        $section = $section.Substring(0, $section.IndexOf('<h2>', 5))
+        $section | Should -BeLike '*AD-03*'
+        $section | Should -Not -BeLike '*AD-01*'
+    }
+
+    It 'the HTML story encodes text' {
+        $row = New-TestRow -Time '2026-11-18 17:57' -Log Application -Provider 'Application Error' -Id 1000 -Level 2 -Message '<script>alert(1)</script>'
+        $html = ConvertTo-TimelineHtml -Rows @($row) -Context (New-ReportContext)
+        $html | Should -Not -BeLike '*<script>*'
+        $html | Should -BeLike '*&lt;script&gt;*'
+    }
+}

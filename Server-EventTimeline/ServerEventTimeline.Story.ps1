@@ -219,3 +219,46 @@ function Get-TimelineStory {
     }
     [PSCustomObject]@{ Lines = $lines.ToArray(); MoreCount = [Math]::Max(0, $built.Count - $shown) }
 }
+
+function Format-TimelineStoryText {
+    <#
+        The story as ticket lines: one per Event line ('AD-01 2026-11-18 17:49 (server local):
+        Disk I/O had to be retried (3 in 3 min)'), no gap or detail lines, so N lines means N
+        happenings. Ends with how many more flagged events there were when the story was cut.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Story)
+    foreach ($l in @($Story.Lines | Where-Object { $_.Kind -eq 'Event' })) {
+        '{0} {1:yyyy-MM-dd HH:mm} (server local): {2}' -f $l.Server, ([datetime]$l.TimeServerLocal), $l.Text
+    }
+    if ($Story.MoreCount -gt 0) {
+        $noun = if ($Story.MoreCount -eq 1) { 'flagged event' } else { 'flagged events' }
+        '... and {0} more {1} (see the report)' -f $Story.MoreCount, $noun
+    }
+}
+
+function ConvertTo-TimelineStoryHtml {
+    <# The story as an HTML list for the report. Every piece of text is HTML-encoded. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Story)
+    $e = { param($s) [System.Net.WebUtility]::HtmlEncode([string]$s) }
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append('<h2>What happened</h2>')
+    $lines = @($Story.Lines)
+    if ($lines.Count -eq 0) {
+        [void]$sb.Append("<p class=""meta"">Nothing the tool recognises happened in these events - check the errors in the table.</p>")
+        return $sb.ToString()
+    }
+    [void]$sb.Append('<ul class="story">')
+    foreach ($l in $lines) {
+        if ($l.Kind -eq 'Gap') { [void]$sb.AppendFormat('<li class="gap">{0}</li>', (& $e $l.Text)); continue }
+        [void]$sb.AppendFormat('<li><span class="when">{0:yyyy-MM-dd HH:mm}</span> <b>{1}</b> {2}', ([datetime]$l.TimeServerLocal), (& $e $l.Server), (& $e $l.Text))
+        if ($l.Detail) { [void]$sb.AppendFormat('<br><span class="meta">{0}</span>', (& $e $l.Detail)) }
+        [void]$sb.Append('</li>')
+    }
+    [void]$sb.Append('</ul>')
+    if ($Story.MoreCount -gt 0) {
+        [void]$sb.AppendFormat('<p class="meta">... and {0:N0} more flagged events - see the table below.</p>', $Story.MoreCount)
+    }
+    $sb.ToString()
+}

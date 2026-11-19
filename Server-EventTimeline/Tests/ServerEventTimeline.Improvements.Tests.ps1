@@ -259,7 +259,7 @@ Describe 'New-TimelineTicketNote' {
     }
 
     It 'lists the first flagged events with their server-local time' {
-        ($script:Note.Checked -join "`n") | Should -BeLike '*APP01 2026-11-17 08:01:00 (server local): Restarted without a clean shutdown*Kernel-Power 41*'
+        ($script:Note.Checked -join "`n") | Should -BeLike '*APP01 2026-11-17 08:01 (server local): Restarted without a clean shutdown*'
     }
 
     It 'rules out a server only when every log was read' {
