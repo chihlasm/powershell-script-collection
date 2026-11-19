@@ -174,8 +174,8 @@ Describe 'Window layout' {
 
     It 'gives the event list the remaining height, with the detail pane below a drag handle' {
         $xaml = New-TimelineWindowXaml
-        $xaml | Should -Match '<DataGrid x:Name="EventGrid" Grid.Row="2"'
-        $xaml | Should -Match '<GridSplitter Grid.Row="3"'
+        $xaml | Should -Match '<Grid Grid.Row="2">\s*<TabControl x:Name="MainTabs">'  # the Events tab holds the list
+        $xaml | Should -Match '<GridSplitter x:Name="DetailSplitter" Grid.Row="3"'
         $xaml | Should -Match '<ScrollViewer x:Name="SidebarScroll"'
     }
 
@@ -525,10 +525,9 @@ Describe 'The What happened tab' {
         $script:Refresh = { param($Ui) $Ui.EventGrid.ItemsSource = @(Select-TimelineRows -Rows $Ui.Store.Rows.ToArray() -Filter (Get-TimelineGridFilter -Ui $Ui)) }
     }
 
-    It 'has the two detail tabs, the story list and Copy for ticket' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+    It 'has the story list and Copy for ticket' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
         $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
         foreach ($n in 'DetailTabs', 'DetailText', 'StoryList', 'StoryEmptyText', 'CopyStoryButton') { $w.FindName($n) | Should -Not -BeNullOrEmpty -Because "control $n" }
-        @($w.FindName('DetailTabs').Items | ForEach-Object Header) | Should -Be @('Event details', 'What happened')
         $w.FindName('CopyStoryButton').Content | Should -Be 'Copy for ticket'
     }
 
@@ -638,8 +637,8 @@ Describe 'The picture strip in the window' {
     It 'has the picture strip between the filters and the event list' {
         $xaml = New-TimelineWindowXaml
         $xaml | Should -Match '<Border x:Name="StripBorder" Grid.Row="1"'
-        $xaml | Should -Match '<DataGrid x:Name="EventGrid" Grid.Row="2"'
-        $xaml | Should -Match '<GridSplitter Grid.Row="3"'
+        $xaml | Should -Match '<Grid Grid.Row="2">\s*<TabControl x:Name="MainTabs">'  # the Events tab holds the list
+        $xaml | Should -Match '<GridSplitter x:Name="DetailSplitter" Grid.Row="3"'
     }
 
     It 'has the strip controls and the time range chip' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
@@ -908,5 +907,124 @@ Describe 'When? as a two-way switch' {
         $row = $w.FindName('LastHourButton').Parent
         $row | Should -Be $w.FindName('Last24Button').Parent
         @($row.Children | Where-Object { $_ -is [System.Windows.Controls.TextBlock] } | ForEach-Object Text) | Should -Be @('Search now:')
+    }
+}
+
+Describe 'What happened as a big tab beside Events' {
+    # The story was squeezed into the 150 px pane under the list. It is now a tab of its own
+    # beside the event list, and gets the whole height when it is open.
+    BeforeAll {
+        function Find-Ancestor($Element, $Target) {
+            $p = $Element
+            while ($p) { if ($p -eq $Target) { return $true }; $p = [System.Windows.LogicalTreeHelper]::GetParent($p) }
+            $false
+        }
+        $script:StRec2 = 0
+        function New-TabTestRow {
+            param([string]$Time, [string]$Provider = 'Microsoft-Windows-WindowsUpdateClient', [int]$Id = 19, [int]$Level = 4)
+            $script:StRec2++
+            $e = [PSCustomObject]@{ TimeCreatedUtc = [datetime]::SpecifyKind([datetime]$Time, [DateTimeKind]::Utc); Id = $Id; ProviderName = $Provider
+                Level = $Level; LogName = 'System'; Message = "event $script:StRec2"; RecordId = $script:StRec2; UserSid = ''; MachineName = 'AD-01' }
+            ConvertTo-TimelineRow -Server 'AD-01' -EventRecord $e -UtcOffsetMinutes 0
+        }
+    }
+
+    It 'puts Events and What happened side by side as the main tabs; the pane below keeps only Event details' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
+        $tabs = $w.FindName('MainTabs')
+        @($tabs.Items | ForEach-Object Name) | Should -Be @('EventsTab', 'StoryTab')
+        $w.FindName('EventsTab').Header | Should -Be 'Events'
+        $tabs.SelectedItem | Should -Be $w.FindName('EventsTab')
+        Find-Ancestor $w.FindName('EventGrid') $w.FindName('EventsTab') | Should -BeTrue
+        Find-Ancestor $w.FindName('StoryList') $w.FindName('StoryTab') | Should -BeTrue
+        @($w.FindName('DetailTabs').Items | ForEach-Object Header) | Should -Be @('Event details')
+        $w.FindName('CopyStoryButton').Visibility | Should -Be 'Collapsed'
+        $w.FindName('StoryBanner').Visibility | Should -Be 'Collapsed'
+        $w.FindName('StoryBadge').Visibility | Should -Be 'Collapsed'
+    }
+
+    It 'gives the story the whole height: the event details fold away, and come back at their old size' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
+        $area = $w.FindName('DetailArea'); $row = $area.Parent.RowDefinitions[4]
+        $row.Height = New-Object System.Windows.GridLength 210
+        Set-TimelineMainTab -Window $w -Tab Story
+        $w.FindName('MainTabs').SelectedItem | Should -Be $w.FindName('StoryTab')
+        $area.Visibility | Should -Be 'Collapsed'
+        $w.FindName('DetailSplitter').Visibility | Should -Be 'Collapsed'
+        $row.Height.Value | Should -Be 0
+        $w.FindName('CopyStoryButton').Visibility | Should -Be 'Visible'
+        Set-TimelineMainTab -Window $w -Tab Events
+        $area.Visibility | Should -Be 'Visible'
+        $w.FindName('DetailSplitter').Visibility | Should -Be 'Visible'
+        $row.Height.Value | Should -Be 210
+        $row.MinHeight | Should -Be 90
+        $w.FindName('CopyStoryButton').Visibility | Should -Be 'Collapsed'
+    }
+
+    It 'shows the banner only when the window switched on its own, and hides it on leaving the tab' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
+        Set-TimelineMainTab -Window $w -Tab Story
+        $w.FindName('StoryBanner').Visibility | Should -Be 'Collapsed'
+        Set-TimelineMainTab -Window $w -Tab Story -Banner
+        $w.FindName('StoryBanner').Visibility | Should -Be 'Visible'
+        $w.FindName('StoryBannerText').Text | Should -BeLike '*stood out*in order*'
+        $w.FindName('StoryBannerEventsButton').Content | Should -Be 'Show all events'
+        Set-TimelineMainTab -Window $w -Tab Events
+        $w.FindName('StoryBanner').Visibility | Should -Be 'Collapsed'
+    }
+
+    It 'counts what stood out on the tab' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
+        $rows = @((New-TabTestRow -Time '2026-11-18 17:00' -Provider 'Disk' -Id 153 -Level 3), (New-TabTestRow -Time '2026-11-18 17:30'))
+        Set-TimelineStoryView -Window $w -Story (Get-TimelineStory -Rows $rows)
+        $w.FindName('StoryCountText').Text | Should -Be '2'
+        $w.FindName('StoryBadge').Visibility | Should -Be 'Visible'
+        Set-TimelineStoryView -Window $w -Story $null
+        $w.FindName('StoryBadge').Visibility | Should -Be 'Collapsed'
+    }
+
+    It 'switches on its own only when something stood out and nobody touched the results' {
+        Test-TimelineStoryAutoShow -StoryCount 3 -Touched $false -Cancelled $false | Should -BeTrue
+        Test-TimelineStoryAutoShow -StoryCount 0 -Touched $false -Cancelled $false | Should -BeFalse
+        Test-TimelineStoryAutoShow -StoryCount 3 -Touched $true -Cancelled $false | Should -BeFalse
+        Test-TimelineStoryAutoShow -StoryCount 3 -Touched $false -Cancelled $true | Should -BeFalse
+    }
+
+    It 'says in the status line where to look' {
+        Get-TimelineFinishMessage -EventCount 3985 -StoryCount 5 -Shown $true | Should -Be 'Finished: 3,985 events. Showing the 5 that stood out.'
+        Get-TimelineFinishMessage -EventCount 3985 -StoryCount 5 -Shown $false | Should -Be 'Finished: 3,985 events. 5 stood out - see What happened.'
+        Get-TimelineFinishMessage -EventCount 3985 -StoryCount 1 -Shown $false | Should -Be 'Finished: 3,985 events. 1 stood out - see What happened.'
+        Get-TimelineFinishMessage -EventCount 12 -StoryCount 0 -Shown $false | Should -Be 'Finished: 12 events.'
+    }
+
+    It 'a story line or a picture symbol opens the Events tab on that event' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
+        $row = New-TabTestRow -Time '2026-11-18 17:30'
+        $ui = @{ Window = $w; Store = (New-TimelineRowStore); Hidden = (New-Object System.Collections.Generic.List[string]); EventKey = '' }
+        foreach ($n in 'LevelFilter', 'ServerFilter', 'LogFilter', 'FlaggedOnlyCheck', 'FilterText', 'EventGrid', 'CollapseCheck', 'MainTabs') { $ui[$n] = $w.FindName($n) }
+        Add-TimelineRows -Store $ui.Store -NewRows @($row)
+        $ui.EventGrid.ItemsSource = @($row)
+        Set-TimelineMainTab -Window $w -Tab Story
+        Show-TimelineStoryRow -Ui $ui -RowId (Get-TimelineRowId -Row $row) -Refresh { } | Should -BeTrue
+        $ui.MainTabs.SelectedItem | Should -Be $w.FindName('EventsTab')
+        $w.FindName('DetailArea').Visibility | Should -Be 'Visible'
+        $ui.EventGrid.SelectedItem | Should -Be $row
+    }
+
+    It 'wires it up: touching the results during a search, the finish decision, and a new search' {
+        $src = Get-Content -LiteralPath $script:AppPath -Raw
+        $src | Should -Match '\$ui\.MainTabs\.add_PreviewMouseLeftButtonDown\(\{\s*\$ui\.ResultsTouched = \$true'
+        $src | Should -Match '\$ui\.EventGrid\.add_PreviewMouseWheel\(\{\s*\$ui\.ResultsTouched = \$true'
+        $src | Should -Match '\$ui\.StripCanvas\.add_PreviewMouseLeftButtonDown\(\{\s*\$ui\.ResultsTouched = \$true'
+        # Only the tab control's own selection: the grid and combo boxes inside raise it too.
+        $src | Should -Match '\$ui\.MainTabs\.add_SelectionChanged[\s\S]{0,200}OriginalSource -ne \$ui\.MainTabs'
+        $start = $src.Substring($src.IndexOf('function Start-Search'), 1800)
+        $start | Should -Match '\$ui\.ResultsTouched = \$false'
+        $start | Should -Match 'Set-TimelineMainTab -Window \$window -Tab Events'
+        $finish = $src.Substring($src.IndexOf('if ($u.Finished) {'), 1200)
+        $finish | Should -Match 'Test-TimelineStoryAutoShow'
+        $finish | Should -Match 'Set-TimelineMainTab -Window \$window -Tab Story -Banner'
+        $finish | Should -Match 'Get-TimelineFinishMessage'
+        $src | Should -Match '\$ui\.StoryBannerEventsButton\.add_Click\(\{\s*Set-TimelineMainTab -Window \$window -Tab Events'
     }
 }

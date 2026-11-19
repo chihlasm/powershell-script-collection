@@ -196,13 +196,19 @@ server's local time when they all share a time zone, and UTC (it says so) when t
 
 ### What happened
 
-The **What happened** tab, next to the event details, tells the story of the search in plain
-English, in order: *17:49 AD-01: Disk I/O had to be retried (3 in 3 min)*, *17:57 AD-01:
+The results have two big tabs: **Events** (every event, with the event details below) and
+**What happened**, which tells the story of the search in plain English, in order: *17:49 AD-01: Disk I/O had to be retried (3 in 3 min)*, *17:57 AD-01:
 Application crashed (7 errors in the 5 minutes before)*, *Restarted without a clean shutdown -
 back up at 18:04*. Repeats within 10 minutes fold into one line, a restart and its start-up
 events become one line, and quiet stretches of 10 minutes or more show as *25 minutes later*.
-Click a line to select its event (filters that hide it are cleared). **Copy for ticket** copies
-the lines. The ticket summary and the HTML report carry the same story, and the report has the
+The story gets the whole height (the event details fold away on that tab), and the tab shows
+how many things stood out. Click a line to open the Events tab on that event (filters that hide
+it are cleared). **Copy for ticket** copies the lines.
+
+When a search finishes and something stood out, the window opens **What happened** on its own,
+with a note saying so and a **Show all events** button. It doesn't if you clicked into or
+scrolled the results while the search ran: then it stays where you are, and the status line
+says how many stood out. The ticket summary and the HTML report carry the same story, and the report has the
 picture too.
 
 Windows writes the unexpected-restart events (Kernel-Power 41, EventLog 6008) when the server
