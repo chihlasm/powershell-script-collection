@@ -51,6 +51,9 @@
     - One unexpected restart writes both Kernel-Power 41 and EventLog 6008, and one start
       writes both EventLog 6005 and Kernel-General 12 (same reboot-causes page above), so
       the summary counts each pair once.
+    - The story (ServerEventTimeline.Story.ps1) says when a server was back up, not when it
+      went down: 41 and 6008 are written at the next start, and a blue screen's WER 1001 and a
+      requested restart's 1074 belong to the same restart (same reboot-causes page above).
 
     The ticket note is built with CaseKit.ps1 (a copy of TicketNote\CaseKit.ps1; see the
     TicketNote README), which defines functions only.
@@ -59,6 +62,8 @@
 . (Join-Path $PSScriptRoot 'CaseKit.ps1')
 # The server list (AD entries, suggestions, notes, file import, background lookups).
 . (Join-Path $PSScriptRoot 'ServerEventTimeline.ServerList.ps1')
+# "What happened": the story of the flagged events and the timeline picture's layout.
+. (Join-Path $PSScriptRoot 'ServerEventTimeline.Story.ps1')
 
 function ConvertTo-ServerList {
     <# Turns whatever a tech pasted into a clean list of server names. #>
