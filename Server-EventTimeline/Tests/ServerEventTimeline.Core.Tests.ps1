@@ -656,3 +656,32 @@ Describe 'Get-TimelineServerCards (the sidebar''s EACH SERVER block)' {
         @(Get-TimelineServerNotes -Status $script:Status -SummaryLines $script:Lines) | Should -Be @('Security log not read: tick it under Which logs? to see sign-in or lockout problems.')
     }
 }
+
+Describe 'The time range filter (FromUtc / ToUtc)' {
+    BeforeAll {
+        $script:RangeRows = @(foreach ($m in 0..9) {
+                [PSCustomObject]@{ Server = 'AD-01'; Log = 'System'; TimeUtc = [datetime]::SpecifyKind(([datetime]'2026-11-18 17:00').AddMinutes($m), [DateTimeKind]::Utc)
+                    Level = 4; Flag = ''; Provider = 'P'; EventId = 1; Message = "m$m" }
+            })
+        $script:From = [datetime]::SpecifyKind([datetime]'2026-11-18 17:02', [DateTimeKind]::Utc)
+        $script:To = [datetime]::SpecifyKind([datetime]'2026-11-18 17:05', [DateTimeKind]::Utc)
+    }
+
+    It 'keeps rows inside FromUtc to ToUtc, the end not included' {
+        $f = @{ MinLevel = 'All'; FromUtc = $script:From; ToUtc = $script:To }
+        $kept = @(Select-TimelineRows -Rows $script:RangeRows -Filter $f)
+        @($kept | ForEach-Object Message) | Should -Be @('m2', 'm3', 'm4')
+        @($script:RangeRows | Where-Object { Test-RowMatchesFilter -Row $_ -Filter $f } | ForEach-Object Message) | Should -Be @('m2', 'm3', 'm4')
+    }
+
+    It 'ignores a missing FromUtc or ToUtc' {
+        @(Select-TimelineRows -Rows $script:RangeRows -Filter @{ MinLevel = 'All'; FromUtc = $script:From }).Count | Should -Be 8
+        @(Select-TimelineRows -Rows $script:RangeRows -Filter @{ MinLevel = 'All'; ToUtc = $script:To }).Count | Should -Be 5
+        @(Select-TimelineRows -Rows $script:RangeRows -Filter @{ MinLevel = 'All'; FromUtc = $null; ToUtc = $null }).Count | Should -Be 10
+    }
+
+    It 'Select-TimelineRows and Test-RowMatchesFilter agree on the time range with other filters' {
+        $f = @{ MinLevel = 'All'; Text = 'm'; FromUtc = $script:From; ToUtc = $script:To; Server = 'AD-01' }
+        @(Select-TimelineRows -Rows $script:RangeRows -Filter $f).Count | Should -Be @($script:RangeRows | Where-Object { Test-RowMatchesFilter -Row $_ -Filter $f }).Count
+    }
+}

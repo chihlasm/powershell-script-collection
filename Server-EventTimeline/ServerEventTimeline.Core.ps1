@@ -325,7 +325,8 @@ function Test-RowMatchesFilter {
         True when the row passes the grid's filters. Filter keys: MinLevel (All | Warning |
         Error | Critical), Server ('*' or a name), Log ('*' or a name), FlaggedOnly, Text
         (literal, case-insensitive, matched against message, provider and event ID),
-        HiddenSources (provider names to hide) and EventKey ('Provider|Id': only that event).
+        HiddenSources (provider names to hide), EventKey ('Provider|Id': only that event) and
+        FromUtc / ToUtc (UTC datetimes, either may be $null: FromUtc <= TimeUtc < ToUtc).
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Row, [Parameter(Mandatory)][hashtable]$Filter)
@@ -337,6 +338,8 @@ function Test-RowMatchesFilter {
     if ($Filter.FlaggedOnly -and -not $Row.Flag) { return $false }
     if (@($Filter.HiddenSources) -contains [string]$Row.Provider) { return $false }
     if ($Filter.EventKey -and (Get-TimelineEventKey -Row $Row) -ne $Filter.EventKey) { return $false }
+    if ($null -ne $Filter.FromUtc -and [datetime]$Row.TimeUtc -lt [datetime]$Filter.FromUtc) { return $false }
+    if ($null -ne $Filter.ToUtc -and [datetime]$Row.TimeUtc -ge [datetime]$Filter.ToUtc) { return $false }
 
     $text = [string]$Filter.Text
     if ($text) {
@@ -551,11 +554,19 @@ function Select-TimelineRows {
         foreach ($h in @($Filter.HiddenSources)) { [void]$hidden.Add([string]$h) }
     }
     $eventKey = [string]$Filter.EventKey
+    # The time range as ticks, so the loop compares numbers.
+    $fromTicks = if ($null -ne $Filter.FromUtc) { ([datetime]$Filter.FromUtc).Ticks } else { [long]::MinValue }
+    $toTicks = if ($null -ne $Filter.ToUtc) { ([datetime]$Filter.ToUtc).Ticks } else { [long]::MaxValue }
+    $ranged = $null -ne $Filter.FromUtc -or $null -ne $Filter.ToUtc
 
-    if ($null -eq $levels -and -not $server -and -not $log -and -not $flagged -and -not $text -and -not $hidden -and -not $eventKey) { return @($Rows) }
+    if ($null -eq $levels -and -not $server -and -not $log -and -not $flagged -and -not $text -and -not $hidden -and -not $eventKey -and -not $ranged) { return @($Rows) }
 
     $out = New-Object System.Collections.Generic.List[object]
     foreach ($r in $Rows) {
+        if ($ranged) {
+            $ticks = ([datetime]$r.TimeUtc).Ticks
+            if ($ticks -lt $fromTicks -or $ticks -ge $toTicks) { continue }
+        }
         if ($null -ne $levels -and $levels -notcontains [int]$r.Level) { continue }
         if ($server -and $r.Server -ne $server) { continue }
         if ($log -and $r.Log -ne $log) { continue }
