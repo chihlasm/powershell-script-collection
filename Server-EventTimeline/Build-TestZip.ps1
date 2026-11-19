@@ -36,10 +36,13 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$OutputPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'dist')
+    [string]$OutputPath
 )
 
 $ErrorActionPreference = 'Stop'
+# Worked out here, not as the parameter's default: Windows PowerShell 5.1 leaves $PSScriptRoot
+# empty while parameter defaults are evaluated.
+if (-not $OutputPath) { $OutputPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'dist' }
 
 # Everything the tool needs on a server. Add a new script here (the tests will remind you).
 $files = @(

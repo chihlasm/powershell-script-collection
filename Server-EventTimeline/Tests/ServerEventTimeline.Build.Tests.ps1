@@ -1,4 +1,4 @@
-<#
+﻿<#
     Pester 5 tests for Build-TestZip.ps1: the zip copied to test servers holds exactly the
     tool's files, never the Reports folder (client data) or the tests.
     Run:  pwsh -File Tests\Invoke-AllTests.ps1 -Path .\Server-EventTimeline\Tests
@@ -59,5 +59,20 @@ Describe 'Build-TestZip.ps1' {
     It 'replaces the zip on the next build' {
         $again = & $script:BuildScript -OutputPath $script:Out
         (Get-ZipEntries -Path $again).Count | Should -Be 9
+    }
+}
+
+Describe 'Build-TestZip.ps1 on Windows PowerShell 5.1' {
+    It 'runs under powershell.exe' -Skip:(-not (Get-Command powershell.exe -ErrorAction SilentlyContinue)) {
+        $out = Join-Path $TestDrive 'dist51'
+        $log = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:BuildScript -OutputPath $out 2>&1 | ForEach-Object { "$_" })
+        $LASTEXITCODE | Should -Be 0 -Because ($log -join "`n")
+        Test-Path -LiteralPath (Join-Path $out 'Server-EventTimeline.zip') | Should -BeTrue
+    }
+
+    It 'works out its default folder in the script body: $PSScriptRoot is empty in 5.1 parameter defaults' {
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:BuildScript, [ref]$null, [ref]$null)
+        $default = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'OutputPath' } | ForEach-Object DefaultValue
+        "$default" | Should -Not -Match 'PSScriptRoot'
     }
 }
