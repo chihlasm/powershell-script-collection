@@ -63,9 +63,16 @@ to process this command*; a process of its own avoids that.
 4. Press **Search**. Each server is read in the background. Rows appear as servers finish,
    and you can scroll and filter while it works. **Cancel** stops at once and keeps what was
    read.
-5. Read **What was found** above the list: one line per server, for example
-   *APP01: 1 unexpected restart, 3 service failures, 1 update installed* or
-   *SQL01: nothing flagged in 1,240 events*. It counts every event read, whatever the filters.
+5. Read **Each server** in the sidebar, under Search: a card per server with how reading it
+   went (✓ done, … reading, ✗ couldn't reach, and the number of events) and what was found,
+   for example *1 unexpected restart, 3 service failures, 1 update installed* or *nothing
+   flagged in 1,240 events*. It counts every event read, whatever the filters. Click a card to
+   show only that server's events; click it again for all servers.
+
+   **The layout.** Everything about what to search is in the sidebar on the left; the events
+   fill the right. Press **«** to fold the sidebar away and give the events the full width
+   (**»** brings it back), drag the sidebar's edge to widen it, and drag the line above the
+   event details to give them more or less room.
 
    **What it does and doesn't know.** It recognises about 30 well-known Windows events
    (unexpected restarts, blue screens, disk errors, service and app crashes, low memory, time

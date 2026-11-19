@@ -119,7 +119,7 @@ Describe 'Window layout' {
         $names = 'ServerInput', 'ServerInputHint', 'AddServerButton', 'ServerCountText', 'DomainText', 'ChangeDomainButton', 'ServerList',
             'SuggestPopup', 'SuggestList', 'AddSeveralButton', 'ClearServersButton', 'AroundRadio', 'RangeRadio', 'AtBox', 'PlusMinusCombo', 'FromBox', 'ToBox', 'LastHourButton', 'Last24Button',
             'LogPanel', 'SecurityCheck', 'AllLogsCheck', 'CapBox', 'TimeoutBox', 'RunAsButton', 'SearchButton',
-            'CancelButton', 'StatusList', 'BannerText', 'TimeZoneNote', 'LevelFilter', 'ServerFilter', 'LogFilter', 'FlaggedOnlyCheck',
+            'CancelButton', 'SidebarColumn', 'SidebarPanel', 'SidebarStrip', 'CollapseSidebarButton', 'ExpandSidebarButton', 'NotesList', 'BannerText', 'TimeZoneNote', 'LevelFilter', 'ServerFilter', 'LogFilter', 'FlaggedOnlyCheck',
             'FilterText', 'CountText', 'EventGrid', 'DetailText', 'ExportCsvButton', 'ExportHtmlButton', 'CopyButton', 'ThisComputerButton', 'LogsButton', 'LogsPopup', 'CoreLogPanel', 'LogsAllButton', 'LogsNoneButton', 'LogsDefaultButton', 'SaveFolderBox', 'BrowseFolderButton', 'OpenFolderButton',
             'SummaryList', 'CollapseCheck', 'HiddenNote', 'ShowAllButton', 'TotalCapBox', 'RecentButton', 'TicketNoteButton'
         foreach ($n in $names) { $script:Window.FindName($n) | Should -Not -BeNullOrEmpty -Because "control $n" }
@@ -156,6 +156,27 @@ Describe 'Window layout' {
         $xaml | Should -Match 'Binding Note'
         $xaml | Should -Match 'Content="×"'
         $xaml | Should -Match 'Binding NoteKind'
+    }
+
+    It 'folds the sidebar to a thin strip and back, keeping its width' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
+        $col = $w.FindName('SidebarColumn')
+        $col.Width = New-Object System.Windows.GridLength 360
+        Set-TimelineSidebar -Window $w -Collapsed $true
+        $col.Width.Value | Should -Be 28
+        $w.FindName('SidebarPanel').Visibility | Should -Be 'Collapsed'
+        $w.FindName('SidebarStrip').Visibility | Should -Be 'Visible'
+        Set-TimelineSidebar -Window $w -Collapsed $false
+        $col.Width.Value | Should -Be 360
+        $w.FindName('SidebarPanel').Visibility | Should -Be 'Visible'
+        $w.FindName('SidebarStrip').Visibility | Should -Be 'Collapsed'
+    }
+
+    It 'gives the event list the remaining height, with the detail pane below a drag handle' {
+        $xaml = New-TimelineWindowXaml
+        $xaml | Should -Match '<DataGrid x:Name="EventGrid" Grid.Row="1"'
+        $xaml | Should -Match '<GridSplitter Grid.Row="2"'
+        $xaml | Should -Match '<ScrollViewer x:Name="SidebarScroll"'
     }
 
     It 'keeps the event grid virtualized and ungrouped' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {

@@ -29,8 +29,11 @@
     note... writes the four-part ticket note (TicketNote\Join-TicketNotes.ps1 can merge it
     with the quick checks' notes) and the HTML report into the ticket's folder.
 
-    A summary line per server sits above the grid ("APP01: 1 unexpected restart, 3 service
-    failures"). Right-click a row to search every server around that event, show only that
+    Everything about what to search sits in a sidebar on the left; the events fill the right.
+    Under Search, a card per server says how reading it went and what was found ("APP01: 1
+    unexpected restart, 3 service failures"); click a card to see only that server's events.
+    The << button folds the sidebar away to give the events the full width, and both the
+    sidebar's edge and the line above the event details can be dragged. Right-click a row to search every server around that event, show only that
     kind of event, hide a noisy source or show only that server. Collapse repeats turns
     hundreds of identical routine events into one row.
 
@@ -243,6 +246,24 @@ function New-TimelineWindowXaml {
       <Setter Property="Background" Value="#2A7AB0"/><Setter Property="BorderBrush" Value="#2A7AB0"/>
       <Setter Property="Foreground" Value="White"/><Setter Property="FontWeight" Value="SemiBold"/>
     </Style>
+    <Style x:Key="CardButton" TargetType="Button">
+      <Setter Property="Background" Value="#191C22"/><Setter Property="Foreground" Value="{StaticResource Text}"/>
+      <Setter Property="BorderBrush" Value="{StaticResource Line}"/><Setter Property="Padding" Value="8,5"/>
+      <Setter Property="Margin" Value="0,0,0,4"/><Setter Property="Cursor" Value="Hand"/><Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="b" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1" CornerRadius="3" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Stretch"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="{StaticResource Accent}"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="b" Property="Background" Value="#1B1F27"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
     <Style TargetType="TextBox">
       <Setter Property="Background" Value="{StaticResource Input}"/><Setter Property="Foreground" Value="{StaticResource Text}"/>
       <Setter Property="BorderBrush" Value="{StaticResource LineStrong}"/><Setter Property="CaretBrush" Value="{StaticResource Text}"/>
@@ -294,27 +315,28 @@ function New-TimelineWindowXaml {
     </Style>
   </Window.Resources>
 
-  <Grid Margin="16">
-    <Grid.RowDefinitions>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="*"/>
-      <RowDefinition Height="5"/>
-      <RowDefinition Height="170"/>
-      <RowDefinition Height="Auto"/>
-    </Grid.RowDefinitions>
+  <Grid Margin="12">
+    <Grid.ColumnDefinitions>
+      <!-- The sidebar: everything about what to search. Drag the handle to widen it, or fold it with the << button. -->
+      <ColumnDefinition x:Name="SidebarColumn" Width="300" MinWidth="28" MaxWidth="520"/>
+      <ColumnDefinition Width="8"/>
+      <ColumnDefinition Width="*"/>
+    </Grid.ColumnDefinitions>
 
-    <!-- What to look at -->
-    <Border Grid.Row="0" Background="{StaticResource Card}" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="4" Padding="14,12">
-      <Grid>
-        <Grid.ColumnDefinitions>
-          <!-- Wide enough for the four server buttons in one row (the smoke test checks nothing is cut off). -->
-          <ColumnDefinition Width="380"/>
-          <ColumnDefinition Width="Auto"/>
-          <ColumnDefinition Width="*"/>
-        </Grid.ColumnDefinitions>
-        <StackPanel Grid.Column="0" Margin="0,0,20,0">
+    <!-- Folded sidebar: a thin strip that brings it back -->
+    <Border x:Name="SidebarStrip" Grid.Column="0" Visibility="Collapsed" Background="{StaticResource Card}" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="4">
+      <Button x:Name="ExpandSidebarButton" Content="&#187;" VerticalAlignment="Top" Margin="2,8,2,0" Padding="4,4" ToolTip="Show the search panel"/>
+    </Border>
+
+    <!-- The sidebar -->
+    <Border x:Name="SidebarPanel" Grid.Column="0" Background="{StaticResource Card}" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="4">
+      <ScrollViewer x:Name="SidebarScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="12,10">
+        <StackPanel>
+          <DockPanel LastChildFill="False" Margin="0,0,0,6">
+            <Button x:Name="CollapseSidebarButton" DockPanel.Dock="Right" Content="&#171;" Margin="0" Padding="7,1" ToolTip="Hide the search panel to give the events the full width"/>
+            <TextBlock DockPanel.Dock="Left" Text="Search" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center"/>
+          </DockPanel>
+
           <DockPanel LastChildFill="False">
             <TextBlock DockPanel.Dock="Left" Style="{StaticResource Label}" Text="WHICH SERVERS?"/>
             <TextBlock x:Name="ServerCountText" DockPanel.Dock="Right" Foreground="{StaticResource Accent}" FontSize="11" FontWeight="SemiBold" Text="0 servers"/>
@@ -322,8 +344,8 @@ function New-TimelineWindowXaml {
           <DockPanel LastChildFill="True" Margin="0,0,0,4">
             <Button x:Name="ChangeDomainButton" DockPanel.Dock="Right" Content="Change..." Padding="8,1" Margin="6,0,0,0" FontSize="11"
                     ToolTip="Choose the domain (or a domain controller) whose servers are suggested"/>
-            <TextBlock x:Name="DomainText" Foreground="{StaticResource Muted}" FontSize="11" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
-                       Text="Suggestions from: ..."/>
+            <TextBlock x:Name="DomainText" Foreground="{StaticResource Muted}" FontSize="11" VerticalAlignment="Center"
+                       TextWrapping="Wrap" Text="Suggestions from: ..."/>
           </DockPanel>
           <DockPanel LastChildFill="True">
             <Button x:Name="AddServerButton" DockPanel.Dock="Right" Content="Add" Style="{StaticResource Primary}" Margin="6,0,0,0" Padding="14,4"
@@ -349,237 +371,281 @@ function New-TimelineWindowXaml {
               </ListBox>
             </Border>
           </Popup>
-          <ListBox x:Name="ServerList" Margin="0,6,0,0" MinHeight="30" MaxHeight="112" Background="{StaticResource Panel}" BorderBrush="{StaticResource Line}"
+          <ListBox x:Name="ServerList" Margin="0,6,0,0" MinHeight="30" MaxHeight="220" Background="{StaticResource Panel}" BorderBrush="{StaticResource Line}"
                    Foreground="{StaticResource Text}" ScrollViewer.HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
             <ListBox.ItemTemplate>
               <DataTemplate>
                 <Grid>
                   <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="22"/>
                   </Grid.ColumnDefinitions>
-                  <TextBlock Grid.Column="0" Text="{Binding Display}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" ToolTip="{Binding Display}"/>
-                  <TextBlock Grid.Column="1" Text="{Binding Note}" FontSize="11" Margin="10,0,6,0" VerticalAlignment="Center" MaxWidth="170" TextTrimming="CharacterEllipsis">
-                    <TextBlock.Style>
-                      <Style TargetType="TextBlock">
-                        <Setter Property="Foreground" Value="{StaticResource Muted}"/>
-                        <Style.Triggers>
-                          <DataTrigger Binding="{Binding NoteKind}" Value="Warn"><Setter Property="Foreground" Value="{StaticResource Warn}"/></DataTrigger>
-                        </Style.Triggers>
-                      </Style>
-                    </TextBlock.Style>
-                  </TextBlock>
-                  <Button Grid.Column="2" Content="×" Tag="{Binding}" Padding="0" Margin="0" Width="20" Height="20" Background="Transparent"
+                  <StackPanel Grid.Column="0" Margin="0,1,0,1">
+                    <TextBlock Text="{Binding Display}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Display}"/>
+                    <TextBlock Text="{Binding Note}" FontSize="11" TextTrimming="CharacterEllipsis">
+                      <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                          <Setter Property="Foreground" Value="{StaticResource Muted}"/>
+                          <Style.Triggers>
+                            <DataTrigger Binding="{Binding NoteKind}" Value="Warn"><Setter Property="Foreground" Value="{StaticResource Warn}"/></DataTrigger>
+                            <DataTrigger Binding="{Binding Note}" Value=""><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
+                          </Style.Triggers>
+                        </Style>
+                      </TextBlock.Style>
+                    </TextBlock>
+                  </StackPanel>
+                  <Button Grid.Column="1" Content="×" Tag="{Binding}" Padding="0" Margin="0" Width="20" Height="20" Background="Transparent" VerticalAlignment="Center"
                           BorderBrush="Transparent" Foreground="{StaticResource Muted}" ToolTip="Remove this server from the list"/>
                 </Grid>
               </DataTemplate>
             </ListBox.ItemTemplate>
           </ListBox>
-          <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
-            <Button x:Name="AddSeveralButton" Content="Add several..." Padding="10,6" ToolTip="Paste a list, find servers in Active Directory, or read them from a file"/>
-            <Button x:Name="ThisComputerButton" Content="This computer" Padding="10,6" ToolTip="Add this computer: its logs are read directly, no network needed"/>
-            <Button x:Name="RecentButton" Content="Recent" Padding="10,6" ToolTip="Server lists you searched before (remembered per user). Picking one replaces the list."/>
-            <Button x:Name="ClearServersButton" Content="Clear" Padding="10,6" Margin="0" ToolTip="Remove every server from the list"/>
-          </StackPanel>
-        </StackPanel>
-        <StackPanel Grid.Column="1" Margin="0,0,20,0">
-          <TextBlock Style="{StaticResource Label}" Text="WHEN? (EACH SERVER'S LOCAL TIME)"/>
-          <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
-            <RadioButton x:Name="AroundRadio" Content="Around" GroupName="When" IsChecked="True"/>
-            <TextBox x:Name="AtBox" Width="140" ToolTip="yyyy-MM-dd HH:mm"/>
-            <TextBlock Text="  +/-  " VerticalAlignment="Center" Foreground="{StaticResource Muted}"/>
-            <ComboBox x:Name="PlusMinusCombo" MinWidth="90"/>
-          </StackPanel>
-          <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
-            <RadioButton x:Name="RangeRadio" Content="From" GroupName="When"/>
-            <TextBox x:Name="FromBox" Width="140" ToolTip="yyyy-MM-dd HH:mm"/>
-            <TextBlock Text="  to  " VerticalAlignment="Center" Foreground="{StaticResource Muted}"/>
-            <TextBox x:Name="ToBox" Width="140" ToolTip="yyyy-MM-dd HH:mm"/>
-          </StackPanel>
-          <StackPanel Orientation="Horizontal">
-            <Button x:Name="LastHourButton" Content="Last hour" ToolTip="Search the last 60 minutes now"/>
-            <Button x:Name="Last24Button" Content="Last 24 hours" ToolTip="Search the last 24 hours now (can be a lot of events)"/>
-          </StackPanel>
-        </StackPanel>
-        <StackPanel Grid.Column="2">
-          <TextBlock Style="{StaticResource Label}" Text="WHICH LOGS?"/>
-          <ToggleButton x:Name="LogsButton" HorizontalAlignment="Left" MinWidth="340" Foreground="{StaticResource Text}" Cursor="Hand" ToolTip="Choose which logs to read">
-            <ToggleButton.Template>
-              <ControlTemplate TargetType="ToggleButton">
-                <Border x:Name="b" Background="{StaticResource Input}" BorderBrush="{StaticResource LineStrong}" BorderThickness="1" CornerRadius="3" Padding="8,5">
-                  <DockPanel>
-                    <TextBlock DockPanel.Dock="Right" Text="v" Foreground="{StaticResource Muted}" Margin="12,0,0,0" VerticalAlignment="Center"/>
-                    <ContentPresenter VerticalAlignment="Center"/>
-                  </DockPanel>
-                </Border>
-                <ControlTemplate.Triggers>
-                  <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="{StaticResource Accent}"/></Trigger>
-                  <Trigger Property="IsChecked" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="{StaticResource Accent}"/></Trigger>
-                </ControlTemplate.Triggers>
-              </ControlTemplate>
-            </ToggleButton.Template>
-          </ToggleButton>
-          <Popup x:Name="LogsPopup" PlacementTarget="{Binding ElementName=LogsButton}" Placement="Bottom" StaysOpen="False"
-                 AllowsTransparency="True" IsOpen="{Binding IsChecked, ElementName=LogsButton, Mode=TwoWay}">
-            <Border Background="{StaticResource Card}" BorderBrush="{StaticResource LineStrong}" BorderThickness="1" CornerRadius="3" Padding="14,12" Width="480" Margin="0,4,0,0">
-              <StackPanel>
-                <TextBlock Style="{StaticResource Label}" Text="EVERYDAY"/>
-                <UniformGrid x:Name="CoreLogPanel" Columns="2" Margin="0,0,0,8"/>
-                <TextBlock Style="{StaticResource Label}" Text="EXTRA DETAIL"/>
-                <UniformGrid x:Name="LogPanel" Columns="2" Margin="0,0,0,8"/>
-                <TextBlock Style="{StaticResource Label}" Text="SLOW - TICK WHEN YOU NEED THEM"/>
-                <UniformGrid Columns="2" Margin="0,0,0,10">
-                  <CheckBox x:Name="SecurityCheck" Content="Security" ToolTip="Slow on domain controllers and file servers"/>
-                  <CheckBox x:Name="AllLogsCheck" Content="All logs with events" ToolTip="Every log on the server that has events (can be 100+ logs)"/>
-                </UniformGrid>
-                <StackPanel Orientation="Horizontal">
-                  <Button x:Name="LogsAllButton" Content="All" ToolTip="Tick every log listed here (not 'All logs with events')"/>
-                  <Button x:Name="LogsNoneButton" Content="None"/>
-                  <Button x:Name="LogsDefaultButton" Content="Default" ToolTip="Everyday and extra detail logs; Security off"/>
+          <WrapPanel Margin="0,8,0,0">
+            <Button x:Name="AddSeveralButton" Content="Add several..." Padding="10,6" Margin="0,0,6,4" ToolTip="Paste a list, find servers in Active Directory, or read them from a file"/>
+            <Button x:Name="ThisComputerButton" Content="This computer" Padding="10,6" Margin="0,0,6,4" ToolTip="Add this computer: its logs are read directly, no network needed"/>
+            <Button x:Name="RecentButton" Content="Recent" Padding="10,6" Margin="0,0,6,4" ToolTip="Server lists you searched before (remembered per user). Picking one replaces the list."/>
+            <Button x:Name="ClearServersButton" Content="Clear" Padding="10,6" Margin="0,0,0,4" ToolTip="Remove every server from the list"/>
+          </WrapPanel>
+
+          <TextBlock Style="{StaticResource Label}" Text="WHEN? (EACH SERVER'S LOCAL TIME)" Margin="0,14,0,4"/>
+          <RadioButton x:Name="AroundRadio" Content="Around" GroupName="When" IsChecked="True" Margin="0,0,0,4"/>
+          <Grid Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBox x:Name="AtBox" Grid.Column="0" ToolTip="yyyy-MM-dd HH:mm"/>
+            <TextBlock Grid.Column="1" Text=" +/- " VerticalAlignment="Center" Foreground="{StaticResource Muted}"/>
+            <ComboBox x:Name="PlusMinusCombo" Grid.Column="2" MinWidth="90" Margin="0"/>
+          </Grid>
+          <RadioButton x:Name="RangeRadio" Content="From ... to ..." GroupName="When" Margin="0,0,0,4"/>
+          <Grid Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <TextBox x:Name="FromBox" Grid.Column="0" ToolTip="yyyy-MM-dd HH:mm"/>
+            <TextBlock Grid.Column="1" Text=" to " VerticalAlignment="Center" Foreground="{StaticResource Muted}"/>
+            <TextBox x:Name="ToBox" Grid.Column="2" ToolTip="yyyy-MM-dd HH:mm"/>
+          </Grid>
+          <WrapPanel>
+            <Button x:Name="LastHourButton" Content="Last hour" Margin="0,0,6,4" ToolTip="Search the last 60 minutes now"/>
+            <Button x:Name="Last24Button" Content="Last 24 hours" Margin="0,0,0,4" ToolTip="Search the last 24 hours now (can be a lot of events)"/>
+          </WrapPanel>
+
+          <StackPanel Margin="0,10,0,0">
+            <TextBlock Style="{StaticResource Label}" Text="WHICH LOGS?"/>
+            <ToggleButton x:Name="LogsButton" HorizontalAlignment="Stretch" Foreground="{StaticResource Text}" Cursor="Hand" ToolTip="Choose which logs to read">
+              <ToggleButton.Template>
+                <ControlTemplate TargetType="ToggleButton">
+                  <Border x:Name="b" Background="{StaticResource Input}" BorderBrush="{StaticResource LineStrong}" BorderThickness="1" CornerRadius="3" Padding="8,5">
+                    <DockPanel>
+                      <TextBlock DockPanel.Dock="Right" Text="v" Foreground="{StaticResource Muted}" Margin="12,0,0,0" VerticalAlignment="Center"/>
+                      <ContentPresenter VerticalAlignment="Center"/>
+                    </DockPanel>
+                  </Border>
+                  <ControlTemplate.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="{StaticResource Accent}"/></Trigger>
+                    <Trigger Property="IsChecked" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="{StaticResource Accent}"/></Trigger>
+                  </ControlTemplate.Triggers>
+                </ControlTemplate>
+              </ToggleButton.Template>
+            </ToggleButton>
+            <Popup x:Name="LogsPopup" PlacementTarget="{Binding ElementName=LogsButton}" Placement="Bottom" StaysOpen="False"
+                   AllowsTransparency="True" IsOpen="{Binding IsChecked, ElementName=LogsButton, Mode=TwoWay}">
+              <Border Background="{StaticResource Card}" BorderBrush="{StaticResource LineStrong}" BorderThickness="1" CornerRadius="3" Padding="14,12" Width="480" Margin="0,4,0,0">
+                <StackPanel>
+                  <TextBlock Style="{StaticResource Label}" Text="EVERYDAY"/>
+                  <UniformGrid x:Name="CoreLogPanel" Columns="2" Margin="0,0,0,8"/>
+                  <TextBlock Style="{StaticResource Label}" Text="EXTRA DETAIL"/>
+                  <UniformGrid x:Name="LogPanel" Columns="2" Margin="0,0,0,8"/>
+                  <TextBlock Style="{StaticResource Label}" Text="SLOW - TICK WHEN YOU NEED THEM"/>
+                  <UniformGrid Columns="2" Margin="0,0,0,10">
+                    <CheckBox x:Name="SecurityCheck" Content="Security" ToolTip="Slow on domain controllers and file servers"/>
+                    <CheckBox x:Name="AllLogsCheck" Content="All logs with events" ToolTip="Every log on the server that has events (can be 100+ logs)"/>
+                  </UniformGrid>
+                  <StackPanel Orientation="Horizontal">
+                    <Button x:Name="LogsAllButton" Content="All" ToolTip="Tick every log listed here (not 'All logs with events')"/>
+                    <Button x:Name="LogsNoneButton" Content="None"/>
+                    <Button x:Name="LogsDefaultButton" Content="Default" ToolTip="Everyday and extra detail logs; Security off"/>
+                  </StackPanel>
                 </StackPanel>
-              </StackPanel>
-            </Border>
-          </Popup>
-          <Expander Header="More options" Foreground="{StaticResource Muted}" Margin="0,4,0,0">
-            <WrapPanel Margin="0,8,0,0">
-              <TextBlock Text="Stop each log at" VerticalAlignment="Center" Margin="0,0,6,0"/>
-              <TextBox x:Name="CapBox" Width="70" Text="5000"/>
-              <TextBlock Text="events.   Give up on a log after" VerticalAlignment="Center" Margin="6,0,6,0"/>
-              <TextBox x:Name="TimeoutBox" Width="50" Text="60"/>
-              <TextBlock Text="seconds." VerticalAlignment="Center" Margin="6,0,6,0"/>
-              <TextBlock Text="Stop each server at" VerticalAlignment="Center" Margin="0,6,6,0"/>
-              <TextBox x:Name="TotalCapBox" Width="80" Text="50000" Margin="0,6,0,0" ToolTip="A safety limit for All logs: once a server reaches this many events, its remaining logs are not read (and are named)"/>
-              <TextBlock Text="events in total.   " VerticalAlignment="Center" Margin="6,6,6,0"/>
-              <Button x:Name="RunAsButton" Content="Run as another account..." Margin="0,6,8,0" ToolTip="Read the servers with a different account (for example another domain)"/>
-            </WrapPanel>
-          </Expander>
+              </Border>
+            </Popup>
+            <Expander Header="More options" Foreground="{StaticResource Muted}" Margin="0,4,0,0">
+              <WrapPanel Margin="0,8,0,0">
+                <TextBlock Text="Stop each log at" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <TextBox x:Name="CapBox" Width="70" Text="5000"/>
+                <TextBlock Text="events.   Give up on a log after" VerticalAlignment="Center" Margin="6,0,6,0"/>
+                <TextBox x:Name="TimeoutBox" Width="50" Text="60"/>
+                <TextBlock Text="seconds." VerticalAlignment="Center" Margin="6,0,6,0"/>
+                <TextBlock Text="Stop each server at" VerticalAlignment="Center" Margin="0,6,6,0"/>
+                <TextBox x:Name="TotalCapBox" Width="80" Text="50000" Margin="0,6,0,0" ToolTip="A safety limit for All logs: once a server reaches this many events, its remaining logs are not read (and are named)"/>
+                <TextBlock Text="events in total.   " VerticalAlignment="Center" Margin="6,6,6,0"/>
+                <Button x:Name="RunAsButton" Content="Run as another account..." Margin="0,6,8,0" ToolTip="Read the servers with a different account (for example another domain)"/>
+              </WrapPanel>
+            </Expander>
+          </StackPanel>
+
+          <Grid Margin="0,14,0,0">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <Button x:Name="SearchButton" Grid.Column="0" Style="{StaticResource Primary}" Content="Search" Padding="22,7" IsDefault="True"/>
+            <Button x:Name="CancelButton" Grid.Column="1" Content="Cancel" IsEnabled="False" Margin="0"/>
+          </Grid>
+          <TextBlock x:Name="InputError" Foreground="{StaticResource Warn}" TextWrapping="Wrap" Margin="0,6,0,0"/>
+
+          <!-- How each server went and what was found: click a card to see only that server -->
+          <StackPanel x:Name="SummaryBorder" Margin="0,12,0,0" Visibility="Collapsed">
+            <TextBlock Style="{StaticResource Label}" Text="EACH SERVER (CLICK TO SHOW ONLY ITS EVENTS)" TextWrapping="Wrap"/>
+            <ItemsControl x:Name="SummaryList">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                  <Button Tag="{Binding Server}" Style="{StaticResource CardButton}" ToolTip="{Binding Findings}">
+                    <StackPanel>
+                      <TextBlock Text="{Binding Heading}" FontWeight="SemiBold" TextWrapping="Wrap">
+                        <TextBlock.Style>
+                          <Style TargetType="TextBlock">
+                            <Setter Property="Foreground" Value="{StaticResource Text}"/>
+                            <Style.Triggers>
+                              <DataTrigger Binding="{Binding Warn}" Value="True"><Setter Property="Foreground" Value="{StaticResource Warn}"/></DataTrigger>
+                            </Style.Triggers>
+                          </Style>
+                        </TextBlock.Style>
+                      </TextBlock>
+                      <TextBlock Text="{Binding Findings}" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"/>
+                    </StackPanel>
+                  </Button>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+            <ItemsControl x:Name="NotesList" Foreground="{StaticResource Muted}" FontSize="12">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate><TextBlock Text="{Binding}" TextWrapping="Wrap" Foreground="{StaticResource Muted}" Margin="0,2,0,0"/></DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </StackPanel>
+          <TextBlock x:Name="BannerText" Foreground="{StaticResource Warn}" TextWrapping="Wrap" Margin="0,6,0,0" Visibility="Collapsed"/>
+          <TextBlock x:Name="TimeZoneNote" Foreground="{StaticResource Accent}" TextWrapping="Wrap" Margin="0,6,0,0" Visibility="Collapsed"/>
         </StackPanel>
-      </Grid>
+      </ScrollViewer>
     </Border>
 
-    <!-- Go, and how each server is doing -->
-    <Grid Grid.Row="1" Margin="0,12,0,0">
-      <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="Auto"/>
-        <ColumnDefinition Width="*"/>
-      </Grid.ColumnDefinitions>
-      <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Top">
-        <Button x:Name="SearchButton" Style="{StaticResource Primary}" Content="Search" Padding="22,7" IsDefault="True"/>
-        <Button x:Name="CancelButton" Content="Cancel" IsEnabled="False"/>
+    <GridSplitter x:Name="SidebarSplitter" Grid.Column="1" Width="8" HorizontalAlignment="Stretch" ResizeDirection="Columns"
+                  Background="Transparent" Cursor="SizeWE" ToolTip="Drag to widen or narrow the search panel"/>
+
+    <!-- The results -->
+    <Grid Grid.Column="2">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="*" MinHeight="120"/>
+        <RowDefinition Height="6"/>
+        <RowDefinition Height="120" MinHeight="60"/>
+        <RowDefinition Height="Auto"/>
+      </Grid.RowDefinitions>
+
+      <!-- Narrow it down -->
+      <StackPanel Grid.Row="0" Margin="0,0,0,8">
+        <WrapPanel>
+          <TextBlock Text="Show" VerticalAlignment="Center" Margin="0,0,8,0" Foreground="{StaticResource Muted}"/>
+          <ComboBox x:Name="LevelFilter" MinWidth="170"/>
+          <ComboBox x:Name="ServerFilter" MinWidth="150"/>
+          <ComboBox x:Name="LogFilter" MinWidth="200"/>
+          <CheckBox x:Name="FlaggedOnlyCheck" Content="Flagged only" VerticalAlignment="Center" Margin="4,0,12,0"/>
+          <CheckBox x:Name="CollapseCheck" Content="Collapse repeats" VerticalAlignment="Center" Margin="0,0,12,0"
+                    ToolTip="Show the same routine event on the same server once, with how many times it happened. Flagged events are never collapsed."/>
+          <TextBox x:Name="FilterText" Width="260" ToolTip="Search message, source or event ID"/>
+          <TextBlock x:Name="CountText" VerticalAlignment="Center" Margin="12,0,0,0" Foreground="{StaticResource Muted}"/>
+          <TextBlock x:Name="HiddenNote" VerticalAlignment="Center" Margin="12,0,8,0" Foreground="{StaticResource Warn}" Visibility="Collapsed"/>
+          <Button x:Name="ShowAllButton" Content="Show everything again" Visibility="Collapsed" ToolTip="Bring back hidden sources and leave 'only this event'"/>
+        </WrapPanel>
       </StackPanel>
-      <StackPanel Grid.Column="1" Margin="8,0,0,0">
-        <TextBlock x:Name="InputError" Foreground="{StaticResource Warn}" TextWrapping="Wrap"/>
-        <ItemsControl x:Name="StatusList" Foreground="{StaticResource Text}" FontFamily="Consolas"/>
-        <TextBlock x:Name="BannerText" Foreground="{StaticResource Warn}" TextWrapping="Wrap" Margin="0,4,0,0" Visibility="Collapsed"/>
-        <TextBlock x:Name="TimeZoneNote" Foreground="{StaticResource Accent}" TextWrapping="Wrap" Margin="0,4,0,0" Visibility="Collapsed"/>
+
+      <!-- The timeline -->
+      <DataGrid x:Name="EventGrid" Grid.Row="1" AutoGenerateColumns="False" IsReadOnly="True" EnableRowVirtualization="True"
+                EnableColumnVirtualization="True" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
+                SelectionMode="Extended" SelectionUnit="FullRow" HeadersVisibility="Column" CanUserAddRows="False"
+                Background="{StaticResource Panel}" RowBackground="{StaticResource Panel}" AlternatingRowBackground="#14171C"
+                Foreground="{StaticResource Text}" BorderBrush="{StaticResource Line}" GridLinesVisibility="Horizontal"
+                HorizontalGridLinesBrush="#1E222A" FontFamily="Segoe UI">
+        <DataGrid.ColumnHeaderStyle>
+          <Style TargetType="DataGridColumnHeader">
+            <Setter Property="Background" Value="{StaticResource Card}"/><Setter Property="Foreground" Value="{StaticResource Muted}"/>
+            <Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Padding" Value="8,6"/>
+            <Setter Property="BorderBrush" Value="{StaticResource Line}"/><Setter Property="BorderThickness" Value="0,0,1,1"/>
+          </Style>
+        </DataGrid.ColumnHeaderStyle>
+        <DataGrid.RowStyle>
+          <Style TargetType="DataGridRow">
+            <Style.Triggers>
+              <DataTrigger Binding="{Binding Level}" Value="1"><Setter Property="Foreground" Value="{StaticResource Danger}"/></DataTrigger>
+              <DataTrigger Binding="{Binding Level}" Value="2"><Setter Property="Foreground" Value="{StaticResource Danger}"/></DataTrigger>
+              <DataTrigger Binding="{Binding Level}" Value="3"><Setter Property="Foreground" Value="{StaticResource Warn}"/></DataTrigger>
+              <Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="#1F6FA8"/><Setter Property="Foreground" Value="White"/></Trigger>
+            </Style.Triggers>
+          </Style>
+        </DataGrid.RowStyle>
+        <DataGrid.CellStyle>
+          <Style TargetType="DataGridCell">
+            <Setter Property="BorderThickness" Value="0"/><Setter Property="Padding" Value="6,3"/>
+            <Setter Property="Template">
+              <Setter.Value>
+                <ControlTemplate TargetType="DataGridCell">
+                  <Border Padding="{TemplateBinding Padding}" Background="Transparent"><ContentPresenter/></Border>
+                </ControlTemplate>
+              </Setter.Value>
+            </Setter>
+          </Style>
+        </DataGrid.CellStyle>
+        <DataGrid.Columns>
+          <DataGridTextColumn Header="Time (server local)" Binding="{Binding TimeServerLocal, StringFormat=yyyy-MM-dd HH:mm:ss}" Width="145" MinWidth="145"/>
+          <DataGridTextColumn Header="UTC" Binding="{Binding TimeUtc, StringFormat=HH:mm:ss}" Width="64" MinWidth="64"/>
+          <DataGridTextColumn Header="Server" Binding="{Binding Server}" Width="140"/>
+          <DataGridTextColumn Header="Level" Binding="{Binding LevelName}" Width="88" MinWidth="88"/>
+          <DataGridTextColumn Header="Flag" Binding="{Binding Flag}" Width="135">
+            <DataGridTextColumn.ElementStyle>
+              <Style TargetType="TextBlock"><Setter Property="Foreground" Value="#5DADE2"/><Setter Property="FontWeight" Value="SemiBold"/></Style>
+            </DataGridTextColumn.ElementStyle>
+          </DataGridTextColumn>
+          <DataGridTextColumn Header="Source" Binding="{Binding Provider}" Width="150"/>
+          <DataGridTextColumn Header="ID" Binding="{Binding EventId}" Width="50" MinWidth="50"/>
+          <DataGridTextColumn Header="Log" Binding="{Binding Log}" Width="95"/>
+          <DataGridTextColumn Header="Message" Binding="{Binding MessageFirstLine}" Width="*" MinWidth="180"/>
+        </DataGrid.Columns>
+      </DataGrid>
+
+      <GridSplitter Grid.Row="2" HorizontalAlignment="Stretch" Background="{StaticResource Line}" Cursor="SizeNS" ToolTip="Drag to resize the event details"/>
+
+      <!-- Everything about the selected event -->
+      <TextBox x:Name="DetailText" Grid.Row="3" IsReadOnly="True" TextWrapping="Wrap" VerticalContentAlignment="Top"
+               VerticalScrollBarVisibility="Auto" FontFamily="Consolas" Background="{StaticResource Panel}"
+               Text="Select an event to see everything about it here."/>
+
+      <!-- Get it into the ticket -->
+      <StackPanel Grid.Row="4" Margin="0,10,0,0">
+        <DockPanel LastChildFill="True">
+          <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
+            <Button x:Name="ExportCsvButton" Content="Export CSV" IsEnabled="False" ToolTip="Save the rows you can see as a CSV file"/>
+            <Button x:Name="ExportHtmlButton" Content="Export HTML report" IsEnabled="False" ToolTip="Save a report with the rows you can see and how each server went"/>
+            <Button x:Name="CopyButton" Content="Copy selected rows" IsEnabled="False" ToolTip="Copy the selected rows as text, to paste into a ticket or an email"/>
+            <!-- ShowOnDisabled: the button is disabled until a search finishes, which is when people hover to find out what it does. -->
+            <Button x:Name="TicketNoteButton" Content="Copy summary for ticket..." IsEnabled="False" ToolTipService.ShowOnDisabled="True"
+                    ToolTip="Asks for the ticket number, then writes a short summary you can paste into the ticket:&#10;- what was found on each server&#10;- what's ruled out&#10;- what couldn't be checked&#10;- what to do next&#10;&#10;The summary is copied to the clipboard and saved with the HTML report in&#10;Documents\TicketNotes\Ticket_&lt;number&gt;.&#10;&#10;Run a search first."/>
+          </StackPanel>
+          <TextBlock x:Name="StatusMessage" VerticalAlignment="Center" Margin="8,0,0,0" Foreground="{StaticResource Muted}" TextTrimming="CharacterEllipsis"/>
+        </DockPanel>
+        <DockPanel LastChildFill="True" Margin="0,8,0,0">
+          <TextBlock DockPanel.Dock="Left" Text="Save reports to:" VerticalAlignment="Center" Margin="0,0,8,0" Foreground="{StaticResource Muted}"/>
+          <Button x:Name="OpenFolderButton" DockPanel.Dock="Right" Content="Open folder" Margin="8,0,0,0" ToolTip="Open this folder in File Explorer"/>
+          <Button x:Name="BrowseFolderButton" DockPanel.Dock="Right" Content="Browse..." Margin="8,0,0,0" ToolTip="Pick the folder for exports (remembered for next time)"/>
+          <TextBox x:Name="SaveFolderBox" ToolTip="Folder for CSV and HTML exports and the activity log. Created on the first export if it doesn't exist."/>
+        </DockPanel>
       </StackPanel>
     </Grid>
-
-    <!-- What was found, then narrow it down -->
-    <StackPanel Grid.Row="2" Margin="0,12,0,8">
-      <Border x:Name="SummaryBorder" Background="{StaticResource Card}" BorderBrush="{StaticResource Accent}" BorderThickness="3,0,0,0"
-              CornerRadius="2" Padding="12,8" Margin="0,0,0,10" Visibility="Collapsed">
-        <StackPanel>
-          <TextBlock Style="{StaticResource Label}" Text="WHAT WAS FOUND (EVERY EVENT READ, BEFORE FILTERS)"/>
-          <ItemsControl x:Name="SummaryList" FontSize="13"/>
-        </StackPanel>
-      </Border>
-      <WrapPanel>
-        <TextBlock Text="Show" VerticalAlignment="Center" Margin="0,0,8,0" Foreground="{StaticResource Muted}"/>
-        <ComboBox x:Name="LevelFilter" MinWidth="170"/>
-        <ComboBox x:Name="ServerFilter" MinWidth="150"/>
-        <ComboBox x:Name="LogFilter" MinWidth="200"/>
-        <CheckBox x:Name="FlaggedOnlyCheck" Content="Flagged only" VerticalAlignment="Center" Margin="4,0,12,0"/>
-        <CheckBox x:Name="CollapseCheck" Content="Collapse repeats" VerticalAlignment="Center" Margin="0,0,12,0"
-                  ToolTip="Show the same routine event on the same server once, with how many times it happened. Flagged events are never collapsed."/>
-        <TextBox x:Name="FilterText" Width="260" ToolTip="Search message, source or event ID"/>
-        <TextBlock x:Name="CountText" VerticalAlignment="Center" Margin="12,0,0,0" Foreground="{StaticResource Muted}"/>
-        <TextBlock x:Name="HiddenNote" VerticalAlignment="Center" Margin="12,0,8,0" Foreground="{StaticResource Warn}" Visibility="Collapsed"/>
-        <Button x:Name="ShowAllButton" Content="Show everything again" Visibility="Collapsed" ToolTip="Bring back hidden sources and leave 'only this event'"/>
-      </WrapPanel>
-    </StackPanel>
-
-    <!-- The timeline -->
-    <DataGrid x:Name="EventGrid" Grid.Row="3" AutoGenerateColumns="False" IsReadOnly="True" EnableRowVirtualization="True"
-              EnableColumnVirtualization="True" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
-              SelectionMode="Extended" SelectionUnit="FullRow" HeadersVisibility="Column" CanUserAddRows="False"
-              Background="{StaticResource Panel}" RowBackground="{StaticResource Panel}" AlternatingRowBackground="#14171C"
-              Foreground="{StaticResource Text}" BorderBrush="{StaticResource Line}" GridLinesVisibility="Horizontal"
-              HorizontalGridLinesBrush="#1E222A" FontFamily="Segoe UI">
-      <DataGrid.ColumnHeaderStyle>
-        <Style TargetType="DataGridColumnHeader">
-          <Setter Property="Background" Value="{StaticResource Card}"/><Setter Property="Foreground" Value="{StaticResource Muted}"/>
-          <Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Padding" Value="8,6"/>
-          <Setter Property="BorderBrush" Value="{StaticResource Line}"/><Setter Property="BorderThickness" Value="0,0,1,1"/>
-        </Style>
-      </DataGrid.ColumnHeaderStyle>
-      <DataGrid.RowStyle>
-        <Style TargetType="DataGridRow">
-          <Style.Triggers>
-            <DataTrigger Binding="{Binding Level}" Value="1"><Setter Property="Foreground" Value="{StaticResource Danger}"/></DataTrigger>
-            <DataTrigger Binding="{Binding Level}" Value="2"><Setter Property="Foreground" Value="{StaticResource Danger}"/></DataTrigger>
-            <DataTrigger Binding="{Binding Level}" Value="3"><Setter Property="Foreground" Value="{StaticResource Warn}"/></DataTrigger>
-            <Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="#1F6FA8"/><Setter Property="Foreground" Value="White"/></Trigger>
-          </Style.Triggers>
-        </Style>
-      </DataGrid.RowStyle>
-      <DataGrid.CellStyle>
-        <Style TargetType="DataGridCell">
-          <Setter Property="BorderThickness" Value="0"/><Setter Property="Padding" Value="6,3"/>
-          <Setter Property="Template">
-            <Setter.Value>
-              <ControlTemplate TargetType="DataGridCell">
-                <Border Padding="{TemplateBinding Padding}" Background="Transparent"><ContentPresenter/></Border>
-              </ControlTemplate>
-            </Setter.Value>
-          </Setter>
-        </Style>
-      </DataGrid.CellStyle>
-      <DataGrid.Columns>
-        <DataGridTextColumn Header="Time (server local)" Binding="{Binding TimeServerLocal, StringFormat=yyyy-MM-dd HH:mm:ss}" Width="140"/>
-        <DataGridTextColumn Header="UTC" Binding="{Binding TimeUtc, StringFormat=HH:mm:ss}" Width="70"/>
-        <DataGridTextColumn Header="Server" Binding="{Binding Server}" Width="110"/>
-        <DataGridTextColumn Header="Level" Binding="{Binding LevelName}" Width="85"/>
-        <DataGridTextColumn Header="Flag" Binding="{Binding Flag}" Width="210">
-          <DataGridTextColumn.ElementStyle>
-            <Style TargetType="TextBlock"><Setter Property="Foreground" Value="#5DADE2"/><Setter Property="FontWeight" Value="SemiBold"/></Style>
-          </DataGridTextColumn.ElementStyle>
-        </DataGridTextColumn>
-        <DataGridTextColumn Header="Source" Binding="{Binding Provider}" Width="190"/>
-        <DataGridTextColumn Header="ID" Binding="{Binding EventId}" Width="60"/>
-        <DataGridTextColumn Header="Log" Binding="{Binding Log}" Width="110"/>
-        <DataGridTextColumn Header="Message" Binding="{Binding MessageFirstLine}" Width="*"/>
-      </DataGrid.Columns>
-    </DataGrid>
-
-    <GridSplitter Grid.Row="4" HorizontalAlignment="Stretch" Background="{StaticResource Line}" Cursor="SizeNS"/>
-
-    <!-- Everything about the selected event -->
-    <TextBox x:Name="DetailText" Grid.Row="5" IsReadOnly="True" TextWrapping="Wrap" VerticalContentAlignment="Top"
-             VerticalScrollBarVisibility="Auto" FontFamily="Consolas" Background="{StaticResource Panel}"
-             Text="Select an event to see everything about it here."/>
-
-    <!-- Get it into the ticket -->
-    <StackPanel Grid.Row="6" Margin="0,10,0,0">
-      <DockPanel LastChildFill="True" Margin="0,0,0,8">
-        <TextBlock DockPanel.Dock="Left" Text="Save reports to:" VerticalAlignment="Center" Margin="0,0,8,0" Foreground="{StaticResource Muted}"/>
-        <Button x:Name="OpenFolderButton" DockPanel.Dock="Right" Content="Open folder" Margin="8,0,0,0" ToolTip="Open this folder in File Explorer"/>
-        <Button x:Name="BrowseFolderButton" DockPanel.Dock="Right" Content="Browse..." Margin="8,0,0,0" ToolTip="Pick the folder for exports (remembered for next time)"/>
-        <TextBox x:Name="SaveFolderBox" ToolTip="Folder for CSV and HTML exports and the activity log. Created on the first export if it doesn't exist."/>
-      </DockPanel>
-      <DockPanel LastChildFill="True">
-        <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
-          <Button x:Name="ExportCsvButton" Content="Export CSV" IsEnabled="False" ToolTip="Save the rows you can see as a CSV file"/>
-          <Button x:Name="ExportHtmlButton" Content="Export HTML report" IsEnabled="False" ToolTip="Save a report with the rows you can see and how each server went"/>
-          <Button x:Name="CopyButton" Content="Copy selected rows" IsEnabled="False" ToolTip="Copy the selected rows as text, to paste into a ticket or an email"/>
-          <!-- ShowOnDisabled: the button is disabled until a search finishes, which is when people hover to find out what it does. -->
-          <Button x:Name="TicketNoteButton" Content="Copy summary for ticket..." IsEnabled="False" ToolTipService.ShowOnDisabled="True"
-                  ToolTip="Asks for the ticket number, then writes a short summary you can paste into the ticket:&#10;- what was found on each server&#10;- what's ruled out&#10;- what couldn't be checked&#10;- what to do next&#10;&#10;The summary is copied to the clipboard and saved with the HTML report in&#10;Documents\TicketNotes\Ticket_&lt;number&gt;.&#10;&#10;Run a search first."/>
-        </StackPanel>
-        <TextBlock x:Name="StatusMessage" VerticalAlignment="Center" Margin="8,0,0,0" Foreground="{StaticResource Muted}" TextTrimming="CharacterEllipsis"/>
-      </DockPanel>
-    </StackPanel>
   </Grid>
 </Window>
 '@
@@ -783,6 +849,27 @@ function Set-SmokeWindowPosition {
     $Window.Top = [System.Windows.SystemParameters]::VirtualScreenTop - $Window.Height - 200
 }
 
+function Set-TimelineSidebar {
+    <#
+        Folds the search sidebar to a thin strip (the events get the full width) or brings it
+        back at the width it had. The width is kept on the column's Tag while folded.
+    #>
+    param([Parameter(Mandatory)]$Window, [Parameter(Mandatory)][bool]$Collapsed)
+    $col = $Window.FindName('SidebarColumn')
+    $panel = $Window.FindName('SidebarPanel'); $strip = $Window.FindName('SidebarStrip'); $splitter = $Window.FindName('SidebarSplitter')
+    if ($Collapsed) {
+        if ($col.ActualWidth -gt 28 -or $col.Width.Value -gt 28) { $col.Tag = $col.Width }
+        $col.Width = New-Object System.Windows.GridLength 28
+        $panel.Visibility = 'Collapsed'; $strip.Visibility = 'Visible'
+        if ($splitter) { $splitter.IsEnabled = $false }
+    }
+    else {
+        $col.Width = if ($col.Tag -is [System.Windows.GridLength]) { $col.Tag } else { New-Object System.Windows.GridLength 300 }
+        $panel.Visibility = 'Visible'; $strip.Visibility = 'Collapsed'
+        if ($splitter) { $splitter.IsEnabled = $true }
+    }
+}
+
 function Register-ServerInputPaste {
     <#
         A one-line TextBox keeps only the first line of a paste, so a column of servers pasted
@@ -920,9 +1007,9 @@ function Show-ServerEventTimeline {
         'SaveFolderBox', 'BrowseFolderButton', 'OpenFolderButton', 'ThisComputerButton', 'ServerInput', 'ServerInputHint', 'AddServerButton', 'ServerCountText', 'DomainText', 'ChangeDomainButton',
         'ServerList', 'SuggestPopup', 'SuggestList', 'AddSeveralButton', 'ClearServersButton', 'AroundRadio', 'RangeRadio', 'AtBox', 'PlusMinusCombo', 'FromBox', 'ToBox', 'LastHourButton',
         'Last24Button', 'LogPanel', 'SecurityCheck', 'AllLogsCheck', 'CapBox', 'TimeoutBox', 'RunAsButton',
-        'SearchButton', 'CancelButton', 'InputError', 'StatusList', 'BannerText', 'TimeZoneNote', 'LevelFilter', 'ServerFilter',
+        'SearchButton', 'CancelButton', 'InputError', 'BannerText', 'TimeZoneNote', 'LevelFilter', 'ServerFilter',
         'LogFilter', 'FlaggedOnlyCheck', 'FilterText', 'CountText', 'EventGrid', 'DetailText', 'ExportCsvButton', 'ExportHtmlButton',
-        'CopyButton', 'StatusMessage') {
+        'CopyButton', 'StatusMessage', 'SidebarColumn', 'SidebarPanel', 'SidebarStrip', 'SidebarSplitter', 'CollapseSidebarButton', 'ExpandSidebarButton', 'NotesList') {
         $ui[$name] = $window.FindName($name)
     }
 
@@ -1139,9 +1226,12 @@ function Show-ServerEventTimeline {
         $key = '{0}|{1}' -f $ui.Store.Rows.Count, (@($ui.Engine.Status.Values | ForEach-Object { "$($_.Server)=$($_.State)" }) -join ',')
         if ($key -eq $ui.SummaryKey) { return }
         $ui.SummaryKey = $key
-        $ui.SummaryList.ItemsSource = @(Get-TimelineSummaryLines -Rows $ui.Store.Rows.ToArray() -Status $ui.Engine.Status -Logs $ui.Selected `
+        $lines = @(Get-TimelineSummaryLines -Rows $ui.Store.Rows.ToArray() -Status $ui.Engine.Status -Logs $ui.Selected `
                 -ErrorHint " - set Show to 'Errors and worse' to review them" `
                 -SecurityHint "Security log not read: tick it under Which logs? to see sign-in or lockout problems.")
+        # One card per server in the sidebar: how reading it went, then what was found.
+        $ui.SummaryList.ItemsSource = @(Get-TimelineServerCards -Status $ui.Engine.Status -SummaryLines $lines)
+        $ui.NotesList.ItemsSource = @(Get-TimelineServerNotes -Status $ui.Engine.Status -SummaryLines $lines)
         $ui.SummaryBorder.Visibility = 'Visible'
     }
 
@@ -1193,7 +1283,6 @@ function Show-ServerEventTimeline {
     function Update-StatusPanel {
         if (-not $ui.Engine) { return }
         $status = $ui.Engine.Status
-        $ui.StatusList.ItemsSource = @(Get-TimelineStatusLines -Status $status)
         $banner = Get-TimelineBannerText -Status $status
         $ui.BannerText.Text = $banner
         $ui.BannerText.Visibility = if ($banner) { 'Visible' } else { 'Collapsed' }
@@ -1241,6 +1330,9 @@ function Show-ServerEventTimeline {
         Write-TimelineLog INFO ('Searching {0} server(s): {1}. {2}. Logs: {3}{4}' -f $req.Servers.Count, ($req.Servers -join ', '),
             (Get-TimelineWindowText -Window $req.Window), ($logs -join ', '), $(if ($ui.AllLogsCheck.IsChecked) { ' + all logs with events' } else { '' }))
         Set-StatusMessage 'Reading the servers in the background - you can filter and scroll while it works.'
+        # The server cards are below the inputs; bring them into view on a short window.
+        $ui.SummaryBorder.Visibility = 'Visible'
+        $ui.SummaryBorder.BringIntoView()
         Update-View
         Update-StatusPanel
         Update-InputState
@@ -1464,6 +1556,21 @@ function Show-ServerEventTimeline {
             }
             # Suggestions come from AD as this account too.
             Start-WindowDirectoryLoad
+        })
+
+    # The sidebar folds away (<<) and comes back (>>).
+    $ui.CollapseSidebarButton.add_Click({ Set-TimelineSidebar -Window $window -Collapsed $true })
+    $ui.ExpandSidebarButton.add_Click({ Set-TimelineSidebar -Window $window -Collapsed $false })
+
+    # Clicking a server card shows only that server's events; clicking it again shows them all.
+    $ui.SummaryList.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, [System.Windows.RoutedEventHandler] {
+            param($source, $e)
+            $server = [string]$e.OriginalSource.Tag
+            if (-not $server) { return }
+            $current = if ($ui.ServerFilter.SelectedItem) { [string]$ui.ServerFilter.SelectedItem.Tag } else { '*' }
+            $want = if ($current -eq $server) { '*' } else { $server }
+            $item = @($ui.ServerFilter.Items | Where-Object { [string]$_.Tag -eq $want })[0]
+            if ($item) { $ui.ServerFilter.SelectedItem = $item }
         })
 
     $ui.ThisComputerButton.add_Click({

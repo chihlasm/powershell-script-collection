@@ -621,3 +621,38 @@ Describe 'Save folder settings' {
         Get-TimelineSettingsPath | Should -BeLike '*ServerEventTimeline*settings.json'
     }
 }
+
+Describe 'Get-TimelineServerCards (the sidebar''s EACH SERVER block)' {
+    BeforeAll {
+        function New-St { param($Server, $State, $Transport = 'WinRM', $Count = 0, $Reason = '')
+            [PSCustomObject]@{ Server = $Server; State = $State; Transport = $Transport; EventCount = $Count; Reason = $Reason; UtcOffsetMinutes = 0; Logs = @() } }
+        $script:Status = [ordered]@{}
+        $script:Status['APP02'] = New-St 'APP02' 'Done' 'Local' 412
+        $script:Status['AD-01.c'] = New-St 'AD-01.c' 'Querying'
+        $script:Status['AD-03.c'] = New-St 'AD-03.c' 'DoneWithGaps' 'RPC' 5000
+        $script:Status['OLD.c'] = New-St 'OLD.c' 'Unreachable' '' 0 'WinRM and the remote event log both refused'
+        $script:Lines = @('APP02: nothing flagged in 412 events', 'AD-01.c: still reading... so far 1 app crash or hang',
+            'AD-03.c: 1 system time change, 4 updates installed (some logs incomplete)', "OLD.c: couldn't be read",
+            'Security log not read: tick it under Which logs? to see sign-in or lockout problems.')
+    }
+
+    It 'gives one card per server with its state and what was found' {
+        $cards = @(Get-TimelineServerCards -Status $script:Status -SummaryLines $script:Lines)
+        $cards.Count | Should -Be 4
+        $cards[0].Server | Should -Be 'APP02'
+        $cards[0].Heading | Should -Be '✓ APP02 · 412 events · this computer'
+        $cards[0].Findings | Should -Be 'nothing flagged in 412 events'
+        $cards[0].Warn | Should -BeFalse
+        $cards[1].Heading | Should -Be '… AD-01.c · reading (WinRM)'
+        $cards[1].Findings | Should -Be 'still reading... so far 1 app crash or hang'
+        $cards[2].Heading | Should -Be '✓ AD-03.c · 5,000 events · with gaps · remote event log'
+        $cards[2].Warn | Should -BeTrue
+        $cards[3].Heading | Should -Be "✗ OLD.c · couldn't reach"
+        $cards[3].Findings | Should -Be 'WinRM and the remote event log both refused'
+        $cards[3].Warn | Should -BeTrue
+    }
+
+    It 'returns the lines that are not about one server as notes' {
+        @(Get-TimelineServerNotes -Status $script:Status -SummaryLines $script:Lines) | Should -Be @('Security log not read: tick it under Which logs? to see sign-in or lockout problems.')
+    }
+}

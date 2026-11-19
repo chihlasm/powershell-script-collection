@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 
 <#
 .SYNOPSIS
@@ -925,6 +925,47 @@ function Get-TimelineSummaryLines {
     if ($chosen.Count -gt 0 -and $chosen -notcontains 'Security' -and $SecurityHint) { $SecurityHint }
 }
 
+function Get-TimelineServerCards {
+    <#
+        The sidebar's EACH SERVER block: one card per server. Heading = how reading it went
+        (from the engine status), Findings = what was found (the server's summary line without
+        its "server: " prefix, or why it couldn't be reached). Warn marks gaps and failures.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Status, [string[]]$SummaryLines)
+    $via = @{ WinRM = 'WinRM'; RPC = 'remote event log'; Local = 'this computer' }
+    foreach ($s in $Status.Values) {
+        $name = [string]$s.Server
+        $prefix = "${name}: "
+        $line = @($SummaryLines | Where-Object { $_ -and $_.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) })[0]
+        $findings = if ($line) { $line.Substring($prefix.Length) } else { '' }
+        $how = if ($s.Transport -and $via.ContainsKey([string]$s.Transport)) { $via[[string]$s.Transport] } else { '' }
+        $count = '{0:N0} events' -f [int]$s.EventCount
+        $warn = $false
+        $heading = switch ([string]$s.State) {
+            'Waiting'      { "… $name · waiting" }
+            'Querying'     { if ($how) { "… $name · reading ($how)" } else { "… $name · reading" } }
+            'Done'         { (@("✓ $name", $count, $how) | Where-Object { $_ }) -join ' · ' }
+            'DoneWithGaps' { $warn = $true; (@("✓ $name", $count, 'with gaps', $how) | Where-Object { $_ }) -join ' · ' }
+            'Unreachable'  { $warn = $true; $findings = [string]$s.Reason; "✗ $name · couldn't reach" }
+            'Cancelled'    { "■ $name · cancelled · $count kept" }
+            default        { "$name · $($s.State)" }
+        }
+        [PSCustomObject]@{ Server = $name; Heading = $heading; Findings = $findings; Warn = $warn }
+    }
+}
+
+function Get-TimelineServerNotes {
+    <# The summary lines that aren't about one server (for example "Security log not read"). #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Status, [string[]]$SummaryLines)
+    $prefixes = @($Status.Keys | ForEach-Object { "$($_): " })
+    foreach ($l in @($SummaryLines | Where-Object { $_ })) {
+        $mine = $false
+        foreach ($p in $prefixes) { if ($l.StartsWith($p, [StringComparison]::OrdinalIgnoreCase)) { $mine = $true; break } }
+        if (-not $mine) { $l }
+    }
+}
 function Group-TimelineRepeats {
     <#
         Collapses the same unflagged event (server, log, source, ID, level) into one row at its
