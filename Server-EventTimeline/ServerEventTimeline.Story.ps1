@@ -74,6 +74,32 @@ function New-StoryLineObject {
     }
 }
 
+function Get-TimelineQuietSince {
+    <#
+        Since = the time (ticks) of the last event on -Server before -Ticks that isn't part of a
+        restart, found by binary search in -ContextRows (every row, in UTC order), $null when
+        there is none; From = where that server's restart events begin (the earliest restart
+        event after Since, or -Ticks), since a filtered list may start the restart late. Used for "no events for about N min before that": measured from every
+        row, so a filtered list or the notable rows alone can't make the gap look longer.
+    #>
+    param([object[]]$ContextRows, [long]$Ticks, [string]$Server)
+    if (-not $ContextRows) { return [PSCustomObject]@{ Since = $null; From = $Ticks } }
+    $lo = 0; $hi = $ContextRows.Count
+    while ($lo -lt $hi) {
+        $mid = [int][Math]::Floor(($lo + $hi) / 2)
+        if ($ContextRows[$mid].TimeUtc.Ticks -lt $Ticks) { $lo = $mid + 1 } else { $hi = $mid }
+    }
+    $roles = $script:StoryRestartRoles
+    $from = $Ticks
+    for ($j = $lo - 1; $j -ge 0; $j--) {
+        $p = $ContextRows[$j]
+        if ($p.Server -ne $Server) { continue }
+        if ($p.Flag -and $roles[$p.Flag]) { $from = $p.TimeUtc.Ticks; continue }
+        return [PSCustomObject]@{ Since = $p.TimeUtc.Ticks; From = $from }
+    }
+    [PSCustomObject]@{ Since = $null; From = $from }
+}
+
 function Get-TimelineStory {
     <#
         The flagged events as story lines, in UTC order across servers (times shown server
@@ -89,11 +115,22 @@ function Get-TimelineStory {
         - Crash lines count the unrecognised errors on that server in the 5 minutes before.
     #>
     [CmdletBinding()]
-    param([object[]]$Rows, [int]$MaxLines = 60)
+    param(
+        [object[]]$Rows,
+        [int]$MaxLines = 60,
+        # Every row in UTC order, when -Rows holds only some of them (the store's flagged and
+        # error rows, or a filtered list): the quiet gap before a restart is measured from these.
+        [object[]]$ContextRows
+    )
 
-    $rows = @($Rows | Where-Object { $null -ne $_ })
-    for ($i = 1; $i -lt $rows.Count; $i++) {
-        if ([datetime]$rows[$i].TimeUtc -lt [datetime]$rows[$i - 1].TimeUtc) { $rows = @($rows | Sort-Object TimeUtc); break }
+    # No pipeline here: Where-Object over the store's notable rows cost ~60 ms on 5.1.
+    $rows = if ($null -eq $Rows) { @() } else { $Rows }
+    $prev = [long]::MinValue
+    foreach ($r in $rows) {
+        if ($null -eq $r) { continue }
+        $tk = $r.TimeUtc.Ticks
+        if ($tk -lt $prev) { $rows = @($rows | Where-Object { $null -ne $_ } | Sort-Object TimeUtc); break }
+        $prev = $tk
     }
 
     $states = @{}
@@ -115,7 +152,7 @@ function Get-TimelineStory {
         if ($g.Role -in @('Unexpected', 'Bugcheck')) {
             $quiet = ''
             if ($g.PlainBefore) {
-                $mins = [int][Math]::Round(([datetime]$g.First.TimeUtc - [datetime]$g.PlainBefore).TotalMinutes)
+                $mins = [int][Math]::Round(([datetime]$g.QuietUntil - [datetime]$g.PlainBefore).TotalMinutes)
                 if ($mins -ge 1) { $quiet = '(no events for about {0} min before that)' -f $mins }
             }
             $detail = Join-StoryDetail @($quiet, (Format-StoryErrorCount -Count $g.Errors))
@@ -128,6 +165,7 @@ function Get-TimelineStory {
     }
 
     foreach ($r in $rows) {
+        if ($null -eq $r) { continue }
         $server = [string]$r.Server
         $s = $states[$server]
         if (-not $s) {
@@ -151,8 +189,14 @@ function Get-TimelineStory {
             else {
                 & $closeGroup $g
                 $seq++
+                $quietSince = $s.PlainBefore; $quietUntil = $t
+                if ($ContextRows) {
+                    $q = Get-TimelineQuietSince -ContextRows $ContextRows -Ticks $t.Ticks -Server $server
+                    $quietSince = if ($null -ne $q.Since) { [datetime]::new([long]$q.Since, [DateTimeKind]::Utc) } else { $null }
+                    $quietUntil = [datetime]::new([long]$q.From, [DateTimeKind]::Utc)
+                }
                 $g = @{ Seq = $seq; First = $r; Last = $t; Role = $role; KeyRow = $r; BackUp = $null; RequestRow = $null
-                    PlainBefore = $s.PlainBefore; Errors = $s.Errors.Count }
+                    PlainBefore = $quietSince; QuietUntil = $quietUntil; Errors = $s.Errors.Count }
                 $s.Group = $g
             }
             if ($role -eq 'Started' -and -not $g.BackUp) { $g.BackUp = $r.TimeServerLocal }
@@ -314,7 +358,10 @@ function Get-TimelineStripModel {
         [Parameter(Mandatory)][double]$Width,
         # All rows in UTC order (the store's), when -Rows holds only the flagged and error
         # ones: the quiet gap before a restart is measured from any event, not just those.
-        [object[]]$ContextRows
+        [object[]]$ContextRows,
+        # Each server's UTC offset in minutes, as the search learned it (Get-TimelineServerOffsets).
+        # Without it the offsets are read from the rows, which can miss a quiet server.
+        [hashtable]$UtcOffsets
     )
     if ($null -eq $Rows) { $Rows = @() }
     $lanes = New-Object System.Collections.Generic.List[object]
@@ -342,11 +389,11 @@ function Get-TimelineStripModel {
     $closeGroup = {
         param($g)
         if (-not $g -or $g.Role -notin @('Unexpected', 'Bugcheck') -or $null -eq $g.PlainBefore) { return }
-        $mins = [int][Math]::Round(($g.Start - $g.PlainBefore) / 600000000.0)
+        $mins = [int][Math]::Round(($g.QuietUntil - $g.PlainBefore) / 600000000.0)
         if ($mins -lt 1) { return }
         $how = if ($g.Role -eq 'Bugcheck') { 'restarted after a blue screen' } else { 'restarted without a clean shutdown' }
         $bars.Add([PSCustomObject]@{
-                Lane = $g.Lane; X1 = [Math]::Max(0.0, ($g.PlainBefore - $startTicks) * $scale); X2 = ($g.Start - $startTicks) * $scale
+                Lane = $g.Lane; X1 = [Math]::Max(0.0, ($g.PlainBefore - $startTicks) * $scale); X2 = ($g.QuietUntil - $startTicks) * $scale
                 Text = ('no events for about {0} min, then {1}' -f $mins, $how)
             })
     }
@@ -393,18 +440,15 @@ function Get-TimelineStripModel {
                 & $closeGroup $g
                 # The last event on this server that isn't part of a restart: when it went quiet.
                 $before = $null
-                $look = $Rows; $from = $k - 1
-                if ($ContextRows) {
-                    # Binary search for the first row at or after this one, then walk back.
-                    $look = $ContextRows; $lo = 0; $hi = $ContextRows.Count
-                    while ($lo -lt $hi) { $mid = [int](($lo + $hi) / 2 - 0.5); if ($ContextRows[$mid].TimeUtc.Ticks -lt $t) { $lo = $mid + 1 } else { $hi = $mid } }
-                    $from = $lo - 1
+                $until = $t
+                if ($ContextRows) { $q = Get-TimelineQuietSince -ContextRows $ContextRows -Ticks $t -Server $r.Server; $before = $q.Since; $until = $q.From }
+                else {
+                    for ($j = $k - 1; $j -ge 0; $j--) {
+                        $p = $Rows[$j]
+                        if ($p.Server -eq $r.Server -and -not ($p.Flag -and $roles[$p.Flag])) { $before = $p.TimeUtc.Ticks; break }
+                    }
                 }
-                for ($j = $from; $j -ge 0; $j--) {
-                    $p = $look[$j]
-                    if ($p.Server -eq $r.Server -and -not ($p.Flag -and $roles[$p.Flag])) { $before = $p.TimeUtc.Ticks; break }
-                }
-                $groups[$lane] = @{ Lane = $lane; Start = $t; Last = $t; Role = $role; PlainBefore = $before }
+                $groups[$lane] = @{ Lane = $lane; Start = $t; Last = $t; Role = $role; PlainBefore = $before; QuietUntil = $until }
             }
         }
         if (-not $kinds.ContainsKey($flag)) { continue }
@@ -437,6 +481,11 @@ function Get-TimelineStripModel {
     $seen = @{}
     $sample = if ($ContextRows) { $ContextRows } else { $Rows }
     $limit = [Math]::Min($sample.Count, 5000)
+    if ($UtcOffsets -and $UtcOffsets.Count -gt 0) {
+        # What the search learned about each server: a quiet server counts too.
+        foreach ($l in $lanes) { if ($UtcOffsets.ContainsKey($l.Server)) { [void]$offsets.Add([int]$UtcOffsets[$l.Server]); $seen[$l.Server] = $true } }
+        if ($seen.Count -ge $lanes.Count) { $limit = 0 }
+    }
     for ($k = 0; $k -lt $limit -and $seen.Count -lt $lanes.Count; $k++) {
         $r = $sample[$k]
         if ($seen.ContainsKey($r.Server) -or -not $laneOf.ContainsKey($r.Server)) { continue }
@@ -477,10 +526,11 @@ function Get-TimelineStoreStripModel {
         [string[]]$Servers,
         [Parameter(Mandatory)][datetime]$StartUtc,
         [Parameter(Mandatory)][datetime]$EndUtc,
-        [Parameter(Mandatory)][double]$Width
+        [Parameter(Mandatory)][double]$Width,
+        [hashtable]$UtcOffsets
     )
     $rows = @(Select-TimelineRows -Rows $Store.Notable.ToArray() -Filter $Filter)
-    Get-TimelineStripModel -Rows $rows -Servers $Servers -StartUtc $StartUtc -EndUtc $EndUtc -Width $Width -ContextRows $Store.Rows.ToArray()
+    Get-TimelineStripModel -Rows $rows -Servers $Servers -StartUtc $StartUtc -EndUtc $EndUtc -Width $Width -ContextRows $Store.Rows.ToArray() -UtcOffsets $UtcOffsets
 }
 
 function Get-TimelineStripToolTip {
@@ -585,4 +635,20 @@ function ConvertTo-TimelineStripSvg {
     [void]$sb.AppendFormat('<text x="{0}" y="{1}"><tspan fill="#E06C5A">&#8226;</tspan><tspan fill="var(--muted)"> errors &#183; {2}</tspan></text>', (& $n $x), (& $n $ly), (& $e $axisText))
     [void]$sb.Append('</svg>')
     $sb.ToString()
+}
+
+function Get-TimelineServerOffsets {
+    <#
+        Each server's UTC offset (minutes) from the search's status (the engine's Status
+        dictionary, or a report's ServerOutcomes list): only servers that were reached, since
+        the offset of one that wasn't is unknown.
+    #>
+    [CmdletBinding()]
+    param($Status)
+    $out = @{}
+    $items = if ($Status -is [System.Collections.IDictionary]) { @($Status.Values) } else { @($Status) }
+    foreach ($st in $items) {
+        if ($st -and $st.Server -and $st.Transport) { $out[[string]$st.Server] = [int]$st.UtcOffsetMinutes }
+    }
+    $out
 }

@@ -390,7 +390,13 @@ function ConvertTo-TimelineHtml {
         timeouts, skipped logs), then the rows. Every piece of text is HTML-encoded.
     #>
     [CmdletBinding()]
-    param([object[]]$Rows, [Parameter(Mandatory)][hashtable]$Context)
+    param(
+        [object[]]$Rows,
+        [Parameter(Mandatory)][hashtable]$Context,
+        # Every row of the search when -Rows is a filtered list: quiet gaps before a restart are
+        # measured from these, so a filter can't make the report claim a longer silence.
+        [object[]]$ContextRows
+    )
 
     $e = { param($s) [System.Net.WebUtility]::HtmlEncode([string]$s) }
     $sb = New-Object System.Text.StringBuilder
@@ -431,12 +437,13 @@ svg.strip{display:block;background:var(--panel);border:1px solid var(--line);bor
         if ($end -le $start) { $start = $start.AddMinutes(-5); $end = $end.AddMinutes(5) }
     }
     if ($null -ne $start -and $null -ne $end -and @($Context.Servers).Count -gt 0) {
-        $model = Get-TimelineStripModel -Rows $all -Servers @($Context.Servers) -StartUtc $start -EndUtc $end -Width 900
+        $model = Get-TimelineStripModel -Rows $all -Servers @($Context.Servers) -StartUtc $start -EndUtc $end -Width 900 `
+            -ContextRows $ContextRows -UtcOffsets (Get-TimelineServerOffsets -Status @($Context.ServerOutcomes))
         [void]$sb.Append('<h2>Timeline</h2>')
         [void]$sb.Append((ConvertTo-TimelineStripSvg -Model $model -Width 900))
     }
     # What happened, in order, from the same rows the report lists.
-    [void]$sb.Append((ConvertTo-TimelineStoryHtml -Story (Get-TimelineStory -Rows $Rows)))
+    [void]$sb.Append((ConvertTo-TimelineStoryHtml -Story (Get-TimelineStory -Rows $Rows -ContextRows $ContextRows)))
 
     [void]$sb.Append('<h2>How each server went</h2><table><tr><th>Server</th><th>Result</th><th>Details</th></tr>')
     foreach ($o in @($Context.ServerOutcomes)) {

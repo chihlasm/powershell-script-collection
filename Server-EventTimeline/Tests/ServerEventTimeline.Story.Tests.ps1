@@ -514,3 +514,99 @@ Describe 'The picture in the HTML report' {
         $console | Should -Match 'StartUtc'
     }
 }
+
+Describe 'Review fixes' {
+    BeforeAll {
+        # An error long before, then routine events, then an unexpected restart (offset -300).
+        $script:QuietRows = Sort-Rows @(
+            New-TestRow -Time '2026-11-18 05:00' -Level 2 -Provider 'Ntfs' -Id 5
+            New-TestRow -Time '2026-11-18 07:50'
+            New-TestRow -Time '2026-11-18 07:57'
+            New-TestRow -Time '2026-11-18 08:00' -Provider 'Microsoft-Windows-Kernel-General' -Id 12
+            New-TestRow -Time '2026-11-18 08:00:30' -Provider 'Microsoft-Windows-Kernel-Power' -Id 41 -Level 1
+        )
+    }
+
+    It 'the story from the notable rows with every row as context matches the story from every row' {
+        $store = New-TimelineRowStore
+        Add-TimelineRows -Store $store -NewRows $script:QuietRows
+        $full = Get-TimelineStory -Rows $script:QuietRows
+        $fast = Get-TimelineStory -Rows $store.Notable.ToArray() -ContextRows $store.Rows.ToArray()
+        @($fast.Lines | ForEach-Object { $_.Text + '|' + $_.Detail }) | Should -Be @($full.Lines | ForEach-Object { $_.Text + '|' + $_.Detail })
+        @($fast.Lines | Where-Object Kind -eq 'Event')[-1].Detail | Should -BeLike '*about 3 min*'
+    }
+
+    It 'the window builds the story from the notable rows' {
+        $src = Get-Content -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'Start-ServerEventTimeline.ps1') -Raw
+        $summary = $src.Substring($src.IndexOf('function Update-Summary'), 2000)
+        $summary | Should -Match 'Get-TimelineStory -Rows \$ui\.Store\.Notable\.ToArray\(\) -ContextRows \$ui\.Store\.Rows\.ToArray\(\)'
+    }
+
+    It 'builds the story for a 40,000-row search in under 100 ms on Windows PowerShell 5.1' -Skip:(-not (Get-Command powershell.exe -ErrorAction SilentlyContinue)) {
+        $core = Join-Path (Split-Path -Parent $PSScriptRoot) 'ServerEventTimeline.Core.ps1'
+        $script = @"
+`$ErrorActionPreference = 'Stop'
+. '$core'
+`$s0 = [datetime]::SpecifyKind([datetime]'2026-11-18 22:45', [DateTimeKind]::Utc)
+`$servers = 'AD-01', 'AD-02', 'AD-03', 'AD-04'
+`$rows = New-Object System.Collections.Generic.List[object]
+for (`$i = 0; `$i -lt 40000; `$i++) {
+    `$t = `$s0.AddMilliseconds(`$i * 30); `$kind = `$i % 100
+    `$flag = if (`$kind -eq 50) { 'Disk I/O had to be retried' } else { '' }
+    `$rows.Add([PSCustomObject]@{ Server = `$servers[`$i % 4]; Log = 'System'; TimeUtc = `$t; TimeServerLocal = `$t.AddHours(-5); Level = `$(if (`$kind -lt 10) { 2 } else { 4 })
+        Flag = `$flag; FlagCategory = `$(if (`$flag) { 'Disk' } else { '' }); Provider = 'Disk'; EventId = 153; RecordId = `$i; Message = ''; MessageFirstLine = 'm' })
+}
+`$store = New-TimelineRowStore
+Add-TimelineRows -Store `$store -NewRows `$rows.ToArray()
+[void](Get-TimelineStory -Rows `$store.Notable.ToArray() -ContextRows `$store.Rows.ToArray())
+`$best = [double]::MaxValue
+foreach (`$try in 1..3) { `$sw = [Diagnostics.Stopwatch]::StartNew(); [void](Get-TimelineStory -Rows `$store.Notable.ToArray() -ContextRows `$store.Rows.ToArray()); `$best = [Math]::Min(`$best, `$sw.Elapsed.TotalMilliseconds) }
+[int]`$best
+"@
+        $file = Join-Path $TestDrive 'story-timing.ps1'
+        Set-Content -LiteralPath $file -Value $script -Encoding UTF8
+        $out = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $file 2>&1 | ForEach-Object { "$_" })
+        $last = $out | Select-Object -Last 1
+        $last | Should -Match '^\d+$' -Because ($out -join "`n")
+        [int]$last | Should -BeLessThan 100
+    }
+
+    It 'a filtered report measures the quiet gap from every row, not just the shown ones' {
+        $errorsOnly = @($script:QuietRows | Where-Object { $_.Level -in 1, 2 })
+        $ctx = @{ WindowText = 'w'; Servers = @('AD-01'); Logs = @('System'); FiltersText = 'Errors'; GeneratedAt = [datetime]'2026-11-18 09:00'; Summary = @(); ServerOutcomes = @()
+            StartUtc = [datetime]::SpecifyKind([datetime]'2026-11-18 10:00', [DateTimeKind]::Utc); EndUtc = [datetime]::SpecifyKind([datetime]'2026-11-18 13:10', [DateTimeKind]::Utc) }
+        $html = ConvertTo-TimelineHtml -Rows $errorsOnly -Context $ctx -ContextRows $script:QuietRows
+        $html | Should -Not -BeLike '*about 180 min*'
+        $html | Should -BeLike '*no events for about 3 min*'
+    }
+
+    It 'both report callers pass every row as context' {
+        $src = Get-Content -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'Start-ServerEventTimeline.ps1') -Raw
+        ([regex]::Matches($src, 'ConvertTo-TimelineHtml -Rows [^\r\n]*-ContextRows')).Count | Should -Be 3
+    }
+
+    It 'takes the time zones from what the search learned, not from a sample of rows' {
+        # Only AD-01 (UTC-5) has rows; AD-03 is quiet but known to be UTC+0.
+        $rows = @(Disk153 '2026-11-18 17:50')
+        $m = Get-TimelineStripModel -Rows $rows -Servers @('AD-01', 'AD-03') -StartUtc ([datetime]'2026-11-18 22:45') -EndUtc ([datetime]'2026-11-18 23:05') -Width 800 -UtcOffsets @{ 'AD-01' = -300; 'AD-03' = 0 }
+        $m.AxisIsUtc | Should -BeTrue
+        $same = Get-TimelineStripModel -Rows $rows -Servers @('AD-01', 'AD-03') -StartUtc ([datetime]'2026-11-18 22:45') -EndUtc ([datetime]'2026-11-18 23:05') -Width 800 -UtcOffsets @{ 'AD-01' = -300; 'AD-03' = -300 }
+        $same.AxisIsUtc | Should -BeFalse
+        $same.AxisOffsetMinutes | Should -Be -300
+    }
+
+    It 'the report takes the time zones from the server outcomes' {
+        $ctx = @{ WindowText = 'w'; Servers = @('AD-01', 'AD-03'); Logs = @('System'); FiltersText = 'none'; GeneratedAt = [datetime]'2026-11-18 18:10'; Summary = @()
+            ServerOutcomes = @([PSCustomObject]@{ Server = 'AD-01'; State = 'Done'; Transport = 'WinRM'; UtcOffsetMinutes = -300; EventCount = 1; Reason = ''; Logs = @() },
+                [PSCustomObject]@{ Server = 'AD-03'; State = 'Done'; Transport = 'WinRM'; UtcOffsetMinutes = 0; EventCount = 0; Reason = ''; Logs = @() })
+            StartUtc = [datetime]::SpecifyKind([datetime]'2026-11-18 22:45', [DateTimeKind]::Utc); EndUtc = [datetime]::SpecifyKind([datetime]'2026-11-18 23:05', [DateTimeKind]::Utc) }
+        $html = ConvertTo-TimelineHtml -Rows @(Disk153 '2026-11-18 17:50') -Context $ctx
+        $html | Should -BeLike '*times in UTC*'
+    }
+
+    It 'the window passes the time zones it learned to the picture' {
+        $src = Get-Content -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'Start-ServerEventTimeline.ps1') -Raw
+        $strip = $src.Substring($src.IndexOf('function Update-Strip'), 1800)
+        $strip | Should -Match '-UtcOffsets \(Get-TimelineServerOffsets -Status \$ui\.Engine\.Status\)'
+    }
+}

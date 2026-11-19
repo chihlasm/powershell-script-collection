@@ -939,7 +939,7 @@ function Invoke-TimelineConsole {
             GeneratedAt = Get-Date; ServerOutcomes = @($engine.Status.Values); Summary = $summary
             StartUtc = $span.StartUtc; EndUtc = $span.EndUtc
         }
-        [System.IO.File]::WriteAllText($htmlPath, (ConvertTo-TimelineHtml -Rows $rows -Context $context), (New-Object System.Text.UTF8Encoding $true))
+        [System.IO.File]::WriteAllText($htmlPath, (ConvertTo-TimelineHtml -Rows $rows -Context $context -ContextRows $rows), (New-Object System.Text.UTF8Encoding $true))
         & $say PASS ('Saved {0:N0} events to {1}' -f $rows.Count, $folder)
     }
     catch { & $say FAIL "Couldn't save the report: $($_.Exception.Message)" }
@@ -1625,7 +1625,9 @@ function Show-ServerEventTimeline {
         $ui.NotesList.ItemsSource = @(Get-TimelineServerNotes -Status $ui.Engine.Status -SummaryLines $lines)
         $ui.SummaryBorder.Visibility = 'Visible'
         # What happened, in order, from every event read (same "rows arrived" trigger).
-        $ui.Story = Get-TimelineStory -Rows $ui.Store.Rows.ToArray()
+        # From the flagged and error rows only (every row is context for quiet gaps): walking
+        # every row took ~0.8 s per update at 40,000 rows and froze the window.
+        $ui.Story = Get-TimelineStory -Rows $ui.Store.Notable.ToArray() -ContextRows $ui.Store.Rows.ToArray()
         Set-TimelineStoryView -Window $window -Story $ui.Story
     }
 
@@ -1652,7 +1654,8 @@ function Show-ServerEventTimeline {
         $span = if ($ui.TimeRange) { $ui.TimeRange } else { Get-TimelineStripWindow -Window $ui.Engine.Window -Status $ui.Engine.Status -NowUtc $ui.SearchStartedUtc }
         $room = if ($ui.StripScroll.ActualWidth -gt 0) { $ui.StripScroll.ActualWidth } else { 900 }
         $width = [Math]::Max(120, $room - $script:StripLabelPx - 24)
-        $ui.StripModel = Get-TimelineStoreStripModel -Store $ui.Store -Filter (Get-CurrentFilter) -Servers @($ui.Engine.Status.Keys) -StartUtc $span.StartUtc -EndUtc $span.EndUtc -Width $width
+        $ui.StripModel = Get-TimelineStoreStripModel -Store $ui.Store -Filter (Get-CurrentFilter) -Servers @($ui.Engine.Status.Keys) -StartUtc $span.StartUtc -EndUtc $span.EndUtc -Width $width `
+            -UtcOffsets (Get-TimelineServerOffsets -Status $ui.Engine.Status)
         $ui.StripSpan = $span; $ui.StripWidth = $width
         Show-TimelineStrip -Window $window -Model $ui.StripModel -Width $width
     }
@@ -1790,7 +1793,7 @@ function Show-ServerEventTimeline {
             }
             else {
                 $path = Join-Path $ui.OutputPath "ServerEventTimeline_$stamp.html"
-                [System.IO.File]::WriteAllText($path, (ConvertTo-TimelineHtml -Rows $rows -Context (Get-ExportContext)), (New-Object System.Text.UTF8Encoding $true))
+                [System.IO.File]::WriteAllText($path, (ConvertTo-TimelineHtml -Rows $rows -Context (Get-ExportContext) -ContextRows $ui.Store.Rows.ToArray()), (New-Object System.Text.UTF8Encoding $true))
             }
             Write-TimelineLog PASS "Saved $($rows.Count) rows to $path"
             Set-StatusMessage "Saved: $path"
@@ -1951,7 +1954,7 @@ function Show-ServerEventTimeline {
                 $folder = Resolve-TicketFolder -TicketNumber $number -Root (Get-TicketNoteDefaultRoot)
                 $context = Get-ExportContext
                 $htmlPath = Join-Path $folder ('ServerEventTimeline_{0}.html' -f (Get-Date -Format 'yyyy-MM-dd_HHmmss'))
-                [System.IO.File]::WriteAllText($htmlPath, (ConvertTo-TimelineHtml -Rows @($ui.VisibleRows) -Context $context), (New-Object System.Text.UTF8Encoding $true))
+                [System.IO.File]::WriteAllText($htmlPath, (ConvertTo-TimelineHtml -Rows @($ui.VisibleRows) -Context $context -ContextRows $ui.Store.Rows.ToArray()), (New-Object System.Text.UTF8Encoding $true))
                 $note = New-TimelineTicketNote -Status $ui.Engine.Status -Rows $ui.Store.Rows.ToArray() -WindowText $context.WindowText -Logs $ui.Selected -EvidencePaths @($htmlPath)
                 $published = Publish-TicketNote -Note $note -Folder $folder -PasteSafe
                 Write-TimelineLog PASS "Ticket summary saved to $($published.NotePath)"
