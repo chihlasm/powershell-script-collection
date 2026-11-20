@@ -288,10 +288,10 @@ Describe 'Console mode (-NoGui)' {
                 Channels = @(); FailureKind = ''; Reason = '' }
         }
         $script:TwoEventLog = {
-            param($EnginePath, $Server, $Transport, $LogName, $StartUtc, $EndUtc, $Cap, $Credential)
+            param($EnginePath, $Server, $Transport, $LogName, $StartUtc, $EndUtc, $Cap, $Credential, $Part)
             $mk = { param($m, $id, $prov) [PSCustomObject]@{ TimeCreatedUtc = ([datetime]$StartUtc).AddMinutes($m); Id = $id; ProviderName = $prov
                 Level = 2; LogName = $LogName; Message = "event from $Server"; RecordId = $m; UserSid = ''; MachineName = $Server } }
-            $events = if ($LogName -eq 'System') { @((& $mk 1 41 'Microsoft-Windows-Kernel-Power'), (& $mk 2 7036 'Service Control Manager')) } else { @() }
+            $events = if ($LogName -eq 'System' -and $Part -ne 'Routine') { @((& $mk 1 41 'Microsoft-Windows-Kernel-Power'), (& $mk 2 7036 'Service Control Manager')) } else { @() }
             [PSCustomObject]@{ Server = $Server; Log = $LogName; Outcome = 'Read'; Count = $events.Count; Events = $events; Reason = '' }
         }
         $script:Fakes = @{ ProbeScript = $script:OkProbe; LogScript = $script:TwoEventLog }
