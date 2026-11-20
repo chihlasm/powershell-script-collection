@@ -1205,7 +1205,7 @@ function Set-TimelineStoryView {
             })
     }
     if ($Story.MoreCount -gt 0) {
-        $items.Add([PSCustomObject]@{ Kind = 'More'; Text = ('... and {0:N0} more flagged events - filter the list to see them' -f $Story.MoreCount); RowId = '' })
+        $items.Add([PSCustomObject]@{ Kind = 'More'; Text = ('... and {0:N0} more that stood out - filter the list to see them' -f $Story.MoreCount); RowId = '' })
     }
     $list.ItemsSource = $items.ToArray()
     $empty.Visibility = 'Collapsed'

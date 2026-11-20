@@ -105,7 +105,8 @@ function Get-TimelineStory {
         The flagged events as story lines, in UTC order across servers (times shown server
         local). Lines = Event lines (Server, TimeUtc, LastTimeUtc, TimeServerLocal, Category,
         Text, Detail, RowId of the line's telling row, Count) with Gap lines ('25 minutes
-        later') between lines 10 minutes or more apart. MoreCount = Event lines past MaxLines.
+        later') between lines 10 minutes or more apart. MoreCount = Event lines past MaxLines
+        (lines, not events: one line can fold many events, so the wording is "more that stood out").
 
         - Flags with no summary kind are left out (a lone clean shutdown, the WER crash report
           that follows every app crash), except clean shutdowns inside a restart.
@@ -146,7 +147,11 @@ function Get-TimelineStory {
             'Requested' { if ($g.BackUp) { 'Restarted on request' } else { 'Restart or shutdown requested' } }
             default { 'Windows started' }
         }
-        if ($g.BackUp -and $g.Role -ne 'Started') { $text += ' - back up at {0:HH:mm}' -f $g.BackUp }
+        if ($g.BackUp -and $g.Role -ne 'Started') {
+            # The line shows the restart's date; a server back after midnight needs its own.
+            $backFormat = if (([datetime]$g.BackUp).Date -ne ([datetime]$g.First.TimeServerLocal).Date) { 'yyyy-MM-dd HH:mm' } else { 'HH:mm' }
+            $text += ' - back up at ' + ([datetime]$g.BackUp).ToString($backFormat)
+        }
         $detail = ''
         if ($g.Role -eq 'Requested' -and $g.RequestRow) { $detail = [string]$g.RequestRow.MessageFirstLine }
         if ($g.Role -in @('Unexpected', 'Bugcheck')) {
@@ -268,7 +273,7 @@ function Format-TimelineStoryText {
     <#
         The story as ticket lines: one per Event line ('AD-01 2026-11-18 17:49 (server local):
         Disk I/O had to be retried (3 in 3 min)'), no gap or detail lines, so N lines means N
-        happenings. Ends with how many more flagged events there were when the story was cut.
+        happenings. Ends with how many more lines stood out when the story was cut.
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Story)
@@ -276,8 +281,7 @@ function Format-TimelineStoryText {
         '{0} {1:yyyy-MM-dd HH:mm} (server local): {2}' -f $l.Server, ([datetime]$l.TimeServerLocal), $l.Text
     }
     if ($Story.MoreCount -gt 0) {
-        $noun = if ($Story.MoreCount -eq 1) { 'flagged event' } else { 'flagged events' }
-        '... and {0} more {1} (see the report)' -f $Story.MoreCount, $noun
+        '... and {0} more that stood out (see the report)' -f $Story.MoreCount
     }
 }
 
@@ -302,7 +306,7 @@ function ConvertTo-TimelineStoryHtml {
     }
     [void]$sb.Append('</ul>')
     if ($Story.MoreCount -gt 0) {
-        [void]$sb.AppendFormat('<p class="meta">... and {0:N0} more flagged events - see the table below.</p>', $Story.MoreCount)
+        [void]$sb.AppendFormat('<p class="meta">... and {0:N0} more that stood out - see the table below.</p>', $Story.MoreCount)
     }
     $sb.ToString()
 }
@@ -335,7 +339,8 @@ function Get-TimelineCategoryStyle {
 
 $script:StripMarkMergePx = 4
 $script:StripDotPx = 6
-$script:StripTickSteps = @(1, 2, 5, 10, 15, 30, 60, 120, 180, 360, 720, 1440)
+# Up to about 8 months at 8 ticks or so; whole-day steps are labelled with the date alone.
+$script:StripTickSteps = @(1, 2, 5, 10, 15, 30, 60, 120, 180, 360, 720, 1440, 2880, 4320, 10080, 20160, 43200)
 
 function Get-TimelineStripModel {
     <#
@@ -504,7 +509,7 @@ function Get-TimelineStripModel {
     foreach ($candidate in $script:StripTickSteps) { if ($spanMinutes / $candidate -le 8) { $step = $candidate; break } }
     $shownStart = $StartUtc.AddMinutes($offset)
     $shownEnd = $EndUtc.AddMinutes($offset)
-    $format = if ($spanMinutes -gt 1440) { 'MM-dd HH:mm' } else { 'HH:mm' }
+    $format = if ($step -ge 1440) { 'MM-dd' } elseif ($spanMinutes -gt 1440) { 'MM-dd HH:mm' } else { 'HH:mm' }
     $tick = $shownStart.Date.AddMinutes([Math]::Ceiling(($shownStart - $shownStart.Date).TotalMinutes / $step) * $step)
     $ticks = New-Object System.Collections.Generic.List[object]
     while ($tick -le $shownEnd) {
