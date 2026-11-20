@@ -99,9 +99,9 @@ to process this command*; a process of its own avoids that.
    - **Hide events from this source**: for chatty sources such as Task Scheduler. What's
      hidden is named next to the filters; **Show everything again** brings it back.
    - **Show only this server**.
-8. Click a row to see everything about the event. Then **Export CSV**, **Export HTML report**
-   (with *What was found* at the top), **Export workbook**, or **Copy selected rows** to paste
-   into the ticket. Exports always contain every filtered event, even when repeats are collapsed.
+8. Click a row to see everything about the event. Then **Export** (a menu: **Excel workbook**,
+   **HTML report** with *What was found* at the top, or **CSV**), or **Copy selected rows** to
+   paste into the ticket. Exports always contain every filtered event, even when repeats are collapsed.
    The workbook is an Excel file with a **Summary** sheet (the search, *What was found*, how each
    server went, *What happened*), an **All servers** sheet, and **a sheet for each server**, so
    you can filter, sort and run formulas per server. Times are real Excel dates and event IDs are

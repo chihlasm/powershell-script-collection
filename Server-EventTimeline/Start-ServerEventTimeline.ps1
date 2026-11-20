@@ -816,9 +816,9 @@ function New-TimelineWindowXaml {
       <StackPanel Grid.Row="5" Margin="0,10,0,0">
         <DockPanel LastChildFill="True">
           <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
-            <Button x:Name="ExportCsvButton" Content="Export CSV" IsEnabled="False" ToolTip="Save the rows you can see as a CSV file"/>
-            <Button x:Name="ExportHtmlButton" Content="Export HTML report" IsEnabled="False" ToolTip="Save a report with the rows you can see and how each server went"/>
-            <Button x:Name="ExportXlsxButton" Content="Export workbook" IsEnabled="False" ToolTip="Save an Excel workbook: a summary, every event, and a sheet for each server (the rows you can see)"/>
+            <!-- One button, three formats: the menu says what each file is for (New-ExportMenu). -->
+            <Button x:Name="ExportButton" Content="Export &#9662;" IsEnabled="False" ToolTipService.ShowOnDisabled="True"
+                    ToolTip="Save the rows you can see as an Excel workbook, an HTML report or a CSV file.&#10;Run a search first."/>
             <Button x:Name="CopyButton" Content="Copy selected rows" IsEnabled="False" ToolTip="Copy the selected rows as text, to paste into a ticket or an email"/>
             <!-- ShowOnDisabled: the button is disabled until a search finishes, which is when people hover to find out what it does. -->
             <Button x:Name="TicketNoteButton" Content="Copy summary for ticket..." IsEnabled="False" ToolTipService.ShowOnDisabled="True"
@@ -1497,6 +1497,24 @@ function New-ServerAddMenu {
     $menu
 }
 
+function New-ExportMenu {
+    <#
+        The menu behind the Export button: the workbook, the HTML report and the CSV, each
+        saying what the file is for. Each item's Tag is the Invoke-Export kind (Xlsx, Html, Csv).
+    #>
+    $menu = New-Object System.Windows.Controls.ContextMenu
+    foreach ($i in @(
+            @{ Header = 'Excel workbook (a sheet for each server)'; Tag = 'Xlsx'; Tip = 'A summary, every event, and a sheet for each server. Times are real Excel dates, so you can sort, filter and use formulas.' },
+            @{ Header = 'HTML report (to attach to the ticket)'; Tag = 'Html'; Tip = 'What was found, how each server went, and the rows you can see, in one page that opens in any browser.' },
+            @{ Header = 'CSV (every row, one file)'; Tag = 'Csv'; Tip = 'The rows you can see as plain comma-separated text.' }
+        )) {
+        $mi = New-Object System.Windows.Controls.MenuItem
+        $mi.Header = $i.Header; $mi.Tag = $i.Tag; $mi.ToolTip = $i.Tip
+        [void]$menu.Items.Add($mi)
+    }
+    $menu
+}
+
 function Register-TimelineErrorGuard {
     <#
         An exception inside a button or menu handler escapes the WPF dispatcher, ShowDialog
@@ -1602,7 +1620,7 @@ function Show-ServerEventTimeline {
         'ServerList', 'SuggestPopup', 'SuggestList', 'AroundRadio', 'RangeRadio', 'AroundPanel', 'RangePanel', 'AtBox', 'PlusMinusCombo', 'FromBox', 'ToBox', 'LastHourButton',
         'Last24Button', 'LogPanel', 'SecurityCheck', 'AllLogsCheck', 'CapBox', 'TimeoutBox', 'RunAsButton',
         'SearchButton', 'CancelButton', 'InputError', 'BannerText', 'TimeZoneNote', 'LevelFilter', 'ServerFilter',
-        'LogFilter', 'FlaggedOnlyCheck', 'FilterText', 'CountText', 'EventGrid', 'DetailText', 'ExportCsvButton', 'ExportHtmlButton', 'ExportXlsxButton',
+        'LogFilter', 'FlaggedOnlyCheck', 'FilterText', 'CountText', 'EventGrid', 'DetailText', 'ExportButton',
         'CopyButton', 'StatusMessage', 'DetailTabs', 'StoryList', 'StoryEmptyText', 'CopyStoryButton', 'MainTabs', 'EventsTab', 'StoryTab', 'StoryBanner', 'StoryBannerEventsButton', 'StripBorder', 'StripScroll', 'StripCanvas', 'StripAxisNote', 'StripLegend', 'HidePictureToggle', 'TimeRangeChip', 'TimeRangeText', 'ClearRangeButton', 'SidebarColumn', 'SidebarPanel', 'SidebarStrip', 'SidebarSplitter', 'CollapseSidebarButton', 'ExpandSidebarButton', 'NotesList') {
         $ui[$name] = $window.FindName($name)
     }
@@ -1882,9 +1900,7 @@ function Show-ServerEventTimeline {
             }
             else { 'Showing {0:N0} of {1:N0} events' -f $visible.Count, $ui.Store.Rows.Count }
             $has = $visible.Count -gt 0
-            $ui.ExportCsvButton.IsEnabled = $has
-            $ui.ExportHtmlButton.IsEnabled = $has
-            $ui.ExportXlsxButton.IsEnabled = $has
+            $ui.ExportButton.IsEnabled = $has
             Update-Summary
             Update-HiddenNote
             Update-Strip
@@ -2387,9 +2403,19 @@ function Show-ServerEventTimeline {
     $window.add_LocationChanged({ $ui.SuggestPopup.IsOpen = $false })
     $window.add_Deactivated({ $ui.SuggestPopup.IsOpen = $false })
 
-    $ui.ExportCsvButton.add_Click({ Invoke-Export -Kind Csv })
-    $ui.ExportHtmlButton.add_Click({ Invoke-Export -Kind Html })
-    $ui.ExportXlsxButton.add_Click({ Invoke-Export -Kind Xlsx })
+    # Export opens a menu under the button; each item's Tag is the Invoke-Export kind. A plain
+    # Button opens it from the keyboard too (Enter/Space), and the menu takes the arrow keys.
+    $ui.ExportButton.add_Click({
+            $menu = New-ExportMenu
+            $menu.AddHandler([System.Windows.Controls.MenuItem]::ClickEvent, [System.Windows.RoutedEventHandler] {
+                    param($sender, $e)
+                    $tag = [string]$e.OriginalSource.Tag
+                    if ($tag) { Invoke-Export -Kind $tag }
+                })
+            $menu.PlacementTarget = $ui.ExportButton
+            $menu.Placement = 'Bottom'
+            $menu.IsOpen = $true
+        })
     # A story line: select its event in the list (clearing filters that hide it).
     $ui.StoryList.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, [System.Windows.RoutedEventHandler] {
             param($sender, $e)
