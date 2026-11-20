@@ -125,6 +125,10 @@ Describe 'Window layout' {
         foreach ($n in $names) { $script:Window.FindName($n) | Should -Not -BeNullOrEmpty -Because "control $n" }
     }
 
+    It 'shows the tool version in the title bar' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $script:Window.Title | Should -Be "Server Event Timeline $script:TimelineVersion"
+    }
+
     It 'says what the ticket button does, even before a search has run' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
         $button = $script:Window.FindName('TicketNoteButton')
         # A noun ("Ticket note...") left people guessing; the label names the result.
@@ -335,6 +339,15 @@ Describe 'Console mode (-NoGui)' {
         ($said -join "`n") | Should -BeLike '*srv-fake-01: older routine events trimmed in 1 log*'
         $log = Get-Content -LiteralPath (Get-ChildItem -LiteralPath $out -Filter 'ServerEventTimeline_*.log')[0].FullName -Raw
         $log | Should -BeLike '*[INFO]*srv-fake-01: older routine events trimmed in 1 log*'
+    }
+
+    It 'names the tool version first, on screen and in the log file' {
+        $out = Join-Path $TestDrive 'version'
+        $said = @(Invoke-TimelineConsole -ComputerName 'srv-fake-01' -LastMinutes 60 -LogName System `
+                -OutputPath $out -DefaultOutputPath (Join-Path $TestDrive 'default') -EngineOptions $script:Fakes -PollMs 20 6>&1)
+        "$($said[0])" | Should -BeLike "*Server Event Timeline $script:TimelineVersion*"
+        $log = Get-Content -LiteralPath (Get-ChildItem -LiteralPath $out -Filter 'ServerEventTimeline_*.log')[0].FullName -Raw
+        $log | Should -Match ('\[INFO\] Server Event Timeline ' + [regex]::Escape($script:TimelineVersion))
     }
 
     It 'says the Security log was not read, with the console switch that adds it, in the output and the report' {

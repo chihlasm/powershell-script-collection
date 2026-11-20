@@ -19,13 +19,19 @@ Describe 'Build-TestZip.ps1' {
     BeforeAll {
         $script:Out = Join-Path $TestDrive 'dist'
         $script:Result = & $script:BuildScript -OutputPath $script:Out
-        $script:Zip = Join-Path $script:Out 'Server-EventTimeline.zip'
+        $script:Zip = "$script:Result"
+        # The version the tool says it is: one constant in Core, read the way the build reads it.
+        $script:Version = [regex]::Match((Get-Content -LiteralPath (Join-Path $script:ToolDir 'ServerEventTimeline.Core.ps1') -Raw),
+            "(?m)^\`$script:TimelineVersion = '(\d+\.\d+\.\d+)'").Groups[1].Value
         $script:Entries = Get-ZipEntries -Path $script:Zip
     }
 
-    It 'writes Server-EventTimeline.zip to -OutputPath and returns its path' {
+    It 'writes a zip named with the version and commit to -OutputPath and returns its path' {
+        $script:Version | Should -Match '^\d+\.\d+\.\d+$'
         Test-Path -LiteralPath $script:Zip | Should -BeTrue
-        "$script:Result" | Should -Be $script:Zip
+        (Split-Path -Parent $script:Zip) | Should -Be (Resolve-Path -LiteralPath $script:Out).ProviderPath
+        # Unique per build: version + commit, plus -modified when built from uncommitted changes.
+        (Split-Path -Leaf $script:Zip) | Should -Match ('^Server-EventTimeline-' + [regex]::Escape($script:Version) + '-([0-9a-f]{7,}|unknown)(-modified)?\.zip$')
     }
 
     It 'puts every script the tool needs, the README and BUILD.txt in a Server-EventTimeline folder' {
@@ -52,12 +58,14 @@ Describe 'Build-TestZip.ps1' {
             $text = $reader.ReadToEnd(); $reader.Dispose()
         }
         finally { $zip.Dispose() }
+        $text | Should -Match ('Version: ' + [regex]::Escape($script:Version))
         $text | Should -Match 'Commit: [0-9a-f]{7,}'
         $text | Should -Match 'Built: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'
     }
 
-    It 'replaces the zip on the next build' {
+    It 'replaces a zip of the same build instead of failing' {
         $again = & $script:BuildScript -OutputPath $script:Out
+        "$again" | Should -Be $script:Zip
         (Get-ZipEntries -Path $again).Count | Should -Be 10
     }
 }
@@ -67,9 +75,10 @@ Describe 'Build-TestZip.ps1 on Windows PowerShell 5.1' {
         $out = Join-Path $TestDrive 'dist51'
         $log = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:BuildScript -OutputPath $out 2>&1 | ForEach-Object { "$_" })
         $LASTEXITCODE | Should -Be 0 -Because ($log -join "`n")
-        Test-Path -LiteralPath (Join-Path $out 'Server-EventTimeline.zip') | Should -BeTrue
+        $built = @(Get-ChildItem -LiteralPath $out -Filter 'Server-EventTimeline-*.zip')
+        $built.Count | Should -Be 1
         # .NET Framework (5.1) writes backslashes from CreateFromDirectory; the zip format wants '/'.
-        $zip = [System.IO.Compression.ZipFile]::OpenRead((Join-Path $out 'Server-EventTimeline.zip'))
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($built[0].FullName)
         try { $names = @($zip.Entries | ForEach-Object FullName) } finally { $zip.Dispose() }
         $names.Count | Should -Be 10
         @($names | Where-Object { $_ -like '*\*' }).Count | Should -Be 0

@@ -250,6 +250,12 @@ Describe 'Export-TimelineWorkbook' {
         @($values | Where-Object { $_ -like "*System (routine events): Trimmed kept the newest 3,200 routine events; older ones in the window weren't read*" }).Count | Should -Be 1
     }
 
+    It 'names the tool version on the Summary sheet' {
+        $book = Get-Book -Rows $script:Rows5 -Context (New-WbContext)
+        $values = @($book['Summary'] | ForEach-Object { $_[-1] })
+        $values | Should -Contain "Server Event Timeline $script:TimelineVersion"
+    }
+
     It 'leaves empty fields as blank cells, so ISBLANK and Go To Blanks work' {
         $path = Join-Path $TestDrive 'blanks.xlsx'
         $row = New-WbRow -Provider 'Service Control Manager' -Id 7036 -Level 4

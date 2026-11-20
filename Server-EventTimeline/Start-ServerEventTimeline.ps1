@@ -213,11 +213,11 @@ param(
 . (Join-Path $PSScriptRoot 'ServerEventTimeline.AddServersDialog.ps1')
 
 function New-TimelineWindowXaml {
-    <# The window's XAML (dark, blue accent). #>
-    @'
+    <# The window's XAML (dark, blue accent). The title bar shows the tool version. #>
+    (@'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Server Event Timeline" Width="1400" Height="900" MinWidth="980" MinHeight="640"
+        Title="Server Event Timeline __VERSION__" Width="1400" Height="900" MinWidth="980" MinHeight="640"
         Background="#16181D" Foreground="#D7DCE3" FontFamily="Segoe UI" FontSize="13" WindowStartupLocation="CenterScreen">
   <Window.Resources>
     <SolidColorBrush x:Key="Panel" Color="#101216"/>
@@ -836,7 +836,7 @@ function New-TimelineWindowXaml {
     </Grid>
   </Grid>
 </Window>
-'@
+'@).Replace('__VERSION__', $script:TimelineVersion)
 }
 
 function Get-TimelineWindowText {
@@ -936,6 +936,7 @@ function Invoke-TimelineConsole {
         Write-Host "[$Level] $Message" -ForegroundColor $color
         $lines.Add(('{0} [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message))
     }
+    & $say INFO "Server Event Timeline $script:TimelineVersion"
 
     # What to read
     $serversText = if (@($ComputerName).Count -gt 0) { @($ComputerName) -join ',' } else { @(Get-LocalComputerNames)[0] }

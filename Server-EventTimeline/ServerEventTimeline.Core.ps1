@@ -59,6 +59,12 @@
     TicketNote README), which defines functions only.
 #>
 
+# The tool's version: shown in the title bar, the console log, the HTML report, the workbook,
+# the ticket note, BUILD.txt and the test zip's name. Build-TestZip.ps1 reads this exact line.
+# Bump the last number for a fix, the middle one for a change in what the tool reads or shows,
+# and go to 1.0.0 once it has run cleanly across a full client estate.
+$script:TimelineVersion = '0.9.0'
+
 . (Join-Path $PSScriptRoot 'CaseKit.ps1')
 # The server list (AD entries, suggestions, notes, file import, background lookups).
 . (Join-Path $PSScriptRoot 'ServerEventTimeline.ServerList.ps1')
@@ -424,9 +430,9 @@ function ConvertTo-TimelineHtml {
     $e = { param($s) [System.Net.WebUtility]::HtmlEncode([string]$s) }
     $sb = New-Object System.Text.StringBuilder
 
-    [void]$sb.Append(@'
+    [void]$sb.Append((@'
 <!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Server Event Timeline</title>
+<html lang="en"><head><meta charset="utf-8"><title>Server Event Timeline __VERSION__</title>
 <style>
 :root{--bg:#14171c;--panel:#1c2027;--text:#e6e8eb;--muted:#9aa3ad;--line:#2c323b;--accent:#5dade2;--err:#e5534b;--warn:#d4a72c}
 @media (prefers-color-scheme: light){:root{--bg:#f6f7f9;--panel:#fff;--text:#1d232b;--muted:#5c6773;--line:#dde1e6;--accent:#1f78b4;--err:#c8312b;--warn:#9a6b00}}
@@ -439,10 +445,10 @@ th{color:var(--muted);font-weight:600}.l1,.l2{color:var(--err)}.l3{color:var(--w
 svg.strip{display:block;background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:6px 0;max-width:1100px}ul.story{list-style:none;padding:0;margin:0}ul.story li{padding:4px 0;border-bottom:1px solid var(--line)}ul.story li.gap{color:var(--muted);font-size:12px;padding-left:24px;border:none}.when{color:var(--muted)}
 </style></head><body>
 <h1>Server Event Timeline</h1>
-'@)
-    [void]$sb.AppendFormat('<p class="meta">{0}<br>Servers: {1}<br>Logs: {2}<br>Filters: {3}<br>Made {4}</p>',
+'@).Replace('__VERSION__', (& $e $script:TimelineVersion)))
+    [void]$sb.AppendFormat('<p class="meta">{0}<br>Servers: {1}<br>Logs: {2}<br>Filters: {3}<br>Made {4} by Server Event Timeline {5}</p>',
         (& $e $Context.WindowText), (& $e (@($Context.Servers) -join ', ')), (& $e (@($Context.Logs) -join ', ')),
-        (& $e $Context.FiltersText), (& $e ([datetime]$Context.GeneratedAt).ToString('yyyy-MM-dd HH:mm:ss')))
+        (& $e $Context.FiltersText), (& $e ([datetime]$Context.GeneratedAt).ToString('yyyy-MM-dd HH:mm:ss')), (& $e $script:TimelineVersion))
 
     if (@($Context.Summary).Count -gt 0) {
         # The verdict first: what was found on each server, in plain words.
@@ -1266,6 +1272,7 @@ function New-TimelineTicketNote {
     if ($unrecTotal -gt 0) { $headline += ', plus ' + (Format-TimelineUnrecognisedText -Count $unrecTotal) }
     $scopeLine = 'Servers: {0}' -f ($servers -join ', ')
     if (@($Logs).Count -gt 0) { $scopeLine += ' | Logs: {0}' -f (@($Logs) -join ', ') }
+    $scopeLine += ' | Server Event Timeline {0}' -f $script:TimelineVersion
     $stamp = New-TicketNoteStamp -ScopeLabel Computer -Scope ($servers -join ', ') -Now $Now
     New-TicketNote -Tool 'Server-EventTimeline' -Headline $headline -ScopeLine $scopeLine -Items $items.ToArray() -NextSteps $next.ToArray() -Stamp $stamp -EvidencePaths $EvidencePaths
 }
