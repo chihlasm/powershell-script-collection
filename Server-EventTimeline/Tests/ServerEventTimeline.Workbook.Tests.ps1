@@ -145,3 +145,110 @@ Describe 'ConvertTo-XlsxSheetName' {
         $b | Should -BeLike '* (2)'
     }
 }
+
+Describe 'Export-TimelineWorkbook' {
+    BeforeAll {
+        $script:WbRec = 0
+        function New-WbRow {
+            param([string]$Server = 'AD-01', [string]$Time = '2026-11-18 17:49', [string]$Provider = 'Disk', [int]$Id = 153, [int]$Level = 3)
+            $script:WbRec++
+            $e = [PSCustomObject]@{ TimeCreatedUtc = [datetime]::SpecifyKind([datetime]$Time, [DateTimeKind]::Utc); Id = $Id; ProviderName = $Provider
+                Level = $Level; LogName = 'System'; Message = "The IO operation was retried. ($script:WbRec)"; RecordId = $script:WbRec; UserSid = ''; MachineName = $Server }
+            ConvertTo-TimelineRow -Server $Server -EventRecord $e -UtcOffsetMinutes 0
+        }
+        function New-WbContext {
+            param([string[]]$Servers = @('AD-01', 'AD-02'), [hashtable]$Counts = @{})
+            @{
+                WindowText = '2026-11-18 17:30 to 18:30 (each server''s local time)'; Servers = $Servers; Logs = @('System', 'Application')
+                FiltersText = 'Level: All'; GeneratedAt = [datetime]'2026-11-18 18:40'; Summary = @('AD-01: 3 disk errors')
+                ServerOutcomes = @(foreach ($s in $Servers) {
+                        [PSCustomObject]@{ Server = $s; State = 'Done'; Transport = 'WinRM'; Reason = ''; EventCount = [int]$Counts[$s]
+                            Logs = @([PSCustomObject]@{ Log = 'System'; Outcome = 'Read'; Count = 1; Reason = '' }) }
+                    })
+            }
+        }
+        function Get-Book {
+            param([object[]]$Rows, [hashtable]$Context, [int]$Max = 1048575)
+            $path = Join-Path $TestDrive ([guid]::NewGuid().ToString() + '.xlsx')
+            Export-TimelineWorkbook -Rows $Rows -Context $Context -Path $path -MaxRowsPerSheet $Max
+            $parts = Read-Xlsx $path
+            $names = @($parts['xl/workbook.xml'].workbook.sheets.sheet | ForEach-Object name)
+            $book = [ordered]@{}
+            for ($i = 0; $i -lt $names.Count; $i++) { $book[$names[$i]] = @(Get-SheetRows $parts["xl/worksheets/sheet$($i + 1).xml"]) }
+            $book
+        }
+        $script:Rows5 = @(
+            (New-WbRow -Time '2026-11-18 17:49'), (New-WbRow -Time '2026-11-18 17:50:30'), (New-WbRow -Time '2026-11-18 17:52'),
+            (New-WbRow -Server 'AD-02' -Time '2026-11-18 17:51' -Provider 'Service Control Manager' -Id 7036 -Level 4),
+            (New-WbRow -Server 'AD-02' -Time '2026-11-18 17:53' -Provider 'Service Control Manager' -Id 7036 -Level 4)
+        ) | Sort-Object TimeUtc
+    }
+
+    It 'has Summary, All servers, then one sheet per server in the order searched' {
+        $book = Get-Book -Rows $script:Rows5 -Context (New-WbContext -Servers @('AD-02', 'AD-01'))
+        @($book.Keys) | Should -Be @('Summary', 'All servers', 'AD-02', 'AD-01')
+    }
+
+    It 'puts each server''s rows on its own sheet and every row on All servers' {
+        $book = Get-Book -Rows $script:Rows5 -Context (New-WbContext)
+        $book['AD-01'].Count | Should -Be 4
+        $book['AD-02'].Count | Should -Be 3
+        $book['All servers'].Count | Should -Be 6
+        $book['All servers'][0] | Should -Be @('TimeServerLocal', 'TimeUtc', 'Server', 'Log', 'Level', 'Flag', 'Provider', 'EventId', 'Message', 'RecordId', 'User', 'Machine')
+        @($book['AD-02'] | Select-Object -Skip 1 | ForEach-Object { $_[2] }) | Should -Be @('AD-02', 'AD-02')
+    }
+
+    It 'gives a server with no events a header-only sheet, and writes a valid file with no rows at all' {
+        $book = Get-Book -Rows $script:Rows5 -Context (New-WbContext -Servers @('AD-01', 'AD-02', 'AD-09'))
+        $book['AD-09'].Count | Should -Be 1
+        $none = Get-Book -Rows @() -Context (New-WbContext)
+        @($none.Keys) | Should -Be @('Summary', 'All servers', 'AD-01', 'AD-02')
+        $none['All servers'].Count | Should -Be 1
+    }
+
+    It 'summarises the search, the outcomes and what happened' {
+        $book = Get-Book -Rows $script:Rows5 -Context (New-WbContext -Counts @{ 'AD-01' = 3; 'AD-02' = 2 })
+        $values = @($book['Summary'] | ForEach-Object { $_[-1] })
+        $values | Should -Contain '2026-11-18 17:30 to 18:30 (each server''s local time)'
+        $values | Should -Contain 'AD-01: 3 disk errors'
+        @($values | Where-Object { $_ -like 'Done (3 events)*' }).Count | Should -Be 1
+        @($values | Where-Object { $_ -like 'Disk I/O had to be retried (3 in 3 min)*' }).Count | Should -Be 1
+        @($book['Summary'] | ForEach-Object { $_[0] }) | Should -Contain 'What happened'
+    }
+
+    It 'cuts a sheet at the row limit and says so on the Summary' {
+        $book = Get-Book -Rows $script:Rows5 -Context (New-WbContext) -Max 2
+        $book['AD-01'].Count | Should -Be 3
+        $book['AD-02'].Count | Should -Be 3
+        $book['All servers'].Count | Should -Be 3
+        $values = @($book['Summary'] | ForEach-Object { $_[-1] })
+        $values | Should -Contain "AD-01: first 2 of 3 events (Excel's row limit)"
+        $values | Should -Contain "All servers: first 2 of 5 events (Excel's row limit)"
+    }
+
+    # Timed under Windows PowerShell 5.1, the runtime the tool runs on: the same loop is several
+    # times slower under PowerShell 7 (measured: 4 s on 5.1, ~25 s on 7.6 for 40,000 rows).
+    It 'writes 40,000 rows in under 15 seconds on Windows PowerShell 5.1' -Skip:(-not (Get-Command powershell.exe -ErrorAction SilentlyContinue)) {
+        $root = Split-Path -Parent $PSScriptRoot
+        $out = Join-Path $TestDrive 'big.xlsx'
+        $script = @'
+param($Root, $Out)
+$ErrorActionPreference = 'Stop'
+. (Join-Path $Root 'ServerEventTimeline.Core.ps1')
+$e = [PSCustomObject]@{ TimeCreatedUtc = [datetime]::SpecifyKind([datetime]'2026-11-18 17:49', 'Utc'); Id = 7036; ProviderName = 'Service Control Manager'
+    Level = 4; LogName = 'System'; Message = 'The Windows Update service entered the running state.'; RecordId = 1; UserSid = ''; MachineName = 'AD-01' }
+$rows = New-Object System.Collections.Generic.List[object]
+for ($i = 0; $i -lt 40000; $i++) { $rows.Add((ConvertTo-TimelineRow -Server ('AD-0' + ($i % 4)) -EventRecord $e -UtcOffsetMinutes 0)) }
+$ctx = @{ WindowText = 'w'; Servers = @('AD-00', 'AD-01', 'AD-02', 'AD-03'); Logs = @('System'); FiltersText = ''; GeneratedAt = (Get-Date); Summary = @(); ServerOutcomes = @() }
+$t = Measure-Command { Export-TimelineWorkbook -Rows $rows.ToArray() -Context $ctx -Path $Out }
+[int]$t.TotalSeconds
+'@
+        $file = Join-Path $TestDrive 'perf.ps1'
+        Set-Content -LiteralPath $file -Value $script -Encoding UTF8
+        $result = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $file -Root $root -Out $out 2>&1)
+        $last = [string]$result[-1]
+        $last | Should -Match '^\d+$' -Because ($result -join "`n")
+        [int]$last | Should -BeLessThan 15
+        Test-Path -LiteralPath $out | Should -BeTrue
+    }
+}

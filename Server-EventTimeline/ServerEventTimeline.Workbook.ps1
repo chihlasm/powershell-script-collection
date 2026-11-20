@@ -206,6 +206,9 @@ function Write-XlsxWorkbook {
                 $w.WriteEndElement()
             }
 
+            # Row strings by row object (reference), shared across sheets; see the row loop.
+            $cache = New-Object 'System.Collections.Generic.Dictionary[object,string]'
+            $sb = New-Object System.Text.StringBuilder 4096
             $index = 0
             foreach ($s in @($Sheets)) {
                 $index++
@@ -243,34 +246,45 @@ function Write-XlsxWorkbook {
                     }
                     $w.WriteEndElement()
                     $r = 1
+                    # Locals: a lookup up the scope chain on every cell was a large part of the cost.
+                    $sbL = $sb; $cacheL = $cache; $invL = $inv; $bad = $script:XlsxBadChars; $maxChars = $script:XlsxMaxCellChars
+                    $open = @(for ($c = 0; $c -lt $cols.Count; $c++) { '<c r="' + $letters[$c] + '<R>' })
+                    $isNum = @(foreach ($k in $kinds) { $k -eq 'Number' })
+                    # Speed: a row's cells are built once as one string (with <R> where the row
+                    # number goes; escaped text can't contain "<") and written in one call. The
+                    # same row object on two sheets (All servers and its server) reuses that
+                    # string. The XmlWriter route cost ~55 s for 40,000 rows on two sheets.
                     foreach ($row in $rows) {
                         $r++
                         $rs = [string]$r
-                        $w.WriteStartElement('row'); $w.WriteAttributeString('r', $rs)
-                        $cells = @($row)
-                        for ($c = 0; $c -lt $cols.Count -and $c -lt $cells.Count; $c++) {
-                            $v = $cells[$c]
-                            if ($null -eq $v) { continue }
-                            $w.WriteStartElement('c'); $w.WriteAttributeString('r', $letters[$c] + $rs)
-                            if ($v -is [datetime]) {
-                                $w.WriteAttributeString('s', '2')
-                                $w.WriteElementString('v', $v.ToOADate().ToString('R', $inv))
-                            }
-                            elseif ($kinds[$c] -eq 'Number' -and ($v -is [int] -or $v -is [long] -or $v -is [double] -or $v -is [decimal] -or $v -is [uint32] -or $v -is [uint64] -or $v -is [int16] -or $v -is [single])) {
-                                $w.WriteElementString('v', ([double]$v).ToString('R', $inv))
-                            }
-                            else {
-                                $text = Protect-XlsxText -Text ([string]$v)
-                                $w.WriteAttributeString('t', 'inlineStr')
-                                $w.WriteStartElement('is'); $w.WriteStartElement('t')
-                                if ($text.Length -gt 0 -and ([char]::IsWhiteSpace($text[0]) -or [char]::IsWhiteSpace($text[$text.Length - 1]))) {
-                                    $w.WriteAttributeString('xml', 'space', $null, 'preserve')
+                        $frag = $null
+                        if (-not $cacheL.TryGetValue($row, [ref]$frag)) {
+                            [void]$sbL.Clear()
+                            $cells = [object[]]$row
+                            $n = [Math]::Min($cols.Count, $cells.Count)
+                            for ($c = 0; $c -lt $n; $c++) {
+                                $v = $cells[$c]
+                                if ($null -eq $v) { continue }
+                                if ($v -is [datetime]) {
+                                    [void]$sbL.Append($open[$c] + '" s="2"><v>' + $v.ToOADate().ToString('R', $invL) + '</v></c>')
                                 }
-                                $w.WriteString($text); $w.WriteEndElement(); $w.WriteEndElement()
+                                elseif ($isNum[$c] -and $v -is [ValueType] -and $v -isnot [bool]) {
+                                    [void]$sbL.Append($open[$c] + '"><v>' + ([double]$v).ToString('R', $invL) + '</v></c>')
+                                }
+                                else {
+                                    $text = [string]$v
+                                    if ($text.Length -gt $maxChars) { $text = Protect-XlsxText -Text $text }
+                                    $space = ''
+                                    if ($text.Length -gt 0 -and ([char]::IsWhiteSpace($text[0]) -or [char]::IsWhiteSpace($text[$text.Length - 1]))) { $space = ' xml:space="preserve"' }
+                                    [void]$sbL.Append($open[$c] + '" t="inlineStr"><is><t' + $space + '>' + [System.Security.SecurityElement]::Escape($text) + '</t></is></c>')
+                                }
                             }
-                            $w.WriteEndElement()
+                            # Characters XML forbids, removed from the whole row at once (the
+                            # markup itself has none). See Protect-XlsxText.
+                            $frag = $bad.Replace($sbL.ToString(), '')
+                            $cacheL[$row] = $frag
                         }
-                        $w.WriteEndElement()
+                        $w.WriteRaw('<row r="' + $rs + '">' + $frag.Replace('<R>', $rs) + '</row>')
                     }
                     $w.WriteEndElement()
                     if ($s.Filter -and $cols.Count -gt 0) {
@@ -283,4 +297,117 @@ function Write-XlsxWorkbook {
         finally { $zip.Dispose() }
     }
     finally { $fs.Dispose() }
+}
+
+function Export-TimelineWorkbook {
+    <#
+    .SYNOPSIS
+        Saves the rows as an Excel workbook: Summary, All servers, then one sheet per server.
+    .DESCRIPTION
+        -Rows are the rows the other exports save (filters applied, repeats expanded).
+        -Context is the export context (WindowText, Servers, Logs, FiltersText, GeneratedAt,
+        Summary, ServerOutcomes), as the HTML report gets it. Server sheets follow
+        Context.Servers; a server with no rows gets a header-only sheet. Event sheets have the
+        CSV's columns (Export-TimelineCsv), with times as Excel dates and IDs as numbers.
+        A sheet over -MaxRowsPerSheet data rows keeps the first ones, and the Summary says so.
+    #>
+    [CmdletBinding()]
+    param(
+        [object[]]$Rows,
+        [Parameter(Mandatory)][hashtable]$Context,
+        [Parameter(Mandatory)][string]$Path,
+        [object[]]$ContextRows,
+        # Excel's 1,048,576 rows per sheet, less the header row.
+        [ValidateRange(1, 1048575)][int]$MaxRowsPerSheet = 1048575
+    )
+    if ($null -eq $Rows) { $Rows = @() }
+    $eventColumns = @(
+        @{ Header = 'TimeServerLocal'; Width = 19; Kind = 'Date' }, @{ Header = 'TimeUtc'; Width = 19; Kind = 'Date' }
+        @{ Header = 'Server'; Width = 16; Kind = 'Text' }, @{ Header = 'Log'; Width = 14; Kind = 'Text' }
+        @{ Header = 'Level'; Width = 11; Kind = 'Text' }, @{ Header = 'Flag'; Width = 30; Kind = 'Text' }
+        @{ Header = 'Provider'; Width = 30; Kind = 'Text' }, @{ Header = 'EventId'; Width = 9; Kind = 'Number' }
+        @{ Header = 'Message'; Width = 100; Kind = 'Text' }, @{ Header = 'RecordId'; Width = 11; Kind = 'Number' }
+        @{ Header = 'User'; Width = 20; Kind = 'Text' }, @{ Header = 'Machine'; Width = 20; Kind = 'Text' }
+    )
+
+    # One pass: each row becomes its cells once, and lands in All servers and its server's list.
+    $all = New-Object System.Collections.Generic.List[object]
+    $byServer = @{}
+    foreach ($r in $Rows) {
+        if ($null -eq $r) { continue }
+        $cells = [object[]]@([datetime]$r.TimeServerLocal, [datetime]$r.TimeUtc, [string]$r.Server, [string]$r.Log, [string]$r.LevelName,
+            [string]$r.Flag, [string]$r.Provider, $r.EventId, [string]$r.Message, $r.RecordId, [string]$r.User, [string]$r.Machine)
+        $all.Add($cells)
+        $key = [string]$r.Server
+        if (-not $byServer.ContainsKey($key)) { $byServer[$key] = New-Object System.Collections.Generic.List[object] }
+        $byServer[$key].Add($cells)
+    }
+
+    $cutNotes = New-Object System.Collections.Generic.List[object]
+    $limit = {
+        param([string]$Name, $List)
+        if ($List.Count -le $MaxRowsPerSheet) { return , $List.ToArray() }
+        $cutNotes.Add([object[]]@('Cut short', ("{0}: first {1:N0} of {2:N0} events (Excel's row limit)" -f $Name, $MaxRowsPerSheet, $List.Count)))
+        return , $List.GetRange(0, $MaxRowsPerSheet).ToArray()
+    }
+
+    $taken = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    [void](ConvertTo-XlsxSheetName -Name 'Summary' -Taken $taken)
+    [void](ConvertTo-XlsxSheetName -Name 'All servers' -Taken $taken)
+    $sheets = New-Object System.Collections.Generic.List[object]
+    $sheets.Add(@{ Name = 'All servers'; Columns = $eventColumns; Rows = (& $limit 'All servers' $all); Filter = $true })
+    # Servers in the order searched, then any the rows name that the request didn't (defensive).
+    $order = New-Object System.Collections.Generic.List[string]
+    $seen = @{}
+    foreach ($s in @(@($Context.Servers) + @($byServer.Keys))) {
+        if (-not $s -or $seen.ContainsKey([string]$s)) { continue }
+        $seen[[string]$s] = $true; $order.Add([string]$s)
+    }
+    foreach ($s in $order) {
+        # Not "$list = if (...) { ... }": that would unroll the list into its rows.
+        $list = New-Object System.Collections.Generic.List[object]
+        if ($byServer.ContainsKey($s)) { $list = $byServer[$s] }
+        $name = ConvertTo-XlsxSheetName -Name $s -Taken $taken
+        $sheets.Add(@{ Name = $name; Columns = $eventColumns; Rows = (& $limit $name $list); Filter = $true })
+    }
+
+    # The Summary: what was asked, what was found, how each server went, what happened.
+    $sum = New-Object System.Collections.Generic.List[object]
+    $sum.Add([object[]]@('Search window', [string]$Context.WindowText))
+    $sum.Add([object[]]@('Servers', (@($Context.Servers) -join ', ')))
+    $sum.Add([object[]]@('Logs', (@($Context.Logs) -join ', ')))
+    $sum.Add([object[]]@('Filters', [string]$Context.FiltersText))
+    $sum.Add([object[]]@('Generated', $(if ($Context.GeneratedAt) { [datetime]$Context.GeneratedAt } else { $null })))
+    $sum.Add([object[]]@())
+    $sum.Add([object[]]@('What was found', $null))
+    foreach ($line in @($Context.Summary)) { if ($line) { $sum.Add([object[]]@($null, [string]$line)) } }
+    $sum.Add([object[]]@())
+    $sum.Add([object[]]@('How each server went', $null))
+    foreach ($o in @($Context.ServerOutcomes)) {
+        if ($null -eq $o) { continue }
+        # The same details the HTML report lists (ConvertTo-TimelineHtml).
+        $details = New-Object System.Collections.Generic.List[string]
+        $details.Add(('{0} ({1} events)' -f $o.State, $o.EventCount))
+        if ($o.Reason) { $details.Add([string]$o.Reason) }
+        if ($o.Transport) { $details.Add("Read via $($o.Transport)") }
+        foreach ($l in @($o.Logs | Where-Object { $_ -and $_.Outcome -ne 'Read' })) { $details.Add(('{0}: {1} {2}' -f $l.Log, $l.Outcome, $l.Reason).Trim()) }
+        $sum.Add([object[]]@([string]$o.Server, ($details -join '; ')))
+    }
+    $sum.Add([object[]]@())
+    $sum.Add([object[]]@('What happened', $null))
+    $story = Get-TimelineStory -Rows $Rows -ContextRows $ContextRows
+    foreach ($l in @($story.Lines | Where-Object { $_.Kind -eq 'Event' })) {
+        $value = [string]$l.Text
+        if ($l.Detail) { $value += ' - ' + $l.Detail }
+        $sum.Add([object[]]@(('{0:yyyy-MM-dd HH:mm} {1}' -f [datetime]$l.TimeServerLocal, $l.Server), $value))
+    }
+    if ($story.MoreCount -gt 0) { $sum.Add([object[]]@($null, ('... and {0:N0} more that stood out' -f $story.MoreCount))) }
+    if ($cutNotes.Count -gt 0) {
+        $sum.Add([object[]]@())
+        foreach ($n in $cutNotes) { $sum.Add($n) }
+    }
+    $summary = @{ Name = 'Summary'; Columns = @(@{ Header = 'Item'; Width = 26; Kind = 'Text' }, @{ Header = 'Value'; Width = 110; Kind = 'Text' }); Rows = $sum.ToArray(); Filter = $false }
+    $sheets.Insert(0, $summary)
+
+    Write-XlsxWorkbook -Path $Path -Sheets $sheets.ToArray()
 }
