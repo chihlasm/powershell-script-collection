@@ -709,3 +709,24 @@ Describe 'Remembering Hide picture' {
         $back.SaveFolder | Should -Be 'C:\Reports'
     }
 }
+
+Describe 'Get-TimelineImportantRule' {
+    It 'Security: only 4740 by ID, plus audit failures' {
+        $r = Get-TimelineImportantRule -LogName 'Security'
+        @($r.Ids) | Should -Be @(4740)
+        $r.AuditFailure | Should -BeTrue
+    }
+
+    It 'System: the catalog IDs, no duplicates, no audit failures' {
+        $r = Get-TimelineImportantRule -LogName 'System'
+        foreach ($id in 6005, 1074, 41, 19, 1) { $r.Ids | Should -Contain $id }
+        @($r.Ids).Count | Should -Be @($r.Ids | Select-Object -Unique).Count
+        $r.AuditFailure | Should -BeFalse
+    }
+
+    It 'a log with no catalog entries has no important IDs' {
+        $r = Get-TimelineImportantRule -LogName 'Microsoft-Windows-SMBServer/Operational'
+        @($r.Ids).Count | Should -Be 0
+        $r.AuditFailure | Should -BeFalse
+    }
+}

@@ -262,6 +262,27 @@ function Get-EventFlag {
     return $null
 }
 
+function Get-TimelineImportantRule {
+    <#
+        What makes an event "important" for one log, beyond Level 1-3 (Critical, Error, Warning),
+        which is always important and so is not returned. Ids: the unique, sorted IDs the flag
+        catalog recognises in that log. AuditFailure: also take audit failures (Security).
+        Security audit events are written at Level 0 and the outcome is in Keywords (event 4625
+        shows Level 0, Keywords 0x8010000000000000), so Level alone finds none of them; event
+        4740 (account locked out) is a Level 0 audit SUCCESS, so it is listed by ID.
+        https://learn.microsoft.com/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4625
+        https://learn.microsoft.com/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4740
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$LogName)
+
+    if ($LogName -eq 'Security') {
+        return [PSCustomObject]@{ Ids = [int[]]@(4740); AuditFailure = $true }
+    }
+    $ids = @($script:FlagCatalog | Where-Object { $_.Log -eq $LogName } | ForEach-Object { [int]$_.Id } | Sort-Object -Unique)
+    return [PSCustomObject]@{ Ids = [int[]]$ids; AuditFailure = $false }
+}
+
 function ConvertTo-TimelineRow {
     <#
         One timeline row from one projected remote event (TimeCreatedUtc, Id, ProviderName,

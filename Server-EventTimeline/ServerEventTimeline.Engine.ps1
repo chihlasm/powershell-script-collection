@@ -13,9 +13,17 @@
 
 .NOTES
     REFERENCES
-    - Get-WinEvent (FilterHashtable LogName/StartTime/EndTime, -MaxEvents, -Oldest, -ListLog,
-      -ComputerName, -Credential):
+    - Get-WinEvent (FilterHashtable LogName/StartTime/EndTime, -MaxEvents, -ListLog,
+      -ComputerName, -Credential; returns events newest to oldest by default, -Oldest reverses):
       https://learn.microsoft.com/powershell/module/microsoft.powershell.diagnostics/get-winevent
+    - FilterHashtable keys Level (Critical 1, Error 2, Warning 3, Informational 4, Verbose 5,
+      LogAlways 0), Id and Keywords (AuditFailure = 4503599627370496 = 0x10000000000000); each
+      call is one query, so important events are read with several calls and merged:
+      https://learn.microsoft.com/powershell/scripting/samples/creating-get-winevent-queries-with-filterhashtable
+    - Security audit events are written at Level 0 with the outcome in Keywords (event 4625:
+      Level 0, Keywords 0x8010000000000000); 4740 is a Level 0 audit success:
+      https://learn.microsoft.com/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4625
+      https://learn.microsoft.com/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4740
     - "No events were found" is raised as error id NoMatchingEventsFound (not documented on
       Learn; same handling as DC-Diagnostics\Get-DCDiagnostics.ps1 Get-EventsSafe).
     - RPC needs TCP 135 plus dynamic ports; 0x6BA = RPC server unavailable:
@@ -29,42 +37,90 @@
 # Runs ON the server (WinRM) or here (RPC, with -ComputerName). Kept PowerShell 3.0-safe:
 # target servers can be old. Returns plain objects only.
 $script:LogQueryScript = {
-    param([string]$LogName, [long]$StartTicks, [long]$EndTicks, [int]$MaxEvents, [string]$ComputerName, $Credential)
+    param([string]$LogName, [long]$StartTicks, [long]$EndTicks, [int]$MaxEvents, [string]$ComputerName, $Credential,
+        [string]$Part, [int[]]$ImportantIds, [bool]$AuditFailure)
 
     $start = New-Object DateTime ($StartTicks, [DateTimeKind]::Utc)
     $end = New-Object DateTime ($EndTicks, [DateTimeKind]::Utc)
-    $params = @{
-        # Local time on the machine running Get-WinEvent: it does value.ToString(), re-parses the
-        # text as local time and then ToUniversalTime(), so a UTC value would shift the window
-        # by the UTC offset (GetEventCommand.cs, HandleStartTimeHashValue / StringToDateTime).
-        FilterHashtable = @{ LogName = $LogName; StartTime = $start.ToLocalTime(); EndTime = $end.ToLocalTime() }
-        MaxEvents       = $MaxEvents
-        Oldest          = $true
-        ErrorAction     = 'Stop'
-    }
-    if ($ComputerName) { $params.ComputerName = $ComputerName }
-    if ($Credential) { $params.Credential = $Credential }
+    $auditFailureKeyword = 4503599627370496   # 0x10000000000000, Get-WinEvent FilterHashtable Keywords
+    $ImportantIds = @($ImportantIds)
 
-    $raw = @()
-    try { $raw = @(Get-WinEvent @params) }
-    catch {
-        if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') { throw }
-    }
-
-    $events = foreach ($e in $raw) {
-        New-Object PSObject -Property @{
-            TimeCreatedUtc = $e.TimeCreated.ToUniversalTime()
-            Id             = $e.Id
-            ProviderName   = $e.ProviderName
-            Level          = [int]$e.Level
-            LogName        = $e.LogName
-            Message        = $e.Message
-            RecordId       = $e.RecordId
-            UserSid        = if ($e.UserId) { $e.UserId.Value } else { '' }
-            MachineName    = $e.MachineName
+    # One Get-WinEvent call. Events come newest first (Get-WinEvent's default order). "No
+    # events were found" is an empty answer, anything else is thrown.
+    $read = {
+        param($extra, [bool]$limit)
+        # StartTime/EndTime are local time on the machine running Get-WinEvent: it does
+        # value.ToString(), re-parses the text as local time and then ToUniversalTime(), so a UTC
+        # value would shift the window by the UTC offset (GetEventCommand.cs,
+        # HandleStartTimeHashValue / StringToDateTime).
+        $filter = @{ LogName = $LogName; StartTime = $start.ToLocalTime(); EndTime = $end.ToLocalTime() }
+        foreach ($k in $extra.Keys) { $filter[$k] = $extra[$k] }
+        $params = @{ FilterHashtable = $filter; ErrorAction = 'Stop' }
+        if ($limit) { $params.MaxEvents = $MaxEvents }
+        if ($ComputerName) { $params.ComputerName = $ComputerName }
+        if ($Credential) { $params.Credential = $Credential }
+        try { Get-WinEvent @params }
+        catch {
+            if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') { throw }
         }
     }
-    New-Object PSObject -Property @{ Events = @($events) }
+
+    $project = {
+        process {
+            New-Object PSObject -Property @{
+                TimeCreatedUtc = $_.TimeCreated.ToUniversalTime()
+                Id             = $_.Id
+                ProviderName   = $_.ProviderName
+                Level          = [int]$_.Level
+                LogName        = $_.LogName
+                Message        = $_.Message
+                RecordId       = $_.RecordId
+                UserSid        = if ($_.UserId) { $_.UserId.Value } else { '' }
+                MachineName    = $_.MachineName
+            }
+        }
+    }
+
+    if ($Part -eq 'Routine') {
+        # Everything that is not Critical/Error/Warning. Security audit events are Level 0 and
+        # the outcome is in Keywords, so Security has no Level filter and drops its important
+        # events (audit failures, listed IDs, levels 1-3) below.
+        $extra = @{}
+        if ($LogName -ne 'Security') { $extra.Level = @(0, 4, 5) }
+        $isSecurity = $LogName -eq 'Security'
+        # Filter first, then Select-Object -First (stops the read early since PowerShell 3.0);
+        # .Message is formatted only in the projection, after both.
+        $events = @(& $read $extra $false |
+                Where-Object {
+                    if ($isSecurity) {
+                        -not ((($_.Keywords -band $auditFailureKeyword) -ne 0) -or ($ImportantIds -contains $_.Id) -or ($_.Level -ge 1 -and $_.Level -le 3))
+                    }
+                    else { -not ($ImportantIds -contains $_.Id) }
+                } |
+                Select-Object -First $MaxEvents |
+                & $project)
+        return New-Object PSObject -Property @{ Events = $events }
+    }
+
+    # Important: levels 1-3, the recognised IDs (chunks of 20 keep each query small), and for
+    # Security the audit failures. Merge, drop duplicates, newest first, keep the first N.
+    $raw = @()
+    $raw += @(& $read @{ Level = @(1, 2, 3) } $true)
+    for ($i = 0; $i -lt $ImportantIds.Count; $i += 20) {
+        $last = [Math]::Min($i + 19, $ImportantIds.Count - 1)
+        $raw += @(& $read @{ Id = [int[]]@($ImportantIds[$i..$last]) } $true)
+    }
+    if ($AuditFailure) { $raw += @(& $read @{ Keywords = $auditFailureKeyword } $true) }
+
+    $seen = @{}
+    $unique = @()
+    foreach ($e in $raw) {
+        if ($seen.ContainsKey([string]$e.RecordId)) { continue }
+        $seen[[string]$e.RecordId] = $true
+        $unique += $e
+    }
+    $events = @($unique | Sort-Object -Property RecordId -Descending | Select-Object -First $MaxEvents | & $project)
+    New-Object PSObject -Property @{ Events = $events }
 }
 
 # Runs ON the server over WinRM: its UTC offset at the window start and its log channels.
@@ -218,23 +274,27 @@ function Invoke-LogQuery {
         [Parameter(Mandatory)][datetime]$StartUtc,
         [Parameter(Mandatory)][datetime]$EndUtc,
         [int]$Cap = 5000,
-        [pscredential]$Credential
+        [pscredential]$Credential,
+        [ValidateSet('Important', 'Routine')][string]$Part = 'Important'
     )
 
+    # -Cap is the budget for this part. One more than the cap is read to tell "exactly the cap"
+    # from "more than the cap".
     $result = [PSCustomObject]@{ Server = $ComputerName; Log = $LogName; Outcome = 'Read'; Count = 0; Events = @(); Reason = '' }
+    $rule = Get-TimelineImportantRule -LogName $LogName
     $queryArgs = @($LogName, $StartUtc.Ticks, $EndUtc.Ticks, ($Cap + 1))
 
     try {
         if ($Transport -eq 'WinRM') {
-            $params = @{ ComputerName = $ComputerName; ScriptBlock = $script:LogQueryScript; ArgumentList = ($queryArgs + @('', $null)); ErrorAction = 'Stop' }
+            $params = @{ ComputerName = $ComputerName; ScriptBlock = $script:LogQueryScript; ArgumentList = ($queryArgs + @('', $null) + @($Part, (, [int[]]$rule.Ids), [bool]$rule.AuditFailure)); ErrorAction = 'Stop' }
             if ($Credential) { $params.Credential = $Credential }
             $answer = Invoke-Command @params
         }
         elseif ($Transport -eq 'Local') {
-            $answer = & $script:LogQueryScript @queryArgs '' $null
+            $answer = & $script:LogQueryScript @queryArgs '' $null $Part ([int[]]$rule.Ids) ([bool]$rule.AuditFailure)
         }
         else {
-            $answer = & $script:LogQueryScript @queryArgs $ComputerName $Credential
+            $answer = & $script:LogQueryScript @queryArgs $ComputerName $Credential $Part ([int[]]$rule.Ids) ([bool]$rule.AuditFailure)
         }
     }
     catch {
@@ -251,7 +311,8 @@ function Invoke-LogQuery {
     if ($events.Count -gt $Cap) {
         $events = @($events[0..($Cap - 1)])
         $result.Outcome = 'Capped'
-        $result.Reason = 'stopped at {0:N0} events' -f $Cap
+        $result.Reason = if ($Part -eq 'Important') { 'more than {0:N0} errors and warnings - kept the newest {0:N0}' -f $Cap }
+        else { 'kept the newest {0:N0} routine events; older ones in the window weren''t read' -f $Cap }
     }
     foreach ($e in $events) {
         $e.TimeCreatedUtc = [datetime]::SpecifyKind(([datetime]$e.TimeCreatedUtc).ToUniversalTime(), [DateTimeKind]::Utc)

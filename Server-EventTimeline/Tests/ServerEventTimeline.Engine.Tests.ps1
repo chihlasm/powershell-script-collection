@@ -1,4 +1,4 @@
-<#
+﻿<#
     Pester 5 tests for ServerEventTimeline.Engine.ps1. Every remote call is mocked: no server
     is contacted, no real event log is read, $env:COMPUTERNAME is never a target.
     Run:  pwsh -File Tests\Invoke-AllTests.ps1 -Path .\Server-EventTimeline\Tests
@@ -12,11 +12,11 @@ BeforeAll {
         New-Object System.Management.Automation.ErrorRecord ($Exception, $Id, [System.Management.Automation.ErrorCategory]::NotSpecified, $null)
     }
     function New-RawEvent {
-        param($Id = 7036, $Time = '2026-11-17 08:00:00')
+        param($Id = 7036, $Time = '2026-11-17 08:00:00', $Level = 4, $RecordId = 1, $Keywords = 0)
         [PSCustomObject]@{
             TimeCreated = [datetime]::SpecifyKind([datetime]$Time, [DateTimeKind]::Utc).ToLocalTime()
-            Id = $Id; ProviderName = 'Service Control Manager'; Level = 4; LogName = 'System'
-            Message = 'The service entered the running state.'; RecordId = 1; UserId = $null; MachineName = 'srv-fake-01'
+            Id = $Id; ProviderName = 'Service Control Manager'; Level = $Level; LogName = 'System'; Keywords = $Keywords
+            Message = 'The service entered the running state.'; RecordId = $RecordId; UserId = $null; MachineName = 'srv-fake-01'
         }
     }
     $script:Start = [datetime]::SpecifyKind([datetime]'2026-11-17 07:45', [DateTimeKind]::Utc)
@@ -84,20 +84,81 @@ Describe 'Invoke-ServerProbe' {
 
 Describe 'Invoke-LogQuery' {
     It 'marks a log Capped and trims to the cap when more than the cap come back' {
-        Mock Get-WinEvent { 1..4 | ForEach-Object { New-RawEvent -Id $_ } }
+        Mock Get-WinEvent { 1..4 | ForEach-Object { New-RawEvent -Id $_ -RecordId $_ } }
         $r = Invoke-LogQuery -ComputerName srv-fake-01 -Transport RPC -LogName System -StartUtc $script:Start -EndUtc $script:End -Cap 3
         $r.Outcome | Should -Be 'Capped'
         $r.Count | Should -Be 3
         @($r.Events).Count | Should -Be 3
     }
 
-    It 'asks for one more than the cap, oldest first, between the UTC times' {
+    It 'reads newest first (regression: oldest first dropped the end of the window)' {
         Mock Get-WinEvent { @() }
         Invoke-LogQuery -ComputerName srv-fake-01 -Transport RPC -LogName System -StartUtc $script:Start -EndUtc $script:End -Cap 3 | Out-Null
         Should -Invoke Get-WinEvent -Times 1 -ParameterFilter {
-            $MaxEvents -eq 4 -and $Oldest -and $ComputerName -eq 'srv-fake-01' -and
-            $FilterHashtable[0].LogName -eq 'System'
+            $MaxEvents -eq 4 -and -not $Oldest -and $ComputerName -eq 'srv-fake-01' -and
+            $FilterHashtable[0].LogName -eq 'System' -and $FilterHashtable[0].Level -ne $null
         }
+    }
+
+    It 'important read asks for levels 1-3 and the recognised IDs in chunks of at most 20' {
+        $script:calls = @()
+        Mock Get-WinEvent { $script:calls += , $FilterHashtable[0]; @() }
+        Invoke-LogQuery -ComputerName srv-fake-01 -Transport RPC -LogName System -StartUtc $script:Start -EndUtc $script:End -Cap 3 -Part Important | Out-Null
+        @($script:calls | Where-Object { $_.Level }).Count | Should -Be 1
+        (@($script:calls | Where-Object { $_.Level })[0].Level) | Should -Be @(1, 2, 3)
+        $idCalls = @($script:calls | Where-Object { $_.Id })
+        foreach ($c in $idCalls) { @($c.Id).Count | Should -BeLessOrEqual 20 }
+        $union = @($idCalls | ForEach-Object { $_.Id } | Sort-Object -Unique)
+        $union | Should -Be @((Get-TimelineImportantRule -LogName System).Ids)
+    }
+
+    It 'important read for Security asks for audit failures and 4740' {
+        $script:calls = @()
+        Mock Get-WinEvent { $script:calls += , $FilterHashtable[0]; @() }
+        Invoke-LogQuery -ComputerName srv-fake-01 -Transport RPC -LogName Security -StartUtc $script:Start -EndUtc $script:End -Cap 3 -Part Important | Out-Null
+        @($script:calls | Where-Object { $_.Keywords -eq 4503599627370496 }).Count | Should -Be 1
+        @($script:calls | Where-Object { $_.Id -contains 4740 }).Count | Should -Be 1
+    }
+
+    It 'important read merges the queries newest first, without duplicates, and caps' {
+        Mock Get-WinEvent {
+            if ($FilterHashtable[0].Level) { @((New-RawEvent -RecordId 5 -Level 2), (New-RawEvent -RecordId 3 -Level 2)) }
+            else { @((New-RawEvent -RecordId 5 -Id 6005), (New-RawEvent -RecordId 4 -Id 6005)) }
+        }
+        $r = Invoke-LogQuery -ComputerName srv-fake-01 -Transport RPC -LogName System -StartUtc $script:Start -EndUtc $script:End -Cap 2 -Part Important
+        $r.Outcome | Should -Be 'Capped'
+        @($r.Events | ForEach-Object { $_.RecordId }) | Should -Be @(5, 4)
+    }
+
+    It 'routine read skips important events before the budget' {
+        Mock Get-WinEvent {
+            @((New-RawEvent -RecordId 9 -Id 6005), (New-RawEvent -RecordId 8), (New-RawEvent -RecordId 7), (New-RawEvent -RecordId 6))
+        }
+        $r = Invoke-LogQuery -ComputerName srv-fake-01 -Transport RPC -LogName System -StartUtc $script:Start -EndUtc $script:End -Cap 2 -Part Routine
+        @($r.Events | ForEach-Object { $_.RecordId }) | Should -Be @(8, 7)
+        $r.Outcome | Should -Be 'Capped'
+        Should -Invoke Get-WinEvent -Times 1 -ParameterFilter { (@($FilterHashtable[0].Level) -join ',') -eq '0,4,5' }
+    }
+
+    It 'routine read of Security skips audit failures, 4740 and levels 1-3' {
+        Mock Get-WinEvent {
+            @((New-RawEvent -RecordId 4 -Id 4625 -Level 0 -Keywords 0x8010000000000000),
+                (New-RawEvent -RecordId 3 -Id 4740 -Level 0 -Keywords 0x8020000000000000),
+                (New-RawEvent -RecordId 2 -Id 4624 -Level 0 -Keywords 0x8020000000000000),
+                (New-RawEvent -RecordId 1 -Id 4672 -Level 2 -Keywords 0x8020000000000000))
+        }
+        $r = Invoke-LogQuery -ComputerName srv-fake-01 -Transport RPC -LogName Security -StartUtc $script:Start -EndUtc $script:End -Cap 10 -Part Routine
+        @($r.Events).Count | Should -Be 1
+        @($r.Events)[0].Id | Should -Be 4624
+    }
+
+    It 'no matching events in every important query is an empty Read' {
+        Mock Get-WinEvent {
+            throw (New-Err (New-Object System.Exception 'No events were found that match the specified selection criteria.') 'NoMatchingEventsFound,Microsoft.PowerShell.Commands.GetWinEventCommand')
+        }
+        $r = Invoke-LogQuery -ComputerName srv-fake-01 -Transport RPC -LogName System -StartUtc $script:Start -EndUtc $script:End -Cap 3 -Part Important
+        $r.Outcome | Should -Be 'Read'
+        $r.Count | Should -Be 0
     }
 
     It 'treats "no events found" as an empty Read, not a failure' {
