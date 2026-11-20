@@ -115,10 +115,10 @@
     -NoGui: also read every log on each server that has events (can be 100+ logs).
 
 .PARAMETER Cap
-    -NoGui: stop each log at this many events (default 5000).
+    -NoGui: most events read per log (default 5000). Most events read per log. Errors, warnings and recognised events are read first; routine events fill the rest, newest first.
 
 .PARAMETER TotalCap
-    -NoGui: stop each server at this many events in total (default 50000).
+    -NoGui: a safety limit for routine events across all logs on one server. Errors, warnings and recognised events are never dropped for it. (default 50000).
 
 .PARAMETER TimeoutSec
     -NoGui: give up on a log after this many seconds (default 60).
@@ -562,12 +562,12 @@ function New-TimelineWindowXaml {
             <Expander Header="More options" Foreground="{StaticResource Muted}" Margin="0,4,0,0">
               <WrapPanel Margin="0,8,0,0">
                 <TextBlock Text="Stop each log at" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                <TextBox x:Name="CapBox" Width="70" Text="5000"/>
+                <TextBox x:Name="CapBox" Width="70" Text="5000" ToolTip="Most events read per log. Errors, warnings and recognised events are read first; routine events fill the rest, newest first."/>
                 <TextBlock Text="events.   Give up on a log after" VerticalAlignment="Center" Margin="6,0,6,0"/>
                 <TextBox x:Name="TimeoutBox" Width="50" Text="60"/>
                 <TextBlock Text="seconds." VerticalAlignment="Center" Margin="6,0,6,0"/>
                 <TextBlock Text="Stop each server at" VerticalAlignment="Center" Margin="0,6,6,0"/>
-                <TextBox x:Name="TotalCapBox" Width="80" Text="50000" Margin="0,6,0,0" ToolTip="A safety limit for All logs: once a server reaches this many events, its remaining logs are not read (and are named)"/>
+                <TextBox x:Name="TotalCapBox" Width="80" Text="50000" Margin="0,6,0,0" ToolTip="A safety limit for routine events across all logs on one server. Errors, warnings and recognised events are never dropped for it."/>
                 <TextBlock Text="events in total.   " VerticalAlignment="Center" Margin="6,6,6,0"/>
                 <Button x:Name="RunAsButton" Content="Run as another account..." Margin="0,6,8,0" ToolTip="Read the servers with a different account (for example another domain)"/>
               </WrapPanel>
@@ -1932,6 +1932,7 @@ function Show-ServerEventTimeline {
             foreach ($l in @($s.Logs | Where-Object { $_.Outcome -notin @('Read', 'Pending') })) {
                 Write-TimelineLog INFO ('{0} {1}: {2} {3}' -f $s.Server, $l.Log, $l.Outcome, $l.Reason)
             }
+            foreach ($line in @(Get-TimelineRoutineLogLines -Logs $s.Logs)) { Write-TimelineLog INFO ('{0} {1}' -f $s.Server, $line) }
         }
     }
 
