@@ -1,30 +1,35 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    Builds Server-EventTimeline.zip: the tool's files, ready to copy to a test server.
+    Builds Server-EventTimeline-<version>-<commit>.zip: the tool's files, ready to copy to a
+    test server.
 
 .DESCRIPTION
     Puts the scripts the tool needs and its README in a Server-EventTimeline folder inside
-    the zip, with BUILD.txt saying which commit it came from and when, so you can tell which
-    version is on a test server. Extract the zip on the server and run
-    Start-ServerEventTimeline.ps1 from the extracted folder.
+    the zip, with BUILD.txt saying which version and commit it came from and when. The zip's
+    name carries the version (from $script:TimelineVersion in ServerEventTimeline.Core.ps1)
+    and the short commit, plus "-modified" when the tool folder has uncommitted changes, so
+    every build is its own file and the name says which build is on a test server. Extract
+    the zip on the server and run Start-ServerEventTimeline.ps1 from the extracted folder.
 
     The files come from a fixed list, never "everything in the folder": the Reports folder
     beside the script holds client data and must not travel. The tests check that the list
     covers every .ps1 in the folder, so a new script can't be left out.
 
-    The zip is replaced on each build. *.zip and dist\ are in .gitignore.
+    Older builds' zips are kept; a rebuild of the same commit replaces its own zip. *.zip and
+    dist\ are in .gitignore.
 
 .PARAMETER OutputPath
-    Where to write Server-EventTimeline.zip. Default: dist\ at the repository root.
+    Where to write the zip. Default: dist\ at the repository root.
 
 .EXAMPLE
     .\Build-TestZip.ps1
-    Writes dist\Server-EventTimeline.zip at the repository root and prints its path.
+    Writes, for example, dist\Server-EventTimeline-0.9.0-29bb91d.zip at the repository root
+    and prints its path.
 
 .EXAMPLE
     .\Build-TestZip.ps1 -OutputPath C:\Temp
-    Writes C:\Temp\Server-EventTimeline.zip.
+    Writes the zip to C:\Temp.
 
 .NOTES
     Read-only on the tool folder. Uses System.IO.Compression.ZipFile (.NET Framework 4.5+),
@@ -61,13 +66,21 @@ $files = @(
     'README.md'
 )
 
+# The version is one line in Core (shown in the window, reports and ticket note too). Read as
+# text, not by dot-sourcing Core, so the build never loads the tool.
+$versionMatch = [regex]::Match((Get-Content -LiteralPath (Join-Path $PSScriptRoot 'ServerEventTimeline.Core.ps1') -Raw),
+    '(?m)^\$script:TimelineVersion = ''(\d+\.\d+\.\d+)''')
+if (-not $versionMatch.Success) { throw "Couldn't find `$script:TimelineVersion in ServerEventTimeline.Core.ps1." }
+$version = $versionMatch.Groups[1].Value
+
 $commit = 'unknown'
 $note = ''
+$suffix = ''
 try {
     $c = & git -C $PSScriptRoot rev-parse --short HEAD 2>$null
     if ($LASTEXITCODE -eq 0 -and $c) { $commit = [string]$c }
     $dirty = & git -C $PSScriptRoot status --porcelain -- . 2>$null
-    if ($LASTEXITCODE -eq 0 -and $dirty) { $note = ' (plus uncommitted changes)' }
+    if ($LASTEXITCODE -eq 0 -and $dirty) { $note = ' (plus uncommitted changes)'; $suffix = '-modified' }
 }
 catch { }
 
@@ -79,6 +92,7 @@ try {
     $built = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $info = @(
         'Server Event Timeline - test build'
+        "Version: $version"
         "Commit: $commit$note"
         "Built: $built"
         ''
@@ -87,7 +101,10 @@ try {
     Set-Content -LiteralPath (Join-Path $folder 'BUILD.txt') -Value $info -Encoding UTF8
 
     if (-not (Test-Path -LiteralPath $OutputPath)) { New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null }
-    $zip = Join-Path (Resolve-Path -LiteralPath $OutputPath).ProviderPath 'Server-EventTimeline.zip'
+    # Version + commit in the name, so each build's zip is its own file and the name says
+    # which build is on a test server. A rebuild of the same commit replaces its own zip.
+    $zipName = 'Server-EventTimeline-{0}-{1}{2}.zip' -f $version, $commit, $suffix
+    $zip = Join-Path (Resolve-Path -LiteralPath $OutputPath).ProviderPath $zipName
     if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
     Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
     # Each entry named with '/' ourselves: CreateFromDirectory on .NET Framework (Windows
@@ -101,7 +118,7 @@ try {
         }
     }
     finally { $archive.Dispose() }
-    Write-Host "[PASS] Built $zip (commit $commit$note)" -ForegroundColor Green
+    Write-Host "[PASS] Built $zip (version $version, commit $commit$note)" -ForegroundColor Green
     $zip
 }
 finally {

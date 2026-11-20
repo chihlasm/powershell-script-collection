@@ -7,6 +7,10 @@ times up by hand. It also shows several servers side by side, which Event Viewer
 
 Read-only: it changes nothing on any server.
 
+Version 0.9.0. The version is shown in the title bar, the console log, the HTML report, the
+workbook's Summary sheet and the ticket note, so you can tell which build produced them. It
+lives in one place, `$script:TimelineVersion` in `ServerEventTimeline.Core.ps1`.
+
 ```powershell
 .\Start-ServerEventTimeline.ps1
 .\Start-ServerEventTimeline.ps1 -ComputerName APP01, SQL01, DC01
@@ -319,9 +323,11 @@ folder it couldn't create).
 - `ServerEventTimeline.AddServersDialog.ps1`: the "Add several servers" dialog
 - `ServerEventTimeline.Story.ps1`: "What happened" and the timeline picture's layout
 - `ServerEventTimeline.Workbook.ps1`: the Excel workbook export (writes .xlsx without Excel)
-- `Build-TestZip.ps1`: builds `dist\Server-EventTimeline.zip` (repository root) to copy to a test
-  server: the scripts above and this README in a `Server-EventTimeline` folder, plus `BUILD.txt`
-  naming the commit. It never includes `Reports\` or the tests. Not needed on the server.
+- `Build-TestZip.ps1`: builds `dist\Server-EventTimeline-<version>-<commit>.zip` (repository
+  root, e.g. `Server-EventTimeline-0.9.0-29bb91d.zip`; `-modified` is added when built from
+  uncommitted changes) to copy to a test server: the scripts above and this README in a
+  `Server-EventTimeline` folder, plus `BUILD.txt` naming the version and commit. Each build is
+  its own file. It never includes `Reports\` or the tests. Not needed on the server.
 - `CaseKit.ps1`: the shared ticket-note kit (an identical copy of `TicketNote\CaseKit.ps1`)
 - The save folder (default `Reports\` beside the script; see step 7): exports and an activity log,
   `ServerEventTimeline_yyyy-MM-dd_HHmmss.*`. These contain client data: don't commit or

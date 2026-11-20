@@ -391,6 +391,7 @@ function Export-TimelineWorkbook {
     $sum.Add([object[]]@('Logs', (@($Context.Logs) -join ', ')))
     $sum.Add([object[]]@('Filters', [string]$Context.FiltersText))
     $sum.Add([object[]]@('Generated', $(if ($Context.GeneratedAt) { [datetime]$Context.GeneratedAt } else { $null })))
+    $sum.Add([object[]]@('Made by', ('Server Event Timeline {0}' -f $script:TimelineVersion)))
     $sum.Add([object[]]@())
     $sum.Add([object[]]@('What was found', $null))
     foreach ($line in @($Context.Summary)) { if ($line) { $sum.Add([object[]]@($null, [string]$line)) } }

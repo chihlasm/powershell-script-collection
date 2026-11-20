@@ -279,6 +279,13 @@ Describe 'Exports' {
         $html | Should -Not -BeLike '*<script>alert*'
     }
 
+    It 'HTML report names the tool version, so a report says which build made it' {
+        $html = ConvertTo-TimelineHtml -Rows $script:Rows -Context $script:Context
+        $script:TimelineVersion | Should -Match '^\d+\.\d+\.\d+$'
+        $html | Should -BeLike "*<title>Server Event Timeline $script:TimelineVersion</title>*"
+        $html | Should -BeLike "*Made 2026-11-17 09:00:00 by Server Event Timeline $script:TimelineVersion*"
+    }
+
     It 'HTML lists the capped log and the unreachable server' {
         $html = ConvertTo-TimelineHtml -Rows $script:Rows -Context $script:Context
         $html | Should -BeLike '*APP01*System*stopped at 5,000 events*'
@@ -804,6 +811,12 @@ Describe 'Saying what was cut (routine events trimmed or not read)' {
         $note = New-TimelineTicketNote -Status $status -Rows @() -WindowText 'w'
         @($note.CouldNotCheck | Where-Object { $_ -like 'APP01*' }).Count | Should -Be 0
         ($note.RuledOut -join "`n") | Should -BeLike '*APP01*'
+    }
+
+    It 'ticket note names the tool version in its Checked line' {
+        $status = [ordered]@{ 'APP01' = New-RoutineStatus -Logs @((New-RoutineLog)) }
+        $note = New-TimelineTicketNote -Status $status -Rows @() -WindowText 'w' -Logs @('System')
+        $note.ScopeLine | Should -Be "Servers: APP01 | Logs: System | Server Event Timeline $script:TimelineVersion"
     }
 
     It 'adds a routine-events line to the HTML report details' {
