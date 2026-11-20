@@ -120,7 +120,7 @@ Describe 'Window layout' {
             'SuggestPopup', 'SuggestList', 'AddMenuButton', 'ServerListHint', 'AroundRadio', 'RangeRadio', 'AtBox', 'PlusMinusCombo', 'FromBox', 'ToBox', 'LastHourButton', 'Last24Button',
             'LogPanel', 'SecurityCheck', 'AllLogsCheck', 'CapBox', 'TimeoutBox', 'RunAsButton', 'SearchButton',
             'CancelButton', 'SidebarColumn', 'SidebarPanel', 'SidebarStrip', 'CollapseSidebarButton', 'ExpandSidebarButton', 'NotesList', 'BannerText', 'TimeZoneNote', 'LevelFilter', 'ServerFilter', 'LogFilter', 'FlaggedOnlyCheck',
-            'FilterText', 'CountText', 'EventGrid', 'DetailText', 'ExportCsvButton', 'ExportHtmlButton', 'CopyButton', 'LogsButton', 'LogsPopup', 'CoreLogPanel', 'LogsAllButton', 'LogsNoneButton', 'LogsDefaultButton', 'SaveFolderBox', 'BrowseFolderButton', 'OpenFolderButton',
+            'FilterText', 'CountText', 'EventGrid', 'DetailText', 'ExportButton', 'CopyButton', 'LogsButton', 'LogsPopup', 'CoreLogPanel', 'LogsAllButton', 'LogsNoneButton', 'LogsDefaultButton', 'SaveFolderBox', 'BrowseFolderButton', 'OpenFolderButton',
             'SummaryList', 'CollapseCheck', 'HiddenNote', 'ShowAllButton', 'TotalCapBox', 'TicketNoteButton'
         foreach ($n in $names) { $script:Window.FindName($n) | Should -Not -BeNullOrEmpty -Because "control $n" }
     }
@@ -1041,23 +1041,44 @@ Describe 'What happened as a big tab beside Events' {
     }
 }
 
-Describe 'Export workbook' {
-    # A third export beside CSV and HTML: an Excel workbook with a sheet per server.
-    It 'has an Export workbook button beside the other exports' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+Describe 'Export menu' {
+    # One Export button with a menu, instead of three buttons side by side.
+    It 'has one Export button with an arrow, where the three export buttons were' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
         $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
-        $b = $w.FindName('ExportXlsxButton')
+        $b = $w.FindName('ExportButton')
         $b | Should -Not -BeNullOrEmpty
-        $b.Content | Should -Be 'Export workbook'
+        $b.Content | Should -Be ("Export " + [char]0x25BE)
         $b.IsEnabled | Should -BeFalse
-        $b.Parent | Should -Be $w.FindName('ExportHtmlButton').Parent
-        [string]$b.ToolTip | Should -BeLike '*sheet for each server*'
+        $b.Parent | Should -Be $w.FindName('CopyButton').Parent
+        foreach ($old in 'ExportCsvButton', 'ExportHtmlButton', 'ExportXlsxButton') { $w.FindName($old) | Should -BeNullOrEmpty -Because "$old is now a menu item" }
     }
 
-    It 'wires the workbook export in the window and in -NoGui' {
+    It 'the menu lists the workbook, the HTML report and the CSV, each saying what it is for' {
+        $menu = New-ExportMenu
+        $items = @($menu.Items)
+        $items.Count | Should -Be 3
+        @($items | ForEach-Object { [string]$_.Tag }) | Should -Be @('Xlsx', 'Html', 'Csv')
+        [string]$items[0].Header | Should -BeLike 'Excel workbook*sheet for each server*'
+        [string]$items[1].Header | Should -BeLike 'HTML report*ticket*'
+        [string]$items[2].Header | Should -BeLike 'CSV*'
+        foreach ($i in $items) { [string]$i.ToolTip | Should -Not -BeNullOrEmpty }
+    }
+
+    It 'the button opens the menu under it and each item runs its export' {
         $src = Get-Content -LiteralPath $script:AppPath -Raw
-        $src | Should -Match 'ExportXlsxButton\.add_Click\(\{ Invoke-Export -Kind Xlsx'
+        $open = $src.Substring($src.IndexOf('$ui.ExportButton.add_Click('), 900)
+        $open | Should -Match 'New-ExportMenu'
+        $open | Should -Match 'Invoke-Export -Kind \$tag'
+        $open | Should -Match 'PlacementTarget = \$ui\.ExportButton'
+        $open | Should -Match "Placement = 'Bottom'"
+        $open | Should -Match 'IsOpen = \$true'
+        $src | Should -Match '\$ui\.ExportButton\.IsEnabled = \$has'
+        $src | Should -Not -Match 'ExportCsvButton|ExportHtmlButton|ExportXlsxButton'
+    }
+
+    It 'wires the workbook export in -NoGui' {
+        $src = Get-Content -LiteralPath $script:AppPath -Raw
         $src | Should -Match "ValidateSet\('Csv', 'Html', 'Xlsx'\)"
-        $src | Should -Match '\$ui\.ExportXlsxButton\.IsEnabled = \$has'
         $start = $src.IndexOf('function Invoke-Export')
         $src.Substring($start, 2000) | Should -Match 'Export-TimelineWorkbook -Rows \$rows -Context \(Get-ExportContext\)'
         # -NoGui: the workbook after the HTML report, in its own try so a failure keeps the others.
