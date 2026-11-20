@@ -262,6 +262,27 @@ function Get-EventFlag {
     return $null
 }
 
+function Get-TimelineImportantRule {
+    <#
+        What makes an event "important" for one log, beyond Level 1-3 (Critical, Error, Warning),
+        which is always important and so is not returned. Ids: the unique, sorted IDs the flag
+        catalog recognises in that log. AuditFailure: also take audit failures (Security).
+        Security audit events are written at Level 0 and the outcome is in Keywords (event 4625
+        shows Level 0, Keywords 0x8010000000000000), so Level alone finds none of them; event
+        4740 (account locked out) is a Level 0 audit SUCCESS, so it is listed by ID.
+        https://learn.microsoft.com/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4625
+        https://learn.microsoft.com/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4740
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$LogName)
+
+    if ($LogName -eq 'Security') {
+        return [PSCustomObject]@{ Ids = [int[]]@(4740); AuditFailure = $true }
+    }
+    $ids = @($script:FlagCatalog | Where-Object { $_.Log -eq $LogName } | ForEach-Object { [int]$_.Id } | Sort-Object -Unique)
+    return [PSCustomObject]@{ Ids = [int[]]$ids; AuditFailure = $false }
+}
+
 function ConvertTo-TimelineRow {
     <#
         One timeline row from one projected remote event (TimeCreatedUtc, Id, ProviderName,
@@ -455,6 +476,7 @@ svg.strip{display:block;background:var(--panel);border:1px solid var(--line);bor
         foreach ($l in @($o.Logs | Where-Object { $_.Outcome -ne 'Read' })) {
             $details.Add(('{0}: {1} {2}' -f $l.Log, $l.Outcome, $l.Reason).Trim())
         }
+        foreach ($line in @(Get-TimelineRoutineLogLines -Logs $o.Logs)) { $details.Add($line) }
         [void]$sb.AppendFormat('<tr><td>{0}</td><td>{1} ({2} events)</td><td>{3}</td></tr>',
             (& $e $o.Server), (& $e $o.State), (& $e $o.EventCount), ((@($details) | ForEach-Object { & $e $_ }) -join '<br>'))
     }
@@ -739,7 +761,7 @@ function Get-TimelineBannerText {
             switch ($l.Outcome) {
                 'Capped'   { '{0} {1}: {2} - narrow the window or raise the cap' -f $s.Server, $l.Log, $l.Reason }
                 'TimedOut' { '{0} {1}: {2} - try a shorter window or a longer timeout' -f $s.Server, $l.Log, $l.Reason }
-                'Failed'   { '{0} {1}: could not be read - {2}' -f $s.Server, $l.Log, $l.Reason }
+                'Failed'   { '{0} {1}: {2}' -f $s.Server, $l.Log, $l.Reason }
                 'NotRead'  { '{0} {1}: not read - {2}' -f $s.Server, $l.Log, $l.Reason }
             }
         }
@@ -987,6 +1009,52 @@ function Get-TimelineSummaryLines {
     if ($chosen.Count -gt 0 -and $chosen -notcontains 'Security' -and $SecurityHint) { $SecurityHint }
 }
 
+function Get-TimelineRoutineLogLines {
+    <#
+        One line per log whose routine events were trimmed, not read or cancelled, for the
+        report, workbook and log file: "System (routine events): Trimmed kept the newest ...".
+        Logs without a RoutineOutcome (older contexts) and logs where routine events were read,
+        are still pending or were skipped add nothing. So does a log whose errors and warnings
+        weren't read: its own line already says so, and the routine line would only repeat it.
+    #>
+    [CmdletBinding()]
+    param($Logs)
+    foreach ($l in @($Logs | Where-Object { $_ })) {
+        if (-not $l.PSObject.Properties['RoutineOutcome']) { continue }
+        if ([string]$l.RoutineOutcome -in @('Read', 'Pending', 'Skipped', '')) { continue }
+        if ($l.PSObject.Properties['Outcome'] -and [string]$l.Outcome -notin @('Read', 'Capped')) { continue }
+        $reason = if ($l.PSObject.Properties['RoutineReason']) { [string]$l.RoutineReason } else { '' }
+        ('{0} (routine events): {1} {2}' -f $l.Log, $l.RoutineOutcome, $reason).Trim()
+    }
+}
+
+function Get-TimelineRoutineNote {
+    <#
+        A short note for the server card when routine events were cut but errors, warnings and
+        recognised events were all read, e.g. "older routine events trimmed in 2 logs". Empty
+        when nothing was cut. NotRead is left out on purpose: it only happens when the errors
+        and warnings were not read either, which is already shown as a gap. Logs whose errors
+        and warnings weren't read are skipped for the same reason, and a cancelled server gets no
+        note (its card already says cancelled).
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Status)
+    if ($Status.PSObject.Properties['State'] -and [string]$Status.State -eq 'Cancelled') { return '' }
+    $logs = @($Status.Logs | Where-Object {
+            $_ -and $_.PSObject.Properties['RoutineOutcome'] -and
+            (-not $_.PSObject.Properties['Outcome'] -or [string]$_.Outcome -in @('Read', 'Capped'))
+        })
+    $trimmed = @($logs | Where-Object { $_.RoutineOutcome -eq 'Trimmed' }).Count
+    $notRead = @($logs | Where-Object { $_.RoutineOutcome -in @('TimedOut', 'Failed') }).Count
+    $cancelled = @($logs | Where-Object { $_.RoutineOutcome -eq 'Cancelled' }).Count
+    $n = { param($c) if ($c -eq 1) { '1 log' } else { "$c logs" } }
+    $parts = @()
+    if ($trimmed -gt 0) { $parts += 'older routine events trimmed in ' + (& $n $trimmed) }
+    if ($notRead -gt 0) { $parts += 'routine events not read in ' + (& $n $notRead) }
+    if ($cancelled -gt 0) { $parts += 'routine events cancelled in ' + (& $n $cancelled) }
+    return ($parts -join '; ')
+}
+
 function Get-TimelineServerCards {
     <#
         The sidebar's EACH SERVER block: one card per server. Heading = how reading it went
@@ -1013,6 +1081,9 @@ function Get-TimelineServerCards {
             'Cancelled'    { "■ $name · cancelled · $count kept" }
             default        { "$name · $($s.State)" }
         }
+        # Routine events cut by the budget are not a gap: say so next to the findings, no warning.
+        $routineNote = Get-TimelineRoutineNote -Status $s
+        if ($routineNote) { $findings = if ($findings) { "$findings ($routineNote)" } else { $routineNote } }
         [PSCustomObject]@{ Server = $name; Heading = $heading; Findings = $findings; Warn = $warn }
     }
 }

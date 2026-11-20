@@ -288,10 +288,10 @@ Describe 'Console mode (-NoGui)' {
                 Channels = @(); FailureKind = ''; Reason = '' }
         }
         $script:TwoEventLog = {
-            param($EnginePath, $Server, $Transport, $LogName, $StartUtc, $EndUtc, $Cap, $Credential)
+            param($EnginePath, $Server, $Transport, $LogName, $StartUtc, $EndUtc, $Cap, $Credential, $Part)
             $mk = { param($m, $id, $prov) [PSCustomObject]@{ TimeCreatedUtc = ([datetime]$StartUtc).AddMinutes($m); Id = $id; ProviderName = $prov
                 Level = 2; LogName = $LogName; Message = "event from $Server"; RecordId = $m; UserSid = ''; MachineName = $Server } }
-            $events = if ($LogName -eq 'System') { @((& $mk 1 41 'Microsoft-Windows-Kernel-Power'), (& $mk 2 7036 'Service Control Manager')) } else { @() }
+            $events = if ($LogName -eq 'System' -and $Part -ne 'Routine') { @((& $mk 1 41 'Microsoft-Windows-Kernel-Power'), (& $mk 2 7036 'Service Control Manager')) } else { @() }
             [PSCustomObject]@{ Server = $Server; Log = $LogName; Outcome = 'Read'; Count = $events.Count; Events = $events; Reason = '' }
         }
         $script:Fakes = @{ ProbeScript = $script:OkProbe; LogScript = $script:TwoEventLog }
@@ -320,6 +320,21 @@ Describe 'Console mode (-NoGui)' {
         }
         finally { $fs.Dispose() }
         @($book.workbook.sheets.sheet | ForEach-Object name) | Should -Be @('Summary', 'All servers', 'srv-fake-01', 'srv-fake-02')
+    }
+
+    It 'says when routine events were trimmed, as an INFO line, and the log file has it too' {
+        $trim = {
+            param($EnginePath, $Server, $Transport, $LogName, $StartUtc, $EndUtc, $Cap, $Credential, $Part)
+            $routine = $Part -eq 'Routine'
+            [PSCustomObject]@{ Server = $Server; Log = $LogName; Outcome = $(if ($routine) { 'Capped' } else { 'Read' }); Count = 0; Events = @()
+                Reason = $(if ($routine) { 'kept the newest 0 routine events; older ones in the window weren''t read' } else { '' }) }
+        }
+        $out = Join-Path $TestDrive 'trimmed'
+        $said = @(Invoke-TimelineConsole -ComputerName 'srv-fake-01' -LastMinutes 60 -LogName System `
+                -OutputPath $out -DefaultOutputPath (Join-Path $TestDrive 'default') -EngineOptions @{ ProbeScript = $script:OkProbe; LogScript = $trim } -PollMs 20 6>&1)
+        ($said -join "`n") | Should -BeLike '*srv-fake-01: older routine events trimmed in 1 log*'
+        $log = Get-Content -LiteralPath (Get-ChildItem -LiteralPath $out -Filter 'ServerEventTimeline_*.log')[0].FullName -Raw
+        $log | Should -BeLike '*[INFO]*srv-fake-01: older routine events trimmed in 1 log*'
     }
 
     It 'says the Security log was not read, with the console switch that adds it, in the output and the report' {

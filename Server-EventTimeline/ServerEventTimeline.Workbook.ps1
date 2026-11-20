@@ -404,6 +404,7 @@ function Export-TimelineWorkbook {
         if ($o.Reason) { $details.Add([string]$o.Reason) }
         if ($o.Transport) { $details.Add("Read via $($o.Transport)") }
         foreach ($l in @($o.Logs | Where-Object { $_ -and $_.Outcome -ne 'Read' })) { $details.Add(('{0}: {1} {2}' -f $l.Log, $l.Outcome, $l.Reason).Trim()) }
+        foreach ($line in @(Get-TimelineRoutineLogLines -Logs $o.Logs)) { $details.Add($line) }
         $sum.Add([object[]]@([string]$o.Server, ($details -join '; ')))
     }
     $sum.Add([object[]]@())

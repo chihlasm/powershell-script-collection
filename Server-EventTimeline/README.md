@@ -167,14 +167,24 @@ Each server shows one line:
 
 - **done - 1,240 events (via WinRM)**: everything asked for was read.
 - **done with gaps**: at least one log is incomplete. A **yellow banner** names it:
-  - *stopped at 5,000 events - narrow the window or raise the cap*: there was more.
-    The first 5,000 of the window are shown. Raise the limit under **More options**.
+  - *more than 5,000 errors and warnings - kept the newest 5,000*: there were more errors
+    and warnings than the limit. Narrow the window, or raise the limit under **More options**.
   - *didn't answer within 60 s*: that log was too slow. The other logs on that server
     still show.
-  - *not read - stopped at the 50,000 event total for this server*: "All logs" hit its
-    safety limit. Raise it under **More options** (*Stop each server at ... events in total*).
 - **couldn't reach - why**, for example *Access denied on DC01: check you're an admin
   there, or use Run as*, or *WinRM and remote event log are both unreachable from here*.
+
+Routine events (information-level noise) fill whatever room is left after the errors,
+warnings and recognised events, newest first. When they are cut, the server is **not**
+marked "with gaps", because the errors are complete:
+
+- *older routine events trimmed in 2 logs* (on the server's card, and in the report and
+  workbook as *kept the newest N routine events; older ones in the window weren't read*):
+  only older routine events were left out. Errors, warnings and recognised events are all there.
+  If the server hit its safety limit (*Stop routine events per server at ... events in total* under **More options**),
+  the report says *stopped at the N event total for this server*; raise it to read more routine events.
+- *routine events not read in 1 log*: the errors and warnings were read, but the routine
+  events for that log timed out or failed.
 
 A short log is never presented as a quiet one: an incomplete log is always named.
 
@@ -289,12 +299,14 @@ the Excel workbook and a log.
 | `-LastMinutes` | The last N minutes (default 60), when no time is given. |
 | `-LogName` | Logs by checkbox label (`System`, `Task Scheduler`, `Group Policy`...) or log name. Default: the window's default logs. |
 | `-IncludeSecurity`, `-AllLogs` | Same as the window's Slow options. |
-| `-Cap`, `-TotalCap`, `-TimeoutSec` | Per log, per server and per log time limits (defaults 5000, 50000, 60). |
+| `-Cap` | Most events read per log (default 5000). Errors, warnings and recognised events are read first; routine events fill the rest, newest first. |
+| `-TotalCap` | A safety limit for routine events across all logs on one server (default 50000). Errors, warnings and recognised events are never dropped for it. |
+| `-TimeoutSec` | Give up on each read of a log after this many seconds (default 60). A log is read in two parts, so one log can take up to twice this. |
 | `-Credential` | Read the servers as another account. |
 | `-TicketNumber` | Write the ticket note, CSV and report into `<-OutputPath or Documents\TicketNotes>\Ticket_<number>`, and copy the note (`-NoClipboard` to skip that). |
 | `-OutputPath` | Where the files go (without `-TicketNumber`, default `Reports\` beside the script). |
 
-Exit codes: `0` every log was read in full, `1` a server or log couldn't be read in full
+Exit codes: `0` errors, warnings and recognised events were read in full on every server, `1` a server or log couldn't be read in full
 (the output says which), `2` couldn't run (a time it couldn't read, a bad ticket number, or a
 folder it couldn't create).
 

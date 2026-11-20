@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 
 <#
 .SYNOPSIS
@@ -13,9 +13,17 @@
 
 .NOTES
     REFERENCES
-    - Get-WinEvent (FilterHashtable LogName/StartTime/EndTime, -MaxEvents, -Oldest, -ListLog,
-      -ComputerName, -Credential):
+    - Get-WinEvent (FilterHashtable LogName/StartTime/EndTime, -MaxEvents, -ListLog,
+      -ComputerName, -Credential; returns events newest to oldest by default, -Oldest reverses):
       https://learn.microsoft.com/powershell/module/microsoft.powershell.diagnostics/get-winevent
+    - FilterHashtable keys Level (Critical 1, Error 2, Warning 3, Informational 4, Verbose 5,
+      LogAlways 0), Id and Keywords (AuditFailure = 4503599627370496 = 0x10000000000000); each
+      call is one query, so important events are read with several calls and merged:
+      https://learn.microsoft.com/powershell/scripting/samples/creating-get-winevent-queries-with-filterhashtable
+    - Security audit events are written at Level 0 with the outcome in Keywords (event 4625:
+      Level 0, Keywords 0x8010000000000000); 4740 is a Level 0 audit success:
+      https://learn.microsoft.com/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4625
+      https://learn.microsoft.com/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4740
     - "No events were found" is raised as error id NoMatchingEventsFound (not documented on
       Learn; same handling as DC-Diagnostics\Get-DCDiagnostics.ps1 Get-EventsSafe).
     - RPC needs TCP 135 plus dynamic ports; 0x6BA = RPC server unavailable:
@@ -29,42 +37,94 @@
 # Runs ON the server (WinRM) or here (RPC, with -ComputerName). Kept PowerShell 3.0-safe:
 # target servers can be old. Returns plain objects only.
 $script:LogQueryScript = {
-    param([string]$LogName, [long]$StartTicks, [long]$EndTicks, [int]$MaxEvents, [string]$ComputerName, $Credential)
+    param([string]$LogName, [long]$StartTicks, [long]$EndTicks, [int]$MaxEvents, [string]$ComputerName, $Credential,
+        [string]$Part, [int[]]$ImportantIds, [bool]$AuditFailure)
 
     $start = New-Object DateTime ($StartTicks, [DateTimeKind]::Utc)
     $end = New-Object DateTime ($EndTicks, [DateTimeKind]::Utc)
-    $params = @{
-        # Local time on the machine running Get-WinEvent: it does value.ToString(), re-parses the
-        # text as local time and then ToUniversalTime(), so a UTC value would shift the window
-        # by the UTC offset (GetEventCommand.cs, HandleStartTimeHashValue / StringToDateTime).
-        FilterHashtable = @{ LogName = $LogName; StartTime = $start.ToLocalTime(); EndTime = $end.ToLocalTime() }
-        MaxEvents       = $MaxEvents
-        Oldest          = $true
-        ErrorAction     = 'Stop'
-    }
-    if ($ComputerName) { $params.ComputerName = $ComputerName }
-    if ($Credential) { $params.Credential = $Credential }
+    $auditFailureKeyword = 4503599627370496   # 0x10000000000000, Get-WinEvent FilterHashtable Keywords
+    $ImportantIds = @($ImportantIds)
 
-    $raw = @()
-    try { $raw = @(Get-WinEvent @params) }
-    catch {
-        if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') { throw }
-    }
-
-    $events = foreach ($e in $raw) {
-        New-Object PSObject -Property @{
-            TimeCreatedUtc = $e.TimeCreated.ToUniversalTime()
-            Id             = $e.Id
-            ProviderName   = $e.ProviderName
-            Level          = [int]$e.Level
-            LogName        = $e.LogName
-            Message        = $e.Message
-            RecordId       = $e.RecordId
-            UserSid        = if ($e.UserId) { $e.UserId.Value } else { '' }
-            MachineName    = $e.MachineName
+    # One Get-WinEvent call. Events come newest first (Get-WinEvent's default order). "No
+    # events were found" is an empty answer, anything else is thrown.
+    $read = {
+        param($extra, [bool]$limit)
+        # StartTime/EndTime are local time on the machine running Get-WinEvent: it does
+        # value.ToString(), re-parses the text as local time and then ToUniversalTime(), so a UTC
+        # value would shift the window by the UTC offset (GetEventCommand.cs,
+        # HandleStartTimeHashValue / StringToDateTime).
+        $filter = @{ LogName = $LogName; StartTime = $start.ToLocalTime(); EndTime = $end.ToLocalTime() }
+        foreach ($k in $extra.Keys) { $filter[$k] = $extra[$k] }
+        $params = @{ FilterHashtable = $filter; ErrorAction = 'Stop' }
+        if ($limit) { $params.MaxEvents = $MaxEvents }
+        if ($ComputerName) { $params.ComputerName = $ComputerName }
+        if ($Credential) { $params.Credential = $Credential }
+        try { Get-WinEvent @params }
+        catch {
+            if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') { throw }
         }
     }
-    New-Object PSObject -Property @{ Events = @($events) }
+
+    $project = {
+        process {
+            New-Object PSObject -Property @{
+                TimeCreatedUtc = $_.TimeCreated.ToUniversalTime()
+                Id             = $_.Id
+                ProviderName   = $_.ProviderName
+                Level          = [int]$_.Level
+                LogName        = $_.LogName
+                Message        = $_.Message
+                RecordId       = $_.RecordId
+                UserSid        = if ($_.UserId) { $_.UserId.Value } else { '' }
+                MachineName    = $_.MachineName
+            }
+        }
+    }
+
+    if ($Part -eq 'Routine') {
+        # Everything that is not Critical/Error/Warning. There is no server-side Level filter:
+        # providers may define levels above 5 (16-255), which a Level = 0,4,5 key would drop
+        # from both parts. Levels 1-3 are skipped here instead (they are the important read).
+        # Security audit events are Level 0 with the outcome in Keywords, so Security also
+        # drops its audit failures. Keywords is a nullable long: on Windows PowerShell 5.1
+        # `$null -band <long>` throws "Specified cast is not valid" (PowerShell 7 returns 0),
+        # so null is checked first.
+        $isSecurity = $LogName -eq 'Security'
+        # Filter first, then Select-Object -First (stops the read early since PowerShell 3.0);
+        # .Message is formatted only in the projection, after both.
+        $events = @(& $read @{} $false |
+                Where-Object {
+                    $lvl = $_.Level
+                    $isLow = ($null -ne $lvl -and $lvl -ge 1 -and $lvl -le 3)
+                    if ($isSecurity) {
+                        $kw = $_.Keywords
+                        $isFail = ($null -ne $kw -and (([long]$kw -band $auditFailureKeyword) -ne 0))
+                        -not ($isFail -or ($ImportantIds -contains $_.Id) -or $isLow)
+                    }
+                    else { -not (($ImportantIds -contains $_.Id) -or $isLow) }
+                } |
+                Select-Object -First $MaxEvents |
+                & $project)
+        return New-Object PSObject -Property @{ Events = $events }
+    }
+
+    # Important: levels 1-3, the recognised IDs (chunks of 20 keep each query small), and for
+    # Security the audit failures. Merge, drop duplicates, newest first, keep the first N.
+    $raw = @()
+    $raw += @(& $read @{ Level = @(1, 2, 3) } $true)
+    for ($i = 0; $i -lt $ImportantIds.Count; $i += 20) {
+        $last = [Math]::Min($i + 19, $ImportantIds.Count - 1)
+        $raw += @(& $read @{ Id = [int[]]@($ImportantIds[$i..$last]) } $true)
+    }
+    if ($AuditFailure) { $raw += @(& $read @{ Keywords = $auditFailureKeyword } $true) }
+
+    $seen = @{}
+    # Emitted through the pipeline, not grown with +=: the input can be ~20,000 events.
+    $unique = @(foreach ($e in $raw) {
+            if (-not $seen.ContainsKey([string]$e.RecordId)) { $seen[[string]$e.RecordId] = $true; $e }
+        })
+    $events = @($unique | Sort-Object -Property RecordId -Descending | Select-Object -First $MaxEvents | & $project)
+    New-Object PSObject -Property @{ Events = $events }
 }
 
 # Runs ON the server over WinRM: its UTC offset at the window start and its log channels.
@@ -218,23 +278,27 @@ function Invoke-LogQuery {
         [Parameter(Mandatory)][datetime]$StartUtc,
         [Parameter(Mandatory)][datetime]$EndUtc,
         [int]$Cap = 5000,
-        [pscredential]$Credential
+        [pscredential]$Credential,
+        [ValidateSet('Important', 'Routine')][string]$Part = 'Important'
     )
 
+    # -Cap is the budget for this part. One more than the cap is read to tell "exactly the cap"
+    # from "more than the cap".
     $result = [PSCustomObject]@{ Server = $ComputerName; Log = $LogName; Outcome = 'Read'; Count = 0; Events = @(); Reason = '' }
+    $rule = Get-TimelineImportantRule -LogName $LogName
     $queryArgs = @($LogName, $StartUtc.Ticks, $EndUtc.Ticks, ($Cap + 1))
 
     try {
         if ($Transport -eq 'WinRM') {
-            $params = @{ ComputerName = $ComputerName; ScriptBlock = $script:LogQueryScript; ArgumentList = ($queryArgs + @('', $null)); ErrorAction = 'Stop' }
+            $params = @{ ComputerName = $ComputerName; ScriptBlock = $script:LogQueryScript; ArgumentList = ($queryArgs + @('', $null) + @($Part, [int[]]$rule.Ids, [bool]$rule.AuditFailure)); ErrorAction = 'Stop' }
             if ($Credential) { $params.Credential = $Credential }
             $answer = Invoke-Command @params
         }
         elseif ($Transport -eq 'Local') {
-            $answer = & $script:LogQueryScript @queryArgs '' $null
+            $answer = & $script:LogQueryScript @queryArgs '' $null $Part ([int[]]$rule.Ids) ([bool]$rule.AuditFailure)
         }
         else {
-            $answer = & $script:LogQueryScript @queryArgs $ComputerName $Credential
+            $answer = & $script:LogQueryScript @queryArgs $ComputerName $Credential $Part ([int[]]$rule.Ids) ([bool]$rule.AuditFailure)
         }
     }
     catch {
@@ -251,7 +315,8 @@ function Invoke-LogQuery {
     if ($events.Count -gt $Cap) {
         $events = @($events[0..($Cap - 1)])
         $result.Outcome = 'Capped'
-        $result.Reason = 'stopped at {0:N0} events' -f $Cap
+        $result.Reason = if ($Part -eq 'Important') { 'more than {0:N0} errors and warnings - kept the newest {0:N0}' -f $Cap }
+        else { 'kept the newest {0:N0} routine events; older ones in the window weren''t read' -f $Cap }
     }
     foreach ($e in $events) {
         $e.TimeCreatedUtc = [datetime]::SpecifyKind(([datetime]$e.TimeCreatedUtc).ToUniversalTime(), [DateTimeKind]::Utc)
@@ -345,10 +410,13 @@ $script:RowConverterTask = {
     }
 }
 
+# Each log is read in two parts: Important (errors, warnings, recognised events) first, then
+# Routine into the room left under the per-log cap. $Cap is the budget for that part.
 $script:DefaultLogTask = {
-    param($EnginePath, $Server, $Transport, $LogName, $StartUtc, $EndUtc, $Cap, $Credential)
+    param($EnginePath, $Server, $Transport, $LogName, $StartUtc, $EndUtc, $Cap, $Credential, $Part)
     . $EnginePath
-    Invoke-LogQuery -ComputerName $Server -Transport $Transport -LogName $LogName -StartUtc $StartUtc -EndUtc $EndUtc -Cap $Cap -Credential $Credential
+    if (-not $Part) { $Part = 'Important' }
+    Invoke-LogQuery -ComputerName $Server -Transport $Transport -LogName $LogName -StartUtc $StartUtc -EndUtc $EndUtc -Cap $Cap -Credential $Credential -Part $Part
 }
 
 function Start-TimelineEngine {
@@ -378,7 +446,8 @@ function Start-TimelineEngine {
     $status = [ordered]@{}
     foreach ($s in $Servers) {
         $status[$s] = [PSCustomObject]@{
-            Server = $s; State = 'Waiting'; Transport = ''; Reason = ''; EventCount = 0; UtcOffsetMinutes = 0
+            # EventCount = important + routine rows; RoutineEventCount alone is held to ServerTotalCap.
+            Server = $s; State = 'Waiting'; Transport = ''; Reason = ''; EventCount = 0; RoutineEventCount = 0; UtcOffsetMinutes = 0
             Logs = New-Object System.Collections.ArrayList
         }
     }
@@ -429,13 +498,72 @@ function Start-PendingTimelineTasks {
 }
 
 function Set-TimelineLogOutcome {
-    param($Status, [string]$Log, [string]$Outcome, [int]$Count = 0, [string]$Reason = '')
+    # One entry per log. Outcome/Count/Reason describe the important read, so every consumer
+    # that treats Outcome -ne 'Read' as a gap still means "errors and warnings missing".
+    # RoutineOutcome/RoutineCount/RoutineReason describe the routine read.
+    # -Part Routine on a missing entry would create an important 'Pending' (a gap): never call
+    # it before the log's important entry exists.
+    param($Status, [string]$Log, [string]$Outcome, [int]$Count = 0, [string]$Reason = '',
+        [ValidateSet('Important', 'Routine')][string]$Part = 'Important')
     $entry = $Status.Logs | Where-Object Log -eq $Log | Select-Object -First 1
     if (-not $entry) {
-        $entry = [PSCustomObject]@{ Log = $Log; Outcome = $Outcome; Count = $Count; Reason = $Reason }
+        # A skipped log has nothing to read in either part.
+        $routine = if ($Outcome -eq 'Skipped' -and $Part -eq 'Important') { 'Skipped' } else { 'Pending' }
+        $entry = [PSCustomObject]@{ Log = $Log; Outcome = 'Pending'; Count = 0; Reason = ''
+            RoutineOutcome = $routine; RoutineCount = 0; RoutineReason = '' }
         [void]$Status.Logs.Add($entry)
     }
+    if ($Part -eq 'Routine') { $entry.RoutineOutcome = $Outcome; $entry.RoutineCount = $Count; $entry.RoutineReason = $Reason }
     else { $entry.Outcome = $Outcome; $entry.Count = $Count; $entry.Reason = $Reason }
+}
+
+function Get-TimelineDoneState {
+    # Done unless an important read is missing. Skipped = the server doesn't have the log or
+    # has it turned off: not missing events. Routine outcomes never make a gap.
+    param($Status)
+    $gaps = @($Status.Logs | Where-Object { $_.Outcome -notin @('Read', 'Skipped') }).Count
+    if ($gaps -gt 0) { 'DoneWithGaps' } else { 'Done' }
+}
+
+function Get-TimelinePartReason {
+    # Wording for a part that wasn't read (timed out or failed), per part.
+    param([string]$Part, [string]$Detail)
+    if ($Part -eq 'Routine') { "routine events not read ($Detail); errors and warnings were read" }
+    else { "errors and warnings not read: $Detail" }
+}
+
+function Request-TimelineRoutineRead {
+    <#
+        After a log's important read: queue its routine read at the end of the queue (so on a
+        busy run routine reads go after the important reads already waiting), with the room
+        left under the per-log cap and the server's routine total. No room -> Trimmed without
+        a read. Important read timed out or failed -> no routine read: a second read would
+        double the wait on a slow log, couldn't succeed after access denied, and would fill the
+        grid with routine rows for a log whose errors are missing.
+    #>
+    param($Engine, $Task, [string]$ImportantOutcome, [int]$ImportantCount = 0)
+    $st = $Engine.Status[$Task.Server]
+    if ($ImportantOutcome -notin @('Read', 'Capped')) {
+        Set-TimelineLogOutcome -Status $st -Log $Task.Log -Part Routine -Outcome 'NotRead' -Reason "errors and warnings weren't read, so routine events weren't either"
+        return
+    }
+    $logRoom = $Engine.Cap - $ImportantCount
+    $totalRoom = $Engine.ServerTotalCap - $st.RoutineEventCount
+    $budget = [Math]::Min($logRoom, $totalRoom)
+    if ($budget -le 0) {
+        $reason = if ($logRoom -le $totalRoom) { 'no room left after {0:N0} important events' -f $ImportantCount }
+        else { 'stopped at the {0:N0} event total for this server' -f $Engine.ServerTotalCap }
+        Set-TimelineLogOutcome -Status $st -Log $Task.Log -Part Routine -Outcome 'Trimmed' -Reason $reason
+        return
+    }
+    $parameters = [ordered]@{}
+    foreach ($k in $Task.Parameters.Keys) { $parameters[$k] = $Task.Parameters[$k] }
+    $parameters['Cap'] = $budget
+    $parameters['Part'] = 'Routine'
+    [void]$Engine.Pending.Add([PSCustomObject]@{
+            Kind = 'Log'; Part = 'Routine'; Server = $Task.Server; Log = $Task.Log
+            Convert = $Task.Convert; Parameters = $parameters
+        })
 }
 
 function Stop-TimelineTask {
@@ -463,10 +591,10 @@ function Complete-TimelineProbe {
     foreach ($log in @($plan.Query)) {
         Set-TimelineLogOutcome -Status $st -Log $log -Outcome 'Pending'
         [void]$Engine.Pending.Add([PSCustomObject]@{
-                Kind = 'Log'; Server = $Task.Server; Log = $log
+                Kind = 'Log'; Part = 'Important'; Server = $Task.Server; Log = $log
                 Convert = [ordered]@{ EnginePath = $script:EngineFilePath; Server = $Task.Server; UtcOffsetMinutes = $st.UtcOffsetMinutes }
                 Parameters = [ordered]@{ EnginePath = $script:EngineFilePath; Server = $Task.Server; Transport = $Probe.Transport; LogName = $log
-                    StartUtc = $utc.StartUtc; EndUtc = $utc.EndUtc; Cap = $Engine.Cap; Credential = $Engine.Credential }
+                    StartUtc = $utc.StartUtc; EndUtc = $utc.EndUtc; Cap = $Engine.Cap; Credential = $Engine.Credential; Part = 'Important' }
             })
     }
 }
@@ -474,39 +602,64 @@ function Complete-TimelineProbe {
 function Complete-TimelineLog {
     param($Engine, $Task, $Result, $Rows)
     $st = $Engine.Status[$Task.Server]
-    if (-not $Result) { Set-TimelineLogOutcome -Status $st -Log $Task.Log -Outcome 'Failed' -Reason 'No answer from the server.'; return }
+    $routine = $Task.Part -eq 'Routine'
+    $part = if ($routine) { 'Routine' } else { 'Important' }
+    if (-not $Result -or $Result.Outcome -eq 'Failed') {
+        $detail = if ($Result) { [string]$Result.Reason } else { 'No answer from the server.' }
+        Set-TimelineLogOutcome -Status $st -Log $Task.Log -Part $part -Outcome 'Failed' -Reason (Get-TimelinePartReason -Part $part -Detail $detail)
+        if (-not $routine) { Request-TimelineRoutineRead -Engine $Engine -Task $Task -ImportantOutcome 'Failed' }
+        return
+    }
     # Rows were built in the task's runspace (RowConverterTask); events are converted here only
     # when a result arrives without them.
     $prebuilt = [bool]$Result.PSObject.Properties['Rows']
     # @() around the whole if: assigning an if unrolls a one-row array (no .Count on 5.1).
     $events = @(if ($prebuilt) { $Result.Rows } else { $Result.Events | Where-Object { $_ } })
-    $room = [Math]::Max($Engine.ServerTotalCap - $st.EventCount, 0)
-    $reason = 'stopped at the {0:N0} event total for this server' -f $Engine.ServerTotalCap
     $outcome = $Result.Outcome
     $why = $Result.Reason
-    if ($events.Count -gt $room) {
-        # Cut short by the per-server total: never report this log as fully read.
-        $events = @($events | Select-Object -First $room)
-        $outcome = if ($room -gt 0) { 'Capped' } else { 'NotRead' }
-        $why = $reason
+    $hitTotal = $false
+    $reason = 'stopped at the {0:N0} event total for this server' -f $Engine.ServerTotalCap
+    if ($routine) {
+        # The per-server total limits routine events only; important events are never dropped.
+        if ($outcome -eq 'Capped') { $outcome = 'Trimmed' }
+        $room = [Math]::Max($Engine.ServerTotalCap - $st.RoutineEventCount, 0)
+        if ($events.Count -gt $room) {
+            $events = @($events | Select-Object -First $room)
+            $outcome = 'Trimmed'
+            $why = $reason
+        }
+        $hitTotal = ($st.RoutineEventCount + $events.Count) -ge $Engine.ServerTotalCap
     }
-    $hitTotal = ($st.EventCount + $events.Count) -ge $Engine.ServerTotalCap
 
     if ($prebuilt) { $Rows.AddRange([object[]]$events) }
     else { foreach ($e in $events) { $Rows.Add((ConvertTo-TimelineRow -Server $Task.Server -EventRecord $e -UtcOffsetMinutes $st.UtcOffsetMinutes)) } }
     $st.EventCount += $events.Count
-    Set-TimelineLogOutcome -Status $st -Log $Task.Log -Outcome $outcome -Count $events.Count -Reason $why
+    if ($routine) { $st.RoutineEventCount += $events.Count }
+    Set-TimelineLogOutcome -Status $st -Log $Task.Log -Part $part -Outcome $outcome -Count $events.Count -Reason $why
 
-    if ($hitTotal) {
-        foreach ($p in @($Engine.Pending | Where-Object { $_.Server -eq $Task.Server -and $_.Kind -eq 'Log' })) {
+    if (-not $routine) {
+        Request-TimelineRoutineRead -Engine $Engine -Task $Task -ImportantOutcome $outcome -ImportantCount $events.Count
+    }
+    elseif ($hitTotal) {
+        # Only this server's routine reads stop; its important reads still run.
+        $isRoutine = { $_.Server -eq $Task.Server -and $_.Kind -eq 'Log' -and $_.Part -eq 'Routine' }
+        foreach ($p in @($Engine.Pending | Where-Object $isRoutine)) {
             [void]$Engine.Pending.Remove($p)
-            Set-TimelineLogOutcome -Status $st -Log $p.Log -Outcome 'NotRead' -Reason $reason
+            Set-TimelineLogOutcome -Status $st -Log $p.Log -Part Routine -Outcome 'Trimmed' -Reason $reason
         }
-        foreach ($r in @($Engine.Running | Where-Object { $_.Server -eq $Task.Server -and $_.Kind -eq 'Log' })) {
+        foreach ($r in @($Engine.Running | Where-Object $isRoutine)) {
             Stop-TimelineTask -Engine $Engine -Task $r
-            Set-TimelineLogOutcome -Status $st -Log $r.Log -Outcome 'NotRead' -Reason $reason
+            Set-TimelineLogOutcome -Status $st -Log $r.Log -Part Routine -Outcome 'Trimmed' -Reason $reason
         }
     }
+}
+
+function Set-TimelinePartUnread {
+    # A log task that timed out or threw. An important part gets no routine read after it.
+    param($Engine, $Task, [string]$Outcome, [string]$Detail)
+    $part = if ($Task.Part -eq 'Routine') { 'Routine' } else { 'Important' }
+    Set-TimelineLogOutcome -Status $Engine.Status[$Task.Server] -Log $Task.Log -Part $part -Outcome $Outcome -Reason (Get-TimelinePartReason -Part $part -Detail $Detail)
+    if ($part -eq 'Important') { Request-TimelineRoutineRead -Engine $Engine -Task $Task -ImportantOutcome $Outcome }
 }
 
 function Update-TimelineEngine {
@@ -538,7 +691,7 @@ function Update-TimelineEngine {
                 else { Complete-TimelineProbe -Engine $Engine -Task $task -Probe $output }
             }
             else {
-                if ($failure) { Set-TimelineLogOutcome -Status $st -Log $task.Log -Outcome 'Failed' -Reason $failure }
+                if ($failure) { Set-TimelinePartUnread -Engine $Engine -Task $task -Outcome 'Failed' -Detail $failure }
                 else { Complete-TimelineLog -Engine $Engine -Task $task -Result $output -Rows $rows }
             }
             $changed = $true
@@ -546,7 +699,7 @@ function Update-TimelineEngine {
         elseif ($task.Started.Elapsed.TotalSeconds -ge $Engine.TimeoutSec) {
             Stop-TimelineTask -Engine $Engine -Task $task
             if ($task.Kind -eq 'Probe') { $st.State = 'Unreachable'; $st.Reason = Get-FailureText -Kind TimedOut -Server $task.Server }
-            else { Set-TimelineLogOutcome -Status $st -Log $task.Log -Outcome 'TimedOut' -Reason ("didn't answer within {0} s" -f $Engine.TimeoutSec) }
+            else { Set-TimelinePartUnread -Engine $Engine -Task $task -Outcome 'TimedOut' -Detail ("didn't answer within {0} s" -f $Engine.TimeoutSec) }
             $changed = $true
         }
     }
@@ -564,9 +717,7 @@ function Update-TimelineEngine {
         if ($st.State -ne 'Querying') { continue }
         $busy = @($Engine.Running + $Engine.Pending | Where-Object { $_.Server -eq $st.Server }).Count
         if ($busy -eq 0) {
-            # Skipped = the server doesn't have the log or has it turned off: not missing events.
-            $gaps = @($st.Logs | Where-Object { $_.Outcome -notin @('Read', 'Skipped') }).Count
-            $st.State = if ($gaps -gt 0) { 'DoneWithGaps' } else { 'Done' }
+            $st.State = Get-TimelineDoneState -Status $st
             $changed = $true
         }
     }
@@ -584,16 +735,29 @@ function Stop-TimelineEngine {
     param([Parameter(Mandatory)]$Engine)
 
     $Engine.Cancelled = $true
+    # A server whose probe and important reads have all finished keeps its verdict: only its
+    # routine reads are cancelled. Anything else still waiting or querying is Cancelled.
+    $importantBusy = @{}
+    foreach ($t in @($Engine.Pending) + @($Engine.Running)) {
+        if ($t.Kind -eq 'Probe' -or $t.Part -ne 'Routine') { $importantBusy[$t.Server] = $true }
+    }
     foreach ($p in @($Engine.Pending)) {
-        if ($p.Kind -eq 'Log') { Set-TimelineLogOutcome -Status $Engine.Status[$p.Server] -Log $p.Log -Outcome 'Cancelled' }
+        if ($p.Kind -eq 'Log') { Set-TimelineLogOutcome -Status $Engine.Status[$p.Server] -Log $p.Log -Part $p.Part -Outcome 'Cancelled' }
     }
     $Engine.Pending.Clear()
     foreach ($t in @($Engine.Running)) {
         Stop-TimelineTask -Engine $Engine -Task $t
-        if ($t.Kind -eq 'Log') { Set-TimelineLogOutcome -Status $Engine.Status[$t.Server] -Log $t.Log -Outcome 'Cancelled' }
+        if ($t.Kind -eq 'Log') { Set-TimelineLogOutcome -Status $Engine.Status[$t.Server] -Log $t.Log -Part $t.Part -Outcome 'Cancelled' }
     }
     foreach ($st in $Engine.Status.Values) {
-        if ($st.State -in @('Waiting', 'Querying')) { $st.State = 'Cancelled'; $st.Reason = 'Cancelled.' }
+        if ($st.State -notin @('Waiting', 'Querying')) { continue }
+        # Cancel marks both parts of unfinished logs (a routine read not yet queued is Pending).
+        foreach ($l in @($st.Logs | Where-Object RoutineOutcome -eq 'Pending')) { $l.RoutineOutcome = 'Cancelled' }
+        $importantDone = $st.State -eq 'Querying' -and -not $importantBusy.ContainsKey($st.Server) -and
+            @($st.Logs | Where-Object Outcome -eq 'Pending').Count -eq 0
+        # Never write routine cancels to Reason: it blocks "ruled out" in the ticket note.
+        if ($importantDone) { $st.State = Get-TimelineDoneState -Status $st }
+        else { $st.State = 'Cancelled'; $st.Reason = 'Cancelled.' }
     }
     $Engine.StatusChanged = $true
 }

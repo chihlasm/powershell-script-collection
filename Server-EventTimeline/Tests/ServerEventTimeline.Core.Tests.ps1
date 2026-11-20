@@ -709,3 +709,107 @@ Describe 'Remembering Hide picture' {
         $back.SaveFolder | Should -Be 'C:\Reports'
     }
 }
+
+Describe 'Get-TimelineImportantRule' {
+    It 'Security: only 4740 by ID, plus audit failures' {
+        $r = Get-TimelineImportantRule -LogName 'Security'
+        @($r.Ids) | Should -Be @(4740)
+        $r.AuditFailure | Should -BeTrue
+    }
+
+    It 'System: the catalog IDs, no duplicates, no audit failures' {
+        $r = Get-TimelineImportantRule -LogName 'System'
+        foreach ($id in 6005, 1074, 41, 19, 1) { $r.Ids | Should -Contain $id }
+        @($r.Ids).Count | Should -Be @($r.Ids | Select-Object -Unique).Count
+        $r.AuditFailure | Should -BeFalse
+    }
+
+    It 'a log with no catalog entries has no important IDs' {
+        $r = Get-TimelineImportantRule -LogName 'Microsoft-Windows-SMBServer/Operational'
+        @($r.Ids).Count | Should -Be 0
+        $r.AuditFailure | Should -BeFalse
+    }
+}
+
+Describe 'Saying what was cut (routine events trimmed or not read)' {
+    BeforeAll {
+        function New-RoutineLog { param($Log = 'System', $Routine = 'Trimmed', $Reason = '')
+            [PSCustomObject]@{ Log = $Log; Outcome = 'Read'; Count = 10; Reason = ''; RoutineOutcome = $Routine; RoutineCount = 3200; RoutineReason = $Reason } }
+        function New-RoutineStatus { param([object[]]$Logs, $State = 'Done')
+            [PSCustomObject]@{ Server = 'APP01'; State = $State; Transport = 'WinRM'; Reason = ''; EventCount = 100; UtcOffsetMinutes = 0; Logs = $Logs } }
+    }
+
+    It 'names how many logs had older routine events trimmed' {
+        $st = New-RoutineStatus -Logs @((New-RoutineLog -Log 'System'), (New-RoutineLog -Log 'Application'))
+        Get-TimelineRoutineNote -Status $st | Should -Be 'older routine events trimmed in 2 logs'
+    }
+
+    It 'says "1 log" for one, and names timed out, failed and cancelled routine reads' {
+        Get-TimelineRoutineNote -Status (New-RoutineStatus -Logs @((New-RoutineLog -Routine 'TimedOut'))) | Should -Be 'routine events not read in 1 log'
+        Get-TimelineRoutineNote -Status (New-RoutineStatus -Logs @((New-RoutineLog -Routine 'Failed'), (New-RoutineLog -Routine 'TimedOut'))) | Should -Be 'routine events not read in 2 logs'
+        Get-TimelineRoutineNote -Status (New-RoutineStatus -Logs @((New-RoutineLog -Routine 'Cancelled'))) | Should -Be 'routine events cancelled in 1 log'
+    }
+
+    It 'joins mixed parts with "; " in order: trimmed, not read, cancelled' {
+        $st = New-RoutineStatus -Logs @((New-RoutineLog -Routine 'Cancelled'), (New-RoutineLog -Routine 'TimedOut'), (New-RoutineLog -Routine 'Trimmed'))
+        Get-TimelineRoutineNote -Status $st | Should -Be 'older routine events trimmed in 1 log; routine events not read in 1 log; routine events cancelled in 1 log'
+    }
+
+    It 'is empty when nothing was cut, when the important part also failed (NotRead), and for old entries without RoutineOutcome' {
+        Get-TimelineRoutineNote -Status (New-RoutineStatus -Logs @((New-RoutineLog -Routine 'Read'), (New-RoutineLog -Routine 'Skipped'), (New-RoutineLog -Routine 'Pending'))) | Should -Be ''
+        Get-TimelineRoutineNote -Status (New-RoutineStatus -Logs @((New-RoutineLog -Routine 'NotRead'))) | Should -Be ''
+        $old = New-RoutineStatus -Logs @([PSCustomObject]@{ Log = 'System'; Outcome = 'Read'; Count = 5; Reason = '' })
+        Get-TimelineRoutineNote -Status $old | Should -Be ''
+    }
+
+    It 'leaves out logs whose errors and warnings were not read, and the whole note for a cancelled server' {
+        $bad = New-RoutineLog -Routine 'NotRead'; $bad.Outcome = 'TimedOut'
+        $bad2 = New-RoutineLog -Routine 'Cancelled'; $bad2.Outcome = 'Cancelled'
+        $capped = New-RoutineLog -Log 'Application'; $capped.Outcome = 'Capped'
+        Get-TimelineRoutineNote -Status (New-RoutineStatus -Logs @($bad, $bad2)) | Should -Be ''
+        Get-TimelineRoutineNote -Status (New-RoutineStatus -Logs @($bad2, $capped)) | Should -Be 'older routine events trimmed in 1 log'
+        Get-TimelineRoutineNote -Status (New-RoutineStatus -State 'Cancelled' -Logs @((New-RoutineLog -Routine 'Cancelled'))) | Should -Be ''
+        $l = New-RoutineLog -Routine 'Failed' -Reason 'routine events not read (x)'; $l.Outcome = 'Failed'
+        @(Get-TimelineRoutineLogLines -Logs @($l, $bad2)).Count | Should -Be 0
+        $ok = New-RoutineLog -Routine 'Failed' -Reason 'routine events not read (x)'
+        @(Get-TimelineRoutineLogLines -Logs @($ok)).Count | Should -Be 1
+    }
+
+    It 'puts the note on the card without turning the card into a warning' {
+        $status = [ordered]@{ 'APP01' = New-RoutineStatus -Logs @((New-RoutineLog)) }
+        $cards = @(Get-TimelineServerCards -Status $status -SummaryLines @('APP01: 2 app crashes or hangs'))
+        $cards[0].Warn | Should -BeFalse
+        $cards[0].Findings | Should -Be '2 app crashes or hangs (older routine events trimmed in 1 log)'
+        $cards2 = @(Get-TimelineServerCards -Status $status -SummaryLines @())
+        $cards2[0].Findings | Should -Be 'older routine events trimmed in 1 log'
+        $cards2[0].Warn | Should -BeFalse
+    }
+
+    It 'does not banner a log whose only cut is routine events' {
+        $status = [ordered]@{ 'APP01' = New-RoutineStatus -Logs @((New-RoutineLog)) }
+        Get-TimelineBannerText -Status $status | Should -Be ''
+    }
+
+    It 'banners failed and timed-out important reads without repeating "could not be read"' {
+        $status = [ordered]@{ 'APP01' = New-RoutineStatus -State 'DoneWithGaps' -Logs @(
+                [PSCustomObject]@{ Log = 'System'; Outcome = 'Failed'; Count = 0; Reason = 'errors and warnings not read: access denied' }
+                [PSCustomObject]@{ Log = 'Application'; Outcome = 'TimedOut'; Count = 0; Reason = "errors and warnings not read: didn't answer within 60 s" }) }
+        $lines = @((Get-TimelineBannerText -Status $status) -split "`r?`n")
+        $lines[0] | Should -Be 'APP01 System: errors and warnings not read: access denied'
+        $lines[1] | Should -Be "APP01 Application: errors and warnings not read: didn't answer within 60 s - try a shorter window or a longer timeout"
+    }
+
+    It 'still rules out a Done server whose only cut is routine Trimmed (ticket note)' {
+        $status = [ordered]@{ 'APP01' = New-RoutineStatus -Logs @((New-RoutineLog)) }
+        $note = New-TimelineTicketNote -Status $status -Rows @() -WindowText 'w'
+        @($note.CouldNotCheck | Where-Object { $_ -like 'APP01*' }).Count | Should -Be 0
+        ($note.RuledOut -join "`n") | Should -BeLike '*APP01*'
+    }
+
+    It 'adds a routine-events line to the HTML report details' {
+        $ctx = @{ WindowText = 'w'; Servers = @('APP01'); Logs = @('System'); FiltersText = ''; GeneratedAt = [datetime]'2026-11-17 09:00'
+            ServerOutcomes = @(New-RoutineStatus -Logs @((New-RoutineLog -Reason "kept the newest 3,200 routine events; older ones in the window weren't read"))) }
+        $html = ConvertTo-TimelineHtml -Rows @() -Context $ctx
+        $html | Should -BeLike '*System (routine events): Trimmed kept the newest 3,200 routine events; older ones in the window weren&#39;t read*'
+    }
+}

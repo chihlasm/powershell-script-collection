@@ -241,6 +241,15 @@ Describe 'Export-TimelineWorkbook' {
         @($book['Summary'] | ForEach-Object { $_[0] }) | Should -Contain 'What happened'
     }
 
+    It 'adds a routine-events line to the server details on the Summary' {
+        $ctx = New-WbContext -Servers @('AD-01')
+        $ctx.ServerOutcomes[0].Logs = @([PSCustomObject]@{ Log = 'System'; Outcome = 'Read'; Count = 1; Reason = ''; RoutineOutcome = 'Trimmed'; RoutineCount = 3200
+                RoutineReason = "kept the newest 3,200 routine events; older ones in the window weren't read" })
+        $book = Get-Book -Rows $script:Rows5 -Context $ctx
+        $values = @($book['Summary'] | ForEach-Object { $_[-1] })
+        @($values | Where-Object { $_ -like "*System (routine events): Trimmed kept the newest 3,200 routine events; older ones in the window weren't read*" }).Count | Should -Be 1
+    }
+
     It 'leaves empty fields as blank cells, so ISBLANK and Go To Blanks work' {
         $path = Join-Path $TestDrive 'blanks.xlsx'
         $row = New-WbRow -Provider 'Service Control Manager' -Id 7036 -Level 4
