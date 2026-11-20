@@ -113,12 +113,10 @@ $script:LogQueryScript = {
     if ($AuditFailure) { $raw += @(& $read @{ Keywords = $auditFailureKeyword } $true) }
 
     $seen = @{}
-    $unique = @()
-    foreach ($e in $raw) {
-        if ($seen.ContainsKey([string]$e.RecordId)) { continue }
-        $seen[[string]$e.RecordId] = $true
-        $unique += $e
-    }
+    # Emitted through the pipeline, not grown with +=: the input can be ~20,000 events.
+    $unique = @(foreach ($e in $raw) {
+            if (-not $seen.ContainsKey([string]$e.RecordId)) { $seen[[string]$e.RecordId] = $true; $e }
+        })
     $events = @($unique | Sort-Object -Property RecordId -Descending | Select-Object -First $MaxEvents | & $project)
     New-Object PSObject -Property @{ Events = $events }
 }
@@ -286,7 +284,7 @@ function Invoke-LogQuery {
 
     try {
         if ($Transport -eq 'WinRM') {
-            $params = @{ ComputerName = $ComputerName; ScriptBlock = $script:LogQueryScript; ArgumentList = ($queryArgs + @('', $null) + @($Part, (, [int[]]$rule.Ids), [bool]$rule.AuditFailure)); ErrorAction = 'Stop' }
+            $params = @{ ComputerName = $ComputerName; ScriptBlock = $script:LogQueryScript; ArgumentList = ($queryArgs + @('', $null) + @($Part, [int[]]$rule.Ids, [bool]$rule.AuditFailure)); ErrorAction = 'Stop' }
             if ($Credential) { $params.Credential = $Credential }
             $answer = Invoke-Command @params
         }

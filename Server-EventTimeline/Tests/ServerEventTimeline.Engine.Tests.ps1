@@ -137,7 +137,7 @@ Describe 'Invoke-LogQuery' {
         $r = Invoke-LogQuery -ComputerName srv-fake-01 -Transport RPC -LogName System -StartUtc $script:Start -EndUtc $script:End -Cap 2 -Part Routine
         @($r.Events | ForEach-Object { $_.RecordId }) | Should -Be @(8, 7)
         $r.Outcome | Should -Be 'Capped'
-        Should -Invoke Get-WinEvent -Times 1 -ParameterFilter { (@($FilterHashtable[0].Level) -join ',') -eq '0,4,5' }
+        Should -Invoke Get-WinEvent -Times 1 -ParameterFilter { (@($FilterHashtable[0].Level) -join ',') -eq '0,4,5' -and -not $PSBoundParameters.ContainsKey('MaxEvents') }
     }
 
     It 'routine read of Security skips audit failures, 4740 and levels 1-3' {
@@ -159,6 +159,18 @@ Describe 'Invoke-LogQuery' {
         $r = Invoke-LogQuery -ComputerName srv-fake-01 -Transport RPC -LogName System -StartUtc $script:Start -EndUtc $script:End -Cap 3 -Part Important
         $r.Outcome | Should -Be 'Read'
         $r.Count | Should -Be 0
+    }
+
+    It 'WinRM arguments bind: the script receives the part, the ID list and the audit flag' {
+        $script:remoteArgs = $null
+        Mock Invoke-Command { $script:remoteArgs = $ArgumentList; [PSCustomObject]@{ Events = @() } }
+        Invoke-LogQuery -ComputerName srv-fake-01 -Transport WinRM -LogName System -StartUtc $script:Start -EndUtc $script:End -Cap 3 -Part Important | Out-Null
+        $script:calls = @()
+        Mock Get-WinEvent { $script:calls += , $FilterHashtable[0]; @() }
+        $argList = $script:remoteArgs
+        { & $script:LogQueryScript @argList } | Should -Not -Throw
+        $union = @($script:calls | Where-Object { $_.Id } | ForEach-Object { $_.Id } | Sort-Object -Unique)
+        $union | Should -Be @((Get-TimelineImportantRule -LogName System).Ids)
     }
 
     It 'treats "no events found" as an empty Read, not a failure' {
@@ -233,7 +245,7 @@ Describe 'Real cmdlet parameter names' {
     It '<Command> has -<Parameter>' -ForEach @(
         @{ Command = 'Get-WinEvent'; Parameter = 'FilterHashtable' }, @{ Command = 'Get-WinEvent'; Parameter = 'MaxEvents' }
         @{ Command = 'Get-WinEvent'; Parameter = 'ComputerName' }, @{ Command = 'Get-WinEvent'; Parameter = 'Credential' }
-        @{ Command = 'Get-WinEvent'; Parameter = 'ListLog' }, @{ Command = 'Get-WinEvent'; Parameter = 'Oldest' }
+        @{ Command = 'Get-WinEvent'; Parameter = 'ListLog' }
         @{ Command = 'Invoke-Command'; Parameter = 'ComputerName' }, @{ Command = 'Invoke-Command'; Parameter = 'ScriptBlock' }
         @{ Command = 'Invoke-Command'; Parameter = 'ArgumentList' }, @{ Command = 'Invoke-Command'; Parameter = 'Credential' }
         @{ Command = 'New-CimSession'; Parameter = 'ComputerName' }, @{ Command = 'New-CimSession'; Parameter = 'SessionOption' }
