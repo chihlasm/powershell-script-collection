@@ -23,6 +23,10 @@
 
 $script:XlsxMaxCellChars = 32767
 $script:XlsxMaxSheetName = 31
+# Rows shared by two sheets (All servers and the server's own) keep their finished text for
+# reuse, up to this many characters (~100 MB); rows past it are simply built again. Without a
+# cap a 100,000-row export held ~370 MB extra until the end.
+$script:XlsxCacheMaxChars = 50000000
 # Characters XML 1.0 doesn't allow (control characters other than tab, LF and CR; U+FFFE and
 # U+FFFF), then lone surrogate halves. Event messages can carry them, and one of them makes
 # Excel call the whole file corrupt.
@@ -114,6 +118,7 @@ function Write-XlsxWorkbook {
     try { Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop }
     catch { throw "This computer can't write zip files (System.IO.Compression is missing): $($_.Exception.Message)" }
 
+    $written = $false
     $inv = [System.Globalization.CultureInfo]::InvariantCulture
     $letters = [char[]]'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
     $fs = New-Object System.IO.FileStream -ArgumentList $Path, ([System.IO.FileMode]::Create), ([System.IO.FileAccess]::ReadWrite), ([System.IO.FileShare]::None)
@@ -208,6 +213,7 @@ function Write-XlsxWorkbook {
 
             # Row strings by row object (reference), shared across sheets; see the row loop.
             $cache = New-Object 'System.Collections.Generic.Dictionary[object,string]'
+            $cachedChars = [long]0
             $sb = New-Object System.Text.StringBuilder 4096
             $index = 0
             foreach ($s in @($Sheets)) {
@@ -282,7 +288,7 @@ function Write-XlsxWorkbook {
                             # Characters XML forbids, removed from the whole row at once (the
                             # markup itself has none). See Protect-XlsxText.
                             $frag = $bad.Replace($sbL.ToString(), '')
-                            $cacheL[$row] = $frag
+                            if ($cachedChars + $frag.Length -le $script:XlsxCacheMaxChars) { $cacheL[$row] = $frag; $cachedChars += $frag.Length }
                         }
                         $w.WriteRaw('<row r="' + $rs + '">' + $frag.Replace('<R>', $rs) + '</row>')
                     }
@@ -293,10 +299,15 @@ function Write-XlsxWorkbook {
                     $w.WriteEndElement()
                 }
             }
+            $written = $true
         }
         finally { $zip.Dispose() }
     }
-    finally { $fs.Dispose() }
+    finally {
+        $fs.Dispose()
+        # A half-written file would sit in the save folder looking like a real export.
+        if (-not $written) { Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue }
+    }
 }
 
 function Export-TimelineWorkbook {
@@ -337,6 +348,8 @@ function Export-TimelineWorkbook {
         if ($null -eq $r) { continue }
         $cells = [object[]]@([datetime]$r.TimeServerLocal, [datetime]$r.TimeUtc, [string]$r.Server, [string]$r.Log, [string]$r.LevelName,
             [string]$r.Flag, [string]$r.Provider, $r.EventId, [string]$r.Message, $r.RecordId, [string]$r.User, [string]$r.Machine)
+        # An empty field is no cell at all, so ISBLANK() and Go To Special > Blanks find it.
+        for ($k = 2; $k -lt $cells.Length; $k++) { if ($cells[$k] -is [string] -and $cells[$k].Length -eq 0) { $cells[$k] = $null } }
         $all.Add($cells)
         $key = [string]$r.Server
         if (-not $byServer.ContainsKey($key)) { $byServer[$key] = New-Object System.Collections.Generic.List[object] }

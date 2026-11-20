@@ -140,6 +140,31 @@ Describe 'Write-XlsxWorkbook' {
     }
 }
 
+Describe 'Write-XlsxWorkbook on failure and with large exports' {
+    It 'leaves no half-written file behind when writing fails' {
+        $path = Join-Path $TestDrive 'broken.xlsx'
+        $cols = @(for ($i = 0; $i -lt 27; $i++) { @{ Header = "c$i"; Kind = 'Text' } })
+        { Write-XlsxWorkbook -Path $path -Sheets @(@{ Name = 'Wide'; Columns = $cols; Rows = @(); Filter = $false }) } | Should -Throw
+        Test-Path -LiteralPath $path | Should -BeFalse
+    }
+
+    It 'caps the memory spent on shared rows, and the rows past the cap are still right' {
+        # Reusing a row's text across sheets keeps it in memory; past the budget rows are rebuilt.
+        $script:XlsxCacheMaxChars | Should -BeGreaterThan 0
+        $script:XlsxCacheMaxChars | Should -BeLessOrEqual 50000000
+        $saved = $script:XlsxCacheMaxChars
+        try {
+            $script:XlsxCacheMaxChars = 1
+            $rows = @(@([datetime]'2026-11-18', 1, 'a'), @([datetime]'2026-11-18', 2, 'b'))
+            $path = Join-Path $TestDrive 'nocache.xlsx'
+            Write-XlsxWorkbook -Path $path -Sheets @(@{ Name = 'One'; Columns = (New-Cols); Rows = $rows; Filter = $true }, @{ Name = 'Two'; Columns = (New-Cols); Rows = $rows; Filter = $true })
+            $parts = Read-Xlsx $path
+            foreach ($n in 1, 2) { @(Get-SheetRows $parts["xl/worksheets/sheet$n.xml"] | ForEach-Object { $_[-1] }) | Should -Be @('Message', 'a', 'b') }
+        }
+        finally { $script:XlsxCacheMaxChars = $saved }
+    }
+}
+
 Describe 'ConvertTo-XlsxSheetName' {
     BeforeEach { $script:Taken = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase) }
 
@@ -214,6 +239,17 @@ Describe 'Export-TimelineWorkbook' {
         @($values | Where-Object { $_ -like 'Done (3 events)*' }).Count | Should -Be 1
         @($values | Where-Object { $_ -like 'Disk I/O had to be retried (3 in 3 min)*' }).Count | Should -Be 1
         @($book['Summary'] | ForEach-Object { $_[0] }) | Should -Contain 'What happened'
+    }
+
+    It 'leaves empty fields as blank cells, so ISBLANK and Go To Blanks work' {
+        $path = Join-Path $TestDrive 'blanks.xlsx'
+        $row = New-WbRow -Provider 'Service Control Manager' -Id 7036 -Level 4
+        $row.Flag | Should -Be ''
+        Export-TimelineWorkbook -Rows @($row) -Context (New-WbContext -Servers @('AD-01')) -Path $path
+        $all = (Read-Xlsx $path)['xl/worksheets/sheet2.xml']
+        Cell $all 'F2' | Should -BeNullOrEmpty
+        Cell $all 'K2' | Should -BeNullOrEmpty
+        (Cell $all 'C2').is.InnerText | Should -Be 'AD-01'
     }
 
     It 'cuts a sheet at the row limit and says so on the Summary' {
