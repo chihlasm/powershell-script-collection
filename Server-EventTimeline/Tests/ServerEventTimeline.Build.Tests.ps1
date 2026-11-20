@@ -42,7 +42,7 @@ Describe 'Build-TestZip.ps1' {
 
     It 'never includes the Reports folder, the tests, the build script or a nested copy' {
         @($script:Entries | Where-Object { $_ -match '/Reports/|/Tests/|Build-TestZip|Server-EventTimeline/Server-EventTimeline/' }).Count | Should -Be 0
-        $script:Entries.Count | Should -Be 9
+        $script:Entries.Count | Should -Be 10
     }
 
     It 'says in BUILD.txt which commit and when' {
@@ -58,7 +58,7 @@ Describe 'Build-TestZip.ps1' {
 
     It 'replaces the zip on the next build' {
         $again = & $script:BuildScript -OutputPath $script:Out
-        (Get-ZipEntries -Path $again).Count | Should -Be 9
+        (Get-ZipEntries -Path $again).Count | Should -Be 10
     }
 }
 
@@ -71,7 +71,7 @@ Describe 'Build-TestZip.ps1 on Windows PowerShell 5.1' {
         # .NET Framework (5.1) writes backslashes from CreateFromDirectory; the zip format wants '/'.
         $zip = [System.IO.Compression.ZipFile]::OpenRead((Join-Path $out 'Server-EventTimeline.zip'))
         try { $names = @($zip.Entries | ForEach-Object FullName) } finally { $zip.Dispose() }
-        $names.Count | Should -Be 9
+        $names.Count | Should -Be 10
         @($names | Where-Object { $_ -like '*\*' }).Count | Should -Be 0
         $names | Should -Contain 'Server-EventTimeline/BUILD.txt'
     }

@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Builds Server-EventTimeline.zip: the tool's files, ready to copy to a test server.
@@ -56,6 +56,7 @@ $files = @(
     'ServerEventTimeline.ServerList.ps1'
     'ServerEventTimeline.AddServersDialog.ps1'
     'ServerEventTimeline.Story.ps1'
+    'ServerEventTimeline.Workbook.ps1'
     'CaseKit.ps1'
     'README.md'
 )
