@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 
 <#
 .SYNOPSIS
@@ -82,20 +82,26 @@ $script:LogQueryScript = {
     }
 
     if ($Part -eq 'Routine') {
-        # Everything that is not Critical/Error/Warning. Security audit events are Level 0 and
-        # the outcome is in Keywords, so Security has no Level filter and drops its important
-        # events (audit failures, listed IDs, levels 1-3) below.
-        $extra = @{}
-        if ($LogName -ne 'Security') { $extra.Level = @(0, 4, 5) }
+        # Everything that is not Critical/Error/Warning. There is no server-side Level filter:
+        # providers may define levels above 5 (16-255), which a Level = 0,4,5 key would drop
+        # from both parts. Levels 1-3 are skipped here instead (they are the important read).
+        # Security audit events are Level 0 with the outcome in Keywords, so Security also
+        # drops its audit failures. Keywords is a nullable long: on Windows PowerShell 5.1
+        # `$null -band <long>` throws "Specified cast is not valid" (PowerShell 7 returns 0),
+        # so null is checked first.
         $isSecurity = $LogName -eq 'Security'
         # Filter first, then Select-Object -First (stops the read early since PowerShell 3.0);
         # .Message is formatted only in the projection, after both.
-        $events = @(& $read $extra $false |
+        $events = @(& $read @{} $false |
                 Where-Object {
+                    $lvl = $_.Level
+                    $isLow = ($null -ne $lvl -and $lvl -ge 1 -and $lvl -le 3)
                     if ($isSecurity) {
-                        -not ((($_.Keywords -band $auditFailureKeyword) -ne 0) -or ($ImportantIds -contains $_.Id) -or ($_.Level -ge 1 -and $_.Level -le 3))
+                        $kw = $_.Keywords
+                        $isFail = ($null -ne $kw -and (([long]$kw -band $auditFailureKeyword) -ne 0))
+                        -not ($isFail -or ($ImportantIds -contains $_.Id) -or $isLow)
                     }
-                    else { -not ($ImportantIds -contains $_.Id) }
+                    else { -not (($ImportantIds -contains $_.Id) -or $isLow) }
                 } |
                 Select-Object -First $MaxEvents |
                 & $project)
@@ -495,6 +501,8 @@ function Set-TimelineLogOutcome {
     # One entry per log. Outcome/Count/Reason describe the important read, so every consumer
     # that treats Outcome -ne 'Read' as a gap still means "errors and warnings missing".
     # RoutineOutcome/RoutineCount/RoutineReason describe the routine read.
+    # -Part Routine on a missing entry would create an important 'Pending' (a gap): never call
+    # it before the log's important entry exists.
     param($Status, [string]$Log, [string]$Outcome, [int]$Count = 0, [string]$Reason = '',
         [ValidateSet('Important', 'Routine')][string]$Part = 'Important')
     $entry = $Status.Logs | Where-Object Log -eq $Log | Select-Object -First 1

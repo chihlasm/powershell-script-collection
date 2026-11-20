@@ -62,7 +62,7 @@
 
     With -NoGui it runs in the console instead (for RMM scripts and scheduled tasks): it reads
     the servers, prints how each went and what was found, and writes the CSV, the HTML report
-    and the Excel workbook (and the ticket note with -TicketNumber). Exit code 0 = every log read, 1 = a server or
+    and the Excel workbook (and the ticket note with -TicketNumber). Exit code 0 = errors, warnings and recognised events read in full on every server, 1 = a server or
     log could not be read in full, 2 = could not run (for example a time it couldn't read).
 
 .PARAMETER ComputerName
@@ -115,13 +115,13 @@
     -NoGui: also read every log on each server that has events (can be 100+ logs).
 
 .PARAMETER Cap
-    -NoGui: most events read per log (default 5000). Most events read per log. Errors, warnings and recognised events are read first; routine events fill the rest, newest first.
+    -NoGui: most events read per log (default 5000). Errors, warnings and recognised events are read first; routine events fill the rest, newest first.
 
 .PARAMETER TotalCap
-    -NoGui: a safety limit for routine events across all logs on one server. Errors, warnings and recognised events are never dropped for it. (default 50000).
+    -NoGui: a safety limit for routine events across all logs on one server. Errors, warnings and recognised events are never dropped for it (default 50000).
 
 .PARAMETER TimeoutSec
-    -NoGui: give up on a log after this many seconds (default 60).
+    -NoGui: give up on each read of a log after this many seconds (default 60). A log is read in two parts, so one log can take up to twice this.
 
 .PARAMETER Credential
     -NoGui: read the servers with this account (the window has Run as... instead).
@@ -563,10 +563,10 @@ function New-TimelineWindowXaml {
               <WrapPanel Margin="0,8,0,0">
                 <TextBlock Text="Stop each log at" VerticalAlignment="Center" Margin="0,0,6,0"/>
                 <TextBox x:Name="CapBox" Width="70" Text="5000" ToolTip="Most events read per log. Errors, warnings and recognised events are read first; routine events fill the rest, newest first."/>
-                <TextBlock Text="events.   Give up on a log after" VerticalAlignment="Center" Margin="6,0,6,0"/>
+                <TextBlock Text="events.   Give up on each read of a log after" VerticalAlignment="Center" Margin="6,0,6,0"/>
                 <TextBox x:Name="TimeoutBox" Width="50" Text="60"/>
                 <TextBlock Text="seconds." VerticalAlignment="Center" Margin="6,0,6,0"/>
-                <TextBlock Text="Stop each server at" VerticalAlignment="Center" Margin="0,6,6,0"/>
+                <TextBlock Text="Stop routine events per server at" VerticalAlignment="Center" Margin="0,6,6,0"/>
                 <TextBox x:Name="TotalCapBox" Width="80" Text="50000" Margin="0,6,0,0" ToolTip="A safety limit for routine events across all logs on one server. Errors, warnings and recognised events are never dropped for it."/>
                 <TextBlock Text="events in total.   " VerticalAlignment="Center" Margin="6,6,6,0"/>
                 <Button x:Name="RunAsButton" Content="Run as another account..." Margin="0,6,8,0" ToolTip="Read the servers with a different account (for example another domain)"/>
@@ -911,7 +911,7 @@ function Invoke-TimelineConsole {
     <#
         -NoGui: reads the servers without a window, prints how each went and what was found,
         writes the CSV, the HTML report and a log (and a ticket note with -TicketNumber).
-        Returns the exit code: 0 every log read, 1 something couldn't be read in full,
+        Returns the exit code: 0 errors, warnings and recognised events were read in full on every server, 1 something couldn't be read in full,
         2 couldn't run.
     #>
     [CmdletBinding()]
@@ -985,6 +985,9 @@ function Invoke-TimelineConsole {
                     'Unreachable'  { & $say FAIL ("{0}: couldn't reach - {1}" -f $s.Server, $s.Reason) }
                     default        { & $say WARN ('{0}: {1}' -f $s.Server, $s.State) }
                 }
+                # Routine events cut by the budget are not a gap: an [INFO] line, not a warning.
+                $routineNote = Get-TimelineRoutineNote -Status $s
+                if ($routineNote) { & $say INFO ('{0}: {1}' -f $s.Server, $routineNote) }
             }
             if (-not $u.Finished) { Start-Sleep -Milliseconds $PollMs }
         } until ($u.Finished)

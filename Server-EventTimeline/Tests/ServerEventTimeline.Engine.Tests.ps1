@@ -137,7 +137,49 @@ Describe 'Invoke-LogQuery' {
         $r = Invoke-LogQuery -ComputerName srv-fake-01 -Transport RPC -LogName System -StartUtc $script:Start -EndUtc $script:End -Cap 2 -Part Routine
         @($r.Events | ForEach-Object { $_.RecordId }) | Should -Be @(8, 7)
         $r.Outcome | Should -Be 'Capped'
-        Should -Invoke Get-WinEvent -Times 1 -ParameterFilter { (@($FilterHashtable[0].Level) -join ',') -eq '0,4,5' -and -not $PSBoundParameters.ContainsKey('MaxEvents') }
+        # No server-side Level key: levels above 5 must still come back (levels 1-3 are skipped client-side).
+        Should -Invoke Get-WinEvent -Times 1 -ParameterFilter { -not $FilterHashtable[0].ContainsKey('Level') -and -not $PSBoundParameters.ContainsKey('MaxEvents') }
+    }
+
+    It 'routine read keeps a provider-defined level above 5 and still skips levels 1-3' {
+        Mock Get-WinEvent {
+            @((New-RawEvent -RecordId 4 -Level 16), (New-RawEvent -RecordId 3 -Level 2), (New-RawEvent -RecordId 2 -Level 3), (New-RawEvent -RecordId 1 -Level 4))
+        }
+        $r = Invoke-LogQuery -ComputerName srv-fake-01 -Transport RPC -LogName System -StartUtc $script:Start -EndUtc $script:End -Cap 10 -Part Routine
+        @($r.Events | ForEach-Object { $_.RecordId }) | Should -Be @(4, 1)
+        @($r.Events)[0].Level | Should -Be 16
+    }
+
+    It 'routine read of Security keeps an event whose Keywords is null' {
+        Mock Get-WinEvent {
+            @((New-RawEvent -RecordId 2 -Id 4624 -Level 0 -Keywords $null), (New-RawEvent -RecordId 1 -Id 4625 -Level 0 -Keywords 0x8010000000000000))
+        }
+        $r = Invoke-LogQuery -ComputerName srv-fake-01 -Transport RPC -LogName Security -StartUtc $script:Start -EndUtc $script:End -Cap 10 -Part Routine
+        $r.Outcome | Should -Be 'Read'
+        @($r.Events | ForEach-Object { $_.RecordId }) | Should -Be @(2)
+    }
+
+    It 'runs under Windows PowerShell 5.1 when Keywords is null (null -band throws there)' -Skip:(-not (Get-Command powershell.exe -ErrorAction SilentlyContinue)) {
+        # Child process with its own fake Get-WinEvent: no real log is read.
+        $child = Join-Path $TestDrive 'null-keywords.ps1'
+        $engine = Join-Path (Split-Path -Parent $PSScriptRoot) 'ServerEventTimeline.Engine.ps1'
+        $lines = @(
+            "`$ErrorActionPreference = 'Stop'"
+            ". '$engine'"
+            'function global:Get-WinEvent {'
+            '    param($FilterHashtable, $MaxEvents, $ComputerName, $Credential, [switch]$Oldest)'
+            "    [PSCustomObject]@{ TimeCreated = Get-Date; Id = 4624; ProviderName = 'x'; Level = 0; LogName = 'Security'; Keywords = `$null; Message = 'm'; RecordId = 1; UserId = `$null; MachineName = 'fake' }"
+            '}'
+            'try {'
+            "    `$r = & `$script:LogQueryScript 'Security' 0 ([datetime]::UtcNow.Ticks) 10 '' `$null 'Routine' ([int[]]@(4740)) `$true"
+            "    'RESULT ' + @(`$r.Events).Count + ' ' + `$PSVersionTable.PSVersion.Major"
+            '}'
+            "catch { 'THREW ' + `$_.Exception.Message }"
+        )
+        Set-Content -LiteralPath $child -Value $lines -Encoding UTF8
+        $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $child 2>&1 | Out-String
+        $out | Should -Match 'RESULT 1 5'
+        $out | Should -Not -Match 'THREW'
     }
 
     It 'routine read of Security skips audit failures, 4740 and levels 1-3' {

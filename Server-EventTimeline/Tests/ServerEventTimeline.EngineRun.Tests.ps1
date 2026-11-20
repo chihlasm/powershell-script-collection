@@ -252,8 +252,14 @@ Describe 'Timeline engine: important first' {
                 return [PSCustomObject]@{ Server = $Server; Log = $LogName; Outcome = 'Read'; Count = $n; Events = $events; Reason = '' }
             }
             if ($cfg.RoutineSleep) { Start-Sleep -Seconds $cfg.RoutineSleep }
+            if ($cfg.RoutineFail) { return [PSCustomObject]@{ Server = $Server; Log = $LogName; Outcome = 'Failed'; Count = 0; Events = @(); Reason = $cfg.RoutineFail } }
+            if ($cfg.RoutineThrow) { throw $cfg.RoutineThrow }
             $n = [Math]::Min([int]$cfg.Routine, [int]$Cap)
             $events = @(for ($i = 1; $i -le $n; $i++) { & $mk (20 + $i) 4 })
+            if ($cfg.RoutineCapped) {
+                return [PSCustomObject]@{ Server = $Server; Log = $LogName; Outcome = 'Capped'; Count = $n; Events = $events
+                    Reason = ('kept the newest {0:N0} routine events; older ones in the window weren''t read' -f $Cap) }
+            }
             [PSCustomObject]@{ Server = $Server; Log = $LogName; Outcome = 'Read'; Count = $n; Events = $events; Reason = '' }
         }
         function Start-PartEngine {
@@ -351,6 +357,47 @@ Describe 'Timeline engine: important first' {
         $l.Reason | Should -BeLike 'errors and warnings not read*Access is denied*'
         $l.RoutineOutcome | Should -Be 'NotRead'
         $s.State | Should -Be 'DoneWithGaps'
+    }
+
+    It 'a routine read that hit its cap is Trimmed, leaves the server Done and shows on the card note' {
+        $null = Set-PartFake @{ Important = 1; Routine = 10; RoutineCapped = $true }
+        $script:Engine = Start-PartEngine -Cap 4
+        $r = Wait-Engine -Engine $script:Engine
+        $r.Finished | Should -BeTrue
+        $s = $script:Engine.Status['srv-fake-01']
+        $log = $s.Logs | Where-Object Log -eq 'System'
+        $log.RoutineOutcome | Should -Be 'Trimmed'
+        $log.RoutineReason | Should -BeLike 'kept the newest*'
+        $s.State | Should -Be 'Done'
+        Get-TimelineRoutineNote -Status $s | Should -Be 'older routine events trimmed in 1 log'
+    }
+
+    It 'a routine read returned as Failed leaves the server Done with errors and warnings intact' {
+        $null = Set-PartFake @{ Important = 1; Routine = 2; RoutineFail = 'access denied' }
+        $script:Engine = Start-PartEngine
+        $r = Wait-Engine -Engine $script:Engine
+        $r.Finished | Should -BeTrue
+        $s = $script:Engine.Status['srv-fake-01']
+        $log = $s.Logs | Where-Object Log -eq 'System'
+        $log.Outcome | Should -Be 'Read'
+        $log.RoutineOutcome | Should -Be 'Failed'
+        $log.RoutineReason | Should -BeLike 'routine events not read (*); errors and warnings were read'
+        $s.State | Should -Be 'Done'
+        $s.Reason | Should -BeNullOrEmpty
+    }
+
+    It 'a routine task that throws leaves the server Done with errors and warnings intact' {
+        $null = Set-PartFake @{ Important = 1; Routine = 2; RoutineThrow = 'Access is denied' }
+        $script:Engine = Start-PartEngine
+        $r = Wait-Engine -Engine $script:Engine
+        $r.Finished | Should -BeTrue
+        $s = $script:Engine.Status['srv-fake-01']
+        $log = $s.Logs | Where-Object Log -eq 'System'
+        $log.Outcome | Should -Be 'Read'
+        $log.RoutineOutcome | Should -Be 'Failed'
+        $log.RoutineReason | Should -BeLike 'routine events not read (*); errors and warnings were read'
+        $s.State | Should -Be 'Done'
+        $s.Reason | Should -BeNullOrEmpty
     }
 
     It 'a routine timeout leaves the server Done' {

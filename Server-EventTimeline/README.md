@@ -181,7 +181,7 @@ marked "with gaps", because the errors are complete:
 - *older routine events trimmed in 2 logs* (on the server's card, and in the report and
   workbook as *kept the newest N routine events; older ones in the window weren't read*):
   only older routine events were left out. Errors, warnings and recognised events are all there.
-  If the server hit its safety limit (*Stop each server at ... events in total* under **More options**),
+  If the server hit its safety limit (*Stop routine events per server at ... events in total* under **More options**),
   the report says *stopped at the N event total for this server*; raise it to read more routine events.
 - *routine events not read in 1 log*: the errors and warnings were read, but the routine
   events for that log timed out or failed.
@@ -301,12 +301,12 @@ the Excel workbook and a log.
 | `-IncludeSecurity`, `-AllLogs` | Same as the window's Slow options. |
 | `-Cap` | Most events read per log (default 5000). Errors, warnings and recognised events are read first; routine events fill the rest, newest first. |
 | `-TotalCap` | A safety limit for routine events across all logs on one server (default 50000). Errors, warnings and recognised events are never dropped for it. |
-| `-TimeoutSec` | Give up on a log after this many seconds (default 60). |
+| `-TimeoutSec` | Give up on each read of a log after this many seconds (default 60). A log is read in two parts, so one log can take up to twice this. |
 | `-Credential` | Read the servers as another account. |
 | `-TicketNumber` | Write the ticket note, CSV and report into `<-OutputPath or Documents\TicketNotes>\Ticket_<number>`, and copy the note (`-NoClipboard` to skip that). |
 | `-OutputPath` | Where the files go (without `-TicketNumber`, default `Reports\` beside the script). |
 
-Exit codes: `0` every log was read in full, `1` a server or log couldn't be read in full
+Exit codes: `0` errors, warnings and recognised events were read in full on every server, `1` a server or log couldn't be read in full
 (the output says which), `2` couldn't run (a time it couldn't read, a bad ticket number, or a
 folder it couldn't create).
 

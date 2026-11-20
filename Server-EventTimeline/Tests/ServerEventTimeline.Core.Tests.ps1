@@ -762,6 +762,19 @@ Describe 'Saying what was cut (routine events trimmed or not read)' {
         Get-TimelineRoutineNote -Status $old | Should -Be ''
     }
 
+    It 'leaves out logs whose errors and warnings were not read, and the whole note for a cancelled server' {
+        $bad = New-RoutineLog -Routine 'NotRead'; $bad.Outcome = 'TimedOut'
+        $bad2 = New-RoutineLog -Routine 'Cancelled'; $bad2.Outcome = 'Cancelled'
+        $capped = New-RoutineLog -Log 'Application'; $capped.Outcome = 'Capped'
+        Get-TimelineRoutineNote -Status (New-RoutineStatus -Logs @($bad, $bad2)) | Should -Be ''
+        Get-TimelineRoutineNote -Status (New-RoutineStatus -Logs @($bad2, $capped)) | Should -Be 'older routine events trimmed in 1 log'
+        Get-TimelineRoutineNote -Status (New-RoutineStatus -State 'Cancelled' -Logs @((New-RoutineLog -Routine 'Cancelled'))) | Should -Be ''
+        $l = New-RoutineLog -Routine 'Failed' -Reason 'routine events not read (x)'; $l.Outcome = 'Failed'
+        @(Get-TimelineRoutineLogLines -Logs @($l, $bad2)).Count | Should -Be 0
+        $ok = New-RoutineLog -Routine 'Failed' -Reason 'routine events not read (x)'
+        @(Get-TimelineRoutineLogLines -Logs @($ok)).Count | Should -Be 1
+    }
+
     It 'puts the note on the card without turning the card into a warning' {
         $status = [ordered]@{ 'APP01' = New-RoutineStatus -Logs @((New-RoutineLog)) }
         $cards = @(Get-TimelineServerCards -Status $status -SummaryLines @('APP01: 2 app crashes or hangs'))

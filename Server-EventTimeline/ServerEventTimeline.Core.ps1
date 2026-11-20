@@ -1014,13 +1014,15 @@ function Get-TimelineRoutineLogLines {
         One line per log whose routine events were trimmed, not read or cancelled, for the
         report, workbook and log file: "System (routine events): Trimmed kept the newest ...".
         Logs without a RoutineOutcome (older contexts) and logs where routine events were read,
-        are still pending or were skipped add nothing.
+        are still pending or were skipped add nothing. So does a log whose errors and warnings
+        weren't read: its own line already says so, and the routine line would only repeat it.
     #>
     [CmdletBinding()]
     param($Logs)
     foreach ($l in @($Logs | Where-Object { $_ })) {
         if (-not $l.PSObject.Properties['RoutineOutcome']) { continue }
         if ([string]$l.RoutineOutcome -in @('Read', 'Pending', 'Skipped', '')) { continue }
+        if ($l.PSObject.Properties['Outcome'] -and [string]$l.Outcome -notin @('Read', 'Capped')) { continue }
         $reason = if ($l.PSObject.Properties['RoutineReason']) { [string]$l.RoutineReason } else { '' }
         ('{0} (routine events): {1} {2}' -f $l.Log, $l.RoutineOutcome, $reason).Trim()
     }
@@ -1031,11 +1033,17 @@ function Get-TimelineRoutineNote {
         A short note for the server card when routine events were cut but errors, warnings and
         recognised events were all read, e.g. "older routine events trimmed in 2 logs". Empty
         when nothing was cut. NotRead is left out on purpose: it only happens when the errors
-        and warnings were not read either, which is already shown as a gap.
+        and warnings were not read either, which is already shown as a gap. Logs whose errors
+        and warnings weren't read are skipped for the same reason, and a cancelled server gets no
+        note (its card already says cancelled).
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Status)
-    $logs = @($Status.Logs | Where-Object { $_ -and $_.PSObject.Properties['RoutineOutcome'] })
+    if ($Status.PSObject.Properties['State'] -and [string]$Status.State -eq 'Cancelled') { return '' }
+    $logs = @($Status.Logs | Where-Object {
+            $_ -and $_.PSObject.Properties['RoutineOutcome'] -and
+            (-not $_.PSObject.Properties['Outcome'] -or [string]$_.Outcome -in @('Read', 'Capped'))
+        })
     $trimmed = @($logs | Where-Object { $_.RoutineOutcome -eq 'Trimmed' }).Count
     $notRead = @($logs | Where-Object { $_.RoutineOutcome -in @('TimedOut', 'Failed') }).Count
     $cancelled = @($logs | Where-Object { $_.RoutineOutcome -eq 'Cancelled' }).Count
