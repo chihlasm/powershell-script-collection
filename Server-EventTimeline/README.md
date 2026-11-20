@@ -11,7 +11,7 @@ Read-only: it changes nothing on any server.
 .\Start-ServerEventTimeline.ps1
 .\Start-ServerEventTimeline.ps1 -ComputerName APP01, SQL01, DC01
 
-# No window (RMM scripts, scheduled runs): CSV + HTML report, and a ticket note
+# No window (RMM scripts, scheduled runs): CSV, HTML report and Excel workbook, and a ticket note
 .\Start-ServerEventTimeline.ps1 -NoGui -ComputerName APP01, SQL01 -At '2026-11-17 03:00' -TicketNumber 482113
 ```
 
@@ -100,8 +100,13 @@ to process this command*; a process of its own avoids that.
      hidden is named next to the filters; **Show everything again** brings it back.
    - **Show only this server**.
 8. Click a row to see everything about the event. Then **Export CSV**, **Export HTML report**
-   (with *What was found* at the top), or **Copy selected rows** to paste into the ticket.
-   Exports always contain every filtered event, even when repeats are collapsed.
+   (with *What was found* at the top), **Export workbook**, or **Copy selected rows** to paste
+   into the ticket. Exports always contain every filtered event, even when repeats are collapsed.
+   The workbook is an Excel file with a **Summary** sheet (the search, *What was found*, how each
+   server went, *What happened*), an **All servers** sheet, and **a sheet for each server**, so
+   you can filter, sort and run formulas per server. Times are real Excel dates and event IDs are
+   numbers; each sheet has a frozen header with filter buttons. Excel isn't needed to write it.
+   A sheet past Excel's limit of 1,048,576 rows keeps the first ones, and the Summary says so.
 9. **Copy summary for ticket...** asks for the ticket number, then writes a short summary to
    paste into the ticket (what was found, what's ruled out, what couldn't be checked, what to
    do next) and copies it to the clipboard. The summary (a ticket note) and the HTML report are
@@ -262,8 +267,8 @@ own account.
 ## Without the window (-NoGui)
 
 For RMM scripts, scheduled tasks or a quick look from a console. It uses the same background
-reading, prints how each server went and *What was found*, and writes the CSV, the HTML report
-and a log.
+reading, prints how each server went and *What was found*, and writes the CSV, the HTML report,
+the Excel workbook and a log.
 
 ```powershell
 # Around a time (each server's local time), +/- 30 minutes
@@ -301,6 +306,7 @@ folder it couldn't create).
 - `ServerEventTimeline.ServerList.ps1`: the server list: AD suggestions, notes, IP lookups, file import
 - `ServerEventTimeline.AddServersDialog.ps1`: the "Add several servers" dialog
 - `ServerEventTimeline.Story.ps1`: "What happened" and the timeline picture's layout
+- `ServerEventTimeline.Workbook.ps1`: the Excel workbook export (writes .xlsx without Excel)
 - `Build-TestZip.ps1`: builds `dist\Server-EventTimeline.zip` (repository root) to copy to a test
   server: the scripts above and this README in a `Server-EventTimeline` folder, plus `BUILD.txt`
   naming the commit. It never includes `Reports\` or the tests. Not needed on the server.
@@ -309,7 +315,7 @@ folder it couldn't create).
   `ServerEventTimeline_yyyy-MM-dd_HHmmss.*`. These contain client data: don't commit or
   sync them.
 
-Keep the seven `.ps1` files together. Recent server lists, the save folder, the domain for
+Keep the eight `.ps1` files together. Recent server lists, the save folder, the domain for
 suggestions and whether the picture is hidden are remembered per user in `%APPDATA%\ServerEventTimeline\settings.json`. Needs
 Windows PowerShell 5.1 or PowerShell 7 on Windows. Suggestions from Active Directory and Find
 in AD need the RSAT Active Directory tools (optional).

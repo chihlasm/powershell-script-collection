@@ -308,6 +308,18 @@ Describe 'Console mode (-NoGui)' {
         $html = Get-Content -LiteralPath (Get-ChildItem -LiteralPath $out -Filter 'ServerEventTimeline_*.html')[0].FullName -Raw
         $html | Should -BeLike '*srv-fake-01: 1 unexpected restart*'
         @(Get-ChildItem -LiteralPath $out -Filter 'ServerEventTimeline_*.log').Count | Should -Be 1
+        # The workbook too: Summary, All servers, then a sheet for each server.
+        $xlsx = @(Get-ChildItem -LiteralPath $out -Filter 'ServerEventTimeline_*.xlsx')
+        $xlsx.Count | Should -Be 1
+        Add-Type -AssemblyName System.IO.Compression
+        $fs = [System.IO.File]::OpenRead($xlsx[0].FullName)
+        try {
+            $zip = New-Object System.IO.Compression.ZipArchive -ArgumentList $fs, ([System.IO.Compression.ZipArchiveMode]::Read)
+            $reader = New-Object System.IO.StreamReader -ArgumentList $zip.GetEntry('xl/workbook.xml').Open()
+            $book = [xml]$reader.ReadToEnd(); $reader.Dispose(); $zip.Dispose()
+        }
+        finally { $fs.Dispose() }
+        @($book.workbook.sheets.sheet | ForEach-Object name) | Should -Be @('Summary', 'All servers', 'srv-fake-01', 'srv-fake-02')
     }
 
     It 'says the Security log was not read, with the console switch that adds it, in the output and the report' {
@@ -1026,5 +1038,31 @@ Describe 'What happened as a big tab beside Events' {
         $finish | Should -Match 'Set-TimelineMainTab -Window \$window -Tab Story -Banner'
         $finish | Should -Match 'Get-TimelineFinishMessage'
         $src | Should -Match '\$ui\.StoryBannerEventsButton\.add_Click\(\{\s*Set-TimelineMainTab -Window \$window -Tab Events'
+    }
+}
+
+Describe 'Export workbook' {
+    # A third export beside CSV and HTML: an Excel workbook with a sheet per server.
+    It 'has an Export workbook button beside the other exports' -Skip:(-not ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA')) {
+        $w = [System.Windows.Markup.XamlReader]::Parse((New-TimelineWindowXaml))
+        $b = $w.FindName('ExportXlsxButton')
+        $b | Should -Not -BeNullOrEmpty
+        $b.Content | Should -Be 'Export workbook'
+        $b.IsEnabled | Should -BeFalse
+        $b.Parent | Should -Be $w.FindName('ExportHtmlButton').Parent
+        [string]$b.ToolTip | Should -BeLike '*sheet for each server*'
+    }
+
+    It 'wires the workbook export in the window and in -NoGui' {
+        $src = Get-Content -LiteralPath $script:AppPath -Raw
+        $src | Should -Match 'ExportXlsxButton\.add_Click\(\{ Invoke-Export -Kind Xlsx'
+        $src | Should -Match "ValidateSet\('Csv', 'Html', 'Xlsx'\)"
+        $src | Should -Match '\$ui\.ExportXlsxButton\.IsEnabled = \$has'
+        $start = $src.IndexOf('function Invoke-Export')
+        $src.Substring($start, 2000) | Should -Match 'Export-TimelineWorkbook -Rows \$rows -Context \(Get-ExportContext\)'
+        # -NoGui: the workbook after the HTML report, in its own try so a failure keeps the others.
+        $files = $src.Substring($src.IndexOf('    # Files'), 2500)
+        $files | Should -Match 'Export-TimelineWorkbook'
+        $files | Should -Match "Couldn't save the workbook"
     }
 }

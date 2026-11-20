@@ -64,6 +64,8 @@
 . (Join-Path $PSScriptRoot 'ServerEventTimeline.ServerList.ps1')
 # "What happened": the story of the flagged events and the timeline picture's layout.
 . (Join-Path $PSScriptRoot 'ServerEventTimeline.Story.ps1')
+# The Excel workbook export (.xlsx writer, no Excel needed).
+. (Join-Path $PSScriptRoot 'ServerEventTimeline.Workbook.ps1')
 
 function ConvertTo-ServerList {
     <# Turns whatever a tech pasted into a clean list of server names. #>

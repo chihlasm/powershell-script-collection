@@ -24,8 +24,9 @@
     "Remote Event Log Management" firewall rule) is used instead. Access denied is reported,
     not retried.
 
-    Export the visible rows to CSV or an HTML report, or copy the selected rows as text for a
-    ticket. Files go to -OutputPath (default: a Reports folder beside this script). Ticket
+    Export the visible rows to CSV, an HTML report or an Excel workbook (a summary sheet, every
+    event, and a sheet for each server; no Excel needed to write it), or copy the selected rows
+    as text for a ticket. Files go to -OutputPath (default: a Reports folder beside this script). Ticket
     note... writes the four-part ticket note (TicketNote\Join-TicketNotes.ps1 can merge it
     with the quick checks' notes) and the HTML report into the ticket's folder.
 
@@ -60,8 +61,8 @@
     log over RPC (WinRM with an IP needs TrustedHosts and an explicit credential).
 
     With -NoGui it runs in the console instead (for RMM scripts and scheduled tasks): it reads
-    the servers, prints how each went and what was found, and writes the CSV and HTML report
-    (and the ticket note with -TicketNumber). Exit code 0 = every log read, 1 = a server or
+    the servers, prints how each went and what was found, and writes the CSV, the HTML report
+    and the Excel workbook (and the ticket note with -TicketNumber). Exit code 0 = every log read, 1 = a server or
     log could not be read in full, 2 = could not run (for example a time it couldn't read).
 
 .PARAMETER ComputerName
@@ -817,6 +818,7 @@ function New-TimelineWindowXaml {
           <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
             <Button x:Name="ExportCsvButton" Content="Export CSV" IsEnabled="False" ToolTip="Save the rows you can see as a CSV file"/>
             <Button x:Name="ExportHtmlButton" Content="Export HTML report" IsEnabled="False" ToolTip="Save a report with the rows you can see and how each server went"/>
+            <Button x:Name="ExportXlsxButton" Content="Export workbook" IsEnabled="False" ToolTip="Save an Excel workbook: a summary, every event, and a sheet for each server (the rows you can see)"/>
             <Button x:Name="CopyButton" Content="Copy selected rows" IsEnabled="False" ToolTip="Copy the selected rows as text, to paste into a ticket or an email"/>
             <!-- ShowOnDisabled: the button is disabled until a search finishes, which is when people hover to find out what it does. -->
             <Button x:Name="TicketNoteButton" Content="Copy summary for ticket..." IsEnabled="False" ToolTipService.ShowOnDisabled="True"
@@ -999,6 +1001,7 @@ function Invoke-TimelineConsole {
     # Files
     $stamp = Get-Date -Format 'yyyy-MM-dd_HHmmss'
     $htmlPath = Join-Path $folder "ServerEventTimeline_$stamp.html"
+    $context = $null
     try {
         Export-TimelineCsv -Rows $rows -Path (Join-Path $folder "ServerEventTimeline_$stamp.csv")
         $span = Get-TimelineStripWindow -Window $engine.Window -Status $engine.Status -NowUtc $startedUtc
@@ -1011,6 +1014,15 @@ function Invoke-TimelineConsole {
         & $say PASS ('Saved {0:N0} events to {1}' -f $rows.Count, $folder)
     }
     catch { & $say FAIL "Couldn't save the report: $($_.Exception.Message)" }
+    # The workbook on its own: if it fails, the CSV and HTML report above are still there.
+    if ($context) {
+        try {
+            $xlsxPath = Join-Path $folder "ServerEventTimeline_$stamp.xlsx"
+            Export-TimelineWorkbook -Rows $rows -Context $context -ContextRows $rows -Path $xlsxPath
+            & $say PASS "Saved the workbook: $xlsxPath"
+        }
+        catch { & $say WARN "Couldn't save the workbook: $($_.Exception.Message)" }
+    }
 
     if ($TicketNumber) {
         $note = New-TimelineTicketNote -Status $engine.Status -Rows $rows -WindowText $windowText -Logs $logs -EvidencePaths @($htmlPath)
@@ -1205,7 +1217,7 @@ function Set-TimelineStoryView {
             })
     }
     if ($Story.MoreCount -gt 0) {
-        $items.Add([PSCustomObject]@{ Kind = 'More'; Text = ('... and {0:N0} more flagged events - filter the list to see them' -f $Story.MoreCount); RowId = '' })
+        $items.Add([PSCustomObject]@{ Kind = 'More'; Text = ('... and {0:N0} more that stood out - filter the list to see them' -f $Story.MoreCount); RowId = '' })
     }
     $list.ItemsSource = $items.ToArray()
     $empty.Visibility = 'Collapsed'
@@ -1590,7 +1602,7 @@ function Show-ServerEventTimeline {
         'ServerList', 'SuggestPopup', 'SuggestList', 'AroundRadio', 'RangeRadio', 'AroundPanel', 'RangePanel', 'AtBox', 'PlusMinusCombo', 'FromBox', 'ToBox', 'LastHourButton',
         'Last24Button', 'LogPanel', 'SecurityCheck', 'AllLogsCheck', 'CapBox', 'TimeoutBox', 'RunAsButton',
         'SearchButton', 'CancelButton', 'InputError', 'BannerText', 'TimeZoneNote', 'LevelFilter', 'ServerFilter',
-        'LogFilter', 'FlaggedOnlyCheck', 'FilterText', 'CountText', 'EventGrid', 'DetailText', 'ExportCsvButton', 'ExportHtmlButton',
+        'LogFilter', 'FlaggedOnlyCheck', 'FilterText', 'CountText', 'EventGrid', 'DetailText', 'ExportCsvButton', 'ExportHtmlButton', 'ExportXlsxButton',
         'CopyButton', 'StatusMessage', 'DetailTabs', 'StoryList', 'StoryEmptyText', 'CopyStoryButton', 'MainTabs', 'EventsTab', 'StoryTab', 'StoryBanner', 'StoryBannerEventsButton', 'StripBorder', 'StripScroll', 'StripCanvas', 'StripAxisNote', 'StripLegend', 'HidePictureToggle', 'TimeRangeChip', 'TimeRangeText', 'ClearRangeButton', 'SidebarColumn', 'SidebarPanel', 'SidebarStrip', 'SidebarSplitter', 'CollapseSidebarButton', 'ExpandSidebarButton', 'NotesList') {
         $ui[$name] = $window.FindName($name)
     }
@@ -1872,6 +1884,7 @@ function Show-ServerEventTimeline {
             $has = $visible.Count -gt 0
             $ui.ExportCsvButton.IsEnabled = $has
             $ui.ExportHtmlButton.IsEnabled = $has
+            $ui.ExportXlsxButton.IsEnabled = $has
             Update-Summary
             Update-HiddenNote
             Update-Strip
@@ -1967,7 +1980,7 @@ function Show-ServerEventTimeline {
     }
 
     function Invoke-Export {
-        param([ValidateSet('Csv', 'Html')][string]$Kind)
+        param([ValidateSet('Csv', 'Html', 'Xlsx')][string]$Kind)
         if ($ui.Smoke) { [void]$ui.SmokeFailures.Add('an export would have been written'); return }
         Sync-SaveFolder
         # Every filtered event, even when repeats are collapsed on screen.
@@ -1978,6 +1991,10 @@ function Show-ServerEventTimeline {
             if ($Kind -eq 'Csv') {
                 $path = Join-Path $ui.OutputPath "ServerEventTimeline_$stamp.csv"
                 Export-TimelineCsv -Rows $rows -Path $path
+            }
+            elseif ($Kind -eq 'Xlsx') {
+                $path = Join-Path $ui.OutputPath "ServerEventTimeline_$stamp.xlsx"
+                Export-TimelineWorkbook -Rows $rows -Context (Get-ExportContext) -ContextRows $ui.Store.Rows.ToArray() -Path $path
             }
             else {
                 $path = Join-Path $ui.OutputPath "ServerEventTimeline_$stamp.html"
@@ -2372,6 +2389,7 @@ function Show-ServerEventTimeline {
 
     $ui.ExportCsvButton.add_Click({ Invoke-Export -Kind Csv })
     $ui.ExportHtmlButton.add_Click({ Invoke-Export -Kind Html })
+    $ui.ExportXlsxButton.add_Click({ Invoke-Export -Kind Xlsx })
     # A story line: select its event in the list (clearing filters that hide it).
     $ui.StoryList.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, [System.Windows.RoutedEventHandler] {
             param($sender, $e)

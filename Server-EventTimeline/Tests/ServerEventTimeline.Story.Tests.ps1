@@ -157,6 +157,28 @@ Describe 'Get-TimelineStory' {
         (Events (Get-TimelineStory -Rows $rows))[0].Category | Should -Be 'Disk'
     }
 
+    It 'gives the date with "back up at" when the server came back after midnight' {
+        # Without the date, "back up at 00:02" on a 23:59 line reads as two minutes before it.
+        $rows = Sort-Rows @(
+            New-TestRow -Time '2026-11-18 23:59:00' -Provider 'Microsoft-Windows-Kernel-Power' -Id 41 -Level 1
+            New-TestRow -Time '2026-11-19 00:02:10' -Provider 'EventLog' -Id 6005
+        )
+        $lines = Events (Get-TimelineStory -Rows $rows)
+        $lines.Count | Should -Be 1
+        $lines[0].Text | Should -Be 'Restarted without a clean shutdown - back up at 2026-11-19 00:02'
+    }
+
+    It 'says the lines it left out stood out, not that they are single events' {
+        # A cut line can stand for many events (3 disk retries fold into one), so the count is
+        # of lines, the same thing the What happened tab counts.
+        $rows = @(foreach ($i in 0..61) { Disk153 (([datetime]'2026-11-18 00:00').AddMinutes($i * 11).ToString('yyyy-MM-dd HH:mm')) })
+        $rows += Disk153 '2026-11-18 11:13:30'
+        $s = Get-TimelineStory -Rows (Sort-Rows $rows) -MaxLines 60
+        $s.MoreCount | Should -Be 2
+        @(Format-TimelineStoryText -Story $s)[-1] | Should -Be '... and 2 more that stood out (see the report)'
+        ConvertTo-TimelineStoryHtml -Story $s | Should -BeLike '*... and 2 more that stood out - see the table below.*'
+    }
+
     It 'stops at MaxLines and reports the rest' {
         $rows = @(foreach ($i in 0..69) { Disk153 (([datetime]'2026-11-18 00:00').AddMinutes($i * 11).ToString('yyyy-MM-dd HH:mm')) })
         $s = Get-TimelineStory -Rows $rows -MaxLines 60
@@ -209,7 +231,7 @@ Describe 'The story in the ticket note and the HTML report' {
         $rows = @(foreach ($i in 0..19) { Disk153 (([datetime]'2026-11-18 00:00').AddMinutes($i * 11).ToString('yyyy-MM-dd HH:mm')) })
         $note = New-TimelineTicketNote -Status (New-NoteStatus) -Rows $rows -WindowText 'w' -Now ([datetime]'2026-11-18 18:00')
         @($note.Checked | Where-Object { $_ -like '*(server local):*' }).Count | Should -Be 15
-        ($note.Checked -join "`n") | Should -BeLike '*... and 5 more flagged events (see the report)*'
+        ($note.Checked -join "`n") | Should -BeLike '*... and 5 more that stood out (see the report)*'
         ($note.Checked -join "`n") | Should -Not -BeLike '*minutes later*'
     }
 
@@ -336,6 +358,18 @@ Describe 'Get-TimelineStripModel (the picture strip)' {
         $m2 = Get-Strip $mixed
         $m2.AxisIsUtc | Should -BeTrue
         @($m2.Ticks | ForEach-Object Label) | Should -Contain '22:50'
+    }
+
+    It 'keeps the axis readable on searches longer than 8 days' {
+        # Ticks were one a day at most: 10+ crowded labels on a two-week search.
+        $start = [datetime]::SpecifyKind([datetime]'2026-11-01 00:00', [DateTimeKind]::Utc)
+        foreach ($days in 9, 14, 30, 60) {
+            $m = Get-TimelineStripModel -Rows @() -Servers @('AD-01') -StartUtc $start -EndUtc $start.AddDays($days) -Width 800
+            @($m.Ticks).Count | Should -BeLessOrEqual 8 -Because "a $days-day search"
+            @($m.Ticks).Count | Should -BeGreaterOrEqual 2 -Because "a $days-day search"
+            # Whole-day steps fall on midnight, so the time adds nothing.
+            @($m.Ticks | ForEach-Object Label) | ForEach-Object { $_ | Should -Match '^\d\d-\d\d$' }
+        }
     }
 
     It 'places ticks across the window, left to right' {
