@@ -41,6 +41,25 @@ BeforeAll {
         $path
     }
     function Cell { param([xml]$Sheet, [string]$Ref) Select-Xml -Xml $Sheet -XPath "//x:c[@r='$Ref']" -Namespace $script:Ns | ForEach-Object Node }
+    $script:WbRec = 0
+    function New-WbRow {
+        param([string]$Server = 'AD-01', [string]$Time = '2026-11-18 17:49', [string]$Provider = 'Disk', [int]$Id = 153, [int]$Level = 3)
+        $script:WbRec++
+        $e = [PSCustomObject]@{ TimeCreatedUtc = [datetime]::SpecifyKind([datetime]$Time, [DateTimeKind]::Utc); Id = $Id; ProviderName = $Provider
+            Level = $Level; LogName = 'System'; Message = "The IO operation was retried. ($script:WbRec)"; RecordId = $script:WbRec; UserSid = ''; MachineName = $Server }
+        ConvertTo-TimelineRow -Server $Server -EventRecord $e -UtcOffsetMinutes 0
+    }
+    function New-WbContext {
+        param([string[]]$Servers = @('AD-01', 'AD-02'), [hashtable]$Counts = @{})
+        @{
+            WindowText = '2026-11-18 17:30 to 18:30 (each server''s local time)'; Servers = $Servers; Logs = @('System', 'Application')
+            FiltersText = 'Level: All'; GeneratedAt = [datetime]'2026-11-18 18:40'; Summary = @('AD-01: 3 disk errors')
+            ServerOutcomes = @(foreach ($s in $Servers) {
+                    [PSCustomObject]@{ Server = $s; State = 'Done'; Transport = 'WinRM'; Reason = ''; EventCount = [int]$Counts[$s]
+                        Logs = @([PSCustomObject]@{ Log = 'System'; Outcome = 'Read'; Count = 1; Reason = '' }) }
+                })
+        }
+    }
 }
 
 Describe 'Write-XlsxWorkbook' {
@@ -148,25 +167,6 @@ Describe 'ConvertTo-XlsxSheetName' {
 
 Describe 'Export-TimelineWorkbook' {
     BeforeAll {
-        $script:WbRec = 0
-        function New-WbRow {
-            param([string]$Server = 'AD-01', [string]$Time = '2026-11-18 17:49', [string]$Provider = 'Disk', [int]$Id = 153, [int]$Level = 3)
-            $script:WbRec++
-            $e = [PSCustomObject]@{ TimeCreatedUtc = [datetime]::SpecifyKind([datetime]$Time, [DateTimeKind]::Utc); Id = $Id; ProviderName = $Provider
-                Level = $Level; LogName = 'System'; Message = "The IO operation was retried. ($script:WbRec)"; RecordId = $script:WbRec; UserSid = ''; MachineName = $Server }
-            ConvertTo-TimelineRow -Server $Server -EventRecord $e -UtcOffsetMinutes 0
-        }
-        function New-WbContext {
-            param([string[]]$Servers = @('AD-01', 'AD-02'), [hashtable]$Counts = @{})
-            @{
-                WindowText = '2026-11-18 17:30 to 18:30 (each server''s local time)'; Servers = $Servers; Logs = @('System', 'Application')
-                FiltersText = 'Level: All'; GeneratedAt = [datetime]'2026-11-18 18:40'; Summary = @('AD-01: 3 disk errors')
-                ServerOutcomes = @(foreach ($s in $Servers) {
-                        [PSCustomObject]@{ Server = $s; State = 'Done'; Transport = 'WinRM'; Reason = ''; EventCount = [int]$Counts[$s]
-                            Logs = @([PSCustomObject]@{ Log = 'System'; Outcome = 'Read'; Count = 1; Reason = '' }) }
-                    })
-            }
-        }
         function Get-Book {
             param([object[]]$Rows, [hashtable]$Context, [int]$Max = 1048575)
             $path = Join-Path $TestDrive ([guid]::NewGuid().ToString() + '.xlsx')
@@ -250,5 +250,37 @@ $t = Measure-Command { Export-TimelineWorkbook -Rows $rows.ToArray() -Context $c
         $last | Should -Match '^\d+$' -Because ($result -join "`n")
         [int]$last | Should -BeLessThan 15
         Test-Path -LiteralPath $out | Should -BeTrue
+    }
+}
+
+Describe 'The workbook in Excel' -Tag 'Integration' {
+    # Opens a generated workbook in the real Excel (hidden) to prove Excel accepts the file.
+    # Integration: needs Excel; out of the gate. Writes only under $TestDrive.
+    It 'opens in Excel with every sheet, real dates and the filter' -Skip:(-not (Test-Path 'Registry::HKEY_CLASSES_ROOT\Excel.Application')) {
+        $path = Join-Path $TestDrive 'open-in-excel.xlsx'
+        $rows = @(
+            (New-WbRow -Time '2026-11-18 17:49'), (New-WbRow -Time '2026-11-18 17:50:30'), (New-WbRow -Time '2026-11-18 17:52'),
+            (New-WbRow -Server 'AD-02' -Time '2026-11-18 17:51' -Provider 'Service Control Manager' -Id 7036 -Level 4)
+        )
+        Export-TimelineWorkbook -Rows $rows -Context (New-WbContext -Servers @('AD-01', 'AD-02', 'srv/with:odd*chars')) -Path $path
+        $excel = New-Object -ComObject Excel.Application
+        try {
+            $excel.Visible = $false; $excel.DisplayAlerts = $false
+            $wb = $excel.Workbooks.Open($path, 0, $true)
+            try {
+                @($wb.Worksheets | ForEach-Object Name) | Should -Be @('Summary', 'All servers', 'AD-01', 'AD-02', 'srv_with_odd_chars')
+                $all = $wb.Worksheets.Item('All servers')
+                $all.Range('A2').Value2 | Should -BeOfType [double]
+                $all.Range('A2').Text | Should -Be '2026-11-18 17:49:00'
+                $all.Range('H2').Value2 | Should -Be 153
+                $all.AutoFilterMode | Should -BeTrue
+                $wb.Worksheets.Item('AD-01').UsedRange.Rows.Count | Should -Be 4
+            }
+            finally { $wb.Close($false) | Out-Null }
+        }
+        finally {
+            $excel.Quit()
+            [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($excel)
+        }
     }
 }

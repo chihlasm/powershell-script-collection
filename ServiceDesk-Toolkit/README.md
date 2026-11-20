@@ -551,7 +551,8 @@ installs and app crashes are flagged in colour.
   HTML report in the ticket's folder (the same one the quick checks use, so **TicketNote**
   can join them).
 - **Copy selected rows** puts them on the clipboard for the ticket. **Export HTML report**
-  saves the whole picture in the save folder.
+  saves the whole picture in the save folder. **Export workbook** saves an Excel file with a
+  sheet for each server, for sorting and filtering in Excel.
 
 ---
 
